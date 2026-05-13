@@ -5,7 +5,8 @@
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20phase%202.2-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-9%20pgrx%20%2B%2010%20regression-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-21%20pgrx%20%2B%2013%20regression-brightgreen)](#tests)
+[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20BGP-blue)](guide/03-querying.md)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
@@ -15,7 +16,7 @@
 
 | | |
 |---|---|
-| **Status** | Alpha. Storage CRUD + Turtle ingest landed (Phase 2.0 + 2.1). SPARQL parser is the next visible-surface delivery. |
+| **Status** | Alpha. Storage CRUD, Turtle ingest, and SPARQL SELECT with N-pattern BGPs all land in Phase 2.0–2.2. FILTER / OPTIONAL / aggregates queued for Phase 3. |
 | **Supported PG** | 14, 15, 16, 17 (PG 18 blocked on pgrx upstream — see [ERRATA](specs/ERRATA.v0.2.md) E-006). |
 | **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
@@ -42,9 +43,27 @@ SELECT pgrdf.count_quads(42);
 SELECT * FROM pgrdf._pgrdf_dictionary WHERE term_type = 1 LIMIT 5;
 ```
 
-SPARQL surface (`pgrdf.sparql(q TEXT) → SETOF RECORD`) is the
-deliverable for Phase 2.2 step 5. Until then, your SQL clients can
-query `_pgrdf_quads` joined to `_pgrdf_dictionary` directly.
+### SPARQL
+
+```sql
+-- Multi-pattern BGP, shared variables become joins
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?p ?n ?m
+     WHERE { ?p foaf:name ?n .
+             ?p foaf:mbox ?m }'
+);
+--  → {"p": "http://example.com/alice", "n": "Alice", "m": "mailto:a@x"}
+
+-- Inspect the parsed shape without executing
+SELECT pgrdf.sparql_parse('SELECT ?s WHERE { ?s ?p ?o FILTER(isIRI(?o)) }');
+--  → {"form": "SELECT", "bgp_pattern_count": 1, "unsupported_algebra": ["Filter"], ...}
+```
+
+See [`guide/03-querying.md`](guide/03-querying.md) for the full
+SELECT surface (BGPs with N patterns, constants in any position,
+combining with regular SQL). FILTER / OPTIONAL / UNION / aggregates
+land in Phase 3.
 
 ## Quickstart for users
 
@@ -83,6 +102,7 @@ For people running pgRDF in their applications.
 - [00 — Introduction](guide/00-intro.md)
 - [01 — Install](guide/01-install.md)
 - [02 — Loading RDF](guide/02-loading-rdf.md)
+- [03 — Querying with SPARQL](guide/03-querying.md)
 - [Clients › Python](guide/clients/python.md)
 - [Clients › Rust](guide/clients/rust.md)
 
