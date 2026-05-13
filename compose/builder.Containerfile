@@ -25,10 +25,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         postgresql-server-dev-${PG_MAJOR} \
-    && rm -rf /var/lib/apt/lists/*
+        postgresql-${PG_MAJOR} \
+        sudo \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo 'postgres ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/postgres-nopasswd
+
+# PGRX_HOME goes to /opt/pgrx so both root (build orchestration) and
+# postgres (initdb / managed PG via CARGO_PGRX_TEST_RUNAS) can read/write.
+ENV PGRX_HOME=/opt/pgrx
 
 RUN cargo install cargo-pgrx --locked --version "^${PGRX_VERSION}"
-RUN cargo pgrx init --pg${PG_MAJOR} "$(which pg_config)"
+RUN cargo pgrx init --pg${PG_MAJOR} "$(which pg_config)" \
+    && chown -R postgres:postgres /opt/pgrx
 
 WORKDIR /work
 COPY . .

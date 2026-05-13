@@ -1,8 +1,12 @@
 -- 00-smoke — install state after `CREATE EXTENSION pgrdf`.
 --
--- Idempotent: re-runs cleanly because of IF NOT EXISTS. Uses -A -t -q
--- so output is one value per line; expected file is matched exactly.
+-- Idempotent across fresh-PGDATA and re-runs:
+--  * IF NOT EXISTS handles either path,
+--  * SET client_min_messages=WARNING suppresses the "extension … already
+--    exists" NOTICE that fires on the second-and-later runs (otherwise
+--    the output diff would depend on whether pg-data was wiped).
 
+SET client_min_messages = WARNING;
 CREATE EXTENSION IF NOT EXISTS pgrdf;
 
 SELECT pgrdf.version();

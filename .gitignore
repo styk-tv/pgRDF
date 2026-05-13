@@ -1,5 +1,6 @@
 # Rust build artifacts
 target/
+.target-linux/
 Cargo.lock.bak
 *.rlib
 *.rmeta

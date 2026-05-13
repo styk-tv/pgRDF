@@ -19,6 +19,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SQL_DIR="${REPO_ROOT}/tests/regression/sql"
 EXPECTED_DIR="${REPO_ROOT}/tests/regression/expected"
 CONTAINER="${PGRDF_CONTAINER:-pgrdf-postgres}"
+RUNTIME="${PGRDF_RUNTIME:-podman}"
 PSQL_USER="${POSTGRES_USER:-pgrdf}"
 PSQL_DB="${POSTGRES_DB:-pgrdf}"
 ACCEPT="${ACCEPT:-0}"
@@ -50,7 +51,7 @@ for sql in "${tests[@]}"; do
 
   # `-X` skips ~/.psqlrc; `-A` unaligned; `-t` tuples-only; `-q` quiet;
   # `-v ON_ERROR_STOP=1` so first error halts the script for that file.
-  actual="$(podman exec -i "${CONTAINER}" \
+  actual="$("${RUNTIME}" exec -i "${CONTAINER}" \
     psql -U "${PSQL_USER}" -d "${PSQL_DB}" \
     -X -A -t -q -v ON_ERROR_STOP=1 < "${sql}" 2>&1)" || true
 
