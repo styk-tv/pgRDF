@@ -29,11 +29,19 @@ SELECT (
   )->>'bgp_pattern_count'
 )::int AS n_patterns_two;
 
--- 4. Unsupported algebra (FILTER) is flagged but the parse still
--- succeeds — the user sees what we can't translate.
+-- 4. Filter is now translatable by pgrdf.sparql, so the parser
+-- walks into it instead of flagging it. unsupported_algebra is empty
+-- for a FILTERed BGP.
 SELECT (
   pgrdf.sparql_parse('SELECT ?s WHERE { ?s ?p ?o FILTER(isIRI(?o)) }')->'unsupported_algebra'
-)::text AS unsupported_filter;
+)::text AS unsupported_after_filter;
+
+-- 4b. OPTIONAL still flags as unsupported.
+SELECT (
+  pgrdf.sparql_parse(
+    'SELECT ?s ?n WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }'
+  )->'unsupported_algebra'
+)::text AS unsupported_optional;
 
 -- 5. CONSTRUCT recognised but flagged out-of-scope.
 SELECT (

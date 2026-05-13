@@ -3,7 +3,8 @@ SELECT
 1
 http://xmlns.com/foaf/0.1/name
 2
-["Filter"]
+[]
+["LeftJoin (OPTIONAL)"]
 CONSTRUCT
 f
 42

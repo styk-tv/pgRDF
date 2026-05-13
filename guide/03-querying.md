@@ -25,7 +25,9 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | Constants in subject, predicate, or object position (IRIs, literals) | ✅ |
 | Multi-pattern BGPs with shared variables → INNER joins | ✅ |
 | `DISTINCT`, `REDUCED`, `ORDER BY`, `LIMIT/OFFSET` wrappers | ✅ (pass-through) |
-| `FILTER`, `OPTIONAL`, `UNION`, `MINUS`, property paths, aggregates | ⏳ Phase 3 |
+| `FILTER` — identity (`=`, `!=`, `sameTerm`), boolean (`&&`, `\|\|`, `!`), term-type (`isIRI`, `isLiteral`, `isBlank`), `BOUND` | ✅ |
+| `FILTER` — numeric ordering (`<`/`>`/`<=`/`>=`), `regex`, `str`, `lang`, arithmetic | ⏳ Phase 3 (next slice) |
+| `OPTIONAL` (LeftJoin), `UNION`, `MINUS`, property paths, aggregates, `VALUES`, `BIND` | ⏳ Phase 3 |
 | `CONSTRUCT`, `ASK`, `DESCRIBE` | ⏳ Phase 3 |
 | Named-graph `GRAPH { … }` clauses | ⏳ Phase 3 |
 | `SERVICE` (federated SPARQL) | Out of scope for v0.x |
@@ -107,6 +109,87 @@ SELECT * FROM pgrdf.sparql(
 );
 ```
 
+### FILTER expressions
+
+```sql
+-- Identity: literal equality (compared as dict ids — sameTerm semantics)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s WHERE { ?s foaf:name ?n FILTER(?n = "Alice") }'
+);
+
+-- Identity: IRI equality (also against ?vars)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?o
+     WHERE { ?s ?p ?o FILTER(?p = foaf:knows) }'
+);
+
+-- Negation
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s WHERE { ?s foaf:name ?n FILTER(?n != "Alice") }'
+);
+
+-- Term-type predicates
+SELECT * FROM pgrdf.sparql(
+  'SELECT ?s ?o WHERE { ?s ?p ?o FILTER(isIRI(?o)) }'
+);
+SELECT * FROM pgrdf.sparql(
+  'SELECT ?s ?o WHERE { ?s ?p ?o FILTER(isLiteral(?o)) }'
+);
+SELECT * FROM pgrdf.sparql(
+  'SELECT ?s WHERE { ?s ?p ?o FILTER(isBlank(?s)) }'
+);
+
+-- Boolean composition
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?o
+     WHERE { ?s ?p ?o FILTER(isIRI(?o) && ?p = foaf:knows) }'
+);
+
+-- Self-loop detection via ?s = ?o
+SELECT * FROM pgrdf.sparql('SELECT ?s WHERE { ?s ?p ?o FILTER(?s = ?o) }');
+```
+
+#### What `=` actually means here
+
+pgRDF's FILTER `=` is implemented by comparing **dictionary ids**.
+Two terms compare equal iff their `(term_type, lexical, datatype,
+language)` quadruple matches exactly — that's RDF `sameTerm`
+semantics, which is also what SPARQL's `=` reduces to for IRIs and
+blank nodes, and matches `=` for strings of the same datatype.
+
+The XSD-value-equality cases (`"1"^^xsd:integer = "01"^^xsd:integer`,
+`"a" = "a"^^xsd:string`) currently compare as *not equal* because
+the lexical forms differ. Numeric / lexical / value comparison lands
+with the rest of the ordering operators in the next Phase 3 slice.
+
+#### `BOUND` in a BGP context
+
+`BOUND(?v)` is trivially `TRUE` for any variable `?v` that's used in
+the BGP (every BGP variable is bound on every result row) and
+`FALSE` for any variable that isn't. Useful once `OPTIONAL` lands;
+today it's a no-op marker you can leave in a query that previously
+relied on it.
+
+#### Combining FILTER with multi-pattern BGPs
+
+```sql
+-- All people with both name + mbox, excluding Alice
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?p ?n ?m
+     WHERE { ?p foaf:name ?n .
+             ?p foaf:mbox ?m
+             FILTER(?n != "Alice") }'
+);
+```
+
+Filters apply after the BGP joins — they're appended to the
+`WHERE` clause of the generated SQL.
+
 ### Combining with regular SQL
 
 `pgrdf.sparql` is a SETOF function, so you can join its results with
@@ -159,15 +242,23 @@ SELECT pgrdf.sparql_parse(
 -- }
 ```
 
-If your query uses FILTER / OPTIONAL / aggregates / etc.,
-`unsupported_algebra` lists what the translator skipped. The query
-itself parses fine (spargebra is feature-complete) — `pgrdf.sparql`
-just won't execute those forms yet:
+If your query uses OPTIONAL / aggregates / property paths / etc.,
+`unsupported_algebra` lists what the translator can't yet handle.
+The query itself parses fine (spargebra is feature-complete) —
+`pgrdf.sparql` just won't execute those forms yet:
 
 ```sql
-SELECT pgrdf.sparql_parse('SELECT ?s WHERE { ?s ?p ?o FILTER(isIRI(?o)) }');
---  → {…, "unsupported_algebra": ["Filter"]}
+SELECT pgrdf.sparql_parse(
+  'SELECT ?s ?n WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }'
+);
+--  → {…, "unsupported_algebra": ["LeftJoin (OPTIONAL)"]}
 ```
+
+FILTER is supported as of the Phase 3 first slice — the parser
+walks through it without flagging. If the executor encounters a
+FILTER expression shape it doesn't yet translate (e.g. numeric
+ordering, `regex`), it errors with a clear message rather than
+silently dropping the predicate.
 
 ## How the translation works
 

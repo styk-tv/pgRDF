@@ -18,13 +18,19 @@
 //!
 //! Scope today:
 //!   * SELECT only (no CONSTRUCT/ASK/DESCRIBE).
-//!   * N BGP triples joined by shared variables (no FILTER /
-//!     OPTIONAL / UNION / aggregates / paths / VALUES / SERVICE).
+//!   * N BGP triples joined by shared variables.
+//!   * FILTER expressions over identity (`=`, `!=`, `sameTerm`),
+//!     boolean composition (`&&`, `||`, `!`), term-type predicates
+//!     (`isIRI`, `isLiteral`, `isBlank`), and `BOUND` (trivially TRUE
+//!     in a BGP context). Numeric ordering / regex / arithmetic are
+//!     Phase 3+.
 //!   * Constants in any position (subject IRI, predicate IRI,
 //!     object IRI or literal).
 //!   * Variables in any position.
 //!   * Distinct / Reduced / Slice / OrderBy wrappers are walked
 //!     through without affecting translation.
+//!   * OPTIONAL / UNION / aggregates / paths / VALUES / SERVICE
+//!     remain unsupported.
 //!
 //! Output shape:
 //!   `SETOF JSONB` — one row per solution, keys = projected variable
@@ -35,7 +41,7 @@ use crate::storage::dict::term_type;
 use pgrx::iter::SetOfIterator;
 use pgrx::prelude::*;
 use serde_json::{Map, Value};
-use spargebra::algebra::GraphPattern;
+use spargebra::algebra::{Expression, Function, GraphPattern};
 use spargebra::term::{Literal, NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{Query, SparqlParser};
 use std::collections::HashMap;
@@ -82,25 +88,39 @@ fn translate(q: &Query) -> ExecPlan {
         Query::Select { pattern, .. } => pattern,
         other => panic!("sparql: only SELECT supported in v0.2 (got {other:?})"),
     };
-    let (projected, bgp) = unwrap_select(pattern);
+    let (projected, bgp, filters) = unwrap_select(pattern);
     if bgp.is_empty() {
         panic!("sparql: empty BGP");
     }
-    let sql = build_bgp_sql(&bgp, &projected);
+    let sql = build_bgp_sql(&bgp, &filters, &projected);
     ExecPlan { projected, sql }
 }
 
 /// Walk through wrappers we can pass through transparently and
-/// surface the projection + BGP shape underneath.
-fn unwrap_select(p: &GraphPattern) -> (Vec<String>, Vec<TriplePattern>) {
+/// surface the projection + BGP shape underneath, collecting any
+/// FILTER expressions seen along the way.
+fn unwrap_select(p: &GraphPattern) -> (Vec<String>, Vec<TriplePattern>, Vec<Expression>) {
+    let mut filters: Vec<Expression> = Vec::new();
     match p {
         GraphPattern::Project { inner, variables } => {
             let vars: Vec<String> = variables.iter().map(|v| v.as_str().to_string()).collect();
-            (vars, extract_bgp(inner))
+            let bgp = extract_bgp_and_filters(inner, &mut filters);
+            (vars, bgp, filters)
         }
         GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => unwrap_select(inner),
         GraphPattern::Slice { inner, .. } | GraphPattern::OrderBy { inner, .. } => {
             unwrap_select(inner)
+        }
+        GraphPattern::Filter { .. } => {
+            // SELECT * with FILTER wrapping the BGP.
+            let bgp = extract_bgp_and_filters(p, &mut filters);
+            let mut vars: Vec<String> = Vec::new();
+            for tp in &bgp {
+                push_unique(&mut vars, tp_subject_var(tp));
+                push_unique(&mut vars, tp_predicate_var(tp));
+                push_unique(&mut vars, tp_object_var(tp));
+            }
+            (vars, bgp, filters)
         }
         GraphPattern::Bgp { patterns } => {
             // SELECT * — collect variables in the order they appear.
@@ -110,20 +130,29 @@ fn unwrap_select(p: &GraphPattern) -> (Vec<String>, Vec<TriplePattern>) {
                 push_unique(&mut vars, tp_predicate_var(tp));
                 push_unique(&mut vars, tp_object_var(tp));
             }
-            (vars, patterns.clone())
+            (vars, patterns.clone(), filters)
         }
         other => panic!("sparql: unsupported algebra in select wrapper: {other:?}"),
     }
 }
 
-fn extract_bgp(p: &GraphPattern) -> Vec<TriplePattern> {
+fn extract_bgp_and_filters(
+    p: &GraphPattern,
+    filters: &mut Vec<Expression>,
+) -> Vec<TriplePattern> {
     match p {
         GraphPattern::Bgp { patterns } => patterns.clone(),
-        GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => extract_bgp(inner),
-        GraphPattern::Slice { inner, .. } | GraphPattern::OrderBy { inner, .. } => {
-            extract_bgp(inner)
+        GraphPattern::Filter { expr, inner } => {
+            filters.push(expr.clone());
+            extract_bgp_and_filters(inner, filters)
         }
-        other => panic!("sparql: expected BGP, got {other:?}"),
+        GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => {
+            extract_bgp_and_filters(inner, filters)
+        }
+        GraphPattern::Slice { inner, .. } | GraphPattern::OrderBy { inner, .. } => {
+            extract_bgp_and_filters(inner, filters)
+        }
+        other => panic!("sparql: expected BGP (optionally wrapped in FILTER), got {other:?}"),
     }
 }
 
@@ -164,8 +193,13 @@ fn tp_object_var(tp: &TriplePattern) -> Option<String> {
 /// Build a dynamic SQL SELECT for an N-pattern BGP. Each pattern
 /// becomes a `_pgrdf_quads qN` clause; shared variables become
 /// equality predicates that fold into INNER joins; constants become
-/// `qN.col = <resolved_dict_id>` predicates.
-fn build_bgp_sql(patterns: &[TriplePattern], projected: &[String]) -> String {
+/// `qN.col = <resolved_dict_id>` predicates; FILTER expressions
+/// become SQL WHERE predicates appended after the join clauses.
+fn build_bgp_sql(
+    patterns: &[TriplePattern],
+    filters: &[Expression],
+    projected: &[String],
+) -> String {
     /// First-occurrence anchor for each variable: which alias +
     /// which column. Subsequent occurrences emit equality predicates
     /// against this anchor.
@@ -180,6 +214,17 @@ fn build_bgp_sql(patterns: &[TriplePattern], projected: &[String]) -> String {
         bind_subject(tp, qi, &mut anchors, &mut where_clauses);
         bind_predicate(tp, qi, &mut anchors, &mut where_clauses);
         bind_object(tp, qi, &mut anchors, &mut where_clauses);
+    }
+
+    // FILTER predicates land after the BGP joins, ANDed onto the
+    // WHERE clause. translate_filter returns None for any expression
+    // shape we don't yet handle — panic in that case rather than
+    // silently dropping the filter (which would over-return rows).
+    for expr in filters {
+        let sql = translate_filter(expr, &anchors).unwrap_or_else(|| {
+            panic!("sparql: FILTER expression not translatable: {expr:?}")
+        });
+        where_clauses.push(sql);
     }
 
     // Project: each projected var → its anchor alias.column → dict
@@ -207,6 +252,128 @@ fn build_bgp_sql(patterns: &[TriplePattern], projected: &[String]) -> String {
         sql.push_str(&where_clauses.join(" AND "));
     }
     sql
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// FILTER translation
+// ─────────────────────────────────────────────────────────────────────
+
+/// Translate a SPARQL FILTER expression into a SQL boolean predicate
+/// referencing the BGP's `qN.{subject_id,predicate_id,object_id}`
+/// dictionary-id columns. Returns `None` for any expression shape
+/// that doesn't have a sound dict-id-only translation — the caller
+/// panics in that case rather than silently drop the filter.
+///
+/// Supported today:
+///   * `?a = ?b`, `?a = <iri>`, `?a = "literal"` (and `sameTerm`):
+///     compared as dictionary ids. Sound because our dict deduplicates
+///     terms by (term_type, lexical, datatype, lang).
+///   * `?a != …`: negated identity comparison.
+///   * `&&`, `||`, `!`: boolean composition.
+///   * `isIRI(?v)`, `isLiteral(?v)`, `isBlank(?v)`: emit a correlated
+///     subselect against `_pgrdf_dictionary.term_type`.
+///   * `BOUND(?v)`: trivially TRUE in a BGP context (every BGP
+///     variable is bound on every row).
+///
+/// Not yet supported (would return None): numeric ordering
+/// (`<`/`>`/`<=`/`>=`), arithmetic, `regex`, `str`, `lang`,
+/// `datatype`, `IN`, `EXISTS`, conditional expressions.
+fn translate_filter(
+    expr: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> Option<String> {
+    match expr {
+        Expression::Equal(a, b) | Expression::SameTerm(a, b) => {
+            let l = expr_to_id_sql(a, anchors)?;
+            let r = expr_to_id_sql(b, anchors)?;
+            Some(format!("({l} = {r})"))
+        }
+        Expression::And(a, b) => {
+            let l = translate_filter(a, anchors)?;
+            let r = translate_filter(b, anchors)?;
+            Some(format!("({l} AND {r})"))
+        }
+        Expression::Or(a, b) => {
+            let l = translate_filter(a, anchors)?;
+            let r = translate_filter(b, anchors)?;
+            Some(format!("({l} OR {r})"))
+        }
+        Expression::Not(inner) => {
+            // SPARQL `!=` is `Not(Equal(a,b))` post-normalisation.
+            let l = translate_filter(inner, anchors)?;
+            Some(format!("(NOT ({l}))"))
+        }
+        Expression::Bound(v) => {
+            // In a pure BGP context every variable is bound on every
+            // row — `BOUND(?v)` is `TRUE` if ?v is bound in the BGP
+            // and `FALSE` if it isn't projected/anchored at all.
+            let name = v.as_str();
+            Some(if anchors.contains_key(name) { "TRUE".into() } else { "FALSE".into() })
+        }
+        Expression::FunctionCall(func, args) => translate_function_call(func, args, anchors),
+        _ => None,
+    }
+}
+
+fn translate_function_call(
+    func: &Function,
+    args: &[Expression],
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> Option<String> {
+    match func {
+        Function::IsIri => term_type_check(args, anchors, term_type::URI),
+        Function::IsBlank => term_type_check(args, anchors, term_type::BLANK_NODE),
+        Function::IsLiteral => term_type_check(args, anchors, term_type::LITERAL),
+        _ => None,
+    }
+}
+
+/// `isIRI(?v)` / `isBlank(?v)` / `isLiteral(?v)` → emit a correlated
+/// subselect on `_pgrdf_dictionary.term_type`. Only single-argument
+/// variable form is supported.
+fn term_type_check(
+    args: &[Expression],
+    anchors: &HashMap<String, (usize, &'static str)>,
+    expected: i16,
+) -> Option<String> {
+    if args.len() != 1 {
+        return None;
+    }
+    let var = match &args[0] {
+        Expression::Variable(v) => v.as_str().to_string(),
+        _ => return None,
+    };
+    let &(alias_idx, col) = anchors.get(&var)?;
+    Some(format!(
+        "((SELECT term_type FROM pgrdf._pgrdf_dictionary
+            WHERE id = q{alias_idx}.{col}) = {expected})"
+    ))
+}
+
+/// Resolve an Expression to a SQL fragment that evaluates to a
+/// dictionary id (BIGINT). Variables → `qN.col`; constants → an
+/// inlined integer literal (post dict-lookup, defaulting to `-1`
+/// when the constant isn't in the dictionary so the predicate
+/// reliably returns no rows rather than erroring).
+fn expr_to_id_sql(
+    e: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> Option<String> {
+    match e {
+        Expression::Variable(v) => {
+            let &(alias_idx, col) = anchors.get(v.as_str())?;
+            Some(format!("q{alias_idx}.{col}"))
+        }
+        Expression::NamedNode(n) => {
+            let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
+            Some(id.to_string())
+        }
+        Expression::Literal(l) => {
+            let id = lookup_literal_id(l).unwrap_or(-1);
+            Some(id.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn bind_subject(
@@ -499,6 +666,163 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2);
+    }
+
+    /// FILTER(?n = "Alice") restricts the foaf:name solution set to
+    /// the single binding whose literal matches.
+    #[pg_test]
+    fn sparql_filter_literal_equality() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" .
+                 ex:bob   foaf:name \"Bob\"   .
+                 ex:carol foaf:name \"Carol\" .',
+                8_010)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?n WHERE { ?s foaf:name ?n FILTER(?n = \"Alice\") }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 1, "FILTER(?n = \"Alice\") should match one row, got {rows}");
+    }
+
+    /// FILTER(?o != "B") — the negation form.
+    #[pg_test]
+    fn sparql_filter_not_equal() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p \"A\" .
+                 ex:b ex:p \"B\" .
+                 ex:c ex:p \"C\" .',
+                8_011)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?o WHERE { ?s <http://example.com/p> ?o FILTER(?o != \"B\") }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2, "expected 2 rows (A, C), got {rows}");
+    }
+
+    /// FILTER(isIRI(?o)) restricts to triples whose object is an IRI.
+    #[pg_test]
+    fn sparql_filter_is_iri() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:s1 ex:p ex:o1 .
+                 ex:s2 ex:p \"literal2\" .
+                 ex:s3 ex:p ex:o3 .',
+                8_012)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?o WHERE { ?s ?p ?o FILTER(isIRI(?o)) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2, "expected 2 IRI-object rows, got {rows}");
+    }
+
+    /// FILTER(isIRI(?o) && ?p = foaf:name) — boolean composition
+    /// combining a term-type test and a predicate-identity test.
+    #[pg_test]
+    fn sparql_filter_boolean_and() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:a foaf:name  \"Alice\"   .
+                 ex:a foaf:knows ex:b        .
+                 ex:b foaf:name  \"Bob\"     .
+                 ex:b foaf:knows ex:c        .',
+                8_013)",
+        )
+        .unwrap();
+
+        // Only foaf:knows triples have an IRI object (foaf:name has a
+        // literal object). The AND should retain just those 2 rows.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?p ?o
+                  WHERE { ?s ?p ?o FILTER(isIRI(?o) && ?p = foaf:knows) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2);
+    }
+
+    /// FILTER(?a = ?b) — two variables compared as dict ids. With
+    /// a self-loop in the data we should see exactly one row come back.
+    #[pg_test]
+    fn sparql_filter_var_equals_var() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:x ex:p ex:x .
+                 ex:x ex:p ex:y .
+                 ex:z ex:p ex:y .',
+                8_014)",
+        )
+        .unwrap();
+
+        // ?s ?p ?o FILTER(?s = ?o) → only the self-loop row.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(?s = ?o) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 1);
+    }
+
+    /// BOUND(?v) is trivially true for every BGP variable, so it
+    /// should not change the row count.
+    #[pg_test]
+    fn sparql_filter_bound_is_trivially_true() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:b .
+                 ex:a ex:p ex:c .',
+                8_015)",
+        )
+        .unwrap();
+
+        let baseline: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s ?p ?o }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let filtered: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s ?p ?o FILTER(BOUND(?o)) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(baseline, filtered, "BOUND(?o) should not change row count");
     }
 
     /// Three-pattern BGP exercises chained joins (a → b → c). Same

@@ -4,9 +4,9 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20phase%202.2-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-21%20pgrx%20%2B%2013%20regression-brightgreen)](#tests)
-[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20BGP-blue)](guide/03-querying.md)
+[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20phase%203%20start-yellow)](docs/10-roadmap.md)
+[![Tests](https://img.shields.io/badge/tests-28%20pgrx%20%2B%2014%20regression-brightgreen)](#tests)
+[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20BGP%20%2F%20FILTER-blue)](guide/03-querying.md)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
@@ -16,7 +16,7 @@
 
 | | |
 |---|---|
-| **Status** | Alpha. Storage CRUD, Turtle ingest, and SPARQL SELECT with N-pattern BGPs all land in Phase 2.0–2.2. FILTER / OPTIONAL / aggregates queued for Phase 3. |
+| **Status** | Alpha. Storage CRUD, Turtle ingest, SPARQL SELECT with N-pattern BGPs (Phase 2.0–2.2) and FILTER expressions (Phase 3 first slice — identity, boolean, term-type, BOUND). OPTIONAL / UNION / numeric ordering / aggregates queued. |
 | **Supported PG** | 14, 15, 16, 17 (PG 18 blocked on pgrx upstream — see [ERRATA](specs/ERRATA.v0.2.md) E-006). |
 | **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
@@ -55,15 +55,22 @@ SELECT * FROM pgrdf.sparql(
 );
 --  → {"p": "http://example.com/alice", "n": "Alice", "m": "mailto:a@x"}
 
+-- FILTER over the BGP — identity, boolean composition, term-type tests
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?o
+     WHERE { ?s ?p ?o FILTER(isIRI(?o) && ?p = foaf:knows) }'
+);
+
 -- Inspect the parsed shape without executing
-SELECT pgrdf.sparql_parse('SELECT ?s WHERE { ?s ?p ?o FILTER(isIRI(?o)) }');
---  → {"form": "SELECT", "bgp_pattern_count": 1, "unsupported_algebra": ["Filter"], ...}
+SELECT pgrdf.sparql_parse('SELECT ?s WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }');
+--  → {"form": "SELECT", ..., "unsupported_algebra": ["LeftJoin (OPTIONAL)"]}
 ```
 
 See [`guide/03-querying.md`](guide/03-querying.md) for the full
-SELECT surface (BGPs with N patterns, constants in any position,
-combining with regular SQL). FILTER / OPTIONAL / UNION / aggregates
-land in Phase 3.
+SELECT surface (BGPs with N patterns, FILTER expressions, constants
+in any position, combining with regular SQL). OPTIONAL / UNION /
+numeric ordering / aggregates land in subsequent Phase 3 slices.
 
 ## Quickstart for users
 
@@ -139,11 +146,11 @@ For people working on pgRDF itself.
 | Ontology smoke | Real-world Turtle parses cleanly | `tests/perf/smoke-ontologies.sh` |
 | Full bar | Both `just test` + `just test-regression` | `just test-all` |
 
-Phase 2.0 + 2.1 + 2.2 (current): **9 pgrx integration tests + 10 regression
-files passing.** External smoke covers 24 well-known ontologies
-(W3C, Apache Jena, ValueFlows, ConceptKernel v3.7) for ~17,000
-triples loaded. Workflow.ttl held out due to a non-RFC IRI in the
-source — see [ERRATA E-007 / TEST.ONTOLOGY-SET.md](TEST.ONTOLOGY-SET.md).
+Phase 2.0–2.2 + Phase 3 first slice (current): **28 pgrx integration
+tests + 14 regression files passing.** External smoke covers 24
+well-known ontologies (W3C, Apache Jena, ValueFlows, ConceptKernel
+v3.7) for ~17,000 triples loaded. Workflow.ttl held out due to a
+non-RFC IRI in the source — see [ERRATA E-007 / TEST.ONTOLOGY-SET.md](TEST.ONTOLOGY-SET.md).
 
 ## License
 

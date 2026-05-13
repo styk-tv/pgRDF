@@ -6,6 +6,43 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 1 — FILTER expressions over BGPs
+
+- `pgrdf.sparql` now walks `GraphPattern::Filter { expr, inner }`
+  and translates a useful subset of `Expression` into SQL WHERE
+  predicates appended after the BGP joins:
+  - **Identity**: `=`, `!=`, `sameTerm` — both operands resolved to
+    dictionary ids, compared as BIGINT. Sound because the dictionary
+    deduplicates by `(term_type, lexical, datatype, language)`.
+  - **Boolean**: `&&`, `||`, `!`.
+  - **Term-type predicates**: `isIRI`, `isLiteral`, `isBlank` — emit
+    a correlated subselect on `_pgrdf_dictionary.term_type`.
+  - **`BOUND`**: trivially `TRUE` for any anchored BGP variable.
+  - Untranslatable shapes (numeric `<`/`>`/`<=`/`>=`, `regex`, `str`,
+    `lang`, arithmetic, `IN`, `EXISTS`) panic with a clear message
+    rather than silently dropping the filter.
+- `pgrdf.sparql_parse` no longer flags `Filter` in
+  `unsupported_algebra` — it walks into the inner BGP. OPTIONAL,
+  UNION, MINUS, Group, Path, Values, Extend (BIND), Service still
+  flagged.
+- 6 new pg_tests: literal equality, `!=`, `isIRI`, boolean AND
+  composition, var-equals-var (self-loop), `BOUND` trivially-true.
+- 1 new parser pg_test: OPTIONAL replaces the FILTER-flagged baseline.
+- `tests/regression/sql/33-sparql-filter.sql` covers 9 query shapes
+  end-to-end (literal eq, neg, isIRI, isLiteral, self-loop,
+  boolean AND, negated isIRI, BOUND, unknown-literal-zero-rows).
+- `tests/regression/sql/30-sparql-parse.sql` baseline updated: Filter
+  no longer reported as unsupported; new OPTIONAL assertion added.
+- `guide/03-querying.md` adds a full FILTER section with examples,
+  including the `=` ↔ sameTerm-vs-value-equality caveat and how
+  filters interact with multi-pattern BGPs.
+- `README.md`: status pill → `phase 3 start`, test pill 21+13 → 28+14,
+  SPARQL pill `SELECT/BGP` → `SELECT/BGP/FILTER`.
+
+Test bar:
+  pg_test:        28 passed; 0 failed  (was 21)
+  regression:     14 passed; 0 failed  (was 13)
+
 ### Phase 2.2 step 8 — Node.js + Go client guides
 
 - `guide/clients/typescript.md` — `pg` (node-postgres) + `postgres.js`

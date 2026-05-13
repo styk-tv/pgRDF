@@ -10,10 +10,11 @@
 //!   * SELECT queries (any form) — variables + BGP triples extracted.
 //!   * CONSTRUCT / ASK / DESCRIBE — recognised but reported as
 //!     `supported: false` until the translator covers them.
-//!   * Non-BGP graph patterns (Filter, OPTIONAL, UNION, …) — the
+//!   * Non-BGP graph patterns (OPTIONAL, UNION, GRAPH, …) — the
 //!     parser handles them fine; the JSONB output flags them under
 //!     `unsupported_algebra` so the user knows the AST has shape
-//!     pgRDF doesn't yet translate.
+//!     pgRDF doesn't yet translate. FILTER is walked through (it
+//!     is supported by the executor) and not flagged.
 
 use pgrx::prelude::*;
 use serde_json::{json, Value};
@@ -106,8 +107,8 @@ fn walk(
         GraphPattern::Reduced { inner }  => walk(inner, vars, bgp, unsupported),
         GraphPattern::Slice { inner, .. } => walk(inner, vars, bgp, unsupported),
         GraphPattern::OrderBy { inner, .. } => walk(inner, vars, bgp, unsupported),
+        GraphPattern::Filter { inner, .. } => walk(inner, vars, bgp, unsupported),
 
-        GraphPattern::Filter { .. }    => unsupported.push("Filter"),
         GraphPattern::LeftJoin { .. }  => unsupported.push("LeftJoin (OPTIONAL)"),
         GraphPattern::Union { .. }     => unsupported.push("Union"),
         GraphPattern::Minus { .. }     => unsupported.push("Minus"),
@@ -239,8 +240,11 @@ mod tests {
         assert_eq!(v["bgp_pattern_count"], 2);
     }
 
+    /// Filter is supported by the executor — the parser walks
+    /// through it. We assert it is NOT flagged in unsupported_algebra,
+    /// and the underlying BGP is still extracted.
     #[pg_test]
-    fn sparql_parse_flags_unsupported_filter() {
+    fn sparql_parse_filter_is_supported() {
         let q = "SELECT ?s WHERE { ?s ?p ?o FILTER(isIRI(?o)) }";
         let j: pgrx::JsonB = Spi::get_one_with_args(
             "SELECT pgrdf.sparql_parse($1)",
@@ -251,8 +255,27 @@ mod tests {
         let v = &j.0;
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(
-            unsupported.iter().any(|x| x.as_str() == Some("Filter")),
-            "expected Filter to be flagged as unsupported, got {unsupported:?}"
+            !unsupported.iter().any(|x| x.as_str() == Some("Filter")),
+            "Filter should not be flagged as unsupported anymore, got {unsupported:?}"
+        );
+        assert_eq!(v["bgp_pattern_count"], 1);
+    }
+
+    /// OPTIONAL is still unsupported — the parser flags it.
+    #[pg_test]
+    fn sparql_parse_flags_unsupported_optional() {
+        let q = "SELECT ?s ?n WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }";
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.sparql_parse($1)",
+            &[q.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        let unsupported = v["unsupported_algebra"].as_array().unwrap();
+        assert!(
+            unsupported.iter().any(|x| x.as_str().is_some_and(|s| s.contains("OPTIONAL"))),
+            "expected LeftJoin (OPTIONAL) to be flagged, got {unsupported:?}"
         );
     }
 
