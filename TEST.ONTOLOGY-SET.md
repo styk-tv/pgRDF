@@ -1,0 +1,17 @@
+https://conceptkernel.org/ontology/v3.7/core.ttl
+https://conceptkernel.org/ontology/v3.7/base-instances.ttl
+https://conceptkernel.org/ontology/v3.7/proof.ttl
+https://conceptkernel.org/ontology/v3.7/edges.ttl
+https://conceptkernel.org/ontology/v3.7/consensus.ttl
+https://conceptkernel.org/ontology/v3.7/kernel-metadata.ttl
+https://conceptkernel.org/ontology/v3.7/processes.ttl
+https://conceptkernel.org/ontology/v3.7/relations.ttl
+https://conceptkernel.org/ontology/v3.7/rbac.ttl
+https://conceptkernel.org/ontology/v3.7/workflow.ttl
+https://conceptkernel.org/ontology/v3.7/self-improvement.ttl
+https://conceptkernel.org/ontology/v3.7/shapes.ttl
+https://raw.githubusercontent.com/BFO-ontology/BFO-2020/master/src/owl/bfo-core.ttl
+https://www.w3.org/ns/prov.ttl
+https://www.w3.org/ns/prov-o.ttl
+https://raw.githubusercontent.com/CommonCoreOntology/CommonCoreOntologies/master/src/cco-modules/AllCoreOntology.ttl
+https://codeberg.org/valueflows/pages/raw/branch/main/assets/all_vf.TTL

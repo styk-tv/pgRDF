@@ -63,7 +63,7 @@ test:
         --workdir /work \
         -e CARGO_PGRX_TEST_RUNAS=postgres \
         pgrdf-builder-rust:pg{{PG_MAJOR}} \
-        bash -c 'chown -R postgres:postgres /work/target && cargo pgrx test --no-default-features --features pg{{PG_MAJOR}} pg{{PG_MAJOR}}'
+        bash -c 'rm -rf /work/target/test-pgdata && chown -R postgres:postgres /work/target && cargo pgrx test --no-default-features --features pg{{PG_MAJOR}} pg{{PG_MAJOR}}'
 
 # pg_regress-style golden tests piped at the compose Postgres on podman.
 # Set ACCEPT=1 to re-baseline expected/.
