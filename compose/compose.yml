@@ -43,6 +43,9 @@ services:
       - ./extensions/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro,z
       - ./extensions/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro,z
       - ./extensions/share/extension/pgrdf--0.2.0.sql:/usr/share/postgresql/17/extension/pgrdf--0.2.0.sql:ro,z
+      # Read-only ontology + regression fixtures, reachable from the
+      # postgres process at /fixtures (see pgrdf.load_turtle path arg).
+      - ../fixtures:/fixtures:ro,z
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pgrdf} -d ${POSTGRES_DB:-pgrdf}"]
       interval: 10s

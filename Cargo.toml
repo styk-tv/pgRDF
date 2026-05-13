@@ -33,7 +33,15 @@ pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg_test = []
 
 [dependencies]
-pgrx = "0.16"
+pgrx  = "0.16"
+# Pin to `0.3` to match what oxttl 0.2.3 transitively resolves to.
+# `cargo tree` shows: oxttl v0.2.3 → oxrdf v0.3.3. Using `oxrdf = "0.2"`
+# split the graph (my pin to 0.2.4, oxttl's to 0.3.3) and types didn't
+# unify. The published cargo-info output for oxttl@0.2.3 misleadingly
+# shows "Adding oxrdf v0.2.4" because oxttl's manifest allows both
+# majors — cargo prefers 0.3.x when no other constraint pulls it down.
+oxrdf = "0.3"
+oxttl = "0.2"   # Turtle / N-Triples / TriG / N-Quads. Latest stable as of 2026-05-13.
 
 # Stack-out per SPEC.pgRDF.LLD.v0.2 + ERRATA. Kept here as commented-out
 # pins so the dependency surface is reviewable without compiling them
@@ -41,7 +49,6 @@ pgrx = "0.16"
 # module starts so reviewers see one dep enter the surface at a time.
 #
 # spargebra        = "0.4"     # SPARQL parser + algebra AST (oxigraph workspace)
-# oxrdf            = "0.2"     # RDF term model (shared with spargebra)
 # reasonable       = "0.2"     # OWL 2 RL forward-chain reasoner
 # shacl_validation = "0.4"     # SHACL processor — replaces the v0.2 LLD reference to `shacl-rust` (see specs/ERRATA.v0.2.md)
 
