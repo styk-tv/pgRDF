@@ -6,7 +6,30 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-### Phase 2.2 — Batched ingestion
+### Phase 2.2 step 4 — SPARQL parser surface
+
+- `spargebra = "0.4"` (0.4.6 resolved). Pins `oxrdf = "=0.3.3"`, the
+  same version oxttl 0.2.3 uses, so no graph split.
+- New module `src/query/parser.rs`.
+- `pgrdf.sparql_parse(q TEXT) -> JSONB` parses a SPARQL query via
+  `spargebra::SparqlParser` and returns the high-level shape:
+  - `form` — SELECT / CONSTRUCT / ASK / DESCRIBE
+  - `variables` — projected vars (SELECT only)
+  - `bgp_pattern_count`, `bgp_patterns` — BGP triples with
+    s/p/o each rendered as `{var: …}`, `{iri: …}`, `{bnode: …}`,
+    or `{literal: …, datatype/lang: …}`
+  - `unsupported_algebra` — flags Filter / Union / OPTIONAL /
+    Property paths / Aggregates / VALUES / SERVICE / etc., so
+    callers see the AST has shape the translator doesn't yet
+    cover.
+- 5 new pg_tests covering basic SELECT, predicate-as-IRI BGP,
+  two-pattern BGP, FILTER detection, and a syntax-error panic path.
+- New regression `tests/regression/sql/30-sparql-parse.sql` asserts
+  the JSONB extraction over 6 query forms.
+
+### Phase 2.2 step 3 — Batched ingestion
+
+(landed alongside docs split + README pills.)
 
 - `src/storage/loader.rs`: per-call HashMap dict cache + buffered
   multi-row INSERTs via `unnest($1::bigint[], $2::bigint[], $3::bigint[])`.

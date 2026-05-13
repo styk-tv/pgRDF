@@ -42,7 +42,8 @@ pgrx  = "0.16"
 # majors — cargo prefers 0.3.x when no other constraint pulls it down.
 oxrdf      = "0.3"
 oxttl      = "0.2"   # Turtle / N-Triples / TriG / N-Quads. Latest stable as of 2026-05-13.
-serde_json = "1"     # Used by load_turtle_verbose to emit ingestion stats as JSONB.
+spargebra  = "0.4"   # SPARQL 1.1 parser → algebra AST. Pins =0.3.3 on oxrdf (matches our own).
+serde_json = "1"     # Used by load_turtle_verbose and sparql_parse to emit JSONB.
 
 # Stack-out per SPEC.pgRDF.LLD.v0.2 + ERRATA. Kept here as commented-out
 # pins so the dependency surface is reviewable without compiling them
