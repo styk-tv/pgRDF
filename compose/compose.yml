@@ -1,18 +1,28 @@
-# pgRDF local-dev compose — INSTALL spec §7 (preferred forward path).
+# pgRDF local-dev compose.
 #
-# Stock postgres:18-bookworm. No image rebuild, no entrypoint wrapper,
-# no init script. The locally-built extension artifacts in ./extensions/
-# are made visible to Postgres via the PG 18 `extension_control_path`
-# and `dynamic_library_path` GUCs.
+# Filename `compose.yml` per the Compose Spec convention; recognised
+# automatically by both `docker compose` and `podman compose`.
 #
-# Boot sequence (see compose/README.md for the long version):
-#   1. just build-ext            # builds .so/.control/.sql into ./extensions/
-#   2. podman compose up -d      # boots Postgres with the bind mounts
-#   3. psql … -c 'CREATE EXTENSION pgrdf;'
+# Stock postgres:17.4-bookworm. No image rebuild, no entrypoint
+# wrapper, no init script. The locally-built extension files are
+# placed at the canonical Postgres paths via per-file bind mounts.
+#
+# Why per-file bind mounts and not the INSTALL spec §7 GUC path:
+# `extension_control_path` arrives in PG 18, and pgrx 0.17+/0.18 do
+# not yet build on current rustc (see specs/ERRATA.v0.2.md E-006).
+# We pin to PG 17 + pgrx 0.16 until pgrx catches up; bind-mounting
+# individual files at $libdir / $sharedir/extension is the spec-
+# compliant local incarnation of "drop-in extension files, no image
+# rebuild".
+#
+# Boot sequence:
+#   1. just build-ext        # builds .so/.control/.sql into ./extensions/
+#   2. podman compose up -d  # boots Postgres with the bind mounts
+#   3. psql ... -c 'CREATE EXTENSION pgrdf;'
 
 services:
   postgres:
-    image: docker.io/library/postgres:18-bookworm
+    image: docker.io/library/postgres:17.4-bookworm
     container_name: pgrdf-postgres
     restart: unless-stopped
     environment:
@@ -23,15 +33,16 @@ services:
       - postgres
       - -c
       - shared_preload_libraries=pgrdf
-      - -c
-      - extension_control_path=/pgrdf/share/extension:$$system
-      - -c
-      - dynamic_library_path=/pgrdf/lib:$$libdir
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - ./pg-data:/var/lib/postgresql/data:z
-      - ./extensions:/pgrdf:ro,z
+      # Drop the extension files at canonical PG 17 paths. These bind
+      # mounts require the files to exist on the host first - produced
+      # by `just build-ext` (see compose/README.md).
+      - ./extensions/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro,z
+      - ./extensions/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro,z
+      - ./extensions/share/extension/pgrdf--0.2.0.sql:/usr/share/postgresql/17/extension/pgrdf--0.2.0.sql:ro,z
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pgrdf} -d ${POSTGRES_DB:-pgrdf}"]
       interval: 10s
