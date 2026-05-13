@@ -19,11 +19,19 @@
 //! Scope today:
 //!   * SELECT only (no CONSTRUCT/ASK/DESCRIBE).
 //!   * N BGP triples joined by shared variables.
-//!   * FILTER expressions over identity (`=`, `!=`, `sameTerm`),
-//!     boolean composition (`&&`, `||`, `!`), term-type predicates
-//!     (`isIRI`, `isLiteral`, `isBlank`), and `BOUND` (trivially TRUE
-//!     in a BGP context). Numeric ordering / regex / arithmetic are
-//!     Phase 3+.
+//!   * FILTER expressions:
+//!     - identity (`=`, `!=`, `sameTerm`) via dict-id comparison,
+//!     - boolean composition (`&&`, `||`, `!`),
+//!     - term-type predicates (`isIRI`, `isLiteral`, `isBlank`),
+//!     - `BOUND` (trivially TRUE in a BGP context),
+//!     - numeric ordering (`<`, `>`, `<=`, `>=`) — operand must
+//!       resolve to a numeric XSD literal at the SPI layer, else
+//!       the row is dropped (NULL comparison),
+//!     - `IN (…)` set membership over dict ids,
+//!     - `REGEX(?v, "pat", "flags")` against `_pgrdf_dictionary.lexical_value`
+//!       (PCRE-style, Postgres `~`/`~*`). `STR(?v)` is a passthrough.
+//!     Arithmetic, full string functions, `lang`/`datatype` are
+//!     Phase 3 step 3+.
 //!   * Constants in any position (subject IRI, predicate IRI,
 //!     object IRI or literal).
 //!   * Variables in any position.
@@ -288,6 +296,11 @@ fn translate_filter(
             let r = expr_to_id_sql(b, anchors)?;
             Some(format!("({l} = {r})"))
         }
+        Expression::Greater(a, b) => translate_numeric_cmp(a, b, anchors, ">"),
+        Expression::GreaterOrEqual(a, b) => translate_numeric_cmp(a, b, anchors, ">="),
+        Expression::Less(a, b) => translate_numeric_cmp(a, b, anchors, "<"),
+        Expression::LessOrEqual(a, b) => translate_numeric_cmp(a, b, anchors, "<="),
+        Expression::In(operand, list) => translate_in(operand, list, anchors),
         Expression::And(a, b) => {
             let l = translate_filter(a, anchors)?;
             let r = translate_filter(b, anchors)?;
@@ -324,6 +337,11 @@ fn translate_function_call(
         Function::IsIri => term_type_check(args, anchors, term_type::URI),
         Function::IsBlank => term_type_check(args, anchors, term_type::BLANK_NODE),
         Function::IsLiteral => term_type_check(args, anchors, term_type::LITERAL),
+        Function::Regex => translate_regex(args, anchors),
+        // STR / LANG / DATATYPE etc. aren't callable as top-level
+        // FILTER predicates — they're string-yielding functions used
+        // inside other comparisons. Handled by the lexical-extraction
+        // path (expr_to_lexical_sql) when nested.
         _ => None,
     }
 }
@@ -373,6 +391,184 @@ fn expr_to_id_sql(
             Some(id.to_string())
         }
         _ => None,
+    }
+}
+
+/// `?a IN (x, y, z)` — emit `dict_id IN (id_x, id_y, id_z)`. Returns
+/// None if any list element doesn't have a sound dict-id translation.
+fn translate_in(
+    operand: &Expression,
+    list: &[Expression],
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> Option<String> {
+    let lhs = expr_to_id_sql(operand, anchors)?;
+    if list.is_empty() {
+        return Some("FALSE".to_string());
+    }
+    let ids: Vec<String> = list
+        .iter()
+        .map(|e| expr_to_id_sql(e, anchors))
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("({lhs} IN ({}))", ids.join(",")))
+}
+
+/// Resolve an Expression to a SQL fragment that evaluates to a
+/// numeric value (Postgres NUMERIC). Used by `<`/`>`/`<=`/`>=` so
+/// the comparison is type-safe.
+///
+/// For variables: subselect on `_pgrdf_dictionary` that returns the
+/// cast lexical_value only when the row's datatype is one of the
+/// known XSD numeric types. Non-numeric rows yield NULL, so the
+/// comparison is NULL and the row is dropped — matching SPARQL's
+/// "type error → unbound" semantics.
+///
+/// For constants: must be a numeric XSD literal at translation time,
+/// else `None` (translator panics — the comparison is meaningless).
+fn expr_to_numeric_sql(
+    e: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> Option<String> {
+    match e {
+        Expression::Variable(v) => {
+            let &(alias_idx, col) = anchors.get(v.as_str())?;
+            let dt_ids = numeric_datatype_id_list();
+            Some(format!(
+                "(SELECT CASE WHEN datatype_iri_id IN ({dt_ids})
+                              THEN lexical_value::numeric
+                              ELSE NULL
+                         END
+                  FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
+            ))
+        }
+        Expression::Literal(l) => {
+            if !is_xsd_numeric_iri(l.datatype().as_str()) {
+                return None;
+            }
+            // Constant: emit the numeric value directly. Reject anything
+            // not actually parseable as a number (defensive — spargebra
+            // should have caught this).
+            let v = l.value();
+            if v.parse::<f64>().is_err() {
+                return None;
+            }
+            Some(format!("{v}::numeric"))
+        }
+        _ => None,
+    }
+}
+
+fn translate_numeric_cmp(
+    a: &Expression,
+    b: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+    op: &str,
+) -> Option<String> {
+    let l = expr_to_numeric_sql(a, anchors)?;
+    let r = expr_to_numeric_sql(b, anchors)?;
+    Some(format!("({l} {op} {r})"))
+}
+
+/// `REGEX(?v, "pattern" [, "flags"])` — Postgres regex match on the
+/// term's lexical form. `i` flag → case-insensitive (`~*` operator),
+/// no flag → case-sensitive (`~`). Other flags are accepted but not
+/// translated (Postgres POSIX regex doesn't have direct PCRE-flag
+/// parity); we still match without them rather than erroring.
+fn translate_regex(
+    args: &[Expression],
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> Option<String> {
+    if !(2..=3).contains(&args.len()) {
+        return None;
+    }
+    let lex = expr_to_lexical_sql(&args[0], anchors)?;
+    let pattern = match &args[1] {
+        Expression::Literal(l) => l.value().to_string(),
+        _ => return None,
+    };
+    let flags = match args.get(2) {
+        Some(Expression::Literal(l)) => l.value().to_string(),
+        Some(_) => return None,
+        None => String::new(),
+    };
+    let op = if flags.contains('i') { "~*" } else { "~" };
+    let escaped = pattern.replace('\'', "''");
+    Some(format!("({lex} {op} '{escaped}')"))
+}
+
+/// Resolve an Expression to a SQL fragment that evaluates to the
+/// term's lexical form (TEXT). Used by `REGEX` and similar string
+/// functions.
+fn expr_to_lexical_sql(
+    e: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> Option<String> {
+    match e {
+        Expression::Variable(v) => {
+            let &(alias_idx, col) = anchors.get(v.as_str())?;
+            Some(format!(
+                "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary
+                   WHERE id = q{alias_idx}.{col})"
+            ))
+        }
+        Expression::Literal(l) => {
+            let escaped = l.value().replace('\'', "''");
+            Some(format!("'{escaped}'"))
+        }
+        // STR(?v) is identity for our purposes — every dict entry's
+        // lexical_value IS the string form. Pass through.
+        Expression::FunctionCall(Function::Str, inner) if inner.len() == 1 => {
+            expr_to_lexical_sql(&inner[0], anchors)
+        }
+        _ => None,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// XSD numeric datatype IDs
+// ─────────────────────────────────────────────────────────────────────
+
+/// The full set of XSD numeric IRIs we recognise for type-safe
+/// ordering comparisons. Anything outside this set is treated as
+/// non-numeric — the row is dropped (NULL comparison) rather than
+/// the Postgres cast erroring out.
+fn xsd_numeric_iris() -> &'static [&'static str] {
+    &[
+        "http://www.w3.org/2001/XMLSchema#integer",
+        "http://www.w3.org/2001/XMLSchema#decimal",
+        "http://www.w3.org/2001/XMLSchema#double",
+        "http://www.w3.org/2001/XMLSchema#float",
+        "http://www.w3.org/2001/XMLSchema#long",
+        "http://www.w3.org/2001/XMLSchema#int",
+        "http://www.w3.org/2001/XMLSchema#short",
+        "http://www.w3.org/2001/XMLSchema#byte",
+        "http://www.w3.org/2001/XMLSchema#unsignedLong",
+        "http://www.w3.org/2001/XMLSchema#unsignedInt",
+        "http://www.w3.org/2001/XMLSchema#unsignedShort",
+        "http://www.w3.org/2001/XMLSchema#unsignedByte",
+        "http://www.w3.org/2001/XMLSchema#nonPositiveInteger",
+        "http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+        "http://www.w3.org/2001/XMLSchema#positiveInteger",
+        "http://www.w3.org/2001/XMLSchema#negativeInteger",
+    ]
+}
+
+fn is_xsd_numeric_iri(iri: &str) -> bool {
+    xsd_numeric_iris().contains(&iri)
+}
+
+/// Comma-separated SQL list of dict ids for every XSD numeric IRI
+/// currently in the dictionary. If none are present, returns `-1`
+/// so the IN(...) check trivially matches nothing rather than
+/// producing invalid SQL.
+fn numeric_datatype_id_list() -> String {
+    let ids: Vec<i64> = xsd_numeric_iris()
+        .iter()
+        .filter_map(|iri| lookup_iri_id(iri))
+        .collect();
+    if ids.is_empty() {
+        "-1".to_string()
+    } else {
+        ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
     }
 }
 
@@ -793,6 +989,158 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 1);
+    }
+
+    /// FILTER(?age > 30) — numeric ordering. Spargebra parses bare
+    /// numbers as xsd:integer; we cast lexical_value to NUMERIC when
+    /// the dict row's datatype is one of the XSD numeric IRIs.
+    #[pg_test]
+    fn sparql_filter_numeric_gt() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+                 ex:a ex:age 25 .
+                 ex:b ex:age 35 .
+                 ex:c ex:age 45 .
+                 ex:d ex:age 55 .',
+                8_020)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/age> ?age FILTER(?age > 30) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 3, "expected b,c,d (ages > 30), got {rows}");
+    }
+
+    /// FILTER(?age >= 35 && ?age <= 45) — composed numeric range.
+    #[pg_test]
+    fn sparql_filter_numeric_range() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:age 25 .
+                 ex:b ex:age 35 .
+                 ex:c ex:age 45 .
+                 ex:d ex:age 55 .',
+                8_021)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/age> ?age FILTER(?age >= 35 && ?age <= 45) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2, "expected b,c (35..=45), got {rows}");
+    }
+
+    /// FILTER(?age > 30) with a NON-numeric value — the row's
+    /// lexical_value would fail Postgres `::numeric`, so the CASE
+    /// drops it to NULL → row excluded.
+    #[pg_test]
+    fn sparql_filter_numeric_skips_non_numeric() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:val 99 .
+                 ex:b ex:val \"hello\" .',
+                8_022)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/val> ?v FILTER(?v > 30) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        // Only ex:a (99) qualifies; ex:b is a string literal, NULL on cast.
+        assert_eq!(rows, 1);
+    }
+
+    /// FILTER(REGEX(?n, "^A")) — case-sensitive regex.
+    #[pg_test]
+    fn sparql_filter_regex_case_sensitive() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" .
+                 ex:adam  foaf:name \"Adam\"  .
+                 ex:bob   foaf:name \"Bob\"   .
+                 ex:carol foaf:name \"Carol\" .',
+                8_023)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s WHERE { ?s foaf:name ?n FILTER(REGEX(?n, \"^A\")) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2, "expected Alice+Adam (start with A), got {rows}");
+    }
+
+    /// FILTER(REGEX(STR(?n), "ar", "i")) — STR() passthrough + the
+    /// case-insensitive flag → matches Carol AND ar in any case.
+    #[pg_test]
+    fn sparql_filter_regex_case_insensitive_with_str() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:carol foaf:name \"Carol\" .
+                 ex:mark  foaf:name \"Mark\"  .
+                 ex:alice foaf:name \"Alice\" .',
+                8_024)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s WHERE { ?s foaf:name ?n FILTER(REGEX(STR(?n), \"ar\", \"i\")) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2, "expected Carol+Mark (contain ar/Ar), got {rows}");
+    }
+
+    /// FILTER(?s IN (?a, ?b, ?c)) — set membership via dict ids.
+    #[pg_test]
+    fn sparql_filter_in_set() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p 1 .
+                 ex:b ex:p 2 .
+                 ex:c ex:p 3 .
+                 ex:d ex:p 4 .',
+                8_025)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/p> ?v FILTER(?s IN (<http://example.com/a>, <http://example.com/c>)) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2);
     }
 
     /// BOUND(?v) is trivially true for every BGP variable, so it

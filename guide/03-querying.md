@@ -26,7 +26,8 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | Multi-pattern BGPs with shared variables → INNER joins | ✅ |
 | `DISTINCT`, `REDUCED`, `ORDER BY`, `LIMIT/OFFSET` wrappers | ✅ (pass-through) |
 | `FILTER` — identity (`=`, `!=`, `sameTerm`), boolean (`&&`, `\|\|`, `!`), term-type (`isIRI`, `isLiteral`, `isBlank`), `BOUND` | ✅ |
-| `FILTER` — numeric ordering (`<`/`>`/`<=`/`>=`), `regex`, `str`, `lang`, arithmetic | ⏳ Phase 3 (next slice) |
+| `FILTER` — numeric ordering (`<`/`>`/`<=`/`>=`), `REGEX`, `IN`, `STR` passthrough | ✅ |
+| `FILTER` — arithmetic, `lang`, `datatype`, `STRLEN`, `CONTAINS`, full string-fn surface | ⏳ Phase 3 (next slice) |
 | `OPTIONAL` (LeftJoin), `UNION`, `MINUS`, property paths, aggregates, `VALUES`, `BIND` | ⏳ Phase 3 |
 | `CONSTRUCT`, `ASK`, `DESCRIBE` | ⏳ Phase 3 |
 | Named-graph `GRAPH { … }` clauses | ⏳ Phase 3 |
@@ -189,6 +190,99 @@ SELECT * FROM pgrdf.sparql(
 
 Filters apply after the BGP joins — they're appended to the
 `WHERE` clause of the generated SQL.
+
+### Numeric ordering
+
+```sql
+-- Adults only
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?age
+     WHERE { ?s foaf:age ?age FILTER(?age >= 18) }'
+);
+
+-- Age range
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s
+     WHERE { ?s foaf:age ?age FILTER(?age >= 30 && ?age < 65) }'
+);
+```
+
+Both sides are cast to Postgres `NUMERIC` if and only if their
+dictionary entry's datatype is one of the XSD numeric IRIs
+(`xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:float`, the
+sized variants and unsigned variants, and the constraint subtypes).
+Anything else — `xsd:string`, untyped, IRI, blank node — compares
+NULL and is dropped from the result, matching SPARQL's "type
+error → unbound" semantics. Comparing two strings as if they were
+numbers does not raise an error; it just yields no rows.
+
+If you need string ordering (lexicographic), wait for the
+`STR` + `<`/`>` overload in Phase 3 step 3, or post-process in SQL:
+
+```sql
+SELECT j ->> 's' AS s, j ->> 'n' AS n
+  FROM pgrdf.sparql(
+    'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+     SELECT ?s ?n WHERE { ?s foaf:name ?n }'
+  ) AS j
+ ORDER BY j ->> 'n';
+```
+
+### REGEX
+
+```sql
+-- Case-sensitive (Postgres ~ operator)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s WHERE { ?s foaf:name ?n FILTER(REGEX(?n, "^A")) }'
+);
+
+-- Case-insensitive (i flag → Postgres ~* operator)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s WHERE { ?s foaf:name ?n FILTER(REGEX(?n, "^a", "i")) }'
+);
+
+-- STR() wrapper is a no-op (every term's lexical form IS its string)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s WHERE { ?s foaf:name ?n FILTER(REGEX(STR(?n), "ar", "i")) }'
+);
+```
+
+The regex pattern is a SPARQL literal at translation time and is
+embedded as a Postgres regex literal (single quotes are escaped).
+Anchors (`^`, `$`), character classes, quantifiers — anything
+Postgres POSIX regex supports. The `i` flag toggles case-insensitive;
+other flags are accepted but currently ignored (Postgres POSIX
+doesn't have a direct PCRE-flag equivalent for `x`/`m`/`s`).
+
+### IN — set membership
+
+```sql
+-- Find persons in a named set
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s WHERE {
+     ?s foaf:name ?n
+     FILTER(?s IN (<http://example.com/alice>,
+                   <http://example.com/carol>,
+                   <http://example.com/dave>))
+   }'
+);
+
+-- Literal membership
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s WHERE { ?s foaf:name ?n FILTER(?n IN ("Alice", "Bob")) }'
+);
+```
+
+`IN` is dict-id set membership — emits `qN.col IN (id_1, id_2, …)`
+where each id is resolved upfront. Unknown terms resolve to `-1`
+so they can never match, matching SPARQL's "not in the set" outcome.
 
 ### Combining with regular SQL
 

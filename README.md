@@ -5,8 +5,8 @@
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20phase%203%20start-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-28%20pgrx%20%2B%2014%20regression-brightgreen)](#tests)
-[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20BGP%20%2F%20FILTER-blue)](guide/03-querying.md)
+[![Tests](https://img.shields.io/badge/tests-34%20pgrx%20%2B%2015%20regression-brightgreen)](#tests)
+[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20BGP%20%2F%20FILTER%20%2B%20REGEX-blue)](guide/03-querying.md)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
@@ -16,7 +16,7 @@
 
 | | |
 |---|---|
-| **Status** | Alpha. Storage CRUD, Turtle ingest, SPARQL SELECT with N-pattern BGPs (Phase 2.0–2.2) and FILTER expressions (Phase 3 first slice — identity, boolean, term-type, BOUND). OPTIONAL / UNION / numeric ordering / aggregates queued. |
+| **Status** | Alpha. Storage CRUD, Turtle ingest, SPARQL SELECT with N-pattern BGPs (Phase 2.0–2.2). FILTER expressions: identity, boolean, term-type, BOUND, numeric ordering (`<`/`>`/`<=`/`>=`), `REGEX`, `IN`, `STR` (Phase 3 steps 1–2). OPTIONAL / UNION / aggregates queued. |
 | **Supported PG** | 14, 15, 16, 17 (PG 18 blocked on pgrx upstream — see [ERRATA](specs/ERRATA.v0.2.md) E-006). |
 | **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
@@ -60,6 +60,15 @@ SELECT * FROM pgrdf.sparql(
   'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
    SELECT ?s ?o
      WHERE { ?s ?p ?o FILTER(isIRI(?o) && ?p = foaf:knows) }'
+);
+
+-- Numeric ordering + REGEX in a single query
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?n
+     WHERE { ?s foaf:name ?n .
+             ?s <http://example.com/age> ?age
+             FILTER(?age >= 30 && REGEX(?n, "^A", "i")) }'
 );
 
 -- Inspect the parsed shape without executing
@@ -146,8 +155,8 @@ For people working on pgRDF itself.
 | Ontology smoke | Real-world Turtle parses cleanly | `tests/perf/smoke-ontologies.sh` |
 | Full bar | Both `just test` + `just test-regression` | `just test-all` |
 
-Phase 2.0–2.2 + Phase 3 first slice (current): **28 pgrx integration
-tests + 14 regression files passing.** External smoke covers 24
+Phase 2.0–2.2 + Phase 3 steps 1–2 (current): **34 pgrx integration
+tests + 15 regression files passing.** External smoke covers 24
 well-known ontologies (W3C, Apache Jena, ValueFlows, ConceptKernel
 v3.7) for ~17,000 triples loaded. Workflow.ttl held out due to a
 non-RFC IRI in the source — see [ERRATA E-007 / TEST.ONTOLOGY-SET.md](TEST.ONTOLOGY-SET.md).

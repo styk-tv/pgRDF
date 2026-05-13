@@ -6,6 +6,38 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 2 — FILTER numeric ordering + REGEX + IN
+
+- `pgrdf.sparql` FILTER translator gains three new shapes:
+  - **Numeric ordering** (`<`, `>`, `<=`, `>=`): operand resolves to
+    `NUMERIC` via a CASE-guarded subselect on `_pgrdf_dictionary`.
+    Only XSD numeric datatypes (integer, decimal, double, float,
+    sized + unsigned + constraint subtypes — 16 IRIs total)
+    contribute; everything else compares NULL → row dropped. This
+    matches SPARQL's "type error → unbound" semantics without ever
+    raising a Postgres cast error.
+  - **`REGEX(?v, "pat" [, "flags"])`**: Postgres `~` (case-sensitive)
+    or `~*` (with `i` flag) against the term's `lexical_value`.
+    Pattern + flags are SPARQL literals at translation time;
+    single quotes in the pattern are escaped. `STR(?v)` inside
+    REGEX is a passthrough.
+  - **`?term IN (e1, e2, …)`**: dict-id set membership.
+- 6 new pg_tests: numeric `>` / range / non-numeric drop, regex
+  case-sensitive / case-insensitive with STR(), and IN.
+- `tests/regression/sql/34-sparql-filter-advanced.sql` covers 10
+  query shapes (numeric `>`, range, `<` with non-numeric mixed in,
+  `>= 0` over a typed-decimal row, regex `^A`, regex `ar` case-i,
+  regex+STR wrap, IN over IRIs, IN over a literal, and a cross-BGP
+  composition).
+- `README.md` pills: tests 28+14 → 34+15, SPARQL pill adds REGEX.
+- `guide/03-querying.md` gains full sections for numeric ordering,
+  REGEX (with the POSIX-vs-PCRE caveat), and IN. Capability matrix
+  refreshed.
+
+Test bar:
+  pg_test:    34 passed; 0 failed  (was 28)
+  regression: 15 passed; 0 failed  (was 14)
+
 ### Phase 3 step 1 — FILTER expressions over BGPs
 
 - `pgrdf.sparql` now walks `GraphPattern::Filter { expr, inner }`
