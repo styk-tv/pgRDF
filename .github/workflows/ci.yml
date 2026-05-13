@@ -1,0 +1,51 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.16"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt }
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "15", "16", "17"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: ./.github/actions/setup-pgrx
+        with: { pg: "${{ matrix.pg }}" }
+      - run: cargo clippy --no-default-features --features pg${{ matrix.pg }} -- -D warnings
+
+  test:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "15", "16", "17"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-pgrx
+        with: { pg: "${{ matrix.pg }}" }
+      - run: cargo pgrx test pg${{ matrix.pg }}
+
+  # PLACEHOLDER — wire up once tests/regression/ has a runner.
+  # regression:
+  #   runs-on: ubuntu-22.04
+  #   needs: test
+  #   steps: …

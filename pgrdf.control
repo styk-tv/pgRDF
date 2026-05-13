@@ -1,0 +1,7 @@
+comment = 'Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning'
+default_version = '0.2.0'
+module_pathname = '$libdir/pgrdf'
+relocatable = false
+superuser = true
+trusted = false
+schema = 'pgrdf'

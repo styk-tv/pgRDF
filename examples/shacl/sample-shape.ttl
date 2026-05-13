@@ -1,0 +1,17 @@
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix ex:   <http://example.com/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+ex:PersonShape a sh:NodeShape ;
+    sh:targetClass foaf:Person ;
+    sh:property [
+        sh:path foaf:name ;
+        sh:minCount 1 ;
+        sh:datatype xsd:string ;
+    ] ;
+    sh:property [
+        sh:path foaf:mbox ;
+        sh:minCount 1 ;
+        sh:nodeKind sh:IRI ;
+    ] .

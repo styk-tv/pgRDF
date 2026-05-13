@@ -1,0 +1,31 @@
+name: setup-pgrx
+description: Install pgrx and a specific Postgres major (PGDG bookworm).
+inputs:
+  pg:
+    description: Postgres major version (14|15|16|17|18)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install PGDG Postgres ${{ inputs.pg }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y curl ca-certificates gnupg lsb-release \
+          build-essential pkg-config libssl-dev libclang-dev
+        curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+          | sudo gpg --dearmor -o /usr/share/keyrings/postgresql-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+          | sudo tee /etc/apt/sources.list.d/pgdg.list
+        sudo apt-get update
+        sudo apt-get install -y postgresql-server-dev-${{ inputs.pg }}
+
+    - name: Install cargo-pgrx
+      shell: bash
+      run: cargo install cargo-pgrx --locked --version "^${PGRX_VERSION:-0.17}"
+
+    - name: cargo pgrx init
+      shell: bash
+      run: cargo pgrx init --pg${{ inputs.pg }} /usr/lib/postgresql/${{ inputs.pg }}/bin/pg_config

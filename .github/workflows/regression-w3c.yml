@@ -1,0 +1,46 @@
+name: regression-w3c
+on:
+  schedule:
+    - cron: "0 3 * * *"     # nightly 03:00 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.16"
+
+# PLACEHOLDER — wire each job up as the corresponding tests/ runner lands.
+# The shape below is the destination; jobs are commented out until their
+# fixtures (W3C test suites) and runners exist.
+
+jobs:
+  sparql11:
+    runs-on: ubuntu-22.04
+    if: false  # enabled once tests/w3c-sparql/manifest_runner is in.
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-pgrx
+        with: { pg: "18" }
+      - name: Run W3C SPARQL 1.1 test suite
+        run: cargo run --release -p pgrdf-w3c-sparql -- tests/w3c-sparql/fixtures/sparql11/manifest.ttl
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with: { name: sparql11-report, path: target/w3c-sparql-report.json }
+
+  shacl:
+    runs-on: ubuntu-22.04
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - name: Run W3C SHACL test suite
+        run: cargo run --release -p pgrdf-w3c-shacl -- tests/w3c-shacl/fixtures/core/manifest.ttl
+
+  lubm:
+    runs-on: ubuntu-22.04
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: LUBM-10 baseline (vs Jena TDB and Apache AGE)
+        run: bash tests/perf/run-lubm.sh 10

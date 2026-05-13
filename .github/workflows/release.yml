@@ -1,0 +1,76 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.16"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "15", "16", "17"]
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-pgrx
+        with: { pg: "${{ matrix.pg }}" }
+
+      - name: Build extension package
+        run: cargo pgrx package --pg-config /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      # SPEC.pgRDF.INSTALL.v0.2 §3 layout:
+      #   pgrdf-<ver>-pg<PG>-glibc-<arch>.tar.gz
+      #     ├── lib/pgrdf.so
+      #     ├── share/extension/pgrdf.control
+      #     ├── share/extension/pgrdf--<ver>.sql
+      #     ├── LICENSE
+      #     └── SHA256SUMS
+      - name: Repack to INSTALL-spec layout
+        id: pack
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          PKG="target/release/pgrdf-pg${{ matrix.pg }}"
+          OUT="pgrdf-${VER}-pg${{ matrix.pg }}-glibc-${{ matrix.arch }}"
+          mkdir -p "${OUT}/lib" "${OUT}/share/extension"
+          cp "${PKG}/usr/lib/postgresql/${{ matrix.pg }}/lib/pgrdf.so"            "${OUT}/lib/"
+          cp "${PKG}/usr/share/postgresql/${{ matrix.pg }}/extension/"*.control   "${OUT}/share/extension/"
+          cp "${PKG}/usr/share/postgresql/${{ matrix.pg }}/extension/"*.sql       "${OUT}/share/extension/"
+          cp LICENSE "${OUT}/"
+          ( cd "${OUT}" && find . -type f ! -name SHA256SUMS -print0 | xargs -0 sha256sum > SHA256SUMS )
+          tar czf "${OUT}.tar.gz" "${OUT}"
+          echo "tarball=${OUT}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.tarball }}
+          path: ${{ steps.pack.outputs.tarball }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - name: Generate aggregate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum pgrdf-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/pgrdf-*.tar.gz
+            artifacts/SHA256SUMS
+          generate_release_notes: true

@@ -1,0 +1,58 @@
+[package]
+name = "pgrdf"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning"
+repository = "https://github.com/styk-tv/pgRDF"
+readme = "README.md"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+# pgrx 0.12+ requires a small bin target used by `cargo pgrx package`
+# during schema generation. See src/bin/pgrx_embed.rs.
+[[bin]]
+name = "pgrx_embed_pgrdf"
+path = "./src/bin/pgrx_embed.rs"
+
+[features]
+# No default feature — every invocation MUST pick a PG major explicitly
+# (cargo pgrx run pgN, --features pgN, etc). pgrx's per-PG features are
+# mutually exclusive, so leaving any one as default makes the wrong
+# things implicit.
+default = []
+# pgrx 0.16 supports PG 13-17. PG 18 support arrives in pgrx 0.17+, which
+# uses unstable Rust APIs without enabling the feature flag and so fails
+# to build on stable AND nightly today (rustc 1.95 / 1.97). See
+# specs/ERRATA E-006. Bump when pgrx publishes a fixed 0.17.x/0.18.x.
+pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
+pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg_test = []
+
+[dependencies]
+pgrx = "0.16"
+
+# Stack-out per SPEC.pgRDF.LLD.v0.2 + ERRATA. Kept here as commented-out
+# pins so the dependency surface is reviewable without compiling them
+# until the relevant module work begins. Uncomment when work on that
+# module starts so reviewers see one dep enter the surface at a time.
+#
+# spargebra        = "0.4"     # SPARQL parser + algebra AST (oxigraph workspace)
+# oxrdf            = "0.2"     # RDF term model (shared with spargebra)
+# reasonable       = "0.2"     # OWL 2 RL forward-chain reasoner
+# shacl_validation = "0.4"     # SHACL processor — replaces the v0.2 LLD reference to `shacl-rust` (see specs/ERRATA.v0.2.md)
+
+[dev-dependencies]
+pgrx-tests = "0.16"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1

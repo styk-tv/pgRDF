@@ -1,0 +1,26 @@
+# Rust build artifacts
+target/
+Cargo.lock.bak
+*.rlib
+*.rmeta
+
+# pgrx local state
+.pgrx/
+
+# Compose: locally-built extension artifacts + PGDATA
+compose/extensions/lib/*
+!compose/extensions/lib/.gitkeep
+compose/extensions/share/extension/*
+!compose/extensions/share/extension/.gitkeep
+compose/pg-data/*
+!compose/pg-data/.gitkeep
+
+# Env
+.env
+.env.local
+
+# Editor + OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

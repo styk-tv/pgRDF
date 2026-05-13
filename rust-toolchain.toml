@@ -1,0 +1,7 @@
+[toolchain]
+# Current stable. pgrx 0.16 builds cleanly here; pgrx 0.17/0.18 do not
+# (see specs/ERRATA E-006). Bump when pgrx publishes a fixed 0.17.x or
+# 0.18.x that compiles on stable.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+

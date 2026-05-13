@@ -1,0 +1,39 @@
+# pgRDF local-dev compose — INSTALL spec §7 (preferred forward path).
+#
+# Stock postgres:18-bookworm. No image rebuild, no entrypoint wrapper,
+# no init script. The locally-built extension artifacts in ./extensions/
+# are made visible to Postgres via the PG 18 `extension_control_path`
+# and `dynamic_library_path` GUCs.
+#
+# Boot sequence (see compose/README.md for the long version):
+#   1. just build-ext            # builds .so/.control/.sql into ./extensions/
+#   2. podman compose up -d      # boots Postgres with the bind mounts
+#   3. psql … -c 'CREATE EXTENSION pgrdf;'
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18-bookworm
+    container_name: pgrdf-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pgrdf}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgrdf}
+      POSTGRES_DB: ${POSTGRES_DB:-pgrdf}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pgrdf
+      - -c
+      - extension_control_path=/pgrdf/share/extension:$$system
+      - -c
+      - dynamic_library_path=/pgrdf/lib:$$libdir
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./pg-data:/var/lib/postgresql/data:z
+      - ./extensions:/pgrdf:ro,z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pgrdf} -d ${POSTGRES_DB:-pgrdf}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
