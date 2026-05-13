@@ -40,8 +40,9 @@ pgrx  = "0.16"
 # unify. The published cargo-info output for oxttl@0.2.3 misleadingly
 # shows "Adding oxrdf v0.2.4" because oxttl's manifest allows both
 # majors — cargo prefers 0.3.x when no other constraint pulls it down.
-oxrdf = "0.3"
-oxttl = "0.2"   # Turtle / N-Triples / TriG / N-Quads. Latest stable as of 2026-05-13.
+oxrdf      = "0.3"
+oxttl      = "0.2"   # Turtle / N-Triples / TriG / N-Quads. Latest stable as of 2026-05-13.
+serde_json = "1"     # Used by load_turtle_verbose to emit ingestion stats as JSONB.
 
 # Stack-out per SPEC.pgRDF.LLD.v0.2 + ERRATA. Kept here as commented-out
 # pins so the dependency surface is reviewable without compiling them

@@ -1010,6 +1010,7 @@ dependencies = [
  "oxttl",
  "pgrx",
  "pgrx-tests",
+ "serde_json",
 ]
 
 [[package]]
