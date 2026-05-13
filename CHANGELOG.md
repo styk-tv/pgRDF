@@ -6,6 +6,18 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 2.2 step 7 — User guide for SPARQL surface
+
+- New `guide/03-querying.md`: full walkthrough of `pgrdf.sparql`
+  (single + multi-pattern BGPs, constants in any position, JSONB
+  output, combining with regular SQL, `pgrdf.sparql_parse` for
+  introspection) plus what works / doesn't / why, and a worked
+  example of the SQL translation.
+- `README.md` promoted the SPARQL surface from "coming soon" to a
+  live code example, bumped the test pill from 9+10 to 21+13,
+  added a SPARQL pill, refreshed the status row.
+- `guide/README.md` index entry for `03-querying.md`.
+
 ### Phase 2.2 step 6 — Multi-pattern BGP joins
 
 - `pgrdf.sparql` now handles N-pattern Basic Graph Patterns. Each
