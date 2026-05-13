@@ -20,6 +20,9 @@ compose/pg-data/*
 .env
 .env.local
 
+# Fetched ontologies (manifest is checked in; payloads aren't)
+fixtures/ontologies/
+
 # Editor + OS
 .vscode/
 .idea/

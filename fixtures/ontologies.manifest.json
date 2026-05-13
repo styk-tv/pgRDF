@@ -1,0 +1,20 @@
+{
+  "fetched_at": "2026-05-13T21:30:24Z",
+  "entries": [
+    {"url":"https://conceptkernel.org/ontology/v3.7/core.ttl","file":"ontologies/core.ttl","sha256":"7e47199df8490c24c6654516fbd3cdbaab0ec8c35ef3a74f70a051191971c7bb","size":39818},
+    {"url":"https://conceptkernel.org/ontology/v3.7/base-instances.ttl","file":"ontologies/base-instances.ttl","sha256":"fb9037e62d7c26c998d904514ccff7ce6ae5666ff049490380daab59054442fe","size":11592},
+    {"url":"https://conceptkernel.org/ontology/v3.7/proof.ttl","file":"ontologies/proof.ttl","sha256":"983fabacbb3e88b3fdba5f7e31b31fd019e43456cf1f845222b83bce3297f578","size":13064},
+    {"url":"https://conceptkernel.org/ontology/v3.7/edges.ttl","file":"ontologies/edges.ttl","sha256":"4a0a9eb0b36ab4e555dbb572a958ccc5a36ae90914283f35d9dec647a6db348b","size":8216},
+    {"url":"https://conceptkernel.org/ontology/v3.7/consensus.ttl","file":"ontologies/consensus.ttl","sha256":"d37e58d717e930423d18e88a5a15b1326a0df5e6493e0890ea761b1f0b12ef5f","size":10599},
+    {"url":"https://conceptkernel.org/ontology/v3.7/kernel-metadata.ttl","file":"ontologies/kernel-metadata.ttl","sha256":"4d76c8ea8ddd158661677199173088b5d2d6aecd2f08b0dde2f9fca8cfe2adbc","size":16732},
+    {"url":"https://conceptkernel.org/ontology/v3.7/processes.ttl","file":"ontologies/processes.ttl","sha256":"39c2b330272147dfdc30265b372d051eab67fdd4e8938c0ece09e02f14702019","size":29136},
+    {"url":"https://conceptkernel.org/ontology/v3.7/relations.ttl","file":"ontologies/relations.ttl","sha256":"28f6917380e4e7eaf31d9f4a1bd6a69264bd7acc83986653dca18b08488409e4","size":30755},
+    {"url":"https://conceptkernel.org/ontology/v3.7/rbac.ttl","file":"ontologies/rbac.ttl","sha256":"43afbd0f65865aa3cbc72871391f1a81fd5c5ce302cdf48260f5bbb1d6bef5ce","size":18328},
+    {"url":"https://conceptkernel.org/ontology/v3.7/workflow.ttl","file":"ontologies/workflow.ttl","sha256":"aeda68488608012d2ca356c7af0061e8721d27ca42276ae833428c7721a88a52","size":22284},
+    {"url":"https://conceptkernel.org/ontology/v3.7/self-improvement.ttl","file":"ontologies/self-improvement.ttl","sha256":"40488134a008e55f6daf0154abde8894b7a039f272931cf5d971d679469a88e8","size":12280},
+    {"url":"https://conceptkernel.org/ontology/v3.7/shapes.ttl","file":"ontologies/shapes.ttl","sha256":"a3df4904de766664acc31ec04da9cf331111b759fe93353a535119fbce07587b","size":11947},
+    {"url":"https://www.w3.org/ns/prov.ttl","file":"ontologies/prov.ttl","sha256":"d7ea634dbcd31347eba38157197f69d314077ef7f88fd4f90e4f24a78bfe1097","size":112777},
+    {"url":"https://www.w3.org/ns/prov-o.ttl","file":"ontologies/prov-o.ttl","sha256":"7d203989f67b38bca572253942acc5a1bf24ce3ccfece16f072dcb4be2b79a96","size":68795},
+    {"url":"https://codeberg.org/valueflows/pages/raw/branch/main/assets/all_vf.TTL","file":"ontologies/all_vf.ttl","sha256":"47cada8122561100520702e2998c2949f6f4f42ba550c36797791882cbc48ece","size":87877}
+  ]
+}
