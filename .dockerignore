@@ -1,0 +1,27 @@
+# docker / podman build-context exclusions
+# Anything matched here is NOT copied into the build image's context,
+# so it can't end up in the COPY-everything step and bloat layers.
+
+# Rust build output (rebuilt inside the container)
+target/
+
+# Legacy bind-mount target from the host (replaced by a docker named
+# volume in the test recipe — see Justfile TARGET_VOLUME)
+.target-linux/
+
+# Compose runtime state — PGDATA + extracted .so/.control/.sql
+compose/pg-data/
+compose/extensions/lib/
+compose/extensions/share/
+
+# Fetched ontologies (gitignored already; not needed at build time)
+fixtures/ontologies/
+
+# Git history (irrelevant to the build, sometimes large)
+.git/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

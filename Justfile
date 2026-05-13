@@ -88,10 +88,16 @@ package:
 #   - pgrdf-builder-rust:pgN (fat, ~5 GB, source of cargo + pgrx + postgres-N)
 #   - pgrdf-builder:pgN      (slim, ~100 MB, holds /out artifacts)
 build-ext:
-    {{BUILD}} build --target builder -t pgrdf-builder-rust:pg{{PG_MAJOR}} \
+    # DOCKER_BUILDKIT=1 enables the # syntax= and --mount=type=cache
+    # directives in compose/builder.Containerfile. Without it the
+    # build silently falls back to the legacy builder and the
+    # cache-mounts are ignored — image layers bloat right back.
+    DOCKER_BUILDKIT=1 {{BUILD}} build --target builder \
+        -t pgrdf-builder-rust:pg{{PG_MAJOR}} \
         --build-arg PG_MAJOR={{PG_MAJOR}} \
         -f compose/builder.Containerfile .
-    {{BUILD}} build -t pgrdf-builder:pg{{PG_MAJOR}} \
+    DOCKER_BUILDKIT=1 {{BUILD}} build \
+        -t pgrdf-builder:pg{{PG_MAJOR}} \
         --build-arg PG_MAJOR={{PG_MAJOR}} \
         -f compose/builder.Containerfile .
     rm -rf compose/extensions/lib compose/extensions/share

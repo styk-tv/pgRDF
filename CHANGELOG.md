@@ -6,6 +6,49 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 2.2 step 5 — SPARQL execution: BGP → SQL
+
+- `pgrdf.sparql(q TEXT) → SETOF JSONB` — first user-visible SPARQL
+  surface. Parses via spargebra, translates a single Basic Graph
+  Pattern into a dynamic SQL SELECT over `_pgrdf_quads` joined to
+  `_pgrdf_dictionary`, returns one JSONB row per solution keyed by
+  the projected variable names.
+
+  ```sql
+  SELECT * FROM pgrdf.sparql(
+    'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+     SELECT ?s ?n WHERE { ?s foaf:name ?n }'
+  );
+  --  → {"s": "http://example.com/alice", "n": "Alice"}
+  --  → {"s": "http://example.com/bob",   "n": "Bob"}
+  ```
+
+  Scope today (intentionally narrow — multi-pattern joins land in
+  step 6):
+  - SELECT only.
+  - Exactly one BGP triple per query.
+  - Constants in any position (subject IRI, predicate IRI, object
+    IRI or literal). Unknown constants resolve to `-1` so the query
+    correctly returns zero rows rather than erroring.
+  - Variables in any position.
+  - Distinct / Reduced / Slice / OrderBy wrappers are passed through.
+- 4 new pg_tests covering all-three-vars BGP, bound-predicate filter,
+  bound-subject filter, and unknown-predicate-returns-empty.
+- `tests/regression/sql/31-sparql-bgp.sql` exercises 7 query shapes
+  end-to-end through the compose Postgres.
+
+Infrastructure:
+
+- `compose/builder.Containerfile` rewritten with BuildKit cache
+  mounts. The builder image dropped from 7.73 GB → 3.35 GB; cargo
+  registry + target/ now live in build-scoped cache volumes that
+  persist across rebuilds without bloating image layers.
+- `Justfile build-ext` now invokes `DOCKER_BUILDKIT=1 docker build`
+  so the `# syntax=docker/dockerfile:1.4` directive activates.
+- `.dockerignore` excludes `target/`, `.target-linux/`,
+  `compose/pg-data/`, `compose/extensions/lib|share`,
+  `fixtures/ontologies/`, `.git/`. Build context dropped accordingly.
+
 ### Phase 2.2 step 4 — SPARQL parser surface
 
 - `spargebra = "0.4"` (0.4.6 resolved). Pins `oxrdf = "=0.3.3"`, the
