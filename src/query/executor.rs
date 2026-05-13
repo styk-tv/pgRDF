@@ -1,24 +1,35 @@
 //! BGP → SQL translator.
 //!
-//! Phase 2.2 step 5: translate a SPARQL SELECT with a single Basic
-//! Graph Pattern into a dynamically-generated SQL SELECT over
-//! `_pgrdf_quads` joined to `_pgrdf_dictionary`, then return one
-//! JSONB row per match.
+//! Phase 2.2 steps 5 + 6: translate a SPARQL SELECT with one or more
+//! Basic Graph Pattern triples into a dynamically-generated SQL
+//! SELECT over `_pgrdf_quads` joined to `_pgrdf_dictionary`, then
+//! return one JSONB row per match.
 //!
-//! Scope today (intentionally narrow so the translator can be
-//! validated empirically before scaling up):
+//! Each BGP pattern gets a `_pgrdf_quads` alias (`q1`, `q2`, …). The
+//! first occurrence of a variable records `(alias, column)` as its
+//! anchor binding; subsequent occurrences emit equality predicates
+//! against that anchor (`q2.subject_id = q1.subject_id`) — that's
+//! how shared variables across patterns become INNER JOINs.
+//!
+//! Constants are resolved to dictionary ids up-front so the dynamic
+//! SQL only carries integer constants (never user-supplied IRI
+//! strings — that's how the translator avoids SQL injection while
+//! still building the query at function-call time).
+//!
+//! Scope today:
 //!   * SELECT only (no CONSTRUCT/ASK/DESCRIBE).
-//!   * Exactly one BGP triple — multi-pattern joins arrive in step 6.
+//!   * N BGP triples joined by shared variables (no FILTER /
+//!     OPTIONAL / UNION / aggregates / paths / VALUES / SERVICE).
 //!   * Constants in any position (subject IRI, predicate IRI,
 //!     object IRI or literal).
 //!   * Variables in any position.
 //!   * Distinct / Reduced / Slice / OrderBy wrappers are walked
-//!     through without affecting translation (they don't change
-//!     the BGP shape).
+//!     through without affecting translation.
 //!
 //! Output shape:
-//!   `SETOF JSONB` where each row is `{"varname": "lexical_value", ...}`
-//!   keyed by the projected variable names.
+//!   `SETOF JSONB` — one row per solution, keys = projected variable
+//!   names, values = lexical strings (NULL when the binding maps to
+//!   a term id missing from the dictionary).
 
 use crate::storage::dict::term_type;
 use pgrx::iter::SetOfIterator;
@@ -75,13 +86,7 @@ fn translate(q: &Query) -> ExecPlan {
     if bgp.is_empty() {
         panic!("sparql: empty BGP");
     }
-    if bgp.len() > 1 {
-        panic!(
-            "sparql: multi-pattern BGP not yet supported in step 5 (got {} patterns)",
-            bgp.len()
-        );
-    }
-    let sql = build_single_pattern_sql(&bgp[0], &projected);
+    let sql = build_bgp_sql(&bgp, &projected);
     ExecPlan { projected, sql }
 }
 
@@ -156,19 +161,65 @@ fn tp_object_var(tp: &TriplePattern) -> Option<String> {
 // Translation
 // ─────────────────────────────────────────────────────────────────────
 
-fn build_single_pattern_sql(tp: &TriplePattern, projected: &[String]) -> String {
-    // Resolve every constant position (IRI or literal) to a dict id
-    // *now*, so the dynamic SQL only carries integer constants.
-    let mut var_to_col: HashMap<String, &'static str> = HashMap::new();
+/// Build a dynamic SQL SELECT for an N-pattern BGP. Each pattern
+/// becomes a `_pgrdf_quads qN` clause; shared variables become
+/// equality predicates that fold into INNER joins; constants become
+/// `qN.col = <resolved_dict_id>` predicates.
+fn build_bgp_sql(patterns: &[TriplePattern], projected: &[String]) -> String {
+    /// First-occurrence anchor for each variable: which alias +
+    /// which column. Subsequent occurrences emit equality predicates
+    /// against this anchor.
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
     let mut where_clauses: Vec<String> = Vec::new();
+    let mut from_aliases: Vec<String> = Vec::with_capacity(patterns.len());
 
+    for (i, tp) in patterns.iter().enumerate() {
+        let qi = i + 1;
+        from_aliases.push(format!("pgrdf._pgrdf_quads q{qi}"));
+
+        bind_subject(tp, qi, &mut anchors, &mut where_clauses);
+        bind_predicate(tp, qi, &mut anchors, &mut where_clauses);
+        bind_object(tp, qi, &mut anchors, &mut where_clauses);
+    }
+
+    // Project: each projected var → its anchor alias.column → dict
+    // lookup → aliased to the variable name (so SETOF JSONB emission
+    // pulls the right column by ordinal).
+    let mut select_clauses: Vec<String> = Vec::new();
+    for var in projected {
+        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+            panic!("sparql: projected variable ?{var} is not bound in any BGP pattern")
+        });
+        select_clauses.push(format!(
+            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary
+               WHERE id = q{alias_idx}.{col}) AS {alias_v}",
+            alias_v = quote_identifier(var),
+        ));
+    }
+
+    let mut sql = format!(
+        "SELECT {sel} FROM {from}",
+        sel = select_clauses.join(", "),
+        from = from_aliases.join(", "),
+    );
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+    sql
+}
+
+fn bind_subject(
+    tp: &TriplePattern,
+    qi: usize,
+    anchors: &mut HashMap<String, (usize, &'static str)>,
+    where_clauses: &mut Vec<String>,
+) {
     match &tp.subject {
-        TermPattern::Variable(v) => {
-            var_to_col.insert(v.as_str().to_string(), "subject_id");
-        }
+        TermPattern::Variable(v) => bind_var(v.as_str(), qi, "subject_id", anchors, where_clauses),
         TermPattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            where_clauses.push(format!("q.subject_id = {id}"));
+            where_clauses.push(format!("q{qi}.subject_id = {id}"));
         }
         TermPattern::BlankNode(_) => {
             panic!("sparql: blank-node subject in query not supported")
@@ -176,60 +227,62 @@ fn build_single_pattern_sql(tp: &TriplePattern, projected: &[String]) -> String 
         TermPattern::Literal(_) => panic!("sparql: literal subject is invalid in RDF"),
         other => panic!("sparql: unsupported subject term {other:?}"),
     }
+}
 
+fn bind_predicate(
+    tp: &TriplePattern,
+    qi: usize,
+    anchors: &mut HashMap<String, (usize, &'static str)>,
+    where_clauses: &mut Vec<String>,
+) {
     match &tp.predicate {
         NamedNodePattern::Variable(v) => {
-            var_to_col.insert(v.as_str().to_string(), "predicate_id");
+            bind_var(v.as_str(), qi, "predicate_id", anchors, where_clauses)
         }
         NamedNodePattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            where_clauses.push(format!("q.predicate_id = {id}"));
+            where_clauses.push(format!("q{qi}.predicate_id = {id}"));
         }
     }
+}
 
+fn bind_object(
+    tp: &TriplePattern,
+    qi: usize,
+    anchors: &mut HashMap<String, (usize, &'static str)>,
+    where_clauses: &mut Vec<String>,
+) {
     match &tp.object {
-        TermPattern::Variable(v) => {
-            var_to_col.insert(v.as_str().to_string(), "object_id");
-        }
+        TermPattern::Variable(v) => bind_var(v.as_str(), qi, "object_id", anchors, where_clauses),
         TermPattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            where_clauses.push(format!("q.object_id = {id}"));
+            where_clauses.push(format!("q{qi}.object_id = {id}"));
         }
         TermPattern::Literal(l) => {
             let id = lookup_literal_id(l).unwrap_or(-1);
-            where_clauses.push(format!("q.object_id = {id}"));
+            where_clauses.push(format!("q{qi}.object_id = {id}"));
         }
         TermPattern::BlankNode(_) => {
             panic!("sparql: blank-node object in query not supported")
         }
         other => panic!("sparql: unsupported object term {other:?}"),
     }
+}
 
-    // Project: each var → its quad column → joined to the dictionary
-    // for the lexical value. Aliased to the variable name so JSONB
-    // emission can pull by ordinal.
-    let mut select_clauses: Vec<String> = Vec::new();
-    for var in projected {
-        let col = var_to_col.get(var).unwrap_or_else(|| {
-            panic!("sparql: projected variable ?{var} is not bound in the BGP")
-        });
-        // Sub-select on dictionary so a non-existent term lands as NULL.
-        select_clauses.push(format!(
-            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q.{col}) AS {alias}",
-            col = col,
-            alias = quote_identifier(var),
-        ));
+/// Either record a variable's first occurrence as the anchor, or
+/// emit an equality predicate tying this occurrence to that anchor.
+fn bind_var(
+    name: &str,
+    qi: usize,
+    col: &'static str,
+    anchors: &mut HashMap<String, (usize, &'static str)>,
+    where_clauses: &mut Vec<String>,
+) {
+    if let Some(&(prev_qi, prev_col)) = anchors.get(name) {
+        where_clauses.push(format!("q{qi}.{col} = q{prev_qi}.{prev_col}"));
+    } else {
+        anchors.insert(name.to_string(), (qi, col));
     }
-
-    let mut sql = format!(
-        "SELECT {sel} FROM pgrdf._pgrdf_quads q",
-        sel = select_clauses.join(", "),
-    );
-    if !where_clauses.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&where_clauses.join(" AND "));
-    }
-    sql
 }
 
 /// Postgres identifier quoting for variable names that happen to
@@ -418,5 +471,63 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 0);
+    }
+
+    /// Two-pattern BGP sharing ?p as subject: returns only subjects
+    /// that have BOTH foaf:name AND foaf:mbox.
+    #[pg_test]
+    fn sparql_two_pattern_shared_subject() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> .
+                 ex:bob   foaf:name \"Bob\"                            .
+                 ex:carol foaf:name \"Carol\" ; foaf:mbox <mailto:c@x> .',
+                8_004)",
+        )
+        .unwrap();
+
+        // Alice + Carol have both predicates; Bob only has foaf:name.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?p ?n ?m
+                  WHERE { ?p foaf:name ?n . ?p foaf:mbox ?m }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2);
+    }
+
+    /// Three-pattern BGP exercises chained joins (a → b → c). Same
+    /// FOAF setup but we also assert ?p's binding round-trips.
+    #[pg_test]
+    fn sparql_three_pattern_chain() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice  a foaf:Person ; foaf:name \"Alice\" ; foaf:knows ex:bob .
+                 ex:bob    a foaf:Person ; foaf:name \"Bob\"   .',
+                8_005)",
+        )
+        .unwrap();
+
+        // ?a foaf:knows ?b . ?a foaf:name ?an . ?b foaf:name ?bn
+        // -> 1 row (alice knows bob, alice has name Alice, bob has name Bob)
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?an ?bn
+                  WHERE { ?a foaf:knows ?b .
+                          ?a foaf:name  ?an .
+                          ?b foaf:name  ?bn }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 1);
     }
 }

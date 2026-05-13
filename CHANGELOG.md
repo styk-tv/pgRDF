@@ -6,6 +6,24 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 2.2 step 6 — Multi-pattern BGP joins
+
+- `pgrdf.sparql` now handles N-pattern Basic Graph Patterns. Each
+  pattern becomes a `_pgrdf_quads qN` clause; shared variables across
+  patterns are tracked by first-occurrence anchors and emit equality
+  predicates (`q2.subject_id = q1.subject_id`) that fold into INNER
+  joins.
+- 2 new pg_tests: two-pattern shared-subject BGP (Alice + Carol have
+  both `foaf:name` and `foaf:mbox`, Bob doesn't), three-pattern chain
+  following `foaf:knows`.
+- `tests/regression/sql/32-sparql-multipattern.sql` covers 5 shapes:
+  shared-subject BGP, three-pattern chain, self-loop pattern (?s ?p ?s),
+  bound-subject multi-pattern, and bound-predicate + bound-literal.
+
+Test bar:
+  pg_test:        21 passed; 0 failed  (was 19)
+  regression:     13 passed; 0 failed  (was 12)
+
 ### Phase 2.2 step 5 — SPARQL execution: BGP → SQL
 
 - `pgrdf.sparql(q TEXT) → SETOF JSONB` — first user-visible SPARQL
