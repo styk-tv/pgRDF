@@ -1,0 +1,10 @@
+@prefix ex:  <http://example.com/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# Five triples, one per common XSD datatype, sharing the same subject
+# so dictionary dedup of the subject is exercised.
+ex:thing ex:int  "42"^^xsd:integer .
+ex:thing ex:str  "hello" .
+ex:thing ex:dt   "2026-05-13T22:00:00Z"^^xsd:dateTime .
+ex:thing ex:dec  "3.14"^^xsd:decimal .
+ex:thing ex:bool "true"^^xsd:boolean .

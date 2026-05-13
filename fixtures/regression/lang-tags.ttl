@@ -1,0 +1,11 @@
+@prefix ex:   <http://example.com/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+
+# Four lang-tagged variants of the same lexical concept, plus an
+# untagged string for the same property. Tests language-tag storage
+# and dedup with NULL datatype_iri_id.
+ex:greeting foaf:name "Hello"@en .
+ex:greeting foaf:name "Hola"@es .
+ex:greeting foaf:name "Bonjour"@fr .
+ex:greeting foaf:name "Hallo"@de .
+ex:greeting foaf:name "Hello" .

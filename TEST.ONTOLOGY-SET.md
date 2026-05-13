@@ -9,12 +9,14 @@
 #
 # Known issues from 2026-05-13 fetch:
 #   - prov.ttl: relative IRIs (`<#>`); pass base_iri to load_turtle.
-#   - workflow.ttl: `<ckp://Name:v0.1>` IRI form has a colon in the
-#     path segment (after the host), which RFC 3986 §3.3 doesn't
-#     permit. The CKP source needs to either escape the colon
-#     (`%3A`) or switch to a fragment/dot-separated form.
+#   - workflow.ttl: REMOVED from this set. `<ckp://Name:v0.1>` IRI
+#     form has a colon in the path segment (after the host), which
+#     RFC 3986 §3.3 doesn't permit. The CKP workflow source needs
+#     to either escape the colon (`%3A`) or switch to a fragment /
+#     dot-separated form. Re-add this line once the source is fixed.
 #
-# ConceptKernel v3.7 ontology family (12 modules).
+# ConceptKernel v3.7 ontology family (11 modules; workflow.ttl held
+# out per the note above).
 https://conceptkernel.org/ontology/v3.7/core.ttl
 https://conceptkernel.org/ontology/v3.7/base-instances.ttl
 https://conceptkernel.org/ontology/v3.7/proof.ttl
@@ -24,7 +26,6 @@ https://conceptkernel.org/ontology/v3.7/kernel-metadata.ttl
 https://conceptkernel.org/ontology/v3.7/processes.ttl
 https://conceptkernel.org/ontology/v3.7/relations.ttl
 https://conceptkernel.org/ontology/v3.7/rbac.ttl
-https://conceptkernel.org/ontology/v3.7/workflow.ttl
 https://conceptkernel.org/ontology/v3.7/self-improvement.ttl
 https://conceptkernel.org/ontology/v3.7/shapes.ttl
 

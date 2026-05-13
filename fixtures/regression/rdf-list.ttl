@@ -1,0 +1,10 @@
+@prefix ex:  <http://example.com/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# Turtle list syntax desugars to a chain of rdf:first / rdf:rest
+# pairs ending in rdf:nil. A 3-element list is 7 triples:
+#   ex:s ex:items _:b1
+#   _:b1 rdf:first 1 ; rdf:rest _:b2
+#   _:b2 rdf:first 2 ; rdf:rest _:b3
+#   _:b3 rdf:first 3 ; rdf:rest rdf:nil
+ex:s ex:items ( 1 2 3 ) .
