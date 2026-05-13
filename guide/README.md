@@ -22,10 +22,12 @@ require touching the engineering plan, and vice versa.
 |---|---|
 | Python (psycopg, asyncpg, rdflib bridge sketch) | [clients/python.md](clients/python.md) |
 | Rust (tokio-postgres, sqlx) | [clients/rust.md](clients/rust.md) |
+| Node.js / TypeScript (`pg`, `postgres.js`) | [clients/typescript.md](clients/typescript.md) |
+| Go (`pgx` v5) | [clients/go.md](clients/go.md) |
 
-Node.js (`pg`), Go (`pgx`), Java (JDBC) and the rest of the Postgres
-ecosystem connect identically — every pgRDF capability is a SQL UDF.
-Examples for those land alongside the SPARQL surface in Phase 2.2.
+Java (JDBC), Ruby (`pg`), and the rest of the Postgres ecosystem
+connect identically — every pgRDF capability is a SQL UDF. Example
+pages for those land as the surface stabilizes.
 
 ## Reporting back
 

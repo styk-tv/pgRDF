@@ -89,7 +89,10 @@ Want to integrate from your application?
   (psycopg + asyncpg, plus a sketch of using pgRDF as an rdflib backend)
 - **Rust** — [`guide/clients/rust.md`](guide/clients/rust.md)
   (tokio-postgres and sqlx examples)
-- **Node / TypeScript** — coming with the SPARQL surface in Phase 2.2 step 5
+- **Node.js / TypeScript** — [`guide/clients/typescript.md`](guide/clients/typescript.md)
+  (`pg`, `postgres.js`, `pg-cursor` streaming, typed bindings)
+- **Go** — [`guide/clients/go.md`](guide/clients/go.md)
+  (`pgx` v5, `pgxpool`, bulk-ingest pattern, sqlc tie-in)
 
 ## Documentation
 
