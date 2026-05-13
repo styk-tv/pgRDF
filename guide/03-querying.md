@@ -24,7 +24,10 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `SELECT ?vars WHERE { BGP }` with 1 or more triple patterns | ✅ |
 | Constants in subject, predicate, or object position (IRIs, literals) | ✅ |
 | Multi-pattern BGPs with shared variables → INNER joins | ✅ |
-| `DISTINCT`, `REDUCED`, `ORDER BY`, `LIMIT/OFFSET` wrappers | ✅ (pass-through) |
+| `DISTINCT`, `REDUCED` → `SELECT DISTINCT` | ✅ |
+| `LIMIT N`, `OFFSET N` | ✅ |
+| `ORDER BY ?var`, `ORDER BY ASC(?var)`, `ORDER BY DESC(?var)` — lexicographic on `lexical_value` | ✅ |
+| `ORDER BY <complex expression>` | ⏳ Phase 3 (next slice) |
 | `FILTER` — identity (`=`, `!=`, `sameTerm`), boolean (`&&`, `\|\|`, `!`), term-type (`isIRI`, `isLiteral`, `isBlank`), `BOUND` | ✅ |
 | `FILTER` — numeric ordering (`<`/`>`/`<=`/`>=`), `REGEX`, `IN`, `STR` passthrough | ✅ |
 | `FILTER` — arithmetic, `lang`, `datatype`, `STRLEN`, `CONTAINS`, full string-fn surface | ⏳ Phase 3 (next slice) |
@@ -283,6 +286,87 @@ SELECT * FROM pgrdf.sparql(
 `IN` is dict-id set membership — emits `qN.col IN (id_1, id_2, …)`
 where each id is resolved upfront. Unknown terms resolve to `-1`
 so they can never match, matching SPARQL's "not in the set" outcome.
+
+### Solution modifiers — DISTINCT / LIMIT / OFFSET / ORDER BY
+
+The four classic SPARQL modifiers all land in the generated SQL:
+
+```sql
+-- DISTINCT — dedup on the projected variables
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT DISTINCT ?n WHERE { ?s foaf:name ?n }'
+);
+
+-- REDUCED — treated as DISTINCT (safe over-approximation per spec)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT REDUCED ?n WHERE { ?s foaf:name ?n }'
+);
+
+-- LIMIT — cap the number of returned rows
+SELECT * FROM pgrdf.sparql(
+  'SELECT ?s ?o WHERE { ?s ?p ?o } LIMIT 10'
+);
+
+-- OFFSET — skip rows from the start
+SELECT * FROM pgrdf.sparql(
+  'SELECT ?s ?o WHERE { ?s ?p ?o } OFFSET 10 LIMIT 10'
+);
+
+-- ORDER BY ?var — ascending lexicographic on lexical_value
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?n WHERE { ?s foaf:name ?n } ORDER BY ?n'
+);
+
+-- ORDER BY DESC(?var)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?n WHERE { ?s foaf:name ?n } ORDER BY DESC(?n)'
+);
+
+-- ORDER BY ASC(?var), DESC(?other) — multiple sort keys
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?n
+     WHERE { ?s foaf:name ?n }
+   ORDER BY ASC(?n) DESC(?s)'
+);
+```
+
+#### How ORDER BY works under the hood
+
+For each `ORDER BY ?var`, the translator emits
+
+```sql
+ORDER BY (SELECT lexical_value FROM pgrdf._pgrdf_dictionary
+            WHERE id = qN.<col>) [ASC|DESC] NULLS LAST
+```
+
+If `?var` is in the SELECT list, the existing projected column is
+reused (no extra subselect). If `?var` is bound in the BGP but
+NOT projected, an extra hidden column is appended to the SELECT
+list and ORDER BY references it by ordinal position. The
+`execute` layer only emits the projected columns into JSONB, so
+those hidden columns are invisible to callers.
+
+This is **lexicographic order on the term's string form**, not
+SPARQL's full type-aware ordering. For string-typed literals and
+IRIs that's the same answer; for numeric literals it sorts as
+strings (`"10"` < `"2"`), which is wrong. Use numeric FILTER plus
+a Postgres `ORDER BY (sparql->>'n')::numeric` wrapping the
+`pgrdf.sparql` call when you need numeric ordering today. Full
+type-aware ORDER BY lands in a subsequent Phase 3 slice.
+
+#### DISTINCT + ORDER BY interaction
+
+If `ORDER BY` references a variable that's NOT in the SELECT list,
+DISTINCT can't be applied — Postgres requires ORDER BY expressions
+to appear in the select list when DISTINCT is used. pgRDF panics
+with a clear message in that case rather than silently dropping
+DISTINCT or the ORDER BY. Pull the variable into the SELECT clause
+or remove DISTINCT.
 
 ### Combining with regular SQL
 

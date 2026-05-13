@@ -35,8 +35,11 @@
 //!   * Constants in any position (subject IRI, predicate IRI,
 //!     object IRI or literal).
 //!   * Variables in any position.
-//!   * Distinct / Reduced / Slice / OrderBy wrappers are walked
-//!     through without affecting translation.
+//!   * `DISTINCT` / `REDUCED` → SELECT DISTINCT in the generated SQL.
+//!   * `LIMIT` / `OFFSET` (from spargebra's Slice wrapper) → applied.
+//!   * `ORDER BY ?var` / `ORDER BY ASC(?var)` / `ORDER BY DESC(?var)`
+//!     → ordered lexicographically on the term's `lexical_value`.
+//!     Complex ORDER BY expressions panic.
 //!   * OPTIONAL / UNION / aggregates / paths / VALUES / SERVICE
 //!     remain unsupported.
 //!
@@ -49,7 +52,7 @@ use crate::storage::dict::term_type;
 use pgrx::iter::SetOfIterator;
 use pgrx::prelude::*;
 use serde_json::{Map, Value};
-use spargebra::algebra::{Expression, Function, GraphPattern};
+use spargebra::algebra::{Expression, Function, GraphPattern, OrderExpression};
 use spargebra::term::{Literal, NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{Query, SparqlParser};
 use std::collections::HashMap;
@@ -91,76 +94,98 @@ struct ExecPlan {
     sql: String,
 }
 
+#[derive(Default)]
+struct ParsedSelect {
+    projected: Vec<String>,
+    bgp: Vec<TriplePattern>,
+    filters: Vec<Expression>,
+    distinct: bool,
+    /// (variable_name, ascending). Each entry orders by the term's
+    /// lexical_value in the given direction. Variables that aren't
+    /// projected get an extra (hidden) SELECT-list column.
+    order_by: Vec<(String, bool)>,
+    limit: Option<usize>,
+    offset: usize,
+}
+
 fn translate(q: &Query) -> ExecPlan {
     let pattern = match q {
         Query::Select { pattern, .. } => pattern,
         other => panic!("sparql: only SELECT supported in v0.2 (got {other:?})"),
     };
-    let (projected, bgp, filters) = unwrap_select(pattern);
-    if bgp.is_empty() {
+    let ps = parse_select(pattern);
+    if ps.bgp.is_empty() {
         panic!("sparql: empty BGP");
     }
-    let sql = build_bgp_sql(&bgp, &filters, &projected);
-    ExecPlan { projected, sql }
+    let sql = build_bgp_sql(&ps);
+    ExecPlan { projected: ps.projected, sql }
 }
 
-/// Walk through wrappers we can pass through transparently and
-/// surface the projection + BGP shape underneath, collecting any
-/// FILTER expressions seen along the way.
-fn unwrap_select(p: &GraphPattern) -> (Vec<String>, Vec<TriplePattern>, Vec<Expression>) {
-    let mut filters: Vec<Expression> = Vec::new();
+/// Walk the algebra wrappers around the SELECT's inner BGP,
+/// recording projection, filters, DISTINCT, ORDER BY, LIMIT, OFFSET
+/// as we go. The walk terminates at the innermost `Bgp { patterns }`.
+fn parse_select(p: &GraphPattern) -> ParsedSelect {
+    let mut ps = ParsedSelect::default();
+    walk_select(p, &mut ps);
+    if ps.projected.is_empty() {
+        // SELECT * — collect variables in the order they appear in
+        // the BGP. This branch fires when no `Project` wrapper sets
+        // an explicit projection.
+        for tp in &ps.bgp {
+            push_unique(&mut ps.projected, tp_subject_var(tp));
+            push_unique(&mut ps.projected, tp_predicate_var(tp));
+            push_unique(&mut ps.projected, tp_object_var(tp));
+        }
+    }
+    ps
+}
+
+fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
     match p {
         GraphPattern::Project { inner, variables } => {
-            let vars: Vec<String> = variables.iter().map(|v| v.as_str().to_string()).collect();
-            let bgp = extract_bgp_and_filters(inner, &mut filters);
-            (vars, bgp, filters)
-        }
-        GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => unwrap_select(inner),
-        GraphPattern::Slice { inner, .. } | GraphPattern::OrderBy { inner, .. } => {
-            unwrap_select(inner)
-        }
-        GraphPattern::Filter { .. } => {
-            // SELECT * with FILTER wrapping the BGP.
-            let bgp = extract_bgp_and_filters(p, &mut filters);
-            let mut vars: Vec<String> = Vec::new();
-            for tp in &bgp {
-                push_unique(&mut vars, tp_subject_var(tp));
-                push_unique(&mut vars, tp_predicate_var(tp));
-                push_unique(&mut vars, tp_object_var(tp));
+            if ps.projected.is_empty() {
+                ps.projected = variables.iter().map(|v| v.as_str().to_string()).collect();
             }
-            (vars, bgp, filters)
-        }
-        GraphPattern::Bgp { patterns } => {
-            // SELECT * — collect variables in the order they appear.
-            let mut vars: Vec<String> = Vec::new();
-            for tp in patterns {
-                push_unique(&mut vars, tp_subject_var(tp));
-                push_unique(&mut vars, tp_predicate_var(tp));
-                push_unique(&mut vars, tp_object_var(tp));
-            }
-            (vars, patterns.clone(), filters)
-        }
-        other => panic!("sparql: unsupported algebra in select wrapper: {other:?}"),
-    }
-}
-
-fn extract_bgp_and_filters(
-    p: &GraphPattern,
-    filters: &mut Vec<Expression>,
-) -> Vec<TriplePattern> {
-    match p {
-        GraphPattern::Bgp { patterns } => patterns.clone(),
-        GraphPattern::Filter { expr, inner } => {
-            filters.push(expr.clone());
-            extract_bgp_and_filters(inner, filters)
+            walk_select(inner, ps);
         }
         GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => {
-            extract_bgp_and_filters(inner, filters)
+            // REDUCED is a "duplicates may or may not be removed"
+            // hint. Implementing it as DISTINCT is a safe
+            // over-approximation — the spec allows it.
+            ps.distinct = true;
+            walk_select(inner, ps);
         }
-        GraphPattern::Slice { inner, .. } | GraphPattern::OrderBy { inner, .. } => {
-            extract_bgp_and_filters(inner, filters)
+        GraphPattern::Slice { inner, start, length } => {
+            // Slice is OFFSET (start) + LIMIT (length).
+            ps.offset = *start;
+            ps.limit = *length;
+            walk_select(inner, ps);
         }
-        other => panic!("sparql: expected BGP (optionally wrapped in FILTER), got {other:?}"),
+        GraphPattern::OrderBy { inner, expression } => {
+            for oe in expression {
+                let (expr, ascending) = match oe {
+                    OrderExpression::Asc(e) => (e, true),
+                    OrderExpression::Desc(e) => (e, false),
+                };
+                match expr {
+                    Expression::Variable(v) => {
+                        ps.order_by.push((v.as_str().to_string(), ascending));
+                    }
+                    other => panic!(
+                        "sparql: ORDER BY supports only variable expressions today (got {other:?})"
+                    ),
+                }
+            }
+            walk_select(inner, ps);
+        }
+        GraphPattern::Filter { expr, inner } => {
+            ps.filters.push(expr.clone());
+            walk_select(inner, ps);
+        }
+        GraphPattern::Bgp { patterns } => {
+            ps.bgp = patterns.clone();
+        }
+        other => panic!("sparql: unsupported algebra in select wrapper: {other:?}"),
     }
 }
 
@@ -202,20 +227,17 @@ fn tp_object_var(tp: &TriplePattern) -> Option<String> {
 /// becomes a `_pgrdf_quads qN` clause; shared variables become
 /// equality predicates that fold into INNER joins; constants become
 /// `qN.col = <resolved_dict_id>` predicates; FILTER expressions
-/// become SQL WHERE predicates appended after the join clauses.
-fn build_bgp_sql(
-    patterns: &[TriplePattern],
-    filters: &[Expression],
-    projected: &[String],
-) -> String {
+/// become SQL WHERE predicates appended after the join clauses;
+/// DISTINCT / ORDER BY / LIMIT / OFFSET land on the outer SELECT.
+fn build_bgp_sql(ps: &ParsedSelect) -> String {
     /// First-occurrence anchor for each variable: which alias +
     /// which column. Subsequent occurrences emit equality predicates
     /// against this anchor.
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
     let mut where_clauses: Vec<String> = Vec::new();
-    let mut from_aliases: Vec<String> = Vec::with_capacity(patterns.len());
+    let mut from_aliases: Vec<String> = Vec::with_capacity(ps.bgp.len());
 
-    for (i, tp) in patterns.iter().enumerate() {
+    for (i, tp) in ps.bgp.iter().enumerate() {
         let qi = i + 1;
         from_aliases.push(format!("pgrdf._pgrdf_quads q{qi}"));
 
@@ -228,7 +250,7 @@ fn build_bgp_sql(
     // WHERE clause. translate_filter returns None for any expression
     // shape we don't yet handle — panic in that case rather than
     // silently dropping the filter (which would over-return rows).
-    for expr in filters {
+    for expr in &ps.filters {
         let sql = translate_filter(expr, &anchors).unwrap_or_else(|| {
             panic!("sparql: FILTER expression not translatable: {expr:?}")
         });
@@ -237,9 +259,10 @@ fn build_bgp_sql(
 
     // Project: each projected var → its anchor alias.column → dict
     // lookup → aliased to the variable name (so SETOF JSONB emission
-    // pulls the right column by ordinal).
+    // pulls the right column by ordinal). Hidden trailing columns are
+    // appended for ORDER BY variables that aren't in the projection.
     let mut select_clauses: Vec<String> = Vec::new();
-    for var in projected {
+    for var in &ps.projected {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
             panic!("sparql: projected variable ?{var} is not bound in any BGP pattern")
         });
@@ -250,14 +273,55 @@ fn build_bgp_sql(
         ));
     }
 
+    // ORDER BY: each entry maps to an ordinal SELECT-list position.
+    // For projected vars: reuse the existing column position. For
+    // unprojected vars: append a hidden column and reference it.
+    let mut order_clauses: Vec<String> = Vec::new();
+    for (idx, (var, ascending)) in ps.order_by.iter().enumerate() {
+        let dir = if *ascending { "ASC" } else { "DESC" };
+        // NULLS LAST makes ASC + missing-dict-entry behave intuitively
+        // (the row with the smallest lexical_value comes first, missing
+        // entries sink to the bottom regardless of direction).
+        let position = if let Some(pos) = ps.projected.iter().position(|p| p == var) {
+            pos + 1
+        } else {
+            if ps.distinct {
+                panic!(
+                    "sparql: ORDER BY ?{var} requires ?{var} to be in the SELECT \
+                     clause when DISTINCT is used"
+                );
+            }
+            let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+                panic!("sparql: ORDER BY variable ?{var} not bound in any BGP pattern")
+            });
+            select_clauses.push(format!(
+                "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary
+                   WHERE id = q{alias_idx}.{col}) AS _pgrdf_order_{idx}",
+            ));
+            select_clauses.len()
+        };
+        order_clauses.push(format!("{position} {dir} NULLS LAST"));
+    }
+
+    let distinct_kw = if ps.distinct { "DISTINCT " } else { "" };
     let mut sql = format!(
-        "SELECT {sel} FROM {from}",
+        "SELECT {distinct_kw}{sel} FROM {from}",
         sel = select_clauses.join(", "),
         from = from_aliases.join(", "),
     );
     if !where_clauses.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&where_clauses.join(" AND "));
+    }
+    if !order_clauses.is_empty() {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&order_clauses.join(", "));
+    }
+    if let Some(limit) = ps.limit {
+        sql.push_str(&format!(" LIMIT {limit}"));
+    }
+    if ps.offset > 0 {
+        sql.push_str(&format!(" OFFSET {}", ps.offset));
     }
     sql
 }
@@ -1141,6 +1205,150 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2);
+    }
+
+    /// SELECT DISTINCT — deduplication on the projected variables.
+    #[pg_test]
+    fn sparql_distinct_dedups() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:x .
+                 ex:b ex:p ex:x .
+                 ex:c ex:p ex:y .',
+                8_030)",
+        )
+        .unwrap();
+
+        let baseline: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?o WHERE { ?s ?p ?o }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let with_distinct: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT DISTINCT ?o WHERE { ?s ?p ?o }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(baseline, 3, "expected 3 raw rows, got {baseline}");
+        assert_eq!(with_distinct, 2, "expected 2 distinct ?o (x, y), got {with_distinct}");
+    }
+
+    /// LIMIT caps the number of rows returned.
+    #[pg_test]
+    fn sparql_limit_caps_rows() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p 1 . ex:b ex:p 2 . ex:c ex:p 3 . ex:d ex:p 4 . ex:e ex:p 5 .',
+                8_031)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?o WHERE { ?s ?p ?o } LIMIT 3'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 3);
+    }
+
+    /// OFFSET skips rows from the start.
+    #[pg_test]
+    fn sparql_offset_skips_rows() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p 1 . ex:b ex:p 2 . ex:c ex:p 3 . ex:d ex:p 4 . ex:e ex:p 5 .',
+                8_032)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?o WHERE { ?s ?p ?o } ORDER BY ?s OFFSET 2 LIMIT 100'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 3, "5 rows minus offset 2 = 3");
+    }
+
+    /// ORDER BY ASC ?n — first result has the alphabetically-first name.
+    #[pg_test]
+    fn sparql_order_by_asc() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:carol foaf:name \"Carol\" .
+                 ex:alice foaf:name \"Alice\" .
+                 ex:bob   foaf:name \"Bob\"   .',
+                8_033)",
+        )
+        .unwrap();
+
+        let first: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?n WHERE { ?s foaf:name ?n } ORDER BY ?n LIMIT 1'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.0["n"], "Alice");
+    }
+
+    /// ORDER BY DESC ?n — first result has the alphabetically-last name.
+    #[pg_test]
+    fn sparql_order_by_desc() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:carol foaf:name \"Carol\" .
+                 ex:alice foaf:name \"Alice\" .
+                 ex:bob   foaf:name \"Bob\"   .',
+                8_034)",
+        )
+        .unwrap();
+
+        let first: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?n WHERE { ?s foaf:name ?n } ORDER BY DESC(?n) LIMIT 1'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.0["n"], "Carol");
+    }
+
+    /// DISTINCT + ORDER BY on a projected variable works.
+    #[pg_test]
+    fn sparql_distinct_with_order_by() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p \"x\" . ex:b ex:p \"x\" . ex:c ex:p \"y\" . ex:d ex:p \"z\" .',
+                8_035)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT DISTINCT ?o WHERE { ?s ?p ?o } ORDER BY ?o'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 3, "x, y, z = 3 distinct");
     }
 
     /// BOUND(?v) is trivially true for every BGP variable, so it

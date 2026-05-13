@@ -6,6 +6,45 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 3 — Solution modifiers (DISTINCT / LIMIT / OFFSET / ORDER BY)
+
+- The four classic SPARQL solution modifiers now land in the
+  generated SQL instead of being silently stripped from the AST:
+  - `SELECT DISTINCT ?vars` → `SELECT DISTINCT` in SQL.
+  - `SELECT REDUCED ?vars` → also `SELECT DISTINCT` (REDUCED is a
+    "dups may or may not be removed" hint per spec; over-approxing
+    with DISTINCT is conformant).
+  - `LIMIT N` / `OFFSET N` → `LIMIT N` / `OFFSET N`.
+  - `ORDER BY ?var`, `ORDER BY ASC(?var)`, `ORDER BY DESC(?var)`,
+    multi-key — sorted by the term's `lexical_value` with
+    `NULLS LAST`. If the var is projected the existing column is
+    reused; otherwise an extra hidden column is appended and ORDER
+    BY references it by ordinal (so the JSONB output stays clean).
+- ORDER BY today is **lexicographic on string form**, not SPARQL's
+  full type-aware ordering. Numeric ordering through ORDER BY lands
+  in step 4+; for now use FILTER for numeric range + post-SQL
+  `ORDER BY (sparql->>'n')::numeric`.
+- Refactor: `unwrap_select` → `parse_select` returning a richer
+  `ParsedSelect` struct (projected, bgp, filters, distinct,
+  order_by, limit, offset). Single recursive walk replaces the
+  old two-pass extract_bgp_and_filters / unwrap_select split.
+- 6 new pg_tests: distinct dedups, LIMIT caps, OFFSET skips,
+  ORDER BY ASC + DESC, DISTINCT + ORDER BY interaction.
+- `tests/regression/sql/35-sparql-modifiers.sql` covers 10 query
+  shapes (raw count, DISTINCT, REDUCED, LIMIT 2, ORDER ASC first,
+  ORDER DESC first, OFFSET 3 LIMIT 2 window, DISTINCT + ORDER,
+  ORDER BY on non-projected var, LIMIT 0).
+- `README.md` pills: 34+15 → 40+16, SPARQL pill adds
+  DISTINCT/ORDER/LIMIT.
+- `guide/03-querying.md` gains a full "Solution modifiers" section
+  covering ORDER BY's lexicographic-vs-type-aware caveat, the
+  DISTINCT-with-non-projected-order-by panic case, and a worked
+  example.
+
+Test bar:
+  pg_test:    40 passed; 0 failed  (was 34)
+  regression: 16 passed; 0 failed  (was 15)
+
 ### Phase 3 step 2 — FILTER numeric ordering + REGEX + IN
 
 - `pgrdf.sparql` FILTER translator gains three new shapes:
