@@ -6,6 +6,18 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 2.2 step 8 — Node.js + Go client guides
+
+- `guide/clients/typescript.md` — `pg` (node-postgres) + `postgres.js`
+  + `pg-cursor` streaming + strongly-typed binding helpers. Covers
+  `load_turtle`, `parse_turtle`, `load_turtle_verbose`, and the
+  full `pgrdf.sparql` JSONB result shape with type narrowing.
+- `guide/clients/go.md` — `pgx` v5 + `pgxpool` + sqlc integration
+  + bulk-ingest pattern + the constant-time graph-drop idiom.
+- `guide/README.md` index lists both new client pages.
+- `README.md` clients section now points at all 4 supported clients
+  (Python, Rust, TypeScript, Go).
+
 ### Phase 2.2 step 7 — User guide for SPARQL surface
 
 - New `guide/03-querying.md`: full walkthrough of `pgrdf.sparql`
