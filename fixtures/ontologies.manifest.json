@@ -1,5 +1,5 @@
 {
-  "fetched_at": "2026-05-13T21:30:24Z",
+  "fetched_at": "2026-05-13T21:51:59Z",
   "entries": [
     {"url":"https://conceptkernel.org/ontology/v3.7/core.ttl","file":"ontologies/core.ttl","sha256":"7e47199df8490c24c6654516fbd3cdbaab0ec8c35ef3a74f70a051191971c7bb","size":39818},
     {"url":"https://conceptkernel.org/ontology/v3.7/base-instances.ttl","file":"ontologies/base-instances.ttl","sha256":"fb9037e62d7c26c998d904514ccff7ce6ae5666ff049490380daab59054442fe","size":11592},
@@ -15,6 +15,16 @@
     {"url":"https://conceptkernel.org/ontology/v3.7/shapes.ttl","file":"ontologies/shapes.ttl","sha256":"a3df4904de766664acc31ec04da9cf331111b759fe93353a535119fbce07587b","size":11947},
     {"url":"https://www.w3.org/ns/prov.ttl","file":"ontologies/prov.ttl","sha256":"d7ea634dbcd31347eba38157197f69d314077ef7f88fd4f90e4f24a78bfe1097","size":112777},
     {"url":"https://www.w3.org/ns/prov-o.ttl","file":"ontologies/prov-o.ttl","sha256":"7d203989f67b38bca572253942acc5a1bf24ce3ccfece16f072dcb4be2b79a96","size":68795},
+    {"url":"https://www.w3.org/2000/01/rdf-schema","file":"ontologies/rdf-schema.ttl","sha256":"ecee3a011b7c13ea2a7e40b0a208bfe6be53d69fdd53ee035e09e9f9e5108ad6","size":3790},
+    {"url":"https://www.w3.org/2002/07/owl","file":"ontologies/owl.ttl","sha256":"718fa1db7840d3315bfce94398543f91437ef6fe933054fd93f5471d19262fc5","size":24545},
+    {"url":"https://www.w3.org/2006/vcard/ns","file":"ontologies/ns.ttl","sha256":"2442baf3d07d660910a0e24dd96b1efe1ec22cb26d12cdfd415195da91b43a0c","size":32183},
+    {"url":"https://www.w3.org/ns/odrl/2/ODRL22.ttl","file":"ontologies/odrl22.ttl","sha256":"7895765e80d86d1d0349d945a28b8a2479f03169572345080a5b3e561ef31457","size":91012},
+    {"url":"https://www.w3.org/ns/shacl.ttl","file":"ontologies/shacl.ttl","sha256":"0e5d8aea0eab98a072d4a02faaee1ee914ec99eab2ca473429726faed4a13f69","size":52899},
+    {"url":"https://www.w3.org/ns/dcat","file":"ontologies/dcat.ttl","sha256":"d1624d3bbf364f6fc1d43b9a188bbb9e67639b1a7d46a5cb7ea3f5d47d02b62f","size":200345},
+    {"url":"https://raw.githubusercontent.com/w3c/sdw/gh-pages/time/rdf/time.ttl","file":"ontologies/time.ttl","sha256":"d33aae84175995e7fb37d9efd02f17732ca0a555c653cab718ea5130f708a56e","size":84634},
+    {"url":"https://raw.githubusercontent.com/w3c/sdw/gh-pages/ssn/integrated/sosa.ttl","file":"ontologies/sosa.ttl","sha256":"c70b0d1c843c0047e4c98e0a89392e46a05752ff6365bda7f7f55303905a0392","size":27326},
+    {"url":"https://raw.githubusercontent.com/w3c/sdw/gh-pages/ssn/ssn_separated/ssn.ttl","file":"ontologies/ssn.ttl","sha256":"f2383d3aca612c757a2ba271bfe6d882e74a7a83de2ac51ba9ba4473254af189","size":43676},
+    {"url":"https://raw.githubusercontent.com/apache/jena/main/jena-arq/Vocabularies/FOAF.ttl","file":"ontologies/foaf.ttl","sha256":"b44b18381537604485c613f688a005df74c0e718d7a45841f417ac8cad516ce7","size":27482},
     {"url":"https://codeberg.org/valueflows/pages/raw/branch/main/assets/all_vf.TTL","file":"ontologies/all_vf.ttl","sha256":"47cada8122561100520702e2998c2949f6f4f42ba550c36797791882cbc48ece","size":87877}
   ]
 }

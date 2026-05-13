@@ -79,7 +79,10 @@ while IFS= read -r line || [ -n "${line}" ]; do
   fi
 
   printf '  FETCH  %-45s' "${name}"
-  if curl -fsSL --max-time 60 -o "${out}.tmp" "${url}"; then
+  # `Accept: text/turtle` so content-negotiated W3C namespace URIs
+  # (e.g. https://www.w3.org/2000/01/rdf-schema) serve Turtle instead
+  # of RDF/XML.
+  if curl -fsSL -H 'Accept: text/turtle' --max-time 60 -o "${out}.tmp" "${url}"; then
     mv "${out}.tmp" "${out}"
     sha="$(shasum -a 256 "${out}" | cut -d' ' -f1)"
     size="$(stat -f%z "${out}" 2>/dev/null || stat -c%s "${out}")"

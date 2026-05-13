@@ -11,12 +11,16 @@ CREATE EXTENSION IF NOT EXISTS pgrdf;
 
 SELECT pgrdf.version();
 
+-- Check the canonical schema layout exists. Use explicit names so the
+-- count stays stable even if `pgrdf.add_graph(...)` has created extra
+-- per-graph partitions during earlier work in this session.
 SELECT count(*)::int FROM pg_class
- WHERE relnamespace = 'pgrdf'::regnamespace AND relname = '_pgrdf_dictionary';
+ WHERE relnamespace = 'pgrdf'::regnamespace
+   AND relname IN ('_pgrdf_dictionary','_pgrdf_quads','_pgrdf_quads_default');
 
-SELECT count(*)::int FROM pg_class
- WHERE relnamespace = 'pgrdf'::regnamespace AND relname LIKE '_pgrdf_quads%';
-
+-- The three hexastore covering indexes on the partitioned table.
+-- (Partitioned indexes propagate to child partitions; we just check
+-- the parent here so per-graph partitions don't shift the count.)
 SELECT count(*)::int FROM pg_indexes
  WHERE schemaname = 'pgrdf' AND indexname IN ('_pgrdf_idx_spo','_pgrdf_idx_pos','_pgrdf_idx_osp');
 

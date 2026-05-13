@@ -53,8 +53,18 @@ fn object_to_id(t: &Term) -> i64 {
 /// Ingest Turtle from any `Read`er into the named graph. Returns the
 /// number of triples inserted. Shared between `load_turtle` (file) and
 /// `parse_turtle` (string).
-fn ingest_turtle<R: Read>(reader: R, graph_id: i64) -> i64 {
-    let parser = TurtleParser::new().for_reader(reader);
+///
+/// `base_iri` resolves relative IRIs like `<#>` and `<../foo>` that
+/// appear in many published vocabularies (notably W3C PROV's prov.ttl).
+/// Pass `None` when the document only uses absolute IRIs.
+fn ingest_turtle<R: Read>(reader: R, graph_id: i64, base_iri: Option<&str>) -> i64 {
+    let mut parser = TurtleParser::new();
+    if let Some(base) = base_iri {
+        parser = parser
+            .with_base_iri(base)
+            .unwrap_or_else(|e| panic!("load_turtle: invalid base IRI {base:?}: {e}"));
+    }
+    let parser = parser.for_reader(reader);
     let mut count: i64 = 0;
     for triple_result in parser {
         let triple = triple_result.expect("load_turtle: turtle parse error");
@@ -74,18 +84,25 @@ fn ingest_turtle<R: Read>(reader: R, graph_id: i64) -> i64 {
 }
 
 /// Load a Turtle file from a server-side path into the named graph.
-/// Returns the number of triples inserted.
+/// Returns the number of triples inserted. `base_iri` is the document
+/// URL used to resolve relative IRIs (`<#>`, `<../foo>`); pass `''` or
+/// NULL when the file uses absolute IRIs only.
 ///
 /// SQL surface:
-/// `pgrdf.load_turtle(path TEXT, graph_id BIGINT) → BIGINT`.
+/// `pgrdf.load_turtle(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) → BIGINT`.
 ///
 /// Note: the path is server-side. With the compose runtime this means
 /// `/fixtures/...` (see `compose/compose.yml` mount).
 #[pg_extern]
-fn load_turtle(path: &str, graph_id: i64) -> i64 {
+fn load_turtle(
+    path: &str,
+    graph_id: i64,
+    base_iri: default!(Option<&str>, "NULL"),
+) -> i64 {
     let file = File::open(path)
         .unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
-    ingest_turtle(BufReader::new(file), graph_id)
+    let base = base_iri.filter(|s| !s.is_empty());
+    ingest_turtle(BufReader::new(file), graph_id, base)
 }
 
 /// Parse a Turtle string and ingest its triples into the named graph.
@@ -93,10 +110,15 @@ fn load_turtle(path: &str, graph_id: i64) -> i64 {
 /// `load_turtle` to avoid copying the whole document through SQL.
 ///
 /// SQL surface:
-/// `pgrdf.parse_turtle(content TEXT, graph_id BIGINT) → BIGINT`.
+/// `pgrdf.parse_turtle(content TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) → BIGINT`.
 #[pg_extern]
-fn parse_turtle(content: &str, graph_id: i64) -> i64 {
-    ingest_turtle(content.as_bytes(), graph_id)
+fn parse_turtle(
+    content: &str,
+    graph_id: i64,
+    base_iri: default!(Option<&str>, "NULL"),
+) -> i64 {
+    let base = base_iri.filter(|s| !s.is_empty());
+    ingest_turtle(content.as_bytes(), graph_id, base)
 }
 
 #[cfg(any(test, feature = "pg_test"))]
