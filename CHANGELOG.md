@@ -6,6 +6,35 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Hygiene — lints allowlist review (slice #47)
+
+Audited every `#![allow(...)]` / `#[allow(...)]` attribute in `src/`
+plus the `[lints.rust]` block in `Cargo.toml`. Procedure: comment each
+entry, run `cargo check --no-default-features --features pg17 --tests`
+(rustc 1.95.0 via rustup-installed stable, since the Homebrew rustc on
+this workstation is 1.88 — below the declared MSRV), then restore.
+For each entry, classify the lint as still firing (keep), masking a
+single site only (narrow candidate), or no longer firing (trim
+candidate).
+
+| Allow | Location | Scope | Lint still fires? | Disposition |
+| --- | --- | --- | --- | --- |
+| `unreachable_patterns` | `src/lib.rs:14` | crate | Yes — 6 sites (`reasonable.rs:247`, `loader.rs:161`, `executor.rs:1861`, `executor.rs:1902`, `parser.rs:161`, `parser.rs:212`) | Keep. Rationale ("future-proof against upstream `#[non_exhaustive]` variant additions") is crate-wide design intent. |
+| `clippy::doc_lazy_continuation` | `src/lib.rs:19` | crate | Yes — 4 doc sites (`lib.rs:35`, `lib.rs:36`, `executor.rs:450`, `executor.rs:451`) | Keep. Rationale ("vertically-aligned ASCII continuation lines"). |
+| `clippy::useless_conversion` | `src/lib.rs:25` | crate | Yes — 1 site (`executor.rs:156` `SetOfIterator::new(rows.into_iter())`) | Keep. Single-site narrowing would invert the rationale ("don't litter call sites with annotations"). |
+| `unreachable_patterns` | `src/inference/reasonable.rs:246` | item | Redundant under crate-level allow above, but documents intent at the call site | Keep. |
+| `unreachable_patterns` | `src/storage/loader.rs:160` | item | Same as above. | Keep. |
+| `[lints.rust] unexpected_cfgs check-cfg = ["cfg(feature, values(\"pg13\", \"pg18\"))"]` | `Cargo.toml:53` | crate | Yes — 9 `pg13` + 9 `pg18` sites under rustc 1.95 (pgrx 0.16.1's `pg_shmem_init!` / per-PG `pg_guard` shims expand cfg branches for every PG major they know about regardless of which `feature = "pgN"` we select) | Keep. |
+
+**Result:** zero trims. Every allow on disk currently suppresses a
+real lint that fires under rustc 1.95. The two item-level
+`unreachable_patterns` allows are redundant under the crate-level one
+but document intent at the call site, so they stay. Cargo accepts
+`[lints.rust]` as written (the IDE schema linter flags it as invalid
+under its TOML schema; `cargo check` parses it without complaint).
+This audit re-establishes the baseline: a future slice that drops or
+narrows an allow can point back here as the prior-state record.
+
 ### Hygiene — ERRATA E-006 pgrx-upstream re-check (slice #48)
 
 Refreshed `specs/ERRATA.v0.2.md` E-006 against today's upstream state.
