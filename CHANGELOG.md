@@ -6,6 +6,29 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release notes — RELEASE_NOTES.md drafted + release.yml body_path wired (slice #22)
+
+The GitHub Release body for v0.3.0 — the marketing-style summary that
+consumers see in the GH UI when they land on the release page. Lives at
+the repo root as `RELEASE_NOTES.md` (Option A per the slice brief: simple,
+conventional, rewritten each release). Wired into the workflow via
+`body_path: RELEASE_NOTES.md` on the `softprops/action-gh-release@v2`
+step alongside the existing `generate_release_notes: true` (GH appends
+the auto-generated PR-title commit list under the curated body).
+
+Content is consumer-facing, ~370 words: a one-line elevator pitch,
+the feature surface (storage / Turtle / SPARQL SELECT-ASK / OWL 2 RL /
+SHACL stub / performance), the consolidated test bar (158 automated +
+24 manual smoke matching `docs/09-release.md`), a drop-in install
+recipe with the exact `curl` / `sha256sum -c` / `cp` flow, the docker
+compose pointer, the {pg14..pg17}×{amd64, arm64} support matrix,
+known issues (E-006 / E-007 / E-009 / E-010), the v0.4 deferral list,
+and Apache 2.0 attribution. Every relative path (`specs/SPEC.pgRDF.INSTALL.v0.2.md`,
+`guide/01-install.md`, `specs/ERRATA.v0.2.md`,
+`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`, `CHANGELOG.md`) resolves on disk.
+Numbers cross-checked against the engineering release note in
+`docs/09-release.md` (slice #23); no new claims.
+
 ### Release notes — docs/09-release v0.3.0 section drafted (slice #23)
 
 Replaces the "No release cut yet" preamble in `docs/09-release.md`

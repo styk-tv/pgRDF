@@ -75,4 +75,5 @@ jobs:
           files: |
             artifacts/pgrdf-*.tar.gz
             artifacts/SHA256SUMS
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
