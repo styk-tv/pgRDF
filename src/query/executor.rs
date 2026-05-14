@@ -57,7 +57,15 @@
 //!     on shared variables. Per spec, MINUS with no shared variables
 //!     is a no-op and is elided. Restriction: single-triple right
 //!     side (same as OPTIONAL today).
-//!   * Aggregates / paths / VALUES / SERVICE remain unsupported.
+//!   * Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`,
+//!     `SUM(?v)`, `AVG(?v)`, `MIN(?v)`, `MAX(?v)`, with or without
+//!     `GROUP BY ?vars`. SUM/AVG are numeric-aware (non-numeric
+//!     literals contribute NULL); MIN/MAX are lexicographic on the
+//!     term's `lexical_value`. Aggregate output values come back as
+//!     strings in the JSONB row (consistent with the rest of the
+//!     surface). HAVING and `GROUP_CONCAT` / `SAMPLE` are Phase 3
+//!     backlog.
+//!   * Paths / VALUES / BIND / SERVICE remain unsupported.
 //!
 //! Output shape:
 //!   `SETOF JSONB` — one row per solution, keys = projected variable
@@ -68,7 +76,9 @@ use crate::storage::dict::term_type;
 use pgrx::iter::SetOfIterator;
 use pgrx::prelude::*;
 use serde_json::{Map, Value};
-use spargebra::algebra::{Expression, Function, GraphPattern, OrderExpression};
+use spargebra::algebra::{
+    AggregateExpression, AggregateFunction, Expression, Function, GraphPattern, OrderExpression,
+};
 use spargebra::term::{Literal, NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{Query, SparqlParser};
 use std::collections::HashMap;
@@ -124,6 +134,14 @@ struct ParsedSelect {
     /// `WHERE NOT EXISTS (…)` keyed on shared variables. Elided
     /// if there are no shared vars (SPARQL no-op).
     minuses: Vec<TriplePattern>,
+    /// GROUP BY variables. Empty when the query has aggregates but
+    /// no GROUP BY (the entire result is a single aggregate row),
+    /// or when there are no aggregates at all.
+    group_vars: Vec<String>,
+    /// Aggregate output specs. `output_var` is the SPARQL variable
+    /// that holds the value (after the `Extend` rename); each entry
+    /// becomes a column in the generated SELECT clause.
+    aggregates: Vec<AggregateSpec>,
     /// When non-empty, this is a UNION query — each entry is a
     /// self-contained branch with its own BGP / filters / optionals.
     /// Single-branch fields (`bgp`, `filters`, `optionals`) remain
@@ -144,6 +162,26 @@ struct OptionalBlock {
     /// Translated into the LEFT JOIN's ON clause so rejected rows
     /// still survive with the optional variables NULL.
     filter: Option<Expression>,
+}
+
+struct AggregateSpec {
+    /// The user-facing SPARQL variable that holds this aggregate's
+    /// output (post-Extend rename). Empty SetCompare = `$agg_N`
+    /// from the algebra synthesis layer until Extend renames it.
+    output_var: String,
+    func: AggregateFn,
+    distinct: bool,
+    /// The aggregate's argument variable. `None` only for `COUNT(*)`.
+    arg_var: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum AggregateFn {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 #[derive(Default)]
@@ -204,6 +242,50 @@ fn parse_select(p: &GraphPattern) -> ParsedSelect {
         }
     }
     ps
+}
+
+/// Lower a spargebra `AggregateExpression` into our AggregateSpec.
+/// Supported: COUNT(*), COUNT(?v) [DISTINCT], SUM(?v) [DISTINCT],
+/// AVG(?v), MIN(?v), MAX(?v). Anything else panics.
+fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec {
+    match agg {
+        AggregateExpression::CountSolutions { distinct } => AggregateSpec {
+            output_var: synth_var.to_string(),
+            func: AggregateFn::Count,
+            distinct: *distinct,
+            arg_var: None,
+        },
+        AggregateExpression::FunctionCall { name, expr, distinct } => {
+            let arg_var = match expr {
+                Expression::Variable(v) => v.as_str().to_string(),
+                other => panic!(
+                    "sparql: aggregate over non-variable expression not supported yet (got {other:?})"
+                ),
+            };
+            let func = match name {
+                AggregateFunction::Count => AggregateFn::Count,
+                AggregateFunction::Sum => AggregateFn::Sum,
+                AggregateFunction::Avg => AggregateFn::Avg,
+                AggregateFunction::Min => AggregateFn::Min,
+                AggregateFunction::Max => AggregateFn::Max,
+                AggregateFunction::GroupConcat { .. } => {
+                    panic!("sparql: GROUP_CONCAT is Phase 3 backlog")
+                }
+                AggregateFunction::Sample => {
+                    panic!("sparql: SAMPLE is Phase 3 backlog")
+                }
+                AggregateFunction::Custom(iri) => {
+                    panic!("sparql: custom aggregate {iri:?} not supported")
+                }
+            };
+            AggregateSpec {
+                output_var: synth_var.to_string(),
+                func,
+                distinct: *distinct,
+                arg_var: Some(arg_var),
+            }
+        }
+    }
 }
 
 /// Walk a left-leaning Union tree, pushing each leaf branch.
@@ -350,6 +432,45 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
             };
             ps.minuses.push(triple);
         }
+        GraphPattern::Group { inner, variables, aggregates } => {
+            for v in variables {
+                ps.group_vars.push(v.as_str().to_string());
+            }
+            for (synth_var, agg_expr) in aggregates {
+                ps.aggregates.push(parse_aggregate(synth_var.as_str(), agg_expr));
+            }
+            walk_select(inner, ps);
+        }
+        GraphPattern::Extend { inner, variable, expression } => {
+            // Walk inner FIRST so the Group below has populated
+            // ps.aggregates by the time we process the rename.
+            walk_select(inner, ps);
+            // SPARQL `(EXPR AS ?v)` lowers to Extend wrapping Group.
+            // For aggregates the expression is a Variable($agg_N)
+            // referencing a synthesised name from the Group layer —
+            // we rename the matching AggregateSpec to ?variable.
+            match expression {
+                Expression::Variable(v) => {
+                    let synth = v.as_str();
+                    let new_name = variable.as_str().to_string();
+                    let agg = ps
+                        .aggregates
+                        .iter_mut()
+                        .find(|a| a.output_var == synth)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "sparql: Extend ?{new_name} <- ?{synth} doesn't match any aggregate; \
+                                 BIND on non-aggregate expressions isn't supported yet"
+                            )
+                        });
+                    agg.output_var = new_name;
+                }
+                other => panic!(
+                    "sparql: BIND ({other:?} AS ?{}) — only aggregate aliases are supported today",
+                    variable.as_str()
+                ),
+            }
+        }
         GraphPattern::Bgp { patterns } => {
             ps.bgp = patterns.clone();
         }
@@ -406,7 +527,13 @@ fn tp_object_var(tp: &TriplePattern) -> Option<String> {
 /// outer SELECT has no access to a branch's per-alias columns).
 fn build_bgp_sql(ps: &ParsedSelect) -> String {
     if !ps.union_branches.is_empty() {
+        if !ps.aggregates.is_empty() {
+            panic!("sparql: aggregates on top of UNION not supported yet");
+        }
         return build_union_sql(ps);
+    }
+    if !ps.aggregates.is_empty() {
+        return build_aggregate_sql(ps);
     }
     build_single_branch_outer(ps)
 }
@@ -485,6 +612,159 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
         sql.push_str(&format!(" OFFSET {}", ps.offset));
     }
     sql
+}
+
+/// Aggregate SELECT — single-branch BGP wrapped in SQL GROUP BY +
+/// aggregate functions. Output columns: group vars (dict-lookup)
+/// + aggregate values (cast to TEXT for consistent JSONB output).
+fn build_aggregate_sql(ps: &ParsedSelect) -> String {
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    let (from_sql, where_clauses) = build_from_and_where(
+        &ps.bgp,
+        &ps.filters,
+        &ps.optionals,
+        &ps.minuses,
+        &mut anchors,
+        0,
+    );
+
+    // Pre-compute SQL expressions per group variable so SELECT and
+    // GROUP BY use the same string (Postgres accepts either repeated
+    // expression or an ordinal; we use the expression here).
+    let mut group_exprs: Vec<(String, String)> = Vec::new(); // (var, sql-expr)
+    for var in &ps.group_vars {
+        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+            panic!("sparql: GROUP BY variable ?{var} not bound in any BGP pattern")
+        });
+        let expr = format!(
+            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
+        );
+        group_exprs.push((var.clone(), expr));
+    }
+
+    // Build SELECT clauses. The output column ordering is the user
+    // projection (ps.projected) — for each projected var, either it
+    // is a group var (dict-lookup expr) or it is an aggregate
+    // output_var (aggregate function).
+    let mut select_clauses: Vec<String> = Vec::new();
+    for var in &ps.projected {
+        if let Some((_, expr)) = group_exprs.iter().find(|(v, _)| v == var) {
+            select_clauses.push(format!("{expr} AS {}", quote_identifier(var)));
+        } else if let Some(agg) = ps.aggregates.iter().find(|a| &a.output_var == var) {
+            select_clauses.push(format!(
+                "{}::TEXT AS {}",
+                translate_aggregate(agg, &anchors),
+                quote_identifier(var)
+            ));
+        } else {
+            panic!(
+                "sparql: projected variable ?{var} is neither a GROUP BY variable nor an aggregate output"
+            );
+        }
+    }
+
+    let mut sql = format!(
+        "SELECT {sel} FROM {from_sql}",
+        sel = select_clauses.join(", "),
+    );
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+    if !group_exprs.is_empty() {
+        let group_by_parts: Vec<&str> = group_exprs.iter().map(|(_, e)| e.as_str()).collect();
+        sql.push_str(" GROUP BY ");
+        sql.push_str(&group_by_parts.join(", "));
+    }
+
+    // ORDER BY / LIMIT / OFFSET on aggregate output: only group vars
+    // and aggregate outputs are in scope.
+    if !ps.order_by.is_empty() {
+        let mut order_parts: Vec<String> = Vec::new();
+        for (var, ascending) in &ps.order_by {
+            let dir = if *ascending { "ASC" } else { "DESC" };
+            if !ps.projected.contains(var) {
+                panic!(
+                    "sparql: ORDER BY ?{var} on an aggregate query must reference a \
+                     projected variable (group var or aggregate output)"
+                );
+            }
+            order_parts.push(format!("{} {dir} NULLS LAST", quote_identifier(var)));
+        }
+        sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
+    }
+    if let Some(limit) = ps.limit {
+        sql.push_str(&format!(" LIMIT {limit}"));
+    }
+    if ps.offset > 0 {
+        sql.push_str(&format!(" OFFSET {}", ps.offset));
+    }
+    sql
+}
+
+/// Lower a single AggregateSpec into a SQL aggregate expression.
+/// SUM/AVG are numeric-aware via a CASE-guarded cast to NUMERIC
+/// (matching FILTER numeric semantics — non-numeric rows contribute
+/// NULL and are ignored by SUM/AVG aggregates).
+fn translate_aggregate(
+    agg: &AggregateSpec,
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> String {
+    let distinct = if agg.distinct { "DISTINCT " } else { "" };
+    match (agg.func, &agg.arg_var) {
+        (AggregateFn::Count, None) => "COUNT(*)".to_string(),
+        (AggregateFn::Count, Some(var)) => {
+            let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+                panic!("sparql: aggregate COUNT(?{var}) but variable not bound in any BGP pattern")
+            });
+            format!("COUNT({distinct}q{alias_idx}.{col})")
+        }
+        (AggregateFn::Sum, Some(var)) => {
+            let numeric_expr = numeric_cast_subselect(var, anchors);
+            format!("SUM({distinct}{numeric_expr})")
+        }
+        (AggregateFn::Avg, Some(var)) => {
+            let numeric_expr = numeric_cast_subselect(var, anchors);
+            format!("AVG({distinct}{numeric_expr})")
+        }
+        (AggregateFn::Min, Some(var)) => {
+            let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+                panic!("sparql: aggregate MIN(?{var}) but variable not bound in any BGP pattern")
+            });
+            format!(
+                "MIN({distinct}(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col}))"
+            )
+        }
+        (AggregateFn::Max, Some(var)) => {
+            let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+                panic!("sparql: aggregate MAX(?{var}) but variable not bound in any BGP pattern")
+            });
+            format!(
+                "MAX({distinct}(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col}))"
+            )
+        }
+        (_, None) => panic!("sparql: aggregate over `*` only supported for COUNT"),
+    }
+}
+
+/// Build the same NUMERIC-cast CASE expression we use for FILTER
+/// ordering — restricted to dict rows whose datatype is one of the
+/// XSD numeric IRIs, else NULL.
+fn numeric_cast_subselect(
+    var: &str,
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> String {
+    let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+        panic!("sparql: numeric aggregate over ?{var} but variable not bound in any BGP pattern")
+    });
+    let dt_ids = numeric_datatype_id_list();
+    format!(
+        "(SELECT CASE WHEN datatype_iri_id IN ({dt_ids})
+                      THEN lexical_value::numeric
+                      ELSE NULL
+                 END
+          FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
+    )
 }
 
 /// UNION SELECT — each branch is a complete sub-SELECT that
@@ -1596,6 +1876,184 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2);
+    }
+
+    /// COUNT(*) — total solutions for the BGP.
+    #[pg_test]
+    fn sparql_aggregate_count_star() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:b .
+                 ex:a ex:p ex:c .
+                 ex:a ex:q ex:b .',
+                8_070)",
+        )
+        .unwrap();
+
+        let count: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(count.0["n"], "3");
+    }
+
+    /// COUNT(DISTINCT ?o) — count distinct object terms.
+    #[pg_test]
+    fn sparql_aggregate_count_distinct() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:x .
+                 ex:b ex:p ex:x .
+                 ex:c ex:p ex:y .',
+                8_071)",
+        )
+        .unwrap();
+
+        let dedup: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'SELECT (COUNT(DISTINCT ?o) AS ?n) WHERE { ?s ?p ?o }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(dedup.0["n"], "2", "distinct objects = x, y");
+    }
+
+    /// COUNT(?o) with GROUP BY ?p — group-and-count per predicate.
+    #[pg_test]
+    fn sparql_aggregate_group_by() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:x .
+                 ex:b ex:p ex:y .
+                 ex:c ex:q ex:z .',
+                8_072)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?p (COUNT(?o) AS ?n) WHERE { ?s ?p ?o } GROUP BY ?p'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2, "two distinct predicates ex:p and ex:q");
+    }
+
+    /// SUM over numeric values only — non-numeric literals contribute
+    /// NULL (so SUM ignores them per SQL semantics).
+    #[pg_test]
+    fn sparql_aggregate_sum_numeric() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p 10 .
+                 ex:b ex:p 20 .
+                 ex:c ex:p 30 .
+                 ex:d ex:p \"text\" .',
+                8_073)",
+        )
+        .unwrap();
+
+        let sum: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'SELECT (SUM(?v) AS ?total) WHERE { ?s <http://example.com/p> ?v }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(sum.0["total"], "60");
+    }
+
+    /// AVG over numeric values.
+    #[pg_test]
+    fn sparql_aggregate_avg_numeric() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p 10 .
+                 ex:b ex:p 20 .
+                 ex:c ex:p 30 .',
+                8_074)",
+        )
+        .unwrap();
+
+        let avg: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'SELECT (AVG(?v) AS ?mean) WHERE { ?s <http://example.com/p> ?v }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        // Postgres NUMERIC AVG of {10, 20, 30} = 20 (with no decimals
+        // when divisor is exact). Accept either "20" or "20.000…".
+        let s = avg.0["mean"].as_str().unwrap();
+        let v: f64 = s.parse().unwrap();
+        assert!((v - 20.0).abs() < 1e-9, "got {s}");
+    }
+
+    /// MIN / MAX — lexicographic on the lexical value.
+    #[pg_test]
+    fn sparql_aggregate_min_max() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:a foaf:name \"Charlie\" .
+                 ex:b foaf:name \"Alice\"   .
+                 ex:c foaf:name \"Bob\"     .',
+                8_075)",
+        )
+        .unwrap();
+
+        let min: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT (MIN(?n) AS ?lo) WHERE { ?s foaf:name ?n }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        let max: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT (MAX(?n) AS ?hi) WHERE { ?s foaf:name ?n }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(min.0["lo"], "Alice");
+        assert_eq!(max.0["hi"], "Charlie");
+    }
+
+    /// GROUP BY with multiple aggregates in the same SELECT.
+    #[pg_test]
+    fn sparql_aggregate_multiple_in_group() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p 10 . ex:b ex:p 20 . ex:c ex:p 30 .
+                 ex:d ex:q 5  . ex:e ex:q 15 .',
+                8_076)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?p (COUNT(?v) AS ?n) (SUM(?v) AS ?total)
+                  WHERE { ?s ?p ?v } GROUP BY ?p'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2, "ex:p (3 rows, sum 60) and ex:q (2 rows, sum 20)");
     }
 
     /// MINUS — subtracts solutions of the right pattern from the

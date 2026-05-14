@@ -88,7 +88,11 @@ Plan-cache landing notes for the future slice:
 - ✅ OPTIONAL (single triple per block, chained)
 - ✅ UNION (n-way; per-branch FILTERs / OPTIONALs / MINUSes)
 - ✅ MINUS (single triple, shared-var keyed; no-op without shared)
-- ⏳ Aggregates (`GROUP BY` + COUNT/SUM/AVG/MIN/MAX) — Phase 3 backlog
+- ✅ Aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` + `GROUP BY`).
+      Output values come back as JSON strings; SUM/AVG numeric-aware;
+      MIN/MAX lexicographic.
+- ⏳ HAVING, GROUP_CONCAT, SAMPLE, BIND, aggregates over UNION
+      — Phase 3 backlog
 - ⏳ Property paths beyond simple sequence — Phase 3 backlog
 - ⏳ Named-graph `GRAPH { … }` — needs graph-IRI→graph_id mapping
 - ⏳ `BIND`, `VALUES`, `CONSTRUCT`, `ASK`, `DESCRIBE` — Phase 3 backlog

@@ -35,7 +35,8 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `OPTIONAL { multi-pattern BGP }`, nested OPTIONALs | ⏳ Phase 3 (next slice) |
 | `UNION` (n-way, branches may bind different vars) | ✅ |
 | `MINUS { single-triple }` keyed by shared vars (no-op when no shared vars per spec) | ✅ |
-| `MINUS { multi-pattern }`, property paths, aggregates, `VALUES`, `BIND` | ⏳ Phase 3 |
+| Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`, `SUM`, `AVG`, `MIN`, `MAX` with `GROUP BY` | ✅ |
+| `MINUS { multi-pattern }`, property paths, `VALUES`, `BIND`, HAVING, `GROUP_CONCAT`, `SAMPLE` | ⏳ Phase 3 |
 | `CONSTRUCT`, `ASK`, `DESCRIBE` | ⏳ Phase 3 |
 | Named-graph `GRAPH { … }` clauses | ⏳ Phase 3 |
 | `SERVICE` (federated SPARQL) | Out of scope for v0.x |
@@ -479,6 +480,102 @@ cross product.
   restriction as OPTIONAL today. Multi-pattern MINUS lands in a
   later slice.
 - **Nested MINUS inside MINUS** isn't supported — only flat chains.
+
+### Aggregates and GROUP BY
+
+`pgrdf.sparql` supports the SPARQL set functions `COUNT` (with or
+without `DISTINCT`), `SUM`, `AVG`, `MIN`, `MAX`, optionally with
+`GROUP BY`. Each aggregate is bound to a SPARQL variable via the
+`(EXPR AS ?var)` syntax in the SELECT clause.
+
+```sql
+-- Total triples in the database
+SELECT * FROM pgrdf.sparql(
+  'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }'
+);
+--  → {"n": "9"}
+
+-- Distinct subjects
+SELECT * FROM pgrdf.sparql(
+  'SELECT (COUNT(DISTINCT ?s) AS ?subjects) WHERE { ?s ?p ?o }'
+);
+
+-- Sum / Avg over numeric values (non-numeric literals are skipped)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT (SUM(?age) AS ?total) (AVG(?age) AS ?mean)
+     WHERE { ?s foaf:age ?age }'
+);
+
+-- MIN/MAX lexicographically on the lexical value
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT (MIN(?n) AS ?lo) (MAX(?n) AS ?hi)
+     WHERE { ?s foaf:name ?n }'
+);
+
+-- GROUP BY: count of triples per predicate
+SELECT * FROM pgrdf.sparql(
+  'SELECT ?p (COUNT(?o) AS ?n)
+     WHERE { ?s ?p ?o }
+   GROUP BY ?p'
+);
+--  → {"p": "http://xmlns.com/foaf/0.1/name", "n": "4"}
+--  → {"p": "http://xmlns.com/foaf/0.1/age",  "n": "3"}
+--  → {"p": "http://xmlns.com/foaf/0.1/mbox", "n": "2"}
+
+-- GROUP BY + ORDER BY on the aggregate, then LIMIT
+SELECT * FROM pgrdf.sparql(
+  'SELECT ?p (COUNT(?o) AS ?n)
+     WHERE { ?s ?p ?o }
+   GROUP BY ?p
+   ORDER BY DESC(?n) LIMIT 1'
+);
+```
+
+#### How values come back
+
+All aggregate values are emitted as JSON **strings** in the row's
+JSONB output, consistent with the rest of `pgrdf.sparql`. For
+numeric results, parse them on the caller side
+(`CAST(j ->> 'total' AS NUMERIC)` in SQL, `int(row.sparql["n"])`
+in Python, etc.).
+
+#### SUM / AVG numeric awareness
+
+`SUM(?v)` and `AVG(?v)` cast `?v` to `NUMERIC` if and only if
+its dictionary entry's datatype is one of the XSD numeric IRIs
+(`xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:float`, plus
+the sized + unsigned + constraint subtypes). Non-numeric values
+contribute `NULL` and are ignored by the aggregate per SQL
+semantics — no Postgres cast error is raised. This matches the
+FILTER ordering semantics.
+
+If your data mixes string-encoded numbers (`"30"^^xsd:string`)
+with proper numeric literals, only the latter contribute. Re-load
+with explicit XSD datatype annotations to fix this in the
+fixture rather than working around it in the query.
+
+#### MIN / MAX caveat
+
+`MIN(?v)` and `MAX(?v)` compare values **lexicographically on the
+term's string form** — not type-aware. For string-typed literals
+and IRIs this is the intuitive answer; for numeric data
+`MAX("10", "2") = "2"` because `"2" > "1"` in lex order. Use
+numeric `FILTER(?v >= …)` plus post-SQL `ORDER BY ... LIMIT 1` if
+you need numeric extremes today. Type-aware MIN/MAX is queued.
+
+#### Today's restrictions
+
+- **`HAVING`** isn't translated yet. Filter the result with regular
+  SQL after `pgrdf.sparql` (`SELECT * FROM pgrdf.sparql(...) j
+  WHERE (j->>'n')::int > 5`).
+- **`GROUP_CONCAT` and `SAMPLE`** are queued.
+- **BIND** (`(EXPR AS ?v)` outside aggregates) isn't supported —
+  only the aggregate-aliasing case lands today.
+- **Aggregates on top of UNION** aren't supported. Aggregates over
+  a UNION result require a derived-table refactor that lands in
+  a later slice.
 
 ### Solution modifiers — DISTINCT / LIMIT / OFFSET / ORDER BY
 

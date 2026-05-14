@@ -132,10 +132,19 @@ fn walk(
         }
         GraphPattern::Join { .. }      => unsupported.push("Join (non-BGP)"),
         GraphPattern::Graph { .. }     => unsupported.push("Graph (named graph clause)"),
-        GraphPattern::Group { .. }     => unsupported.push("Group (aggregate)"),
+        GraphPattern::Group { inner, .. } => {
+            // Aggregates — supported by the executor. Walk the inner
+            // BGP so the parser still reports its shape.
+            walk(inner, vars, bgp, unsupported);
+        }
+        GraphPattern::Extend { inner, .. } => {
+            // BIND / Extend — supported only when used to rename
+            // aggregate output vars; the executor enforces. Walk
+            // the inner so the underlying BGP is still visible.
+            walk(inner, vars, bgp, unsupported);
+        }
         GraphPattern::Path { .. }      => unsupported.push("Path (property path)"),
         GraphPattern::Values { .. }    => unsupported.push("Values (inline VALUES)"),
-        GraphPattern::Extend { .. }    => unsupported.push("Extend (BIND)"),
         GraphPattern::Service { .. }   => unsupported.push("Service (federation)"),
 
         _ => unsupported.push("other"),

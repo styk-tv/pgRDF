@@ -6,6 +6,54 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 7 — Aggregates + GROUP BY
+
+- `pgrdf.sparql` handles SPARQL aggregates with or without
+  `GROUP BY`:
+  - `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`.
+  - `SUM(?v)`, `AVG(?v)` — numeric-aware via the same XSD-numeric
+    CASE cast as FILTER ordering. Non-numeric values contribute
+    `NULL` (skipped by SUM/AVG per SQL semantics, no Postgres
+    cast error).
+  - `MIN(?v)`, `MAX(?v)` — lexicographic on the term's
+    `lexical_value`. Type-aware MIN/MAX queued.
+- `GROUP BY ?vars` translates to SQL `GROUP BY` using the same
+  dict-lookup expressions that drive the SELECT clause. Multiple
+  aggregates per group supported.
+- Aggregate output values come back as **JSON strings** in the
+  `pgrdf.sparql` row, consistent with the rest of the surface.
+  Callers cast with `(j ->> 'n')::int`/`::numeric` etc.
+- Algebra layout: spargebra lowers `SELECT (EXPR AS ?v)` to
+  `Project → Extend → Group → BGP`. `walk_select` now handles
+  Extend (renames the synthesised `$agg_N` to `?v`) and Group
+  (captures group_vars + AggregateSpecs). Walk order: descend
+  into inner first so Group's aggregates are populated before
+  Extend tries to rename them.
+- Parser walks `GraphPattern::Group` and `GraphPattern::Extend`
+  rather than flagging them; tests adjusted.
+- 7 new pg_tests: COUNT(*), COUNT(DISTINCT), GROUP BY counting,
+  SUM numeric, AVG numeric, MIN/MAX lex, multiple aggregates
+  per group.
+- `tests/regression/sql/39-sparql-aggregates.sql` covers 10
+  query shapes: count_all, count_o, count_distinct, sum_age,
+  avg_age (rounded), min/max names, group_by predicates,
+  multi-aggregate, ORDER-BY-aggregate + LIMIT.
+- `README.md` pills: 56+19 → 63+20; SPARQL pill adds AGGREGATES.
+- `guide/03-querying.md` gains a full "Aggregates and GROUP BY"
+  section covering the JSON-string output rule, the SUM/AVG
+  numeric-awareness rule, the MIN/MAX lex caveat, and the
+  HAVING/GROUP_CONCAT/BIND restrictions.
+
+Today's restrictions:
+- HAVING not yet translated — post-process with regular SQL.
+- BIND outside aggregate aliasing not supported.
+- Aggregates on top of UNION not supported (panic with clear msg).
+- `GROUP_CONCAT` / `SAMPLE` not supported.
+
+Test bar:
+  pg_test:    63 passed; 0 failed  (was 56)
+  regression: 20 passed; 0 failed  (was 19)
+
 ### Phase 3 step 6 — MINUS
 
 - `pgrdf.sparql` handles `MINUS { ?s :p ?o }` and chained MINUSes.

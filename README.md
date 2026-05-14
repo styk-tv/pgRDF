@@ -5,8 +5,8 @@
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20phase%203%20start-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-56%20pgrx%20%2B%2019%20regression-brightgreen)](#tests)
-[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20BGP%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS-blue)](guide/03-querying.md)
+[![Tests](https://img.shields.io/badge/tests-63%20pgrx%20%2B%2020%20regression-brightgreen)](#tests)
+[![SPARQL](https://img.shields.io/badge/SPARQL-FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
@@ -16,7 +16,7 @@
 
 | | |
 |---|---|
-| **Status** | Alpha. Storage CRUD, Turtle ingest (Phase 2.0–2.2). SPARQL SELECT with N-pattern BGPs + FILTER (identity, boolean, term-type, BOUND, numeric ordering, REGEX, IN, STR) + solution modifiers (DISTINCT, LIMIT, OFFSET, ORDER BY) + OPTIONAL (single-triple LeftJoin) + UNION (n-way) + MINUS — Phase 3 steps 1–6. GRAPH / aggregates / arithmetic / property paths queued. |
+| **Status** | Alpha. Storage CRUD, Turtle ingest (Phase 2.0–2.2). SPARQL SELECT with N-pattern BGPs + FILTER (identity, boolean, term-type, BOUND, numeric ordering, REGEX, IN, STR) + solution modifiers (DISTINCT, LIMIT, OFFSET, ORDER BY) + OPTIONAL (single-triple LeftJoin) + UNION (n-way) + MINUS + aggregates (COUNT, SUM, AVG, MIN, MAX with GROUP BY) — Phase 3 steps 1–7. GRAPH / HAVING / arithmetic / property paths queued. |
 | **Supported PG** | 14, 15, 16, 17 (PG 18 blocked on pgrx upstream — see [ERRATA](specs/ERRATA.v0.2.md) E-006). |
 | **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
@@ -89,6 +89,14 @@ SELECT * FROM pgrdf.sparql(
              UNION
              { ?s foaf:mbox ?m } }'
 );
+
+-- Aggregates with GROUP BY — count of triples per predicate
+SELECT * FROM pgrdf.sparql(
+  'SELECT ?p (COUNT(?o) AS ?n)
+     WHERE { ?s ?p ?o }
+   GROUP BY ?p ORDER BY DESC(?n)'
+);
+--  → {"p": "http://xmlns.com/foaf/0.1/name", "n": "4"}
 
 -- Inspect the parsed shape without executing
 SELECT pgrdf.sparql_parse('SELECT ?s WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }');
@@ -174,8 +182,8 @@ For people working on pgRDF itself.
 | Ontology smoke | Real-world Turtle parses cleanly | `tests/perf/smoke-ontologies.sh` |
 | Full bar | Both `just test` + `just test-regression` | `just test-all` |
 
-Phase 2.0–2.2 + Phase 3 steps 1–6 (current): **56 pgrx integration
-tests + 19 regression files passing.** External smoke covers 24
+Phase 2.0–2.2 + Phase 3 steps 1–7 (current): **63 pgrx integration
+tests + 20 regression files passing.** External smoke covers 24
 well-known ontologies (W3C, Apache Jena, ValueFlows, ConceptKernel
 v3.7) for ~17,000 triples loaded. Workflow.ttl held out due to a
 non-RFC IRI in the source — see [ERRATA E-007 / TEST.ONTOLOGY-SET.md](TEST.ONTOLOGY-SET.md).

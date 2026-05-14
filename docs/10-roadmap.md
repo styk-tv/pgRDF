@@ -123,11 +123,12 @@ each shipping with pgrx + regression coverage.
 | 4 | `OPTIONAL { ?s :p ?o }` → `LEFT JOIN` (with inner FILTER and chained blocks) | `6546d80` | 45 | 17 |
 | 5 | `UNION` (n-way, branch-local FILTERs and OPTIONALs) | `56b7bca` | 51 | 18 |
 | 6 | `MINUS` → `NOT EXISTS` keyed by shared variables | `59ee1b9` | 56 | 19 |
+| 7 | Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT)`, `SUM`, `AVG`, `MIN`, `MAX` + `GROUP BY` | (pending) | 63 | 20 |
 
 Phase 3 backlog (each its own slice):
 
-- ⏳ Aggregates — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` with `GROUP BY`
-      and `HAVING`. Biggest remaining functional gap.
+- ⏳ `HAVING` (post-aggregate filter) + `GROUP_CONCAT` / `SAMPLE`
+      aggregates.
 - ⏳ `GRAPH { … }` named-graph clause. Needs a graph IRI → graph_id
       mapping (schema change).
 - ⏳ Multi-triple OPTIONAL / MINUS — relax the current single-triple
@@ -204,4 +205,5 @@ phase 3 step table above.
 | Phase 2.0 done | 7 | 3 | dict + quad CRUD |
 | Phase 2.1 done | 11 | 7 | + Turtle ingest, regression fixtures |
 | Phase 2.2 done | 21 | 13 | + dict cache, batched ingest, SPARQL parser, BGP-to-SQL, N-pattern BGP joins, user guide |
-| Phase 3 step 6 (current) | 56 | 19 | + FILTER, modifiers, OPTIONAL, UNION, MINUS |
+| Phase 3 step 6 | 56 | 19 | + FILTER, modifiers, OPTIONAL, UNION, MINUS |
+| Phase 3 step 7 (current) | 63 | 20 | + aggregates (COUNT/SUM/AVG/MIN/MAX + GROUP BY) |
