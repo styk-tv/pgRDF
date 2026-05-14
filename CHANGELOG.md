@@ -6,6 +6,34 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Translator fix — type-aware `MIN` / `MAX`
+
+`src/query/executor.rs::translate_aggregate` for `MIN` / `MAX`
+previously emitted
+
+    MIN(lexical_value)
+
+which sorts lexicographically — so over the four `xsd:integer`
+literals `10, 2, 100, 20` it returned `"10"` (since
+`"10" < "100" < "2" < "20"` as strings). Now emits
+
+    COALESCE(MIN(numeric_cast_subselect)::text, MIN(lexical_value))
+
+so when any row in the group has an `xsd:numeric` datatype the
+numeric MIN/MAX wins (matches the SUM/AVG path that has been
+type-aware since Phase 2.2). Pure-string groups fall back to
+lexicographic ordering. Mixed-type groups prefer numeric — the
+SPARQL spec (§17.4) leaves mixed-type ordering
+implementation-defined.
+
+Coverage: new `tests/w3c-sparql/23-min-max-numeric/` — fixture's
+`xsd:integer` literals `10/2/100/20` produce `MIN=2, MAX=100`
+(would have been `MIN="10", MAX="20"` lexicographically).
+
+Test bar: **93 pgrx + 33 pg_regress + 23 W3C-shape + 3 LUBM-shape
+= 152 tests**, green locally. v0.4 deferred SPARQL surface
+shrinks by one entry.
+
 ### Translator fix — inline `HAVING(SUM(?v) > c)` now supported
 
 `src/query/executor.rs::AggregateSpec` gains a `synth_aliases:

@@ -77,7 +77,8 @@ against the W3C spec is the load-bearing part.
 | `!BOUND(?v)` over OPTIONAL | §17.4.1.7 | ✅ 19 |
 | `STR(?iri)` then string equality | §17.4.2.5 | ✅ 20 |
 | Numeric FILTER on `xsd:integer` | §17.3 | ✅ 21 |
-| Inline `HAVING(SUM(?v) > c)` | §11.5 | ❌ deferred — see v0.4 |
+| Inline `HAVING(SUM(?v) > c)` | §11.5 | ✅ 22 |
+| Type-aware `MIN`/`MAX` over `xsd:numeric` | §17.4 | ✅ 23 |
 | Property paths beyond `:a/:b` sequence | §9 | ❌ deferred — see v0.4 |
 | GRAPH `{ … }` named-graph clause | §13 | ❌ deferred — needs storage schema work |
 | VALUES / FROM NAMED / CONSTRUCT / DESCRIBE | §10.2 / §13 / §16 | ❌ deferred — see v0.3 LLD §3 |

@@ -1024,8 +1024,26 @@ fn translate_aggregate(
             let numeric_expr = numeric_cast_subselect(var, anchors);
             format!("AVG({distinct}{numeric_expr})")
         }
-        (AggregateFn::Min, Some(var)) => format!("MIN({distinct}{})", lex_subselect(var)),
-        (AggregateFn::Max, Some(var)) => format!("MAX({distinct}{})", lex_subselect(var)),
+        // Type-aware MIN/MAX: SPARQL 1.1 §17.4 says the
+        // aggregate uses the value's "natural order" — numeric
+        // for xsd:numeric literals, lexicographic otherwise.
+        // COALESCE picks numeric when any row in the group has a
+        // numeric datatype (numeric_cast_subselect returns NULL for
+        // non-numeric rows, so MIN/MAX over numeric yields the
+        // numeric extreme; when every row is non-numeric the
+        // numeric aggregate is NULL and COALESCE falls back to
+        // lex_subselect). Mixed groups prefer numeric — SPARQL
+        // leaves mixed-type behaviour implementation-defined.
+        (AggregateFn::Min, Some(var)) => {
+            let lex = lex_subselect(var);
+            let num = numeric_cast_subselect(var, anchors);
+            format!("COALESCE(MIN({distinct}{num})::text, MIN({distinct}{lex}))")
+        }
+        (AggregateFn::Max, Some(var)) => {
+            let lex = lex_subselect(var);
+            let num = numeric_cast_subselect(var, anchors);
+            format!("COALESCE(MAX({distinct}{num})::text, MAX({distinct}{lex}))")
+        }
         (AggregateFn::GroupConcat { separator }, Some(var)) => {
             let escaped = separator.replace('\'', "''");
             format!("STRING_AGG({distinct}{}, '{escaped}')", lex_subselect(var))

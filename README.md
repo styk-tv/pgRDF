@@ -5,7 +5,7 @@
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20phase%203%20perf-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-93%20pgrx%20%2B%2033%20regression%20%2B%2022%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-93%20pgrx%20%2B%2033%20regression%20%2B%2023%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
 [![SPARQL](https://img.shields.io/badge/SPARQL-FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
@@ -13,7 +13,7 @@
 [![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20via%20reasonable-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Validation](https://img.shields.io/badge/SHACL%20validate-stub%20%28ERRATA%20E--009%29-orange)](specs/ERRATA.v0.2.md)
 [![CI](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml/badge.svg)](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml)
-[![W3C](https://img.shields.io/badge/W3C%20SPARQL%201.1-22%20starter%20tests-blue)](tests/w3c-sparql/)
+[![W3C](https://img.shields.io/badge/W3C%20SPARQL%201.1-23%20starter%20tests-blue)](tests/w3c-sparql/)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 

@@ -1,0 +1,10 @@
+@prefix ex:   <http://example.com/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+# Four typed-integer literals. Their lexical forms sort as
+# "10" < "100" < "2" < "20" — completely wrong for numeric ordering.
+# A type-aware aggregate must give MIN = 2, MAX = 100.
+ex:a ex:n "10"^^xsd:integer  .
+ex:b ex:n "2"^^xsd:integer   .
+ex:c ex:n "100"^^xsd:integer .
+ex:d ex:n "20"^^xsd:integer  .
