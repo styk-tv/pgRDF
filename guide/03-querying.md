@@ -34,7 +34,8 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `OPTIONAL { single-triple BGP }` → LEFT JOIN (with inner FILTER honoured) | ✅ |
 | `OPTIONAL { multi-pattern BGP }`, nested OPTIONALs | ⏳ Phase 3 (next slice) |
 | `UNION` (n-way, branches may bind different vars) | ✅ |
-| `MINUS`, property paths, aggregates, `VALUES`, `BIND` | ⏳ Phase 3 |
+| `MINUS { single-triple }` keyed by shared vars (no-op when no shared vars per spec) | ✅ |
+| `MINUS { multi-pattern }`, property paths, aggregates, `VALUES`, `BIND` | ⏳ Phase 3 |
 | `CONSTRUCT`, `ASK`, `DESCRIBE` | ⏳ Phase 3 |
 | Named-graph `GRAPH { … }` clauses | ⏳ Phase 3 |
 | `SERVICE` (federated SPARQL) | Out of scope for v0.x |
@@ -431,6 +432,53 @@ SELECT * FROM pgrdf.sparql(
 - Each UNION branch is one of: BGP, FILTERed BGP, BGP with
   OPTIONALs. Nested UNION inside a branch, or UNION inside an
   OPTIONAL, isn't supported in this slice.
+
+### MINUS
+
+`{ A } MINUS { B }` removes rows of `A` whose shared variables are
+compatible with some row of `B`. The translator emits a
+`WHERE NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_quads qMIN WHERE …)`
+sub-SELECT keyed on those shared variables.
+
+```sql
+-- Persons who DON'T have an mbox
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?n
+     WHERE { ?s foaf:name ?n
+             MINUS { ?s foaf:mbox ?m } }'
+);
+
+-- Persons with neither mbox nor age (chained MINUSes)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s
+     WHERE { ?s foaf:name ?n
+             MINUS { ?s foaf:mbox ?m }
+             MINUS { ?s foaf:age  ?a } }'
+);
+```
+
+#### The shared-variables rule
+
+Per SPARQL spec, MINUS only filters when the two arms share at
+least one variable. If `MINUS { ?x ex:foo ?y }` shares no variable
+with the outer query, it's a no-op — every row of the outer
+pattern survives. The translator detects this case at translation
+time and emits no SQL at all for that MINUS block.
+
+That's different from how OPTIONAL behaves with disjoint variables
+(OPTIONAL does emit a LEFT JOIN regardless). The asymmetry is
+inherited from the SPARQL semantics: MINUS without shared vars
+is defined to be the identity; OPTIONAL without shared vars is a
+cross product.
+
+#### Today's restrictions
+
+- **Each MINUS block holds exactly one triple pattern.** Same
+  restriction as OPTIONAL today. Multi-pattern MINUS lands in a
+  later slice.
+- **Nested MINUS inside MINUS** isn't supported — only flat chains.
 
 ### Solution modifiers — DISTINCT / LIMIT / OFFSET / ORDER BY
 

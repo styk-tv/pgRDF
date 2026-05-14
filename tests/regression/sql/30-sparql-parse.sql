@@ -51,12 +51,21 @@ SELECT (
   )->>'bgp_pattern_count'
 )::int AS bgp_count_union;
 
--- 4d. MINUS is still unsupported.
+-- 4d. MINUS is now supported. Both arms' BGPs are visible.
 SELECT (
   pgrdf.sparql_parse(
     'SELECT ?s WHERE { ?s ?p ?o MINUS { ?s <http://x/a> ?b } }'
+  )->>'bgp_pattern_count'
+)::int AS bgp_count_minus;
+
+-- 4e. Quantified property paths (e.g. <a>*) are still unsupported.
+-- Note: simple sequence paths (<a>/<b>) are desugared by spargebra
+-- into BGP chains and don't appear as Path nodes.
+SELECT (
+  pgrdf.sparql_parse(
+    'SELECT ?s ?o WHERE { ?s <http://x/a>* ?o }'
   )->'unsupported_algebra'
-)::text AS unsupported_minus;
+)::text AS unsupported_path;
 
 -- 5. CONSTRUCT recognised but flagged out-of-scope.
 SELECT (

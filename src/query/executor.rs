@@ -52,6 +52,11 @@
 //!     emitted as `NULL::TEXT`. Branches are combined with
 //!     `UNION ALL`; outer `DISTINCT` / `ORDER BY` / `LIMIT` /
 //!     `OFFSET` wrap the union via a derived table.
+//!   * `MINUS { ?s :p ?o }` — translated to `WHERE NOT EXISTS
+//!     (SELECT 1 FROM pgrdf._pgrdf_quads qMIN_K WHERE …)` keyed
+//!     on shared variables. Per spec, MINUS with no shared variables
+//!     is a no-op and is elided. Restriction: single-triple right
+//!     side (same as OPTIONAL today).
 //!   * Aggregates / paths / VALUES / SERVICE remain unsupported.
 //!
 //! Output shape:
@@ -115,6 +120,10 @@ struct ParsedSelect {
     /// optional FILTER. Multiple chained OPTIONALs land here in
     /// left-to-right order; build_bgp_sql emits one LEFT JOIN per.
     optionals: Vec<OptionalBlock>,
+    /// Each MINUS block — single triple pattern. Translates to
+    /// `WHERE NOT EXISTS (…)` keyed on shared variables. Elided
+    /// if there are no shared vars (SPARQL no-op).
+    minuses: Vec<TriplePattern>,
     /// When non-empty, this is a UNION query — each entry is a
     /// self-contained branch with its own BGP / filters / optionals.
     /// Single-branch fields (`bgp`, `filters`, `optionals`) remain
@@ -142,6 +151,7 @@ struct UnionBranch {
     bgp: Vec<TriplePattern>,
     filters: Vec<Expression>,
     optionals: Vec<OptionalBlock>,
+    minuses: Vec<TriplePattern>,
 }
 
 fn translate(q: &Query) -> ExecPlan {
@@ -243,6 +253,16 @@ fn walk_branch(p: &GraphPattern, ub: &mut UnionBranch) {
                 filter: expression.clone(),
             });
         }
+        GraphPattern::Minus { left, right } => {
+            walk_branch(left, ub);
+            let triple = match right.as_ref() {
+                GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns[0].clone(),
+                _ => panic!(
+                    "sparql: MINUS today only supports a single triple pattern"
+                ),
+            };
+            ub.minuses.push(triple);
+        }
         other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
     }
 }
@@ -316,6 +336,20 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
             collect_union_branches(left, &mut ps.union_branches);
             collect_union_branches(right, &mut ps.union_branches);
         }
+        GraphPattern::Minus { left, right } => {
+            walk_select(left, ps);
+            let triple = match right.as_ref() {
+                GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns[0].clone(),
+                GraphPattern::Bgp { patterns } => panic!(
+                    "sparql: MINUS today only supports a single triple pattern (got {} triples)",
+                    patterns.len()
+                ),
+                other => panic!(
+                    "sparql: MINUS today only supports a single triple pattern (got {other:?})"
+                ),
+            };
+            ps.minuses.push(triple);
+        }
         GraphPattern::Bgp { patterns } => {
             ps.bgp = patterns.clone();
         }
@@ -382,8 +416,14 @@ fn build_bgp_sql(ps: &ParsedSelect) -> String {
 /// even when they aren't projected (via hidden trailing columns).
 fn build_single_branch_outer(ps: &ParsedSelect) -> String {
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-    let (from_sql, where_clauses) =
-        build_from_and_where(&ps.bgp, &ps.filters, &ps.optionals, &mut anchors, 0);
+    let (from_sql, where_clauses) = build_from_and_where(
+        &ps.bgp,
+        &ps.filters,
+        &ps.optionals,
+        &ps.minuses,
+        &mut anchors,
+        0,
+    );
 
     // Project: each projected var → its anchor alias.column → dict
     // lookup → aliased to the variable name (so SETOF JSONB emission
@@ -498,8 +538,14 @@ fn build_union_sql(ps: &ParsedSelect) -> String {
 /// other branch's row shape (required for `UNION ALL`).
 fn build_branch_sql(branch: &UnionBranch, projected: &[String]) -> String {
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-    let (from_sql, where_clauses) =
-        build_from_and_where(&branch.bgp, &branch.filters, &branch.optionals, &mut anchors, 0);
+    let (from_sql, where_clauses) = build_from_and_where(
+        &branch.bgp,
+        &branch.filters,
+        &branch.optionals,
+        &branch.minuses,
+        &mut anchors,
+        0,
+    );
 
     let mut select_clauses: Vec<String> = Vec::new();
     for var in projected {
@@ -535,6 +581,7 @@ fn build_from_and_where(
     bgp: &[TriplePattern],
     filters: &[Expression],
     optionals: &[OptionalBlock],
+    minuses: &[TriplePattern],
     anchors: &mut HashMap<String, (usize, &'static str)>,
     alias_offset: usize,
 ) -> (String, Vec<String>) {
@@ -591,7 +638,61 @@ fn build_from_and_where(
         });
         where_clauses.push(sql);
     }
+    // MINUS blocks → `NOT EXISTS (SELECT 1 FROM … WHERE shared_vars)`.
+    // Per SPARQL spec, MINUS with no shared variables is a no-op and
+    // is elided here.
+    for minus_triple in minuses {
+        if let Some(sql) = translate_minus(minus_triple, anchors, &mut next_qi) {
+            where_clauses.push(sql);
+        }
+    }
     (from_sql, where_clauses)
+}
+
+/// Translate a MINUS triple against the outer anchors. Returns
+/// `None` if the MINUS shares no variables with the outer query
+/// (which makes it a no-op per SPARQL spec). Otherwise allocates
+/// a fresh alias for the MINUS pattern, emits a `NOT EXISTS`
+/// sub-SELECT whose WHERE clause ties shared variables back to
+/// the outer aliases.
+fn translate_minus(
+    triple: &TriplePattern,
+    outer_anchors: &HashMap<String, (usize, &'static str)>,
+    next_qi: &mut usize,
+) -> Option<String> {
+    // First pass: discover which variables in this MINUS triple are
+    // shared with the outer query. If none, MINUS is a no-op.
+    let triple_vars: Vec<String> = [
+        tp_subject_var(triple),
+        tp_predicate_var(triple),
+        tp_object_var(triple),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !triple_vars.iter().any(|v| outer_anchors.contains_key(v)) {
+        return None;
+    }
+
+    // Second pass: clone outer anchors so already-bound vars in the
+    // MINUS triple emit equality predicates against the outer aliases.
+    // New vars introduced inside the MINUS pick up the local alias.
+    let qi = *next_qi;
+    *next_qi += 1;
+    let mut local_anchors = outer_anchors.clone();
+    let clauses = pattern_clauses(triple, qi, &mut local_anchors);
+    let where_inside = if clauses.is_empty() {
+        // Defensive: shared vars discovered above means we should
+        // have at least one equality clause; if not, drop a literal
+        // FALSE so the row survives (matching the no-shared-vars
+        // semantics).
+        "FALSE".to_string()
+    } else {
+        clauses.join(" AND ")
+    };
+    Some(format!(
+        "NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_quads q{qi} WHERE {where_inside})"
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1490,6 +1591,131 @@ mod tests {
         let rows: i64 = Spi::get_one(
             "SELECT count(*)::BIGINT FROM pgrdf.sparql(
                'SELECT ?s WHERE { ?s <http://example.com/p> ?v FILTER(?s IN (<http://example.com/a>, <http://example.com/c>)) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2);
+    }
+
+    /// MINUS — subtracts solutions of the right pattern from the
+    /// left, keyed on shared variables. Alice has both name + mbox;
+    /// Bob has only name. MINUS { ?s foaf:mbox ?m } drops Alice.
+    #[pg_test]
+    fn sparql_minus_basic() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> .
+                 ex:bob   foaf:name \"Bob\"   .
+                 ex:carol foaf:name \"Carol\" ; foaf:mbox <mailto:c@x> .',
+                8_060)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?n
+                  WHERE { ?s foaf:name ?n
+                          MINUS { ?s foaf:mbox ?m } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        // Alice and Carol have mbox → dropped. Only Bob remains.
+        assert_eq!(rows, 1);
+    }
+
+    /// MINUS with no shared variables is a no-op per spec.
+    /// Querying for ?s ?p ?o MINUS { ?x ex:other ?y } subtracts
+    /// nothing because there's no shared variable.
+    #[pg_test]
+    fn sparql_minus_no_shared_vars_is_noop() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:b .
+                 ex:c ex:p ex:d .',
+                8_061)",
+        )
+        .unwrap();
+
+        let with_minus: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?p ?o WHERE { ?s ?p ?o
+                                        MINUS { ?x <http://example.com/other> ?y } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let without_minus: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?p ?o WHERE { ?s ?p ?o }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(with_minus, without_minus);
+    }
+
+    /// Two chained MINUS clauses each emit a NOT EXISTS predicate.
+    #[pg_test]
+    fn sparql_minus_chained() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> ; foaf:age 30 .
+                 ex:bob   foaf:name \"Bob\"   ; foaf:age 25 .
+                 ex:carol foaf:name \"Carol\" ; foaf:mbox <mailto:c@x> .
+                 ex:dave  foaf:name \"Dave\"  .',
+                8_062)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s
+                  WHERE { ?s foaf:name ?n
+                          MINUS { ?s foaf:mbox ?m }
+                          MINUS { ?s foaf:age  ?a } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        // Alice has mbox → drop. Bob has age → drop. Carol has mbox → drop.
+        // Dave has neither → keep. 1 row.
+        assert_eq!(rows, 1);
+    }
+
+    /// MINUS combined with FILTER on the outer query.
+    #[pg_test]
+    fn sparql_minus_with_outer_filter() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" .
+                 ex:bob   foaf:name \"Bob\"   ; foaf:mbox <mailto:b@x> .
+                 ex:carol foaf:name \"Carol\" .
+                 ex:dave  foaf:name \"Dave\"  .',
+                8_063)",
+        )
+        .unwrap();
+
+        // Persons whose name starts with letter > "B" and who DON'T have mbox.
+        // Names without mbox: Alice, Carol, Dave. Names > "B": Carol, Dave.
+        // → 2 rows.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s
+                  WHERE { ?s foaf:name ?n
+                          MINUS { ?s foaf:mbox ?m }
+                          FILTER(REGEX(?n, \"^[C-Z]\")) }'
              )",
         )
         .unwrap()

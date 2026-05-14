@@ -123,7 +123,13 @@ fn walk(
             walk(left, vars, bgp, unsupported);
             walk(right, vars, bgp, unsupported);
         }
-        GraphPattern::Minus { .. }     => unsupported.push("Minus"),
+        GraphPattern::Minus { left, right } => {
+            // MINUS — supported. Walk both arms so the parser sees
+            // each contributing triple. The executor scopes the
+            // subtraction to shared variables.
+            walk(left, vars, bgp, unsupported);
+            walk(right, vars, bgp, unsupported);
+        }
         GraphPattern::Join { .. }      => unsupported.push("Join (non-BGP)"),
         GraphPattern::Graph { .. }     => unsupported.push("Graph (named graph clause)"),
         GraphPattern::Group { .. }     => unsupported.push("Group (aggregate)"),
@@ -314,9 +320,9 @@ mod tests {
         assert_eq!(v["bgp_pattern_count"], 2);
     }
 
-    /// MINUS is still unsupported.
+    /// MINUS is supported — the parser walks both arms.
     #[pg_test]
-    fn sparql_parse_flags_unsupported_minus() {
+    fn sparql_parse_minus_is_supported() {
         let q = "SELECT ?s WHERE { ?s ?p ?o MINUS { ?s <http://x/a> ?b } }";
         let j: pgrx::JsonB = Spi::get_one_with_args(
             "SELECT pgrdf.sparql_parse($1)",
@@ -327,8 +333,30 @@ mod tests {
         let v = &j.0;
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(
-            unsupported.iter().any(|x| x.as_str() == Some("Minus")),
-            "expected Minus to be flagged, got {unsupported:?}"
+            !unsupported.iter().any(|x| x.as_str() == Some("Minus")),
+            "MINUS should not be flagged anymore, got {unsupported:?}"
+        );
+        assert_eq!(v["bgp_pattern_count"], 2);
+    }
+
+    /// Transitive / quantified property paths (`:a*`, `:a+`, `:a?`,
+    /// inverse, etc.) are still unsupported. Note: simple sequence
+    /// paths (`<a>/<b>`) are desugared by spargebra into a BGP
+    /// chain with fresh blank nodes, so they don't surface as Path.
+    #[pg_test]
+    fn sparql_parse_flags_unsupported_path() {
+        let q = "SELECT ?s ?o WHERE { ?s <http://x/a>* ?o }";
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.sparql_parse($1)",
+            &[q.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        let unsupported = v["unsupported_algebra"].as_array().unwrap();
+        assert!(
+            unsupported.iter().any(|x| x.as_str().is_some_and(|s| s.contains("Path"))),
+            "expected Path to be flagged, got {unsupported:?}"
         );
     }
 

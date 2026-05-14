@@ -6,6 +6,39 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 6 — MINUS
+
+- `pgrdf.sparql` handles `MINUS { ?s :p ?o }` and chained MINUSes.
+  Each block becomes a `WHERE NOT EXISTS (SELECT 1 FROM
+  pgrdf._pgrdf_quads qMIN_K WHERE …)` sub-SELECT, keyed on shared
+  variables between the outer query and the MINUS triple.
+- Per SPARQL spec, MINUS with no shared variables is a no-op —
+  the translator detects this at translation time and emits no
+  SQL for that block (different from OPTIONAL, which always
+  emits a LEFT JOIN).
+- Restriction: each MINUS block must be a single triple pattern
+  (mirrors OPTIONAL's current restriction).
+- Inside UNION branches, MINUS works the same way (scoped to the
+  branch's anchor map).
+- 4 new pg_tests: basic MINUS, no-shared-vars no-op, chained
+  MINUSes, MINUS + outer FILTER + REGEX.
+- Parser walks `GraphPattern::Minus` rather than flagging it.
+  New parser pg_test for the new state + a Path-still-flagged
+  test taking its place (transitive `:a*`, not simple `:a/:b`
+  which spargebra desugars to BGP).
+- `tests/regression/sql/38-sparql-minus.sql` covers 6 query
+  shapes (basic, no-op, chained, with-FILTER, ordered survivor,
+  shared-non-subject-var).
+- `30-sparql-parse.sql` baseline updated: MINUS supported, Path
+  (quantified) is the new unsupported representative.
+- `README.md` pills: 51+18 → 56+19, SPARQL pill adds MINUS.
+- `guide/03-querying.md` gains a MINUS section covering the
+  shared-vars-vs-no-op rule and the OPTIONAL-asymmetry note.
+
+Test bar:
+  pg_test:    56 passed; 0 failed  (was 51)
+  regression: 19 passed; 0 failed  (was 18)
+
 ### Phase 3 step 5 — UNION
 
 - `pgrdf.sparql` handles `{ A } UNION { B }` and chained
