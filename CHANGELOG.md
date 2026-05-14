@@ -24,6 +24,21 @@ prefix `load_turtle: failed to open` (from
 prefix to decide retry-vs-escalate; a silent rename would break
 those callers without any pgRDF-side test firing.
 
+Locks #65 of the countdown: a syntactically invalid `base_iri`
+argument must surface the prefix `load_turtle: invalid base IRI`
+(from `src/storage/loader.rs::ingest_turtle_with_stats`'s
+`with_base_iri().unwrap_or_else(...)`). The check fires through
+`pgrdf.parse_turtle('...', 9982, 'not an iri at all')` — using
+`parse_turtle` keeps the regression file fixture-free while
+exercising the same shared ingest path. The panic message is
+prefixed `load_turtle:` even when triggered via `parse_turtle`;
+that cross-UDF prefix invariance is itself part of the contract
+(downstream callers route on one substring regardless of which
+UDF parses the Turtle). Empty-string `base_iri` continues to
+short-circuit before `with_base_iri()` runs, so callers can
+safely pass `''` to mean "no base"; only a non-empty value that
+fails oxiri's IRI grammar trips the prefix.
+
 Test bar: **93 pgrx + 34 pg_regress + 23 W3C-shape + 3 LUBM-shape
 = 153 tests**, green locally.
 

@@ -18,9 +18,10 @@
 -- ... END;` so the captured baseline is a clean boolean (`t` =
 -- expected substring present in SQLERRM); the volatile tail isn't.
 --
--- One check per commit. This commit locks #66 of the 66 → 1
--- countdown toward v0.3.0:
---   error-66 load_turtle missing file → 'load_turtle: failed to open'
+-- One check per commit. This file accretes locked rows as the
+-- 66 → 1 countdown toward v0.3.0 progresses:
+--   error-66 load_turtle missing file    → 'load_turtle: failed to open'
+--   error-65 load_turtle invalid base IRI → 'load_turtle: invalid base IRI'
 
 DROP EXTENSION IF EXISTS pgrdf CASCADE;
 CREATE EXTENSION pgrdf;
@@ -68,6 +69,29 @@ SELECT _check_error(
   'error-66 load_turtle missing file',
   'SELECT * FROM pgrdf.load_turtle(''/nonexistent/path/i/promise.ttl'', 9981);',
   'load_turtle: failed to open'
+);
+
+-- ─── Error 65: load_turtle invalid base IRI ──────────────────────
+-- `src/storage/loader.rs::ingest_turtle_with_stats` (shared by both
+-- `load_turtle` and `parse_turtle`) calls `parser.with_base_iri(base)`
+-- and `unwrap_or_else` panics with the literal prefix
+-- `load_turtle: invalid base IRI` followed by the bad value Debug-
+-- formatted and the underlying oxiri Display. The prefix says
+-- `load_turtle:` regardless of which UDF triggered it — that name
+-- IS the locked contract surface; the tail (oxiri's specific
+-- complaint, e.g. `Invalid IRI code point ' '`) is informational.
+--
+-- We trigger via `parse_turtle` (not `load_turtle`) so the test does
+-- not depend on a fixture file; the panic prefix is identical
+-- because both UDFs route through the same ingest function.
+-- Empty-string base_iri is filtered out before `with_base_iri` is
+-- called (see `loader.rs` `.filter(|s| !s.is_empty())`), so the bad
+-- value must be syntactically invalid yet non-empty —
+-- `'not an iri at all'` (whitespace + no scheme) fits.
+SELECT _check_error(
+  'error-65 load_turtle invalid base IRI',
+  $$SELECT pgrdf.parse_turtle('@prefix ex: <http://e/> . ex:a ex:b ex:c .', 9982, 'not an iri at all')$$,
+  'load_turtle: invalid base IRI'
 );
 
 DROP FUNCTION _check_error(TEXT, TEXT, TEXT);
