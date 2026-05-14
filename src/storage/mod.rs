@@ -6,3 +6,5 @@
 pub mod dict;
 pub mod hexastore;
 pub mod loader;
+pub mod shmem_cache;
+pub mod stats;

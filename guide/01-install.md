@@ -100,6 +100,7 @@ SELECT extversion FROM pg_extension                -- matches the tarball you fe
  WHERE extname = 'pgrdf';
 SHOW shared_preload_libraries;                     -- contains 'pgrdf'
 SELECT pgrdf.version();                            -- → '0.2.0'
+SELECT pgrdf.stats() -> 'shmem_ready';             -- → true (preload OK)
 ```
 
 If any of these don't match, the most common causes are:
@@ -108,7 +109,11 @@ If any of these don't match, the most common causes are:
    `CREATE EXTENSION` errors with "could not load library ...
    undefined symbol". Fix: re-download the right `pg<N>` tarball.
 2. `shared_preload_libraries` not set / Postgres not restarted.
-   Symptom: `pgrdf must be loaded via shared_preload_libraries`.
+   Symptom: `pgrdf.stats() -> 'shmem_ready'` returns `false`. The
+   extension still works (CRUD, SPARQL, Turtle ingest), but the
+   shmem dict cache from LLD §4.1 is disabled and every dictionary
+   touch hits the table. Fix: add `pgrdf` to
+   `shared_preload_libraries`, restart Postgres.
 3. Container is alpine-based, not bookworm. Symptom:
    `not a dynamic executable`. Fix: switch to `postgres:<N>-bookworm`.
 

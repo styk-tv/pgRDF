@@ -15,6 +15,19 @@ pub mod query;
 pub mod storage;
 pub mod validation;
 
+/// Postgres entrypoint. Runs once per process: in the postmaster
+/// when `pgrdf` is in `shared_preload_libraries` (the supported
+/// production deployment), or lazily in a backend on first extension
+/// use. Only the postmaster path can register shmem hooks — see
+/// `storage::shmem_cache`.
+#[pg_guard]
+pub extern "C-unwind" fn _PG_init() {
+    let in_postmaster = unsafe { pgrx::pg_sys::process_shared_preload_libraries_in_progress };
+    if in_postmaster {
+        storage::shmem_cache::init_in_postmaster();
+    }
+}
+
 /// Returns the extension version. Smoke surface used by the install
 /// verification: `SELECT pgrdf.version();` should return the version
 /// declared in `Cargo.toml`.
@@ -39,7 +52,10 @@ mod tests {
 #[cfg(test)]
 pub mod pg_test {
     pub fn setup(_options: Vec<&str>) {}
+    /// Force the test instance to load `pgrdf` via shared_preload_libraries
+    /// so `_PG_init` runs in postmaster context — required for the shmem
+    /// dict cache (LLD §4.1) to register its hooks.
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec![]
+        vec!["shared_preload_libraries='pgrdf'"]
     }
 }

@@ -6,6 +6,58 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 1 — shmem dict cache (LLD §4.1)
+
+- `src/storage/shmem_cache.rs`: process-wide, cross-backend
+  dictionary cache backed by `pgrx::PgLwLock<[Slot; 16_384]>` (~512
+  KiB shmem). Slot carries a u128 fingerprint (two SipHash variants)
+  plus dict_id + generation. Open-addressed with 8-deep linear
+  probing; canonical-slot eviction on full streak.
+- `_PG_init` gates `pg_shmem_init!` on
+  `pg_sys::process_shared_preload_libraries_in_progress` so hook
+  registration only happens in the postmaster scan. Lazy-loaded
+  backends short-circuit every lookup and fall back to the per-call
+  HashMap path. Compose already sets
+  `shared_preload_libraries=pgrdf`; the pgrx-test harness's
+  `postgresql_conf_options` now does too.
+- `put_term_full` consults shmem before SELECT. On both SELECT-hit
+  and INSERT it **stages** the (key → dict_id) mapping in a
+  per-backend pending list; pgrx's `register_xact_callback` flushes
+  to shmem on `XACT_EVENT_COMMIT` and discards on
+  `XACT_EVENT_ABORT`. The deferred publish keeps shmem in lockstep
+  with the dictionary table — a rolled-back INSERT never leaves an
+  orphan id in the cache.
+- `pgrdf.stats() -> JSONB` exposes cumulative shmem counters
+  (`shmem_ready`, `shmem_slots`, `shmem_hits`, `shmem_misses`,
+  `shmem_inserts`, `shmem_evictions`) — observability target for
+  the LLD §4.1 acceptance criterion.
+- `pgrdf.shmem_reset() -> void` atomically bumps a shmem
+  generation counter so every previously-cached entry reads as
+  cold on next lookup. Required after
+  `DROP EXTENSION pgrdf; CREATE EXTENSION pgrdf;` (the dict id
+  space resets but the cache survives) — also useful in regression
+  setup. Slot generation is part of the slot record; mismatch on
+  lookup is silent and equivalent to a miss.
+- Per-call `load_turtle_verbose` stats gain `shmem_cache_hits` —
+  the count of term references that fell through the per-call
+  HashMap and were satisfied by the cross-backend shmem cache
+  without touching `_pgrdf_dictionary`. Loader snapshots the
+  global HITS counter around each `put_term_full` call to
+  attribute hits.
+- **Perf regression**: new `tests/regression/sql/50-shmem-dict-cache.sql`
+  loads `fixtures/regression/synth-100.ttl` (100 triples, 115
+  distinct terms) three times into successive graphs and asserts:
+  load 1 has 115 db calls + 0 shmem hits; loads 2–3 have 0 db
+  calls + 115 shmem hits each. Cumulative counter deltas asserted
+  via `pgrdf.stats()` ≥ 230 shmem hits / ≥ 115 inserts vs pre-test
+  snapshot. **All expected values hand-computed**, never
+  autobaselined.
+- 6 new pgrx integration tests cover the cache primitive
+  (`shmem_ready_in_test`, `shmem_roundtrip_via_committed`,
+  `shmem_disambiguates_keys`, `shmem_datatype_in_key`,
+  `shmem_counters_advance`, `shmem_reset_invalidates_slots`).
+- Test bar: **85 → 86 pgrx + 25 → 26 regression** tests, all green.
+
 ### LLD v0.3 — Refocus
 
 - [`specs/SPEC.pgRDF.LLD.v0.3.md`](specs/SPEC.pgRDF.LLD.v0.3.md)

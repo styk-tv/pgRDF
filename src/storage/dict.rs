@@ -1,9 +1,13 @@
 //! Dictionary CRUD.
 //!
-//! Phase 2.0: SPI-backed put / get with at-write dedup. The shmem
-//! cache from LLD §4.1 lands in Phase 2.1; this layer is the on-disk
-//! truth it sits in front of.
+//! Phase 2.0: SPI-backed put / get with at-write dedup.
+//! Phase 3 step 1: every `put_term_full` first consults the process-
+//! wide shmem cache (LLD §4.1). On hit it returns immediately, never
+//! touching the table. On miss it falls through to SELECT (warm
+//! shmem with the committed id), then INSERT (stage the new id for
+//! shmem publication on commit).
 
+use crate::storage::shmem_cache;
 use pgrx::prelude::*;
 
 /// Term-type discriminator. Matches `_pgrdf_dictionary.term_type` (SMALLINT)
@@ -28,6 +32,10 @@ pub(crate) fn put_term_full(
     datatype_id: Option<i64>,
     language: Option<&str>,
 ) -> i64 {
+    // Phase 3 step 1: shmem cache hit avoids both SELECT and INSERT.
+    if let Some(id) = shmem_cache::lookup(term_type, value, datatype_id, language) {
+        return id;
+    }
     let existing: Option<i64> = Spi::get_one_with_args(
         "SELECT (
             SELECT id FROM pgrdf._pgrdf_dictionary
@@ -45,9 +53,15 @@ pub(crate) fn put_term_full(
     )
     .expect("put_term_full: select failed");
     if let Some(id) = existing {
+        // SELECT hit. Stage rather than publish-immediately: in a
+        // write transaction the row we just found may have been
+        // INSERTed by THIS txn and could still be rolled back. The
+        // commit-deferred publish keeps shmem in lockstep with the
+        // dictionary table.
+        shmem_cache::stage_for_commit(term_type, value, datatype_id, language, id);
         return id;
     }
-    Spi::get_one_with_args(
+    let id: i64 = Spi::get_one_with_args(
         "INSERT INTO pgrdf._pgrdf_dictionary
             (term_type, lexical_value, datatype_iri_id, language_tag)
          VALUES ($1, $2, $3, $4) RETURNING id",
@@ -59,7 +73,12 @@ pub(crate) fn put_term_full(
         ],
     )
     .expect("put_term_full: insert failed")
-    .expect("put_term_full: INSERT … RETURNING returned no row")
+    .expect("put_term_full: INSERT … RETURNING returned no row");
+    // INSERT path: row is still in-flight. Stage the mapping for
+    // shmem publication on COMMIT — on ABORT it is silently dropped
+    // so we never publish ids that don't survive in the table.
+    shmem_cache::stage_for_commit(term_type, value, datatype_id, language, id);
+    id
 }
 
 /// Insert a simple term (no datatype, no language tag) and return its

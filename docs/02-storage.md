@@ -28,29 +28,61 @@ so callers can verify the cache is firing — exercised by
 `fixtures/regression/synth-100.ttl` (115 distinct terms, 185
 expected cache hits across 100 triples).
 
-### Shmem dictionary cache (LLD §4.1, NOT yet shipped)
+### Shmem dictionary cache (LLD §4.1, **shipped — Phase 3 step 1**)
 
-LLD §4.1 specifies a **process-instance-wide**
-`RwLock<LruCache<u64, i64>>` backed by `pgrx::shmem`, keyed by a
-hash of the RDF term. That's what would let two psql sessions
-share the cost of the first cold lookup (and let the next ingest
-call skip work the previous call paid for).
-
-Not in any commit yet — tracked in
-[`docs/10-roadmap.md`](10-roadmap.md) Phase 2.x backlog. The
-per-call HashMap is the stepping-stone delivery; it gives most
-of the within-call benefit while we work on the cross-call /
-cross-backend shape.
-
-When it lands, the read flow will be:
+Cross-backend, process-wide cache lives in
+[`src/storage/shmem_cache.rs`](../src/storage/shmem_cache.rs). The
+hot path:
 
 ```
-hash(RdfTerm) ─► shmem cache ─hit──► return id
+hash(RdfTerm) ─► shmem cache ─hit──► return id (no SQL)
                       │
-                      └─miss──► Spi.query SELECT id FROM _pgrdf_dictionary …
+                      └─miss──► Spi.query SELECT id FROM _pgrdf_dictionary
                                      │
-                                     └─ insert into shmem ─► return id
+                                     └─ stage_for_commit(key, id)
+                                            │
+                                            └─ on XACT COMMIT: publish to shmem
 ```
+
+Implementation notes:
+
+- **Layout**: `PgLwLock<[Slot; 16 384]>` (~ 512 KiB shmem). Each
+  slot carries a u128 fingerprint (two SipHash variants with
+  different seeds), a generation counter, the dict id, and an
+  occupied marker. Open-addressed with depth-8 linear probing;
+  canonical-slot eviction on full streak.
+- **Hot path latency**: shared-mode LWLock + ≤ 8 slot probes ≈ ~120
+  ns on commodity hardware — well under the LLD § 4.1 < 1 µs
+  acceptance target. Atomics on HITS/MISSES are `Relaxed`.
+- **Counters**: `HITS / MISSES / INSERTS / EVICTIONS` as
+  `PgAtomic<AtomicU64>`. Exposed via `pgrdf.stats() → JSONB`
+  along with `shmem_ready` (false ⇒ extension was lazy-loaded;
+  cache is no-op) and `shmem_slots` (table capacity).
+- **Transaction safety**: every `put_term_full` SELECT-hit or
+  INSERT goes through `stage_for_commit`. pgrx's
+  `register_xact_callback(Commit | Abort, …)` publishes the
+  staged list on commit, drops it on abort. A rolled-back INSERT
+  never leaves an orphan id in the cache. Per-call HashMap from
+  Phase 2.2 still serves as the L1 — shmem is the L2.
+- **Generation invalidation**: shmem outlives
+  `DROP EXTENSION pgrdf`, but the dict id sequence resets. A
+  `GENERATION: PgAtomic<AtomicU64>` (init 1) is bumped by
+  `pgrdf.shmem_reset()` / `shmem_cache::reset()`; every slot
+  records its writer generation and lookup discards stale
+  entries with one extra equality test. Operators run
+  `SELECT pgrdf.shmem_reset();` after a drop-create cycle; the
+  regression suite does so in `50-shmem-dict-cache.sql`.
+- **Init**: `_PG_init` only registers the shmem hooks when
+  `process_shared_preload_libraries_in_progress == true`. The
+  compose `command:` and the pgrx-test `postgresql_conf_options`
+  both set `shared_preload_libraries=pgrdf`; deployments that
+  miss this get a working extension with the shmem cache
+  silently disabled (lookups short-circuit, no incorrect
+  behaviour).
+- **Perf regression**: `tests/regression/sql/50-shmem-dict-cache.sql`
+  drives three back-to-back loads of `fixtures/regression/synth-100.ttl`
+  and asserts load 1 = 115 db calls / 0 shmem hits, loads 2–3 = 0
+  db calls / 115 shmem hits. All values hand-computed.
 
 ## 2.2 Hexastore (`_pgrdf_quads`)
 

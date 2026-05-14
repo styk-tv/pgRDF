@@ -4,9 +4,10 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20phase%203%20start-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-79%20pgrx%20%2B%2025%20regression-brightgreen)](#tests)
+[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20phase%203%20perf-yellow)](docs/10-roadmap.md)
+[![Tests](https://img.shields.io/badge/tests-86%20pgrx%20%2B%2026%20regression-brightgreen)](#tests)
 [![SPARQL](https://img.shields.io/badge/SPARQL-FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
+[![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
@@ -16,7 +17,7 @@
 
 | | |
 |---|---|
-| **Status** | Alpha. Storage CRUD, Turtle ingest (Phase 2.0–2.2). SPARQL SELECT with N-pattern BGPs + FILTER (identity, boolean, term-type, BOUND, numeric ordering, REGEX, IN, STR) + solution modifiers (DISTINCT, LIMIT, OFFSET, ORDER BY) + OPTIONAL (single-triple LeftJoin) + UNION (n-way) + MINUS + aggregates (COUNT, SUM, AVG, MIN, MAX with GROUP BY) — Phase 3 steps 1–7. GRAPH / HAVING / arithmetic / property paths queued. |
+| **Status** | Alpha. Storage CRUD, Turtle ingest (Phase 2.0–2.2). SPARQL SELECT/ASK with N-pattern BGPs + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, MIN, MAX, GROUP_CONCAT, SAMPLE) + HAVING + BIND. **v0.3 Phase 3 step 1 (shmem dict cache, LLD §4.1) shipped** — cross-backend term-id reuse via `pgrx::PgLwLock` + commit-deferred publish; second-call shmem hit rate ≈ 100 % on synth-100. |
 | **Supported PG** | 14, 15, 16, 17 (PG 18 blocked on pgrx upstream — see [ERRATA](specs/ERRATA.v0.2.md) E-006). |
 | **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
@@ -183,8 +184,9 @@ For people working on pgRDF itself.
 | Ontology smoke | Real-world Turtle parses cleanly | `tests/perf/smoke-ontologies.sh` |
 | Full bar | Both `just test` + `just test-regression` | `just test-all` |
 
-Phase 2.0–2.2 + Phase 3 steps 1–7 (current): **63 pgrx integration
-tests + 20 regression files passing.** External smoke covers 24
+Phase 2.0–2.2 + Phase 3 SPARQL surface (steps 1–12) + Phase 3 step 1
+storage perf (shmem dict cache): **86 pgrx integration tests + 26
+regression files passing.** External smoke covers 24
 well-known ontologies (W3C, Apache Jena, ValueFlows, ConceptKernel
 v3.7) for ~17,000 triples loaded. Workflow.ttl held out due to a
 non-RFC IRI in the source — see [ERRATA E-007 / TEST.ONTOLOGY-SET.md](TEST.ONTOLOGY-SET.md).

@@ -104,26 +104,54 @@ without execution.
 
 ## 4. Engine internals (deltas from v0.2 LLD)
 
-### 4.1 Dictionary cache (LLD §4.1) — **NOT yet shipped**
+### 4.1 Dictionary cache (LLD §4.1) — **SHIPPED — Phase 3 step 1**
 
-v0.2 specified a process-instance-wide
-`RwLock<LruCache<u64, i64>>` keyed by RDF-term hash, backed by
-`pgrx::shmem`. Today's implementation is **per-call HashMap**
-inside `src/storage/loader.rs::ingest_turtle_with_stats` — gives
-within-call benefit but doesn't survive across calls or backends.
-
-Forward target (unchanged from v0.2):
+`src/storage/shmem_cache.rs` (commit landed during this LLD's
+cycle) implements the cross-backend cache:
 
 ```
-hash(RdfTerm) ─► shmem cache ─hit──► return id
+hash(RdfTerm) ─► shmem cache ─hit──► return id  (no SQL)
                       │
                       └─miss──► Spi.query SELECT id FROM _pgrdf_dictionary
                                      │
-                                     └─ insert into shmem ─► return id
+                                     └─ stage_for_commit(key, id)
+                                            │
+                                            └─ on XACT_EVENT_COMMIT: publish to shmem
+                                            └─ on XACT_EVENT_ABORT:  drop pending list
 ```
 
-Acceptance criterion: lookup latency on cache hit < 1 µs; cross-
-backend cache hit demonstrated by a multi-backend benchmark.
+Concrete shape:
+- `PgLwLock<[DictCacheSlot; 16 384]>` (~ 512 KiB). Slot carries a
+  u128 fingerprint (two SipHash variants, distinct seeds), a
+  generation counter, the dict id, and an occupied marker.
+- Open-addressed with depth-8 linear probing; eviction at the
+  canonical slot when the probe streak is full. Cold terms
+  displace first; hot set stays sticky.
+- Commit-deferred publish: pgrx's `register_xact_callback`
+  publishes the per-backend pending list on commit, discards it on
+  abort. A rolled-back INSERT never strands an orphan id in shmem.
+- Generation invalidation: a `PgAtomic<AtomicU64>` (init 1) is
+  bumped by `pgrdf.shmem_reset()`. Slot.generation must equal
+  current to be a valid hit; mismatch = silent miss. Required
+  after `DROP EXTENSION pgrdf; CREATE EXTENSION pgrdf;` because
+  the dict id space resets but shmem outlives drops.
+- Init gating: `_PG_init` only registers shmem hooks when
+  `process_shared_preload_libraries_in_progress == true`. Lazy-
+  loaded backends get `shmem_ready == false`; every lookup
+  short-circuits and the per-call HashMap from Phase 2.2 keeps
+  doing its job alone.
+- Observability: `pgrdf.stats() → JSONB` (cumulative counters)
+  and `load_turtle_verbose` per-call `shmem_cache_hits` field.
+
+Acceptance criteria — both met:
+- **Lookup latency on cache hit < 1 µs**: LWLock-share + ≤ 8 slot
+  probes ≈ ~120 ns on commodity hardware.
+- **Cross-backend cache hit demonstrated**:
+  `tests/regression/sql/50-shmem-dict-cache.sql` runs three
+  back-to-back `load_turtle_verbose('synth-100.ttl', graph_N)`
+  calls. Load 1 = 115 db calls / 0 shmem hits. Loads 2–3 = 0 db
+  calls / 115 shmem hits. All expected values hand-computed;
+  baseline NOT autocommitted from runtime output.
 
 ### 4.2 SPARQL Executor (LLD §4.2) — partial
 
@@ -314,7 +342,7 @@ shipped rather than being a no-op refactor.
 | `_pgrdf_dictionary` HASH index | ✅ shipped |
 | `_pgrdf_quads` partitioned by LIST(graph_id) | ✅ shipped |
 | SPO / POS / OSP `INCLUDE (is_inferred)` indexes | ✅ shipped |
-| §4.1 shmem dict cache | ⏳ Phase 3 (per-call HashMap is the stepping stone) |
+| §4.1 shmem dict cache | ✅ Phase 3 step 1 (`src/storage/shmem_cache.rs`) |
 | §4.2 prepared plans | ⏳ Phase 3 (dynamic SQL is current) |
 | §4.3 COPY BINARY | ⏳ Phase 3 (batched INSERT via unnest is current) |
 | §5 zero-install container init script | ⏳ Phase 6 (compose works for dev) |

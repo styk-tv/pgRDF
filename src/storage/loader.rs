@@ -11,11 +11,17 @@
 //!     $3::bigint[])` — one SPI call per BATCH_SIZE tuples instead
 //!     of one per triple.
 //!
+//! Phase 3 step 1: every fall-through to `put_term_full` first checks
+//! the cross-backend shmem cache from `super::shmem_cache`. The
+//! loader observes the global HITS counter around the call to
+//! attribute hits to the current ingest in its verbose stats.
+//!
 //! The COPY ... FROM STDIN (FORMAT BINARY) fast path from
 //! SPEC.pgRDF.LLD.v0.2 §4.3 needs lower-level Postgres integration
-//! than pgrx 0.16 exposes cleanly. Tracked for Phase 3+.
+//! than pgrx 0.16 exposes cleanly. Tracked for Phase 3 step 3.
 
 use crate::storage::dict::{put_term_full, term_type};
+use crate::storage::shmem_cache;
 use oxrdf::{NamedOrBlankNode, Term};
 use oxttl::TurtleParser;
 use pgrx::prelude::*;
@@ -24,6 +30,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::mem;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 /// Quads buffered before each `INSERT ... unnest` flush. 1000 keeps
@@ -38,6 +45,10 @@ struct LoaderStats {
     triples: i64,
     /// Term references that resolved out of the per-call HashMap cache.
     dict_cache_hits: i64,
+    /// Term references that fell through the per-call HashMap and
+    /// were satisfied by the cross-backend shmem cache without
+    /// touching `_pgrdf_dictionary` (LLD §4.1).
+    shmem_cache_hits: i64,
     /// Term references that fell through to `put_term_full` and hit
     /// the underlying _pgrdf_dictionary (either a select-hit or an
     /// insert).
@@ -66,9 +77,26 @@ fn intern_term(
         stats.dict_cache_hits += 1;
         return id;
     }
+    // Snapshot the global shmem-hit counter so we can attribute
+    // hits to this individual put_term_full call. Atomics are
+    // cheap; this stays well under the per-lookup µs budget.
+    let hits_before = if shmem_cache::is_ready() {
+        shmem_cache::HITS.get().load(Ordering::Relaxed)
+    } else {
+        0
+    };
     let id = put_term_full(value, term_type, datatype_id, language);
+    let hits_after = if shmem_cache::is_ready() {
+        shmem_cache::HITS.get().load(Ordering::Relaxed)
+    } else {
+        0
+    };
+    if hits_after > hits_before {
+        stats.shmem_cache_hits += 1;
+    } else {
+        stats.dict_db_calls += 1;
+    }
     cache.insert(key, id);
-    stats.dict_db_calls += 1;
     id
 }
 
@@ -195,11 +223,12 @@ fn ingest_turtle_with_stats<R: Read>(
 
 fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
     pgrx::JsonB(json!({
-        "triples":         stats.triples,
-        "dict_cache_hits": stats.dict_cache_hits,
-        "dict_db_calls":   stats.dict_db_calls,
-        "quad_batches":    stats.quad_batches,
-        "elapsed_ms":      stats.elapsed_ms,
+        "triples":          stats.triples,
+        "dict_cache_hits":  stats.dict_cache_hits,
+        "shmem_cache_hits": stats.shmem_cache_hits,
+        "dict_db_calls":    stats.dict_db_calls,
+        "quad_batches":     stats.quad_batches,
+        "elapsed_ms":       stats.elapsed_ms,
     }))
 }
 
@@ -362,9 +391,14 @@ mod tests {
         let v = &j.0;
         assert_eq!(v["triples"], 3);
         // 3 triples × 3 terms each = 9 references; 5 distinct
-        // (s, p, o1, o2, o3) -> 5 DB calls and 4 cache hits.
-        assert_eq!(v["dict_db_calls"], 5);
+        // (s, p, o1, o2, o3) -> 5 fall-throughs and 4 hashmap hits.
+        // Of the 5 fall-throughs every shmem-vs-db split is allowed
+        // (depends on prior tests in this postmaster), so only the
+        // sum is invariant.
         assert_eq!(v["dict_cache_hits"], 4);
+        let shmem_hits = v["shmem_cache_hits"].as_i64().unwrap();
+        let db_calls = v["dict_db_calls"].as_i64().unwrap();
+        assert_eq!(shmem_hits + db_calls, 5);
         assert_eq!(v["quad_batches"], 1);
     }
 }

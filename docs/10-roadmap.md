@@ -94,13 +94,14 @@ end-to-end; ingestion is fast enough to load real-world ontologies.
       `docs/` (engineering plan) + `guide/` (user docs).
 - ✅ 4 client integration guides: Python, Rust, Node/TypeScript, Go.
 
-**Not yet shipped at this phase boundary** (Phase 2.x backlog):
-- ⏳ **Shmem dictionary cache (LLD §4.1)** — `pgrx::shmem` +
-      `RwLock<LruCache<u64, i64>>` keyed by RdfTerm hash. The
-      per-call HashMap pays for itself within a single ingest call
-      but doesn't survive across calls or backends. Shipping this
-      is the highest-leverage performance work remaining; expected
-      cache-hit latency target is < 1 µs.
+**Phase 3 storage-perf status (v0.3 LLD):**
+- ✅ **Shmem dictionary cache (LLD §4.1)** — `PgLwLock<[Slot; 16 384]>`
+      cross-backend cache with u128 fingerprint, commit-deferred
+      publish, generation invalidation. Per-call
+      `load_turtle_verbose.shmem_cache_hits` and cumulative
+      `pgrdf.stats()` counters; regression
+      `50-shmem-dict-cache.sql` asserts 100 % shmem hit rate on the
+      second load of `synth-100.ttl`.
 - ⏳ **Prepared-plan cache (LLD §4.2)** — `Spi::prepare` + algebra-hash
       keyed cache. Today the executor builds a dynamic SQL string
       per call and runs `Spi::connect_mut(|c| c.update(...))`.
@@ -222,4 +223,6 @@ phase 3 step table above.
 | Phase 2.1 done | 11 | 7 | + Turtle ingest, regression fixtures |
 | Phase 2.2 done | 21 | 13 | + dict cache, batched ingest, SPARQL parser, BGP-to-SQL, N-pattern BGP joins, user guide |
 | Phase 3 step 6 | 56 | 19 | + FILTER, modifiers, OPTIONAL, UNION, MINUS |
-| Phase 3 step 7 (current) | 63 | 20 | + aggregates (COUNT/SUM/AVG/MIN/MAX + GROUP BY) |
+| Phase 3 step 7 | 63 | 20 | + aggregates (COUNT/SUM/AVG/MIN/MAX + GROUP BY) |
+| Phase 3 steps 8–12 | 79 | 25 | + HAVING, GROUP_CONCAT/SAMPLE, expression richness, BIND, multi-triple MINUS, ASK |
+| v0.3 Phase 3 step 1 (current) | 86 | 26 | + shmem dict cache (LLD §4.1), `pgrdf.stats()`, perf regression `50-shmem-dict-cache.sql` |
