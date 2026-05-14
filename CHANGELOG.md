@@ -6,6 +6,58 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release notes — v0.4 deferral list audit (slice #19)
+
+Bi-directional audit of the "Deferred to v0.4" lists in
+`RELEASE_NOTES.md` and `docs/09-release.md` against
+`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md` §2 (canonical v0.4 scope). The
+spec lists five major tracks (§3 named-graph + IRI mapping; §4 SPARQL
+UPDATE; §5 graph-level lifecycle UDFs; §6 CONSTRUCT; §7 property
+paths) plus the carried SPARQL backlog (§11: multi-triple OPTIONAL,
+VALUES, BIND-downstream, aggregates over UNION, DESCRIBE) and the
+ingest-performance carry (§12: `heap_multi_insert` 2× target).
+
+Drift findings, both directions:
+
+- **`docs/09-release.md` was missing the entire §11 SPARQL backlog** —
+  multi-triple OPTIONAL, VALUES, BIND-downstream, aggregates over
+  UNION, and DESCRIBE were absent from its "Deferred to v0.4" list
+  even though they are listed in `RELEASE_NOTES.md` and named
+  explicitly in the spec as in-scope for v0.4. Fixed by adding a
+  dedicated bullet covering all five, with the LLD §11 cross-link.
+- **`RELEASE_NOTES.md` mentioned `GRAPH { … }` without the IRI
+  mapping** — the IRI ↔ `graph_id` mapping table is the hard
+  prerequisite for the SPARQL surface (LLD §3.1), and `docs/09-release.md`
+  already names it. Fixed by adding "with IRI ↔ `graph_id` mapping"
+  to the named-graph entry plus the property-path operator set, and a
+  `§2` anchor on the LLD cross-link for parity with `docs/09-release.md`.
+- **No v0.5/v1.0 items mislabeled as v0.4** — the LLD's §8
+  (reasoning profile selector), §9 (real SHACL output, gated on
+  E-009), §10 (TriG / N-Quads ingest), and §15 (incremental
+  materialisation, RDF 1.2 triple terms) are correctly absent from
+  both consumer-facing files. A short pointer paragraph added to
+  `docs/09-release.md` so readers know where the v0.5/v1.0 forward
+  look lives (LLD §8-§10 and §15) rather than guessing those items
+  were forgotten.
+- **Items in consumer-facing lists not in LLD §2**: `SHA256SUMS.asc`
+  GPG signature and pgrx 0.18 / PG 18 migration are both legitimate
+  v0.4 work items but are release-engineering and toolchain concerns
+  outside the LLD scope (tracked under INSTALL OQ4 / roadmap Phase 6
+  step 3, and ERRATA E-006 respectively). Annotated as such in
+  `docs/09-release.md`; left in place in both files because they're
+  user-visible v0.4 deliverables consumers should see in release
+  notes.
+- **Cross-link anchors**: both files link to the LLD doc top (no
+  in-document anchor); the file resolves on disk. Added an explicit
+  `§2` reference in both prose pointers so a future reader can find
+  the canonical scope section without scrolling.
+
+Outcome: drift closed in both directions. `RELEASE_NOTES.md`'s
+"Deferred to v0.4" line now reads parallel to the LLD §2 capability
+matrix; `docs/09-release.md` no longer drops the SPARQL backlog. No
+spec edits; the LLD remains source of truth. This audit slice is
+documentation-only — no code, no tests, no other docs touched.
+
 ### Release notes — known issues block consolidated (slice #20)
 
 Cross-file audit of the Known Issues surface across `RELEASE_NOTES.md`,

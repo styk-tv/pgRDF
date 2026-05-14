@@ -168,19 +168,32 @@ See [`specs/ERRATA.v0.2.md`](../specs/ERRATA.v0.2.md):
 ### Deferred to v0.4
 
 See
-[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).
-Highlights:
+[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)
+§2 for the canonical scope. Highlights:
 
 - Named-graph scoping (`GRAPH { … }`) with an IRI ↔ `graph_id`
-  mapping table.
-- SPARQL UPDATE including graph-scoped variants.
-- Graph-level lifecycle UDFs over the LIST-partitioned quads table.
-- `CONSTRUCT` returning triple-shaped JSONB rows.
-- Property paths (`*` / `+` / `?` / `^`) beyond simple sequences.
+  mapping table (LLD §3).
+- SPARQL UPDATE including graph-scoped variants (LLD §4).
+- Graph-level lifecycle UDFs over the LIST-partitioned quads table
+  (LLD §5).
+- `CONSTRUCT` returning triple-shaped JSONB rows (LLD §6).
+- Property paths (`*` / `+` / `?` / `^`) beyond simple sequences
+  (LLD §7).
+- SPARQL surface backlog carried from v0.3: multi-triple `OPTIONAL`,
+  `VALUES` inline tables, `BIND`-output usable downstream of FILTER,
+  aggregates over `UNION`, and `DESCRIBE` (LLD §11).
 - `heap_multi_insert` / `COPY BINARY` ingestion (LLD §4.3 phase B,
-  to meet the 2× wall-clock bar).
-- `SHA256SUMS.asc` GPG signature for release artifacts.
-- pgrx 0.18 migration + PG 18 in the build matrix.
+  to meet the 2× wall-clock bar; LLD §12).
+- `SHA256SUMS.asc` GPG signature for release artifacts (release
+  engineering — not in LLD §2, tracked under INSTALL OQ4 / roadmap
+  Phase 6 step 3).
+- pgrx 0.18 migration + PG 18 in the build matrix (ERRATA E-006 —
+  not in LLD §2, tracked via the v0.3 errata block above).
+
+v0.5 / v1.0 forward look (reasoning-profile selector, real SHACL
+output once E-009 clears, TriG / N-Quads ingest, incremental
+materialisation, RDF 1.2 triple terms) lives in the LLD's §8-§10
+and §15 and is not duplicated here.
 
 ## The matrix
 

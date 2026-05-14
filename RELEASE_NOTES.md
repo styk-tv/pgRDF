@@ -61,7 +61,7 @@ See [`specs/ERRATA.v0.2.md`](specs/ERRATA.v0.2.md) for the full text.
 
 ## Deferred to v0.4
 
-Named-graph `GRAPH { … }`, SPARQL UPDATE, graph lifecycle UDFs, CONSTRUCT, property paths, multi-triple OPTIONAL, VALUES, BIND-downstream, aggregates over UNION, DESCRIBE, `heap_multi_insert` (2× ingest target). See [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).
+Named-graph `GRAPH { … }` with IRI ↔ `graph_id` mapping, SPARQL UPDATE (including graph-scoped variants), graph-level lifecycle UDFs, CONSTRUCT, property paths (`*` / `+` / `?` / `^`), multi-triple OPTIONAL, VALUES, BIND-downstream, aggregates over UNION, DESCRIBE, `heap_multi_insert` (2× ingest target). See [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §2.
 
 ## Upgrading
 
