@@ -40,8 +40,14 @@
 //!   * `ORDER BY ?var` / `ORDER BY ASC(?var)` / `ORDER BY DESC(?var)`
 //!     → ordered lexicographically on the term's `lexical_value`.
 //!     Complex ORDER BY expressions panic.
-//!   * OPTIONAL / UNION / aggregates / paths / VALUES / SERVICE
-//!     remain unsupported.
+//!   * OPTIONAL `{ ?s :p ?o }` — translated to `LEFT JOIN
+//!     pgrdf._pgrdf_quads qOPT_i ON …`. Restriction: each OPTIONAL
+//!     block must be a single triple pattern. Per-block FILTER
+//!     (the SPARQL `OPTIONAL { … FILTER(...) }` form) lands in the
+//!     ON clause, so the row survives with the optional vars NULL
+//!     when the filter rejects.
+//!   * UNION / aggregates / paths / VALUES / SERVICE remain
+//!     unsupported.
 //!
 //! Output shape:
 //!   `SETOF JSONB` — one row per solution, keys = projected variable
@@ -106,6 +112,18 @@ struct ParsedSelect {
     order_by: Vec<(String, bool)>,
     limit: Option<usize>,
     offset: usize,
+    /// Each OPTIONAL block — a single triple pattern plus its
+    /// optional FILTER. Multiple chained OPTIONALs land here in
+    /// left-to-right order; build_bgp_sql emits one LEFT JOIN per.
+    optionals: Vec<OptionalBlock>,
+}
+
+struct OptionalBlock {
+    triple: TriplePattern,
+    /// The filter inside `OPTIONAL { … FILTER(...) }`, if any.
+    /// Translated into the LEFT JOIN's ON clause so rejected rows
+    /// still survive with the optional variables NULL.
+    filter: Option<Expression>,
 }
 
 fn translate(q: &Query) -> ExecPlan {
@@ -182,6 +200,27 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
             ps.filters.push(expr.clone());
             walk_select(inner, ps);
         }
+        GraphPattern::LeftJoin { left, right, expression } => {
+            // Walk the left arm first — it may itself be another
+            // LeftJoin (chained OPTIONALs) or a Filter wrapping a BGP.
+            walk_select(left, ps);
+            // The right arm is the OPTIONAL group. Today only a
+            // single-triple BGP is accepted.
+            let triple = match right.as_ref() {
+                GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns[0].clone(),
+                GraphPattern::Bgp { patterns } => panic!(
+                    "sparql: OPTIONAL today only supports a single triple pattern (got {} triples)",
+                    patterns.len()
+                ),
+                other => panic!(
+                    "sparql: OPTIONAL today only supports a single triple pattern (got {other:?})"
+                ),
+            };
+            ps.optionals.push(OptionalBlock {
+                triple,
+                filter: expression.clone(),
+            });
+        }
         GraphPattern::Bgp { patterns } => {
             ps.bgp = patterns.clone();
         }
@@ -235,21 +274,58 @@ fn build_bgp_sql(ps: &ParsedSelect) -> String {
     /// against this anchor.
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
     let mut where_clauses: Vec<String> = Vec::new();
-    let mut from_aliases: Vec<String> = Vec::with_capacity(ps.bgp.len());
 
+    // ── Mandatory BGP ─────────────────────────────────────────────
+    // Pattern 1 → base FROM. Its predicates land in WHERE.
+    // Patterns 2..N → INNER JOIN qN ON (predicates).
+    let mut from_sql = String::new();
     for (i, tp) in ps.bgp.iter().enumerate() {
         let qi = i + 1;
-        from_aliases.push(format!("pgrdf._pgrdf_quads q{qi}"));
-
-        bind_subject(tp, qi, &mut anchors, &mut where_clauses);
-        bind_predicate(tp, qi, &mut anchors, &mut where_clauses);
-        bind_object(tp, qi, &mut anchors, &mut where_clauses);
+        let mut clauses = pattern_clauses(tp, qi, &mut anchors);
+        if i == 0 {
+            from_sql.push_str(&format!("pgrdf._pgrdf_quads q{qi}"));
+            where_clauses.append(&mut clauses);
+        } else {
+            let on = if clauses.is_empty() {
+                "TRUE".to_string()
+            } else {
+                clauses.join(" AND ")
+            };
+            from_sql.push_str(&format!(
+                " INNER JOIN pgrdf._pgrdf_quads q{qi} ON ({on})"
+            ));
+        }
     }
 
-    // FILTER predicates land after the BGP joins, ANDed onto the
-    // WHERE clause. translate_filter returns None for any expression
-    // shape we don't yet handle — panic in that case rather than
-    // silently dropping the filter (which would over-return rows).
+    // ── OPTIONAL blocks ───────────────────────────────────────────
+    // Each becomes a LEFT JOIN. Anchors collected here are nullable
+    // (when the optional doesn't match); the dict-lookup subselect in
+    // the projection returns NULL → JSONB::Null in the output row.
+    let mut next_qi = ps.bgp.len() + 1;
+    for opt in &ps.optionals {
+        let opt_qi = next_qi;
+        next_qi += 1;
+        let mut clauses = pattern_clauses(&opt.triple, opt_qi, &mut anchors);
+        if let Some(filter_expr) = &opt.filter {
+            let sql = translate_filter(filter_expr, &anchors).unwrap_or_else(|| {
+                panic!("sparql: OPTIONAL FILTER not translatable: {filter_expr:?}")
+            });
+            clauses.push(sql);
+        }
+        let on = if clauses.is_empty() {
+            "TRUE".to_string()
+        } else {
+            clauses.join(" AND ")
+        };
+        from_sql.push_str(&format!(
+            " LEFT JOIN pgrdf._pgrdf_quads q{opt_qi} ON ({on})"
+        ));
+    }
+
+    // ── Outer FILTERs ─────────────────────────────────────────────
+    // FILTER predicates outside any OPTIONAL land in WHERE — they
+    // prune the full join result, including OPTIONAL rows where the
+    // referenced variable might be NULL (NULL comparisons drop).
     for expr in &ps.filters {
         let sql = translate_filter(expr, &anchors).unwrap_or_else(|| {
             panic!("sparql: FILTER expression not translatable: {expr:?}")
@@ -305,9 +381,8 @@ fn build_bgp_sql(ps: &ParsedSelect) -> String {
 
     let distinct_kw = if ps.distinct { "DISTINCT " } else { "" };
     let mut sql = format!(
-        "SELECT {distinct_kw}{sel} FROM {from}",
+        "SELECT {distinct_kw}{sel} FROM {from_sql}",
         sel = select_clauses.join(", "),
-        from = from_aliases.join(", "),
     );
     if !where_clauses.is_empty() {
         sql.push_str(" WHERE ");
@@ -381,11 +456,16 @@ fn translate_filter(
             Some(format!("(NOT ({l}))"))
         }
         Expression::Bound(v) => {
-            // In a pure BGP context every variable is bound on every
-            // row — `BOUND(?v)` is `TRUE` if ?v is bound in the BGP
-            // and `FALSE` if it isn't projected/anchored at all.
+            // For mandatory anchors qN.col is never NULL (INNER join
+            // semantics). For OPTIONAL anchors qOPT_i.col is NULL
+            // when the LEFT JOIN didn't match. Emitting `IS NOT NULL`
+            // is correct in both cases: TRUE for mandatory, distinguishes
+            // matched/unmatched for OPTIONAL. Unknown variable → FALSE.
             let name = v.as_str();
-            Some(if anchors.contains_key(name) { "TRUE".into() } else { "FALSE".into() })
+            match anchors.get(name) {
+                Some(&(alias_idx, col)) => Some(format!("(q{alias_idx}.{col} IS NOT NULL)")),
+                None => Some("FALSE".to_string()),
+            }
         }
         Expression::FunctionCall(func, args) => translate_function_call(func, args, anchors),
         _ => None,
@@ -636,17 +716,34 @@ fn numeric_datatype_id_list() -> String {
     }
 }
 
+/// Process a triple pattern's subject/predicate/object positions
+/// against the anchor map and return the equality predicates it
+/// introduces. Callers route these to either `WHERE` (the first
+/// mandatory pattern) or the `ON` clause of an `INNER JOIN` / `LEFT
+/// JOIN` (every subsequent mandatory or optional pattern).
+fn pattern_clauses(
+    tp: &TriplePattern,
+    qi: usize,
+    anchors: &mut HashMap<String, (usize, &'static str)>,
+) -> Vec<String> {
+    let mut clauses = Vec::new();
+    bind_subject(tp, qi, anchors, &mut clauses);
+    bind_predicate(tp, qi, anchors, &mut clauses);
+    bind_object(tp, qi, anchors, &mut clauses);
+    clauses
+}
+
 fn bind_subject(
     tp: &TriplePattern,
     qi: usize,
     anchors: &mut HashMap<String, (usize, &'static str)>,
-    where_clauses: &mut Vec<String>,
+    clauses: &mut Vec<String>,
 ) {
     match &tp.subject {
-        TermPattern::Variable(v) => bind_var(v.as_str(), qi, "subject_id", anchors, where_clauses),
+        TermPattern::Variable(v) => bind_var(v.as_str(), qi, "subject_id", anchors, clauses),
         TermPattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            where_clauses.push(format!("q{qi}.subject_id = {id}"));
+            clauses.push(format!("q{qi}.subject_id = {id}"));
         }
         TermPattern::BlankNode(_) => {
             panic!("sparql: blank-node subject in query not supported")
@@ -660,15 +757,15 @@ fn bind_predicate(
     tp: &TriplePattern,
     qi: usize,
     anchors: &mut HashMap<String, (usize, &'static str)>,
-    where_clauses: &mut Vec<String>,
+    clauses: &mut Vec<String>,
 ) {
     match &tp.predicate {
         NamedNodePattern::Variable(v) => {
-            bind_var(v.as_str(), qi, "predicate_id", anchors, where_clauses)
+            bind_var(v.as_str(), qi, "predicate_id", anchors, clauses)
         }
         NamedNodePattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            where_clauses.push(format!("q{qi}.predicate_id = {id}"));
+            clauses.push(format!("q{qi}.predicate_id = {id}"));
         }
     }
 }
@@ -677,17 +774,17 @@ fn bind_object(
     tp: &TriplePattern,
     qi: usize,
     anchors: &mut HashMap<String, (usize, &'static str)>,
-    where_clauses: &mut Vec<String>,
+    clauses: &mut Vec<String>,
 ) {
     match &tp.object {
-        TermPattern::Variable(v) => bind_var(v.as_str(), qi, "object_id", anchors, where_clauses),
+        TermPattern::Variable(v) => bind_var(v.as_str(), qi, "object_id", anchors, clauses),
         TermPattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            where_clauses.push(format!("q{qi}.object_id = {id}"));
+            clauses.push(format!("q{qi}.object_id = {id}"));
         }
         TermPattern::Literal(l) => {
             let id = lookup_literal_id(l).unwrap_or(-1);
-            where_clauses.push(format!("q{qi}.object_id = {id}"));
+            clauses.push(format!("q{qi}.object_id = {id}"));
         }
         TermPattern::BlankNode(_) => {
             panic!("sparql: blank-node object in query not supported")
@@ -703,10 +800,10 @@ fn bind_var(
     qi: usize,
     col: &'static str,
     anchors: &mut HashMap<String, (usize, &'static str)>,
-    where_clauses: &mut Vec<String>,
+    clauses: &mut Vec<String>,
 ) {
     if let Some(&(prev_qi, prev_col)) = anchors.get(name) {
-        where_clauses.push(format!("q{qi}.{col} = q{prev_qi}.{prev_col}"));
+        clauses.push(format!("q{qi}.{col} = q{prev_qi}.{prev_col}"));
     } else {
         anchors.insert(name.to_string(), (qi, col));
     }
@@ -1205,6 +1302,147 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2);
+    }
+
+    /// OPTIONAL — bind ?mbox when present, NULL otherwise. Bob has
+    /// foaf:name but no foaf:mbox; we should still see his row with
+    /// `mbox` as JSON null.
+    #[pg_test]
+    fn sparql_optional_simple() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> .
+                 ex:bob   foaf:name \"Bob\"                            .
+                 ex:carol foaf:name \"Carol\" ; foaf:mbox <mailto:c@x> .',
+                8_040)",
+        )
+        .unwrap();
+
+        // 3 people total; LEFT JOIN keeps Bob.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?n ?m
+                  WHERE { ?s foaf:name ?n
+                          OPTIONAL { ?s foaf:mbox ?m } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 3, "expected 3 rows (Alice, Bob, Carol), got {rows}");
+
+        // Bob's row has ?m as NULL.
+        let rows_with_null_mbox: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?n ?m
+                  WHERE { ?s foaf:name ?n
+                          OPTIONAL { ?s foaf:mbox ?m } }'
+             ) WHERE sparql->'m' = 'null'::jsonb",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows_with_null_mbox, 1);
+    }
+
+    /// OPTIONAL with FILTER inside — Bob's missing mbox stays NULL;
+    /// the filter only prunes the OPTIONAL match, not the row itself.
+    #[pg_test]
+    fn sparql_optional_with_inner_filter() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:x . ex:a ex:age 25 .
+                 ex:b ex:p ex:y . ex:b ex:age 35 .
+                 ex:c ex:p ex:z .',
+                8_041)",
+        )
+        .unwrap();
+
+        // 3 ?s ?p ?o rows; OPTIONAL ages with filter `?age >= 30`
+        // only adds the b->35 binding. a's age (25) doesn't match
+        // → ?age NULL on a. c has no age at all → ?age NULL on c.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?o ?age
+                  WHERE { ?s <http://example.com/p> ?o
+                          OPTIONAL { ?s <http://example.com/age> ?age FILTER(?age >= 30) } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 3);
+
+        // Only one row should have a non-null age (b=35).
+        let rows_with_age: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?o ?age
+                  WHERE { ?s <http://example.com/p> ?o
+                          OPTIONAL { ?s <http://example.com/age> ?age FILTER(?age >= 30) } }'
+             ) WHERE sparql->'age' != 'null'::jsonb",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows_with_age, 1);
+    }
+
+    /// Multiple chained OPTIONALs — each becomes its own LEFT JOIN.
+    /// Alice has both extras, Bob has none.
+    #[pg_test]
+    fn sparql_optional_chained() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> ; foaf:age 30 .
+                 ex:bob   foaf:name \"Bob\"   .',
+                8_042)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?n ?m ?a
+                  WHERE { ?s foaf:name ?n
+                          OPTIONAL { ?s foaf:mbox ?m }
+                          OPTIONAL { ?s foaf:age  ?a } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2, "Alice and Bob, both rows survive LEFT JOINs");
+    }
+
+    /// OPTIONAL combined with outer FILTER. The outer filter prunes
+    /// rows where the OPTIONAL var is NULL.
+    #[pg_test]
+    fn sparql_optional_with_outer_filter() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:x . ex:a ex:q ex:y .
+                 ex:b ex:p ex:x .',
+                8_043)",
+        )
+        .unwrap();
+
+        // Without the outer filter: a + b both come back (LEFT JOIN
+        // preserves b). With outer FILTER(BOUND(?r)) → only a.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s ?r
+                  WHERE { ?s <http://example.com/p> ?o
+                          OPTIONAL { ?s <http://example.com/q> ?r }
+                          FILTER(BOUND(?r)) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        // FILTER(BOUND(?r)) prunes b's row (no q match → ?r NULL).
+        assert_eq!(rows, 1);
     }
 
     /// SELECT DISTINCT — deduplication on the projected variables.

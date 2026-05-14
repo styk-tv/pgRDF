@@ -6,6 +6,44 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 4 — OPTIONAL (LeftJoin) translation
+
+- `pgrdf.sparql` now handles `OPTIONAL { ?s :p ?o }`. Each OPTIONAL
+  block emits a `LEFT JOIN pgrdf._pgrdf_quads qOPT_i ON (…)`. Variables
+  introduced inside an OPTIONAL surface as NULL (JSONB `null`) when
+  the LEFT JOIN didn't match.
+- `OPTIONAL { … FILTER(...) }` — the inner filter lands in the LEFT
+  JOIN's ON clause, so rejected matches keep the optional variable
+  NULL rather than pruning the whole row.
+- Multiple chained OPTIONALs each get their own LEFT JOIN, in
+  left-to-right order. Per SPARQL semantics, variables introduced
+  by one OPTIONAL aren't visible to another OPTIONAL's ON clause.
+- `BOUND(?v)` translation tightened: now emits `qN.col IS NOT NULL`
+  regardless of whether ?v is mandatory or OPTIONAL. Mandatory
+  anchors are non-NULL so it's trivially TRUE there; OPTIONAL anchors
+  can be NULL so this is the spec-correct semantics.
+- Internal refactor: `build_bgp_sql` switched from comma-style FROM
+  (`q1, q2, q3 WHERE …`) to explicit JOIN syntax
+  (`q1 INNER JOIN q2 ON … INNER JOIN q3 ON …`). Same semantics for
+  INNER joins; necessary for OPTIONAL's LEFT JOIN to compose.
+- Parser updated: `LeftJoin` no longer flagged in
+  `unsupported_algebra` — the parser walks both arms.
+- 4 new pg_tests: simple OPTIONAL, OPTIONAL with inner FILTER,
+  multiple chained OPTIONALs, outer FILTER(BOUND) pruning.
+- `tests/regression/sql/36-sparql-optional.sql` covers 8 query
+  shapes (LEFT JOIN counts, NULL/not-NULL discrimination, inner
+  filter, multi-chain, outer BOUND prune, OPTIONAL + ORDER BY).
+- `30-sparql-parse.sql` baseline updated: OPTIONAL no longer
+  flagged; new UNION assertion replaces it.
+- `README.md` pills: 40+16 → 45+17; SPARQL pill adds OPTIONAL.
+- `guide/03-querying.md` gains a full OPTIONAL section covering
+  inner-FILTER semantics, chained OPTIONALs, BOUND-pruning, and
+  the single-triple restriction for this slice.
+
+Test bar:
+  pg_test:    45 passed; 0 failed  (was 40)
+  regression: 17 passed; 0 failed  (was 16)
+
 ### Phase 3 step 3 — Solution modifiers (DISTINCT / LIMIT / OFFSET / ORDER BY)
 
 - The four classic SPARQL solution modifiers now land in the

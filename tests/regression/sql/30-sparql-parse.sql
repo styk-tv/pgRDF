@@ -36,12 +36,20 @@ SELECT (
   pgrdf.sparql_parse('SELECT ?s WHERE { ?s ?p ?o FILTER(isIRI(?o)) }')->'unsupported_algebra'
 )::text AS unsupported_after_filter;
 
--- 4b. OPTIONAL still flags as unsupported.
+-- 4b. OPTIONAL is now supported — parser walks through it. Both
+-- the mandatory BGP triple and the OPTIONAL's triple are counted.
 SELECT (
   pgrdf.sparql_parse(
     'SELECT ?s ?n WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }'
+  )->>'bgp_pattern_count'
+)::int AS bgp_count_with_optional;
+
+-- 4c. UNION is still unsupported.
+SELECT (
+  pgrdf.sparql_parse(
+    'SELECT ?s WHERE { { ?s <http://x/a> ?o } UNION { ?s <http://x/b> ?o } }'
   )->'unsupported_algebra'
-)::text AS unsupported_optional;
+)::text AS unsupported_union;
 
 -- 5. CONSTRUCT recognised but flagged out-of-scope.
 SELECT (

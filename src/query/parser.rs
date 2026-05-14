@@ -108,8 +108,15 @@ fn walk(
         GraphPattern::Slice { inner, .. } => walk(inner, vars, bgp, unsupported),
         GraphPattern::OrderBy { inner, .. } => walk(inner, vars, bgp, unsupported),
         GraphPattern::Filter { inner, .. } => walk(inner, vars, bgp, unsupported),
+        GraphPattern::LeftJoin { left, right, .. } => {
+            // OPTIONAL — supported by the executor (single-triple
+            // right side only, today). Walk both arms to collect
+            // their BGP shape; the executor enforces the constraint.
+            walk(left, vars, bgp, unsupported);
+            walk(right, vars, bgp, unsupported);
+        }
 
-        GraphPattern::LeftJoin { .. }  => unsupported.push("LeftJoin (OPTIONAL)"),
+
         GraphPattern::Union { .. }     => unsupported.push("Union"),
         GraphPattern::Minus { .. }     => unsupported.push("Minus"),
         GraphPattern::Join { .. }      => unsupported.push("Join (non-BGP)"),
@@ -261,9 +268,10 @@ mod tests {
         assert_eq!(v["bgp_pattern_count"], 1);
     }
 
-    /// OPTIONAL is still unsupported — the parser flags it.
+    /// OPTIONAL is supported by the executor — the parser walks
+    /// through it like Filter. Both arms' BGP triples are collected.
     #[pg_test]
-    fn sparql_parse_flags_unsupported_optional() {
+    fn sparql_parse_optional_is_supported() {
         let q = "SELECT ?s ?n WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }";
         let j: pgrx::JsonB = Spi::get_one_with_args(
             "SELECT pgrdf.sparql_parse($1)",
@@ -274,8 +282,28 @@ mod tests {
         let v = &j.0;
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(
-            unsupported.iter().any(|x| x.as_str().is_some_and(|s| s.contains("OPTIONAL"))),
-            "expected LeftJoin (OPTIONAL) to be flagged, got {unsupported:?}"
+            !unsupported.iter().any(|x| x.as_str().is_some_and(|s| s.contains("OPTIONAL"))),
+            "OPTIONAL should not be flagged anymore, got {unsupported:?}"
+        );
+        // Both BGP arms are now visible.
+        assert_eq!(v["bgp_pattern_count"], 2);
+    }
+
+    /// UNION is still unsupported — the parser flags it.
+    #[pg_test]
+    fn sparql_parse_flags_unsupported_union() {
+        let q = "SELECT ?s WHERE { { ?s <http://x/a> ?o } UNION { ?s <http://x/b> ?o } }";
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.sparql_parse($1)",
+            &[q.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        let unsupported = v["unsupported_algebra"].as_array().unwrap();
+        assert!(
+            unsupported.iter().any(|x| x.as_str() == Some("Union")),
+            "expected Union to be flagged, got {unsupported:?}"
         );
     }
 

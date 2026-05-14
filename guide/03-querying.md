@@ -31,7 +31,9 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `FILTER` — identity (`=`, `!=`, `sameTerm`), boolean (`&&`, `\|\|`, `!`), term-type (`isIRI`, `isLiteral`, `isBlank`), `BOUND` | ✅ |
 | `FILTER` — numeric ordering (`<`/`>`/`<=`/`>=`), `REGEX`, `IN`, `STR` passthrough | ✅ |
 | `FILTER` — arithmetic, `lang`, `datatype`, `STRLEN`, `CONTAINS`, full string-fn surface | ⏳ Phase 3 (next slice) |
-| `OPTIONAL` (LeftJoin), `UNION`, `MINUS`, property paths, aggregates, `VALUES`, `BIND` | ⏳ Phase 3 |
+| `OPTIONAL { single-triple BGP }` → LEFT JOIN (with inner FILTER honoured) | ✅ |
+| `OPTIONAL { multi-pattern BGP }`, nested OPTIONALs | ⏳ Phase 3 (next slice) |
+| `UNION`, `MINUS`, property paths, aggregates, `VALUES`, `BIND` | ⏳ Phase 3 |
 | `CONSTRUCT`, `ASK`, `DESCRIBE` | ⏳ Phase 3 |
 | Named-graph `GRAPH { … }` clauses | ⏳ Phase 3 |
 | `SERVICE` (federated SPARQL) | Out of scope for v0.x |
@@ -286,6 +288,88 @@ SELECT * FROM pgrdf.sparql(
 `IN` is dict-id set membership — emits `qN.col IN (id_1, id_2, …)`
 where each id is resolved upfront. Unknown terms resolve to `-1`
 so they can never match, matching SPARQL's "not in the set" outcome.
+
+### OPTIONAL
+
+`OPTIONAL { ?s :p ?o }` translates to a `LEFT JOIN` against the
+mandatory BGP. Variables introduced inside the OPTIONAL come back
+NULL (as `JSON null` in the JSONB output) for rows where the
+optional pattern didn't match.
+
+```sql
+-- Names + mbox if available
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?n ?m
+     WHERE { ?s foaf:name ?n
+             OPTIONAL { ?s foaf:mbox ?m } }'
+);
+--  → {"s": "...alice", "n": "Alice", "m": "mailto:a@x"}
+--  → {"s": "...bob",   "n": "Bob",   "m": null}
+--  → {"s": "...carol", "n": "Carol", "m": "mailto:c@x"}
+```
+
+#### OPTIONAL with an inner FILTER
+
+```sql
+-- Bring back age only if >= 18; otherwise the row still surfaces
+-- with ?a = null (filter rejects the optional match, not the row)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?n ?a
+     WHERE { ?s foaf:name ?n
+             OPTIONAL { ?s foaf:age ?a FILTER(?a >= 18) } }'
+);
+```
+
+The OPTIONAL's filter lands in the LEFT JOIN's `ON` clause, so when
+it rejects a candidate match, `?a` comes back as `null` (rather
+than the whole row being pruned).
+
+#### Multiple chained OPTIONALs
+
+```sql
+-- name (mandatory), mbox + age both OPTIONAL
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?n ?m ?a
+     WHERE { ?s foaf:name ?n
+             OPTIONAL { ?s foaf:mbox ?m }
+             OPTIONAL { ?s foaf:age  ?a } }'
+);
+```
+
+Each OPTIONAL becomes its own LEFT JOIN. Variables introduced in
+one OPTIONAL aren't visible to another OPTIONAL's join condition
+(per SPARQL semantics).
+
+#### Pruning with outer FILTER(BOUND(?v))
+
+```sql
+-- Persons who DO have an mbox — outer FILTER removes the unbound rows
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?m
+     WHERE { ?s foaf:name ?n
+             OPTIONAL { ?s foaf:mbox ?m }
+             FILTER(BOUND(?m)) }'
+);
+```
+
+`BOUND(?v)` translates to `qN.col IS NOT NULL`, so it correctly
+returns FALSE for OPTIONAL vars that didn't match. (For mandatory
+vars it's always TRUE since INNER joins guarantee non-null.)
+
+#### Today's restrictions
+
+- **Each OPTIONAL block must hold exactly one triple pattern.**
+  Multi-pattern OPTIONALs require a derived-table refactor that
+  lands in the next slice. The executor panics with a clear
+  message if you give it `OPTIONAL { a . b . }`.
+- **Nested OPTIONAL inside OPTIONAL** isn't supported yet — only
+  flat chains at the same level.
+- **OPTIONAL's inner FILTER** sees only that OPTIONAL's variables
+  and the mandatory anchors, not other OPTIONAL groups' variables.
 
 ### Solution modifiers — DISTINCT / LIMIT / OFFSET / ORDER BY
 

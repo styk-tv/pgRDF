@@ -4,7 +4,8 @@ SELECT
 http://xmlns.com/foaf/0.1/name
 2
 []
-["LeftJoin (OPTIONAL)"]
+2
+["Union"]
 CONSTRUCT
 f
 42
