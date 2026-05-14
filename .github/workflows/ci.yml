@@ -80,6 +80,21 @@ jobs:
             -v "$PWD/compose/extensions:/export" \
             pgrdf-builder:pg17
           ls -la compose/extensions/lib compose/extensions/share/extension
+      - name: Pre-pull postgres image (retry on transient Hub flakes)
+        run: |
+          set -euo pipefail
+          # Docker Hub occasionally returns 5xx on anonymous pulls.
+          # Retry up to 5× with a short backoff so a transient Hub
+          # flake doesn't fail the whole job.
+          for i in 1 2 3 4 5; do
+            if docker pull docker.io/library/postgres:17.4-bookworm; then
+              exit 0
+            fi
+            echo "pull attempt $i failed; sleeping before retry"
+            sleep $((i * 5))
+          done
+          echo "pull failed after 5 attempts"
+          exit 1
       - name: Boot compose Postgres
         run: |
           set -euo pipefail
