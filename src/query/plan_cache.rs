@@ -148,8 +148,10 @@ mod tests {
     use pgrx::prelude::*;
 
     /// A SPARQL query primes the local plan cache; a repeated query
-    /// hits it instead of preparing again. Local size = 1 either way
-    /// because the SQL string is identical.
+    /// hits it instead of preparing again. The exact cache size
+    /// depends on what else ran beforehand (the loader caches its
+    /// own INSERT plan too — see `src/storage/loader.rs`); assert
+    /// DELTAS rather than absolutes.
     #[pg_test]
     fn plan_cache_repeats_hit() {
         Spi::run("SELECT pgrdf.plan_cache_clear()").unwrap();
@@ -160,35 +162,60 @@ mod tests {
         )
         .unwrap();
 
-        // First call — prepare + insert.
-        let _ = Spi::run("SELECT count(*) FROM pgrdf.sparql('SELECT ?s WHERE { ?s ?p ?o }')");
-        let size1: i64 = Spi::get_one(
+        // Snapshot AFTER the load. The INSERT plan is now cached;
+        // a SPARQL call should add exactly one more slot.
+        let size_before: i64 = Spi::get_one(
             "SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint",
         )
         .unwrap()
         .unwrap();
-        assert_eq!(size1, 1, "first call must populate one cache slot");
-        let inserts1: i64 = Spi::get_one(
+        let inserts_before: i64 = Spi::get_one(
             "SELECT (pgrdf.stats()->>'plan_cache_inserts')::bigint",
         )
         .unwrap()
         .unwrap();
 
-        // Second call — hit.
+        // First SPARQL call — prepare + insert one new plan.
         let _ = Spi::run("SELECT count(*) FROM pgrdf.sparql('SELECT ?s WHERE { ?s ?p ?o }')");
-        let size2: i64 = Spi::get_one(
+        let size_after_first: i64 = Spi::get_one(
             "SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint",
         )
         .unwrap()
         .unwrap();
-        let inserts2: i64 = Spi::get_one(
+        let inserts_after_first: i64 = Spi::get_one(
             "SELECT (pgrdf.stats()->>'plan_cache_inserts')::bigint",
         )
         .unwrap()
         .unwrap();
-        assert_eq!(size2, 1, "second identical call must NOT add a slot");
         assert_eq!(
-            inserts2, inserts1,
+            size_after_first - size_before,
+            1,
+            "first SPARQL call must populate one new cache slot"
+        );
+        assert_eq!(
+            inserts_after_first - inserts_before,
+            1,
+            "first call must bump the cumulative insert counter by 1"
+        );
+
+        // Second call — hit.
+        let _ = Spi::run("SELECT count(*) FROM pgrdf.sparql('SELECT ?s WHERE { ?s ?p ?o }')");
+        let size_after_second: i64 = Spi::get_one(
+            "SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint",
+        )
+        .unwrap()
+        .unwrap();
+        let inserts_after_second: i64 = Spi::get_one(
+            "SELECT (pgrdf.stats()->>'plan_cache_inserts')::bigint",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            size_after_second, size_after_first,
+            "second identical call must NOT add a slot"
+        );
+        assert_eq!(
+            inserts_after_second, inserts_after_first,
             "second call must not bump the cumulative insert counter"
         );
     }

@@ -106,6 +106,21 @@ seconds, not rows-times-vacuum.
 
 ## 2.3 Bulk loader (`src/storage/loader.rs`)
 
+### Prepared batched INSERT (LLD §4.3 phase A, **shipped — Phase 3 step 3**)
+
+`flush_batch` now prepares the static `INSERT … SELECT FROM
+unnest(…)` exactly once per backend (via the shared `plan_cache`)
+and reuses the `OwnedPreparedStatement` for every flush in every
+load call. The SQL string is keyed verbatim — same cache as the
+SPARQL plans — and observability rides on the same
+`plan_cache_hits / misses / inserts` counters in `pgrdf.stats()`.
+
+Per-backend savings: ~100–500 µs per batch (one parse+plan
+avoided). Verified by `tests/regression/sql/52-bulk-ingest-perf.sql`
+against the `synth-10k.ttl` fixture (10 000 triples = 10 batches
+per load): load 1 generates 1 miss + 9 hits; loads 2–3 generate
+0 misses + 10 hits each.
+
 ### Batched INSERT via unnest (shipped, Phase 2.2 step 3)
 
 The current ingest path uses **batched multi-row INSERTs** —
@@ -121,13 +136,30 @@ BATCH_SIZE = 1000 triples per round-trip. Combined with the
 per-call HashMap dict cache, this brings SPI calls from ~7 per
 triple to roughly `distinct_terms + ceil(triples/1000)`.
 
-### COPY BINARY (LLD §4.3, NOT yet shipped)
+### COPY BINARY / heap_multi_insert (LLD §4.3 phase B, deferred to v0.4)
 
-LLD §4.3 specifies `COPY _pgrdf_quads FROM STDIN (FORMAT BINARY)`
-through `pgrx`'s native COPY API. The batched-INSERT path is the
-stepping-stone delivery; COPY BINARY is a Phase 2.x backlog item
-(typically another 2–5× speedup over batched INSERT on commodity
-hardware). Tracked in `docs/10-roadmap.md` Phase 2.x backlog.
+LLD §4.3 calls for `COPY _pgrdf_quads FROM STDIN (FORMAT BINARY)`
+with a **2× over batched-INSERT** wall-clock target. Phase 3
+step 3 (above) cashes the parse+plan savings but the per-batch
+wall clock on synth-10k stays at ~85 ms steady-state on both the
+batched-INSERT and prepared-INSERT shapes — the executor walk
+(per-tuple projection + partition routing) dominates and is what
+the next slice has to skip.
+
+Two candidate paths, both FFI-heavy:
+
+1. `pg_sys::heap_multi_insert` — writes N tuples to the heap in one
+   call. Skips the executor's per-tuple wrapper and uses the
+   bulk-insert AM path. Requires hand-building `TupleTableSlot`s
+   and routing across partitions (or pre-resolving the partition
+   relation per `graph_id`).
+2. `pg_sys::BeginCopyFrom` + a callback-driven binary feed —
+   higher-level than `heap_multi_insert`, handles partitions, but
+   needs more glue (binary header bytes, the per-tuple binary
+   tuple layout).
+
+Tracked as **Phase 3 step 3b** in the v0.3 LLD; lands in v0.4
+unless promoted forward.
 
 ### Graph routing
 

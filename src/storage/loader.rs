@@ -20,10 +20,13 @@
 //! SPEC.pgRDF.LLD.v0.2 §4.3 needs lower-level Postgres integration
 //! than pgrx 0.16 exposes cleanly. Tracked for Phase 3 step 3.
 
+use crate::query::plan_cache;
 use crate::storage::dict::{put_term_full, term_type};
 use crate::storage::shmem_cache;
 use oxrdf::{NamedOrBlankNode, Term};
 use oxttl::TurtleParser;
+use pgrx::datum::DatumWithOid;
+use pgrx::pg_sys::{Oid, PgBuiltInOids};
 use pgrx::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
@@ -37,6 +40,16 @@ use std::time::Instant;
 /// the array parameters comfortably below Postgres' 1 GB datum
 /// ceiling while amortising the SPI round-trip cost.
 const BATCH_SIZE: usize = 1000;
+
+/// Static SQL for the batched quad flush. Phase 3 step 3 (LLD §4.3,
+/// phase A): the string is constant, so a single prepared statement
+/// — stashed in the per-backend `plan_cache` from Phase 3 step 2 —
+/// is reused for every flush, in every load call, for the rest of
+/// the backend's lifetime. Saves one parse+plan per batch.
+const QUAD_INSERT_SQL: &str = "INSERT INTO pgrdf._pgrdf_quads \
+    (subject_id, predicate_id, object_id, graph_id) \
+    SELECT s, p, o, $4 \
+      FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS t(s, p, o)";
 
 type DictKey = (i16, String, Option<i64>, Option<String>);
 
@@ -146,9 +159,14 @@ fn object_to_id(
     }
 }
 
-/// Flush a buffered batch of quads to the partitioned hexastore.
-/// Moves the buffer Vecs into Postgres-side arrays so we don't pay
-/// a clone; callers see empty Vecs after this returns.
+/// Flush a buffered batch of quads to the partitioned hexastore via
+/// the cached prepared `INSERT ... unnest` statement.
+///
+/// On first call in a backend the SQL is prepared and `keep()`-ed
+/// into `plan_cache`; every subsequent call (in this load and in
+/// future loads) is a pure execute. Moves the buffer Vecs into
+/// Postgres-side arrays so we don't pay a clone; callers see empty
+/// Vecs after this returns.
 fn flush_batch(
     batch_s: &mut Vec<i64>,
     batch_p: &mut Vec<i64>,
@@ -159,18 +177,53 @@ fn flush_batch(
     if batch_s.is_empty() {
         return;
     }
-    Spi::run_with_args(
-        "INSERT INTO pgrdf._pgrdf_quads (subject_id, predicate_id, object_id, graph_id)
-         SELECT s, p, o, $4
-           FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS t(s, p, o)",
-        &[
-            mem::take(batch_s).into(),
-            mem::take(batch_p).into(),
-            mem::take(batch_o).into(),
-            graph_id.into(),
-        ],
-    )
-    .expect("flush_batch: insert failed");
+    let s_arr = mem::take(batch_s);
+    let p_arr = mem::take(batch_p);
+    let o_arr = mem::take(batch_o);
+    let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+    let int8_array_oid: Oid = PgBuiltInOids::INT8ARRAYOID.into();
+
+    Spi::connect_mut(|client| {
+        // Prepare-once / reuse-many via the per-backend plan cache.
+        // Same mechanism as the SPARQL executor (Phase 3 step 2);
+        // keyed on the SQL string which is `QUAD_INSERT_SQL`
+        // verbatim.
+        if !plan_cache::contains(QUAD_INSERT_SQL) {
+            let arg_oids = vec![
+                PgOid::BuiltIn(PgBuiltInOids::INT8ARRAYOID),
+                PgOid::BuiltIn(PgBuiltInOids::INT8ARRAYOID),
+                PgOid::BuiltIn(PgBuiltInOids::INT8ARRAYOID),
+                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
+            ];
+            let prepared = client
+                .prepare_mut(QUAD_INSERT_SQL, &arg_oids)
+                .expect("flush_batch: prepare failed")
+                .keep();
+            plan_cache::insert(QUAD_INSERT_SQL.to_string(), prepared);
+            plan_cache::record_miss();
+        } else {
+            plan_cache::record_hit();
+        }
+
+        // Build Datums for the cached plan. SAFETY: the (value, oid)
+        // pairs match by construction (Vec<i64>/INT8ARRAYOID,
+        // i64/INT8OID).
+        let datums: Vec<DatumWithOid<'_>> = unsafe {
+            vec![
+                DatumWithOid::new(s_arr, int8_array_oid),
+                DatumWithOid::new(p_arr, int8_array_oid),
+                DatumWithOid::new(o_arr, int8_array_oid),
+                DatumWithOid::new(graph_id, int8_oid),
+            ]
+        };
+
+        plan_cache::with_plan(QUAD_INSERT_SQL, |maybe_owned| {
+            let owned = maybe_owned.expect("plan must be in cache after insert");
+            client
+                .update(owned, None, &datums)
+                .expect("flush_batch: prepared insert failed");
+        });
+    });
     stats.quad_batches += 1;
 }
 

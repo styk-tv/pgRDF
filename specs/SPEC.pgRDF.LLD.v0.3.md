@@ -188,17 +188,42 @@ Operator surface:
   and returns the count. Production workloads never need this;
   provided for diagnostics + tear-down.
 
-### 4.3 Bulk Ingestion (LLD §4.3) — **NOT yet shipped as COPY BINARY**
+### 4.3 Bulk Ingestion (LLD §4.3) — **phase A SHIPPED, phase B deferred**
 
-v0.2 specified `COPY _pgrdf_quads FROM STDIN (FORMAT BINARY)`.
-Today's loader uses batched multi-row INSERT via
-`unnest($1::bigint[], $2::bigint[], $3::bigint[])` with
-BATCH_SIZE = 1000.
+**Phase A (shipped — Phase 3 step 3):** the batched-INSERT SQL
+string is constant per backend, so the prepared-plan cache from
+§4.2 also covers the loader's flush path. `flush_batch` runs:
 
-The batched-INSERT path gets us ~50× faster than row-by-row
-INSERT, but COPY BINARY is typically another 2–5× faster on
-commodity hardware. Worth re-measuring against the synth-100
-and smoke-ontologies fixtures before committing to the rewrite.
+```rust
+Spi::connect_mut(|client| {
+    if !plan_cache::contains(QUAD_INSERT_SQL) {
+        let prepared = client.prepare_mut(QUAD_INSERT_SQL, &arg_oids)?.keep();
+        plan_cache::insert(QUAD_INSERT_SQL.to_string(), prepared);
+    }
+    plan_cache::with_plan(QUAD_INSERT_SQL, |owned| {
+        client.update(owned.unwrap(), None, &datums)?;
+    });
+})
+```
+
+Verified by `tests/regression/sql/52-bulk-ingest-perf.sql` against
+the new 10 000-triple `synth-10k.ttl` fixture.
+
+**Phase B (deferred to Phase 3 step 3b / v0.4):** the **2×
+wall-clock** target from §4.3 acceptance is NOT met by phase A
+alone. Observed synth-10k load time is ~85 ms steady-state both
+before and after phase A — the per-batch executor walk (`SELECT s,
+p, o FROM unnest(…)` per-tuple projection + partition routing)
+dominates. To hit the 2× bar, the next slice must bypass the
+executor entirely. Two candidate paths:
+
+1. `pg_sys::heap_multi_insert` + per-partition relation handles
+   (skip the executor; manage `TupleTableSlot` arrays directly).
+2. `pg_sys::BeginCopyFrom` + a callback-driven binary feed (true
+   COPY BINARY path).
+
+Both are FFI-heavy. Acceptance test fixture (synth-10k.ttl) is in
+place; we re-measure once phase B lands.
 
 ### 4.4 ParsedSelect representation (new in v0.3)
 
@@ -362,7 +387,8 @@ shipped rather than being a no-op refactor.
 | SPO / POS / OSP `INCLUDE (is_inferred)` indexes | ✅ shipped |
 | §4.1 shmem dict cache | ✅ Phase 3 step 1 (`src/storage/shmem_cache.rs`) |
 | §4.2 prepared plans | ✅ Phase 3 step 2 (`src/query/plan_cache.rs`) |
-| §4.3 COPY BINARY | ⏳ Phase 3 (batched INSERT via unnest is current) |
+| §4.3 bulk-ingest plan cache (phase A) | ✅ Phase 3 step 3 (`src/storage/loader.rs::flush_batch`) |
+| §4.3 COPY BINARY / heap_multi_insert (phase B) | ⏳ Phase 3 step 3b / v0.4 (2× wall-clock target requires this) |
 | §5 zero-install container init script | ⏳ Phase 6 (compose works for dev) |
 | §6 CI matrix pg14×17 × {amd64, arm64} | ⏳ Phase 6 (workflow stubs in `.github/workflows/`) |
 | §7 Phase 1 "Core Storage" | ✅ effectively done |

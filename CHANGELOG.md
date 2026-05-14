@@ -6,6 +6,43 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 3 — bulk-ingest prepared INSERT (LLD §4.3 phase A)
+
+- `src/storage/loader.rs`: the batch-flush SQL is a constant
+  string; the per-backend `plan_cache` from Phase 3 step 2 stashes
+  the prepared `INSERT … SELECT FROM unnest(…)` exactly once.
+  Every flush across every load in the same backend reuses the
+  cached `OwnedPreparedStatement`. Saves one parse+plan per batch
+  (typically ~100–500 µs each on PG 17).
+- `flush_batch` now runs inside `Spi::connect_mut(|c| {…})` and
+  binds arguments as `Vec<DatumWithOid>` (three `INT8ARRAY` + one
+  `INT8`), driving the cached plan via `client.update`.
+- `tests/regression/sql/52-bulk-ingest-perf.sql` + new
+  `fixtures/regression/synth-10k.{sh,ttl}` fixture (10 000
+  triples = ≥ 10 flushes per load). Asserts:
+  - Load 1 produces exactly one `plan_cache_misses` += 1 and one
+    `plan_cache_inserts` += 1 (the cold prepare).
+  - Two loads together produce ≥ 19 `plan_cache_hits` (the other
+    flushes all hit).
+  - Load 3 produces zero new inserts (cache fully warm).
+  Hand-computed; never `ACCEPT=1` baselined.
+- Test bar: **88 → 88 pgrx + 27 → 28 regression**, green.
+
+**Honest framing — wall-clock target.** LLD §4.3 calls for *"ingest
+throughput at least 2× the current batched-INSERT baseline"*. The
+prepared-INSERT cache saves a few hundred µs per batch but the
+batched-INSERT executor walk (`SELECT … FROM unnest(…)` per-tuple
+construction + partition routing) still dominates per-batch wall
+clock. Observed: synth-100 unchanged within noise; synth-10k
+~85 ms steady-state on both before/after.
+
+To hit the 2× bar the next slice has to bypass the executor —
+either `pg_sys::heap_multi_insert` directly (skips per-tuple
+projection and the partition tuple-router uses heap-bulk paths) or
+the proper `BeginCopyFrom` + binary COPY-protocol feed. Both are
+FFI-heavy. Tracked as **Phase 3 step 3b (deferred)** — does NOT
+block Phase 4 (Inference) start.
+
 ### Phase 3 step 2 — prepared-plan cache (LLD §4.2)
 
 - `src/query/plan_cache.rs`: per-backend `thread_local!`

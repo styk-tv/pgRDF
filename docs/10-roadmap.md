@@ -109,10 +109,16 @@ end-to-end; ingestion is fast enough to load real-world ontologies.
       hook: `pgrdf.plan_cache_clear()`. Regression
       `51-plan-cache.sql` asserts the hit / miss / parametric-reuse
       arithmetic for three workload shapes.
-- ⏳ **COPY BINARY ingestion (LLD §4.3)** — current batched INSERT is
-      ~50× faster than row-by-row INSERT but still slower than the
-      LLD's stated COPY-BINARY target. Worth re-measuring against
-      the synth-100 / smoke-ontologies fixtures before committing.
+- 🚧 **COPY BINARY ingestion (LLD §4.3)** —
+      - ✅ **Phase A**: prepared `INSERT … unnest(…)` cached
+        per-backend, reused across batches and across loads.
+        Saves one parse+plan per batch (~100–500 µs each).
+        Verified by `52-bulk-ingest-perf.sql` on synth-10k.ttl.
+      - ⏳ **Phase B** (deferred to Phase 3 step 3b / v0.4): the
+        2× wall-clock target from LLD §4.3 acceptance is not met
+        by phase A alone — the per-tuple executor walk dominates.
+        Candidate paths: `pg_sys::heap_multi_insert` per partition,
+        or `BeginCopyFrom` + binary callback. Both FFI-heavy.
 - ⏳ W3C SPARQL 1.1 manifest runner wired into CI; coverage target
       ≥ 30 % pass for Phase 2 completion per LLD §7.
 
@@ -228,4 +234,5 @@ phase 3 step table above.
 | Phase 3 step 7 | 63 | 20 | + aggregates (COUNT/SUM/AVG/MIN/MAX + GROUP BY) |
 | Phase 3 steps 8–12 | 79 | 25 | + HAVING, GROUP_CONCAT/SAMPLE, expression richness, BIND, multi-triple MINUS, ASK |
 | v0.3 Phase 3 step 1 | 86 | 26 | + shmem dict cache (LLD §4.1), `pgrdf.stats()`, perf regression `50-shmem-dict-cache.sql` |
-| v0.3 Phase 3 step 2 (current) | 88 | 27 | + prepared-plan cache (LLD §4.2), parameterised SQL, perf regression `51-plan-cache.sql` |
+| v0.3 Phase 3 step 2 | 88 | 27 | + prepared-plan cache (LLD §4.2), parameterised SQL, perf regression `51-plan-cache.sql` |
+| v0.3 Phase 3 step 3 phase A (current) | 88 | 28 | + bulk-ingest prepared INSERT (LLD §4.3 phase A), `synth-10k.ttl`, perf regression `52-bulk-ingest-perf.sql`. 2× wall-clock target deferred to phase B / v0.4 |
