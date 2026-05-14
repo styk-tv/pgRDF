@@ -6,6 +6,47 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release pre-flight — final CI sweep (slices #10-#5)
+
+Last verification gate before tagging v0.3.0. Ran every test/lint
+layer locally against the post-version-bump tree (HEAD was `ac514fe`
+at start of sweep) to confirm the codebase is release-ready.
+
+Per-layer results:
+
+- **Slice #10 — `cargo fmt --check`**: drift in
+  `src/inference/reasonable.rs` (40 lines reflowed; long `.expect()`
+  chains broken across multiple lines by rustfmt). Applied
+  `cargo fmt --all` and committed as a style-only commit.
+- **Slice #9 — `cargo clippy -D warnings`** (in builder container,
+  rustc 1.91): one error surfaced — unused import
+  `use pgrx::prelude::*;` at `src/storage/shmem_cache.rs:349`. The
+  `use super::*;` on the line above already brings `pgrx::prelude::*`
+  into scope through the parent module, so the line was genuinely
+  redundant. Removed it. Clippy now exits 0.
+- **Slice #8 — `just test`** (pgrx integration in Linux builder):
+  `test result: ok. 93 passed; 0 failed; 0 ignored`. Matches the
+  93-count in README and `docs/08-testing.md`; no doc drift.
+- **Slice #7 — `just test-regression`** (pg_regress harness against
+  compose Postgres): `39 pass, 0 fail, 0 new baselines`.
+- **Slice #6 — `just test-w3c`** (W3C-shape SPARQL harness):
+  `23 pass, 0 fail, 0 new baselines`.
+- **Slice #5 — `just test-lubm`** (LUBM-shape harness):
+  `3 pass, 0 fail, 0 new baselines`.
+
+Final aggregate: **93 (pgrx) + 39 (pg_regress) + 23 (W3C) + 3 (LUBM)
+= 158 tests, all green**. Matches the 158 figure cited across
+README.md, `docs/08-testing.md`, `docs/10-roadmap.md`,
+`docs/09-release.md`, and `RELEASE_NOTES.md` — no test-count doc
+updates needed.
+
+Code changes from this sweep:
+
+- `src/inference/reasonable.rs` — rustfmt-only reflow (no semantic
+  change), landed in its own commit.
+- `src/storage/shmem_cache.rs` — removed redundant
+  `use pgrx::prelude::*;` from `mod tests`.
+
 ### Release pre-flight — version bump to 0.3.0 (slices #18-#11)
 
 Mechanical version bump landing slices #18 through #11 of the 66→1

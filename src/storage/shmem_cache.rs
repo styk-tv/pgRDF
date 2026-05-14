@@ -346,7 +346,6 @@ pub fn snapshot() -> Snapshot {
 mod tests {
     use super::*;
     use crate::storage::dict::term_type;
-    use pgrx::prelude::*;
 
     /// shared_preload_libraries='pgrdf' is set in pg_test config;
     /// _PG_init runs in the postmaster path; SHMEM_READY is true.
