@@ -6,6 +6,32 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Hygiene — ERRATA E-006 pgrx-upstream re-check (slice #48)
+
+Refreshed `specs/ERRATA.v0.2.md` E-006 against today's upstream state.
+`crates.io` reports `pgrx.max_stable_version = "0.18.0"` (unchanged
+since 2026-04-17); `develop` is one commit ahead (PR #2280, an
+aarch64 `-Wl,--no-gc-sections` link-flag fix). Upstream README now
+documents "pgrx supports Postgres 13 through Postgres 18" — PG 18
+support has officially landed at the 0.18.0 line. Local-compile
+blockers from the 2026-05-13 saga are unchanged: 0.17.0's
+`non_null_from_ref` E0658 and 0.18.0's `impl_table_iter` E0716 still
+reproduce on every Rust stable/nightly we tested, and `develop` has
+not touched the relevant macro since the release. Additionally,
+0.18.0 carries a hard breaking migration (PR #2264 /
+`v18.0-MIGRATION.md`): `pgrx_embed` binary removed, `crate-type` must
+drop `"lib"`, manual `SqlTranslatable` impls move from methods to
+associated `const`s. pgRDF still ships `src/bin/pgrx_embed.rs` and
+`crate-type = ["cdylib", "lib"]`, so the bump is non-trivial.
+
+**Disposition:** E-006 stays open. Classification B — partially
+resolved at the upstream layer (PG 18 support exists), still blocked
+at the consumption layer (E0716 + breaking-migration scope). Hold
+pgrx 0.16.1 + PG 14–17 matrix for v0.3; defer pgrx-0.18 migration to
+v0.4 as a planned work item. README + `docs/10-roadmap.md` updated
+to reflect the partial-resolution framing. Next re-check trigger:
+any pgrx publish above 0.18.0 OR an E0716 fix landing on `develop`.
+
 ### Hygiene — MSRV declared (slice #49)
 
 Added `rust-version = "1.91"` to `[package]` in `Cargo.toml`. The value

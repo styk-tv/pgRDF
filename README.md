@@ -24,7 +24,7 @@
 | | |
 |---|---|
 | **Status** | Alpha — **v0.3 engine surface feature-complete**. Storage CRUD + Turtle ingest. SPARQL SELECT/ASK with N-pattern BGPs + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias + inline aggregate) + BIND. **Phase 3 storage perf** (shmem dict cache §4.1, prepared-plan cache §4.2, prepared bulk-INSERT §4.3 phase A). **Phase 4 inference** — `pgrdf.materialize` via `reasonable` (OWL 2 RL). **Phase 5 SHACL** — `pgrdf.validate` surface stub (real impl blocked by [ERRATA E-009](specs/ERRATA.v0.2.md)). **Phase 6** — regression suite + W3C-shape harness + LUBM-shape gates in CI. Deferred to v0.4: heap_multi_insert for the 2× ingest target, full W3C TTL-manifest runner, real LUBM + cross-engine benchmarks. |
-| **Supported PG** | 14, 15, 16, 17 (PG 18 blocked on pgrx upstream — see [ERRATA](specs/ERRATA.v0.2.md) E-006). |
+| **Supported PG** | 14, 15, 16, 17. PG 18 support has landed upstream in pgrx 0.18.0 but adoption is deferred to v0.4 — 0.18.0 still fails to build locally and changes the schema-gen model. See [ERRATA](specs/ERRATA.v0.2.md) E-006 (re-checked 2026-05-14). |
 | **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
 

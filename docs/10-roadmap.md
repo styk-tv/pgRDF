@@ -22,8 +22,13 @@ Status legend:
 Outcome: extension registers cleanly in stock `postgres:17.4-bookworm`
 and the local build produces a usable `.so` + `.control` + `.sql`.
 
-- ✅ pgrx 0.16 scaffold compiles on PG 14–17. PG 18 deferred pending
-      pgrx 0.17/0.18 fix (see `specs/ERRATA.v0.2.md` E-006).
+- ✅ pgrx 0.16 scaffold compiles on PG 14–17. PG 18 support has
+      landed upstream in pgrx 0.18.0 (2026-04-17), but adoption is
+      deferred to v0.4: 0.18.0 still trips `E0716` in its
+      `impl_table_iter` macro on every Rust stable/nightly we tested,
+      and its single-pass schema-gen migration (`pgrx_embed` removal,
+      `crate-type` change) is a non-trivial breaking edit. See
+      `specs/ERRATA.v0.2.md` E-006 (re-checked 2026-05-14).
 - ✅ `_pgrdf_dictionary` + `_pgrdf_quads` schema in
       `sql/schema_v0_2_0.sql`, loaded via `extension_sql_file!`.
 - ✅ Hexastore SPO/POS/OSP covering indexes
