@@ -249,10 +249,14 @@ matrix and the compose-based regression runtime (PG 17). Covers:
   `base_triples = 0`, non-negative inferred-count, and stays
   idempotent across two calls.
 
-External smoke covers 24 well-known ontologies (W3C, Apache Jena,
-ValueFlows, ConceptKernel v3.7) for ~17,000 triples loaded;
-runs via `tests/perf/smoke-ontologies.sh`. Workflow.ttl held out
-due to a non-RFC IRI in the source — see
+External smoke covers **24 well-known ontologies → 17,134 triples**
+(W3C, Apache Jena, ValueFlows, ConceptKernel v3.7); runs via
+`tests/perf/smoke-ontologies.sh`. Per-ontology triple counts are
+locked in [`tests/perf/smoke-ontologies.expected.tsv`](tests/perf/smoke-ontologies.expected.tsv);
+`tests/perf/smoke-ontologies.sh --check` re-runs the smoke and
+diffs against the lock-file (not gated in CI yet — the fetched
+payloads are gitignored). Workflow.ttl held out due to a non-RFC
+IRI in the source — see
 [ERRATA E-007 / TEST.ONTOLOGY-SET.md](TEST.ONTOLOGY-SET.md).
 
 ## License

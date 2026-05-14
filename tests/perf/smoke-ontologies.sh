@@ -9,9 +9,20 @@
 # Usage:
 #   tests/perf/smoke-ontologies.sh           # all ontologies in fixtures/ontologies/
 #   tests/perf/smoke-ontologies.sh core.ttl  # one file by name
+#   tests/perf/smoke-ontologies.sh --check   # regression: diff vs smoke-ontologies.expected.tsv
 #
 # Each ontology is loaded into its own graph (400 + hash(name) % 1000)
 # so they don't collide.
+#
+# --check mode (regression-coverage slice #58, locked 2026-05-14):
+#   Runs the smoke, generates an alphabetically-sorted TSV of
+#   filename<TAB>triples for every ontology that parses, and
+#   diff -u's it against tests/perf/smoke-ontologies.expected.tsv.
+#   Exits non-zero on any difference. Ontologies that PARSE ERROR are
+#   omitted from both sides (locked-state set is the parsing subset).
+#   Not gated in CI yet — the fetched ontology payloads are gitignored
+#   so CI can't run it without a fetch step. See TEST.ONTOLOGY-SET.md
+#   "Locked-state regression".
 #
 # These ontologies are work-in-progress and may contain authoring
 # errors. A parse failure here is *signal*, not noise — oxttl is
@@ -43,11 +54,22 @@ base_iri_for() {
   esac
 }
 
-declare -a files
-if [ $# -eq 0 ]; then
+check_mode=0
+declare -a files=()
+declare -a pos_args=()
+for arg in "$@"; do
+  case "$arg" in
+    --check) check_mode=1 ;;
+    *)       pos_args+=( "$arg" ) ;;
+  esac
+done
+
+# `${pos_args[@]:-}` keeps `set -u` happy when no positional args were
+# given (bash 3.2 on macOS treats an empty array as unset).
+if [ ${#pos_args[@]} -eq 0 ]; then
   files=( "${REPO_ROOT}"/fixtures/ontologies/*.ttl )
 else
-  for arg in "$@"; do
+  for arg in "${pos_args[@]}"; do
     files+=( "${REPO_ROOT}/fixtures/ontologies/${arg}" )
   done
 fi
@@ -55,6 +77,12 @@ fi
 ok=0
 err=0
 total_triples=0
+
+# In --check mode we collect filename<TAB>triples rows here and emit
+# them sorted at the end so the comparison is deterministic. The
+# pretty-printed per-ontology lines still stream to stdout so a human
+# watching can see the run.
+actual_rows=""
 
 printf '%-32s %12s %s\n' "ONTOLOGY" "TRIPLES" "NOTES"
 printf '%-32s %12s %s\n' "--------" "-------" "-----"
@@ -83,6 +111,8 @@ for f in "${files[@]}"; do
       base_note=""
       [ -n "$base" ] && base_note="base=$base"
       printf '  \033[32m%-30s\033[0m %12d %s\n' "$name" "$out" "$base_note"
+      actual_rows="${actual_rows}${name}	${out}
+"
       ;;
   esac
 done
@@ -90,3 +120,24 @@ done
 echo
 printf 'Summary: %d ok, %d failed, %d triples loaded across them.\n' \
   "${ok}" "${err}" "${total_triples}"
+
+if [ "${check_mode}" -eq 1 ]; then
+  expected="${REPO_ROOT}/tests/perf/smoke-ontologies.expected.tsv"
+  if [ ! -f "${expected}" ]; then
+    echo
+    echo "smoke-ontologies.sh --check: missing lock-file ${expected}" >&2
+    exit 2
+  fi
+  actual_file="$(mktemp -t smoke-ontologies-actual.XXXXXX)"
+  printf '%s' "${actual_rows}" | sort > "${actual_file}"
+  echo
+  if diff -u "${expected}" "${actual_file}"; then
+    echo "smoke-ontologies.sh --check: OK (${ok} ontologies, ${total_triples} triples)"
+    rm -f "${actual_file}"
+    exit 0
+  else
+    echo "smoke-ontologies.sh --check: FAIL — actual differs from ${expected}" >&2
+    echo "(actual rows preserved at ${actual_file} for inspection)" >&2
+    exit 1
+  fi
+fi

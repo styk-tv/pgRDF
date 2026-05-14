@@ -15,6 +15,25 @@
 #     to either escape the colon (`%3A`) or switch to a fragment /
 #     dot-separated form. Re-add this line once the source is fixed.
 #
+# Locked-state regression (slice #58, 2026-05-14):
+#   tests/perf/smoke-ontologies.expected.tsv records the per-ontology
+#   triple counts (filename<TAB>triples) for every ontology in this
+#   set that parses today. The current snapshot is 24 ontologies
+#   producing 17,134 triples; workflow.ttl stays held out per ERRATA
+#   E-007. `tests/perf/smoke-ontologies.sh --check` re-runs the
+#   smoke against the live fixtures and `diff -u`'s the result
+#   against the lock-file, exiting non-zero on any drift. That catches
+#   two regression classes: (a) an ontology that used to parse stops
+#   parsing, (b) the parser silently drops triples and the count moves.
+#   The check is NOT yet wired into CI — fixtures/ontologies/* is
+#   gitignored, so a future Phase 6 slice has to add the fetch step
+#   before --check can be gated. Updating the lock-file is a
+#   deliberate maintenance step: when an upstream ontology updates
+#   and the new count is intentional, regenerate
+#   smoke-ontologies.expected.tsv from a fresh smoke run and commit
+#   the delta as a single intentional move. Never `--accept`-style
+#   automatic.
+#
 # ConceptKernel v3.7 ontology family (11 modules; workflow.ttl held
 # out per the note above).
 https://conceptkernel.org/ontology/v3.7/core.ttl

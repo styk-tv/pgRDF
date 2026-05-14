@@ -208,8 +208,40 @@ whitespace-only case uses an `E''` extended-string literal so
 `\n` / `\t` reach the parser as actual whitespace rather than
 literal backslash-n (which the Turtle grammar correctly rejects).
 
+Locks #58 of the countdown: the smoke-ontologies set MUST keep
+parsing AND each ontology's triple count MUST stay stable. The
+existing `tests/perf/smoke-ontologies.sh` loads every `*.ttl`
+under `fixtures/ontologies/` through `pgrdf.load_turtle` into its
+own graph and prints `<filename>: <triples>` per file; today's
+snapshot is **24 ontologies, 17,134 triples** (workflow.ttl held
+out per ERRATA E-007). Slice #58 captures that snapshot as
+`tests/perf/smoke-ontologies.expected.tsv` (alphabetically-sorted
+`filename<TAB>triples` rows) and adds a `--check` mode to the
+smoke script: it re-runs the smoke, regenerates the TSV from the
+live output, and `diff -u`'s it against the lock-file, exiting
+non-zero on any drift. The diff catches two regression classes
+the bare smoke can't: (a) an ontology that used to parse stops
+parsing — the row disappears from the actual side; (b) the
+parser silently drops or duplicates triples and the count moves
+even though parsing nominally succeeds. The check is NOT yet
+wired into CI (the fetched ontology payloads under
+`fixtures/ontologies/*.ttl` are gitignored, so CI can't run the
+smoke without a fetch step that doesn't yet exist in the
+workflow). Landing the lock-file + the opt-in `--check` mode
+now means a future Phase 6 slice can wire `--check` once the
+ontology-fetch step is added to CI. The default behaviour
+(no flag → pretty-print results, exit 0) is unchanged so
+existing manual runs still work. Updating the lock-file is a
+deliberate maintenance step — when an upstream ontology updates
+and the new count is intentional, regenerate the TSV from a
+fresh smoke run and commit the delta as one explicit move; no
+`--accept`-style automatic refresh.
+
 Test bar: **93 pgrx + 38 pg_regress + 23 W3C-shape + 3 LUBM-shape
-= 157 tests**, green locally.
+= 157 tests**, green locally. Slice #58 doesn't add a pg_regress
+file — the smoke is a separate harness, so its lock-file (24
+rows / 17,134 triples) lives alongside the script and is
+enforced by `tests/perf/smoke-ontologies.sh --check`.
 
 ### Translator fix — type-aware `MIN` / `MAX`
 
