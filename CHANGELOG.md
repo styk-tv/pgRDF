@@ -6,6 +6,49 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Roadmap — v0.4 milestone section (slice #31)
+
+Added an explicit `## v0.4 — next milestone (forward-looking)` section
+to `docs/10-roadmap.md`, placed between Phase 6 and "Out of scope" so
+the reader's eye flows shipped-phases → next-milestone →
+out-of-scope. The new section surfaces the five v0.4 tracks at H3
+heading granularity (named-graph + IRI mapping, SPARQL UPDATE,
+graph-level lifecycle UDFs, CONSTRUCT, property paths) plus the
+carried SPARQL-surface backlog from v0.3 and the explicit "excluded
+from v0.4 (planned v0.5)" list, with each H3 cross-linking the
+specific anchor in `specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`.
+
+The intent is navigation, not new contract material: each H3 is 2–4
+lines pointing at v0.4-FUTURE for detail — the v0.4-FUTURE spec
+remains the single source of truth, this section is a section-TOC
+entry so readers can land on "what comes next" without spelunking
+the Phase 1–6 bullets.
+
+Sub-edits:
+
+- `docs/10-roadmap.md` — new H2 + 7 H3s (5 tracks + carried backlog +
+  excluded-from-v0.4), inserted at line ~321 just above the existing
+  `## Out of scope (v0.x)` H2.
+- `docs/10-roadmap.md` — "Test bar over time" preamble gains a
+  one-paragraph forward note that future v0.4 rows land under
+  `v0.4 cut` labels per the new section's track grouping; existing
+  v0.3 rows remain frozen as the shipped baseline.
+
+Test bar unchanged: no new pg_regress or pgrx fixtures, this is a
+docs-only slice.
+
+Anchor verification: each cross-link uses the GitHub heading-slug
+rules (lowercase, spaces → `-`, drop non-alphanumeric-or-hyphen,
+em-dash → empty leaving a double-hyphen at its position). Targets
+are §3 (`#3-named-graph-scoping-and-iri-mapping-new`), §4
+(`#4-sparql-update-new`), §5 (`#5-graph-level-lifecycle-udfs-new`),
+§6 (`#6-construct-deferred-from-v03-now-in-scope`), §7
+(`#7-property-paths-deferred-from-v03-now-in-scope`), §11
+(`#11-sparql-surface-backlog-deferred-from-v03-now-in-scope`), §8
+(`#8-reasoning-profile-selector-v05--flagged-here-for-planning`),
+§9 (`#9-shacl-real-integration-v05--gated-on-errata-e-009`), §10
+(`#10-trig--n-quads-ingest-v05`).
+
 ### Docs — markdown link verification (slice #32)
 
 Final docs-group lockdown pass before release-pre-flight: a full,

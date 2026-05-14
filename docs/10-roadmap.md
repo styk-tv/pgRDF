@@ -318,6 +318,71 @@ LLD v0.3 §5.4.
 
 ---
 
+## v0.4 — next milestone (forward-looking)
+
+v0.4 is the next major cut, drafted in
+[`SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).
+What follows summarises the five major tracks — the full contract
+lives in the spec. Acceptance criteria, schema deltas, and
+translator-level wiring are NOT duplicated here; this section is a
+navigation aid only.
+
+### Track 1 — Named-graph scoping + IRI mapping
+`GRAPH { … }` SPARQL surface plus a new `_pgrdf_graphs` system table
+mapping graph IRIs to the existing integer `graph_id` (LIST-partition
+key of `_pgrdf_quads`). `GRAPH ?g { … }` projects `?g` as the IRI,
+not the integer. See
+[v0.4-FUTURE §3](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#3-named-graph-scoping-and-iri-mapping-new).
+
+### Track 2 — SPARQL UPDATE
+`INSERT DATA`, `DELETE DATA`, pattern-driven `INSERT/DELETE … WHERE`,
+the atomic `DELETE … INSERT … WHERE` modify, plus `WITH <iri>` and
+inline `GRAPH <iri> { … }` graph scope. Overloads `pgrdf.sparql(q)`
+to dispatch by query form; UPDATE forms return an `_update` JSONB
+summary row. See
+[v0.4-FUTURE §4](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#4-sparql-update-new).
+
+### Track 3 — Graph-level lifecycle UDFs
+`pgrdf.drop_graph`, `clear_graph`, `copy_graph`, `move_graph` as
+partition-level primitives over `_pgrdf_quads` — constant-time
+`move_graph` via DETACH/ATTACH metadata swap, `TRUNCATE ONLY` for
+`clear_graph`. Also wires the corresponding SPARQL UPDATE forms
+(`DROP/CLEAR/CREATE/COPY/MOVE/ADD GRAPH`) to these UDFs. See
+[v0.4-FUTURE §5](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#5-graph-level-lifecycle-udfs-new).
+
+### Track 4 — CONSTRUCT
+`pgrdf.construct(q TEXT) → SETOF JSONB` returning structured
+`{subject, predicate, object}`-shaped rows via the existing term
+shaper. Sibling UDF rather than overloading `pgrdf.sparql` — callers
+signal intent at the SQL boundary. See
+[v0.4-FUTURE §6](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#6-construct-deferred-from-v03-now-in-scope).
+
+### Track 5 — Property paths
+`*`, `+`, `?`, `^`, with alternation `p1|p2` as a stretch goal.
+Translates to recursive Postgres CTEs with a `pgrdf.path_max_depth`
+GUC; falls back to direct BGP match when the predicate's closure is
+already materialised. See
+[v0.4-FUTURE §7](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#7-property-paths-deferred-from-v03-now-in-scope).
+
+### Carried backlog — SPARQL surface gaps from v0.3
+Multi-triple `OPTIONAL { BGP }` (LATERAL-style derived-table refactor),
+`VALUES` inline tables, `BIND` output usable in later FILTER/BGP,
+aggregates over `UNION`, and `DESCRIBE`. Shipped in the same cut
+because they share the translator machinery §4 + §6 already require.
+See
+[v0.4-FUTURE §11](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#11-sparql-surface-backlog-deferred-from-v03-now-in-scope).
+
+### Excluded from v0.4 (planned v0.5)
+Real SHACL output (ERRATA E-009-gated), the reasoning profile
+selector (`pgrdf.materialize(graph_id, profile)` — RDFS vs OWL-RL),
+TriG / N-Quads ingest, IRI overloads for the §5 lifecycle UDFs, and
+the W3C SHACL manifest runner. See
+[v0.4-FUTURE §8](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#8-reasoning-profile-selector-v05--flagged-here-for-planning),
+[§9](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#9-shacl-real-integration-v05--gated-on-errata-e-009),
+[§10](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#10-trig--n-quads-ingest-v05).
+
+---
+
 ## Out of scope (v0.x)
 
 (Carries forward unchanged from
@@ -345,6 +410,10 @@ pre-v0.3 framing — they correspond to the Phase 2.2 (extended)
 SPARQL surface steps 1-12, not to the v0.3 LLD's Phase 3 Storage
 Performance. Test counts are unaffected; the labels are kept here
 for git-archaeology fidelity.)
+
+(Once v0.4 work begins, new rows land under `v0.4 cut` labels per
+the per-track grouping in the "v0.4 — next milestone" section
+above; the v0.3 rows below remain frozen as the shipped baseline.)
 
 | Boundary | pgrx integration | pg_regress files | Notes |
 |---|---|---|---|
