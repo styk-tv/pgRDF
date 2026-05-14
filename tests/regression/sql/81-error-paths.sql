@@ -23,6 +23,7 @@
 --   error-66 load_turtle missing file    → 'load_turtle: failed to open'
 --   error-65 load_turtle invalid base IRI → 'load_turtle: invalid base IRI'
 --   error-64 parse_turtle malformed input → 'load_turtle: turtle parse error'
+--   error-63 sparql malformed query       → 'sparql: parse error:'
 
 DROP EXTENSION IF EXISTS pgrdf CASCADE;
 CREATE EXTENSION pgrdf;
@@ -120,6 +121,36 @@ SELECT _check_error(
   'error-64 parse_turtle malformed input',
   $$SELECT pgrdf.parse_turtle(':alice :name "Alice"', 9964)$$,
   'load_turtle: turtle parse error'
+);
+
+-- ─── Error 63: sparql malformed query ────────────────────────────
+-- `src/query/executor.rs::translate_query` (the entry the user-
+-- facing `pgrdf.sparql()` SETOF UDF dispatches into) parses the
+-- query string with `SparqlParser::new().parse_query(sql)` and
+-- `unwrap_or_else` panics with the literal prefix
+-- `sparql: parse error:` followed by the spargebra `ParseError`
+-- Display (which carries `error at L:C: expected …` coordinates).
+-- The prefix is the user-facing contract surface — operators and
+-- client libraries scrape SQLERRM on `sparql:` to distinguish
+-- query-parse failure from translator gaps (`80-unsupported-
+-- shapes`) and from RDF ingest failures (`66/65/64`).
+--
+-- The sibling UDF `pgrdf.sparql_parse(query)` (introspection
+-- helper) routes through its own panic site with prefix
+-- `sparql_parse:` instead — a deliberate distinction so callers
+-- can tell which entry point the bytes came in through. We lock
+-- only the `pgrdf.sparql()` path here; the `sparql_parse` prefix
+-- is a separate contract surface (covered by the `#[pg_test]`
+-- `sparql_parse_syntax_error_panics` in `src/query/parser.rs`).
+--
+-- We lock the prefix only — the tail (spargebra's line:col
+-- coordinates, the specific token it expected, e.g.
+-- `expected CONSTRUCT`) is volatile across spargebra versions and
+-- is informational, not contractual.
+SELECT _check_error(
+  'error-63 sparql malformed query',
+  $$SELECT * FROM pgrdf.sparql('this is not sparql at all')$$,
+  'sparql: parse error:'
 );
 
 DROP FUNCTION _check_error(TEXT, TEXT, TEXT);

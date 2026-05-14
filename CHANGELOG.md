@@ -55,6 +55,28 @@ so downstream tooling routes on one substring. Any malformed
 Turtle variant (missing trailing dot, undeclared prefix, bad
 IRI ref, RDF-star in default mode) trips the same prefix.
 
+Locks #63 of the countdown: a syntactically malformed SPARQL
+query handed to `pgrdf.sparql()` must surface the prefix
+`sparql: parse error:` (from `src/query/executor.rs:142`'s
+`SparqlParser::new().parse_query(sql).unwrap_or_else(...)`).
+The check fires through
+`SELECT * FROM pgrdf.sparql('this is not sparql at all')` —
+spargebra rejects at byte 10 with `expected CONSTRUCT`; that
+specific complaint plus the line:col coordinates are tail /
+volatile across spargebra versions, the locked substring is
+just the `sparql: parse error:` prefix. This is the user-facing
+contract surface for query-parse failure, distinct from the
+translator-gap prefix locked across `80-unsupported-shapes`
+(`sparql: …not supported yet`, `sparql: aggregates on top of
+UNION…`, etc.) and from the RDF-ingest prefixes locked in
+error-66/65/64. The sibling introspection UDF
+`pgrdf.sparql_parse()` routes through its own panic site with
+prefix `sparql_parse:` instead — a deliberate distinction so
+callers can tell which entry point the bytes came in through;
+that path is covered by the `#[pg_test]`
+`sparql_parse_syntax_error_panics` in `src/query/parser.rs`
+and is not pinned by this regression slice.
+
 Test bar: **93 pgrx + 34 pg_regress + 23 W3C-shape + 3 LUBM-shape
 = 153 tests**, green locally.
 
