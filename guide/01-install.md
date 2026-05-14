@@ -25,7 +25,7 @@ just psql                 # opens a psql shell to the pgrdf database
 
 pgrdf=# CREATE EXTENSION pgrdf;
 pgrdf=# SELECT pgrdf.version();
-        --  → 0.2.0
+        --  → 0.3.0
 ```
 
 That's it. The extension is installed and you can move on to
@@ -67,9 +67,9 @@ next section):
 ```bash
 # Download the matching tarball from
 # https://github.com/styk-tv/pgRDF/releases/latest
-wget https://github.com/styk-tv/pgRDF/releases/download/v0.2.0/pgrdf-0.2.0-pg17-glibc-amd64.tar.gz
+wget https://github.com/styk-tv/pgRDF/releases/download/v0.3.0/pgrdf-0.3.0-pg17-glibc-amd64.tar.gz
 
-tar -xzf pgrdf-0.2.0-pg17-glibc-amd64.tar.gz
+tar -xzf pgrdf-0.3.0-pg17-glibc-amd64.tar.gz
 sudo cp lib/pgrdf.so                 $(pg_config --pkglibdir)/
 sudo cp share/extension/pgrdf.control $(pg_config --sharedir)/extension/
 sudo cp share/extension/pgrdf--*.sql  $(pg_config --sharedir)/extension/
@@ -99,7 +99,7 @@ in any managed-service extension catalogue. Options:
 SELECT extversion FROM pg_extension                -- matches the tarball you fetched
  WHERE extname = 'pgrdf';
 SHOW shared_preload_libraries;                     -- contains 'pgrdf'
-SELECT pgrdf.version();                            -- → '0.2.0'
+SELECT pgrdf.version();                            -- → '0.3.0'
 SELECT pgrdf.stats() -> 'shmem_ready';             -- → true (preload OK)
 ```
 

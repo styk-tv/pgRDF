@@ -4,10 +4,10 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The first cut is `v0.3.0`. Cargo.toml still reads `version = "0.2.0"`;
-bump-to-`0.3.0` happens as part of the cut. See `CHANGELOG.md` for the
-running set of `[Unreleased]` entries that move into the `[0.3.0]` block
-at tag time.
+The first cut is `v0.3.0`. Cargo.toml now reads `version = "0.3.0"`
+(bumped from `0.2.0` during release pre-flight). See `CHANGELOG.md`
+for the running set of `[Unreleased]` entries that move into the
+`[0.3.0]` block at tag time.
 
 ## v0.3.0 — 2026-05-14 (planned)
 

@@ -6,6 +6,65 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release pre-flight — version bump to 0.3.0 (slices #18-#11)
+
+Mechanical version bump landing slices #18 through #11 of the 66→1
+release countdown. Touches every surface that pins the package
+version. The `pgrdf.version()` UDF (which returns
+`env!("CARGO_PKG_VERSION")`) and the extension's `extversion` now
+both report `0.3.0`.
+
+Files touched:
+
+- `Cargo.toml` — `version = "0.2.0"` → `version = "0.3.0"` (slice #18).
+- `pgrdf.control` — `default_version = '0.2.0'` → `'0.3.0'` (slice #17).
+- `compose/compose.yml` — bind-mount path
+  `pgrdf--0.2.0.sql` → `pgrdf--0.3.0.sql` (slice #16).
+- `compose/README.md` — bind-mount table + `pgrdf.version()` worked
+  example output → `"0.3.0"` (slice #16).
+- `README.md` — `pgrdf.version()` example output → `0.3.0`
+  (slices #15/#14; status pill at `v0.3` was already correct).
+- `guide/01-install.md` — `pgrdf.version()` example outputs (Path A
+  compose flow, Verify section) → `0.3.0`; Path C manual-install
+  worked-example tarball URL → `v0.3.0/pgrdf-0.3.0-...tar.gz`
+  (slice #13).
+- `docs/02-storage.md` — "No PostgreSQL custom scan hooks at v0.3.0"
+  current-version reference (slice #13).
+- `docs/06-installation.md` — `pgrdf.version()` example output →
+  `'0.3.0'` (slice #13).
+- `docs/09-release.md` — preamble reframed to reflect that Cargo.toml
+  now reads `version = "0.3.0"` (bump landed), instead of "still
+  reads `version = "0.2.0"`; bump-to-0.3.0 happens as part of the
+  cut" (slice #13).
+- `tests/regression/expected/00-smoke.out` — pgrdf.version() and
+  extversion lines `0.2.0` → `0.3.0` (slice #13).
+- `Cargo.lock` — `pgrdf 0.2.0 → 0.3.0` via `cargo update -p pgrdf`
+  (slice #11).
+
+Build artifact verification (slice #12):
+
+- `just build-ext` produces
+  `compose/extensions/share/extension/pgrdf--0.3.0.sql` and
+  `pgrdf.control` reads `default_version = '0.3.0'`. The cached
+  `pgrdf--0.2.0.sql` left over in the build output was removed (v0.x
+  doesn't support `ALTER EXTENSION pgrdf UPDATE` per the slice #21
+  upgrade policy, so the legacy migration file isn't needed).
+- `just test-regression` reports `39 pass, 0 fail, 0 new baselines`.
+
+Historical references to `0.2.0` are intentionally preserved:
+
+- All `CHANGELOG.md` `[Unreleased]` entries from slices #24-#27 that
+  document past pre-flight verifications (manual repack test,
+  cargo pgrx package dry-run, etc.) — they accurately describe the
+  state at the time those slices ran.
+- `sql/schema_v0_2_0.sql` — historical bootstrap-schema filename
+  (still referenced by `extension_sql_file!` in `src/lib.rs`); v0.3
+  doesn't change the schema layout.
+- `specs/SPEC.pgRDF.LLD.v0.2.md` — the v0.2 LLD contract.
+
+CHANGELOG `[Unreleased]` → `[0.3.0]` block conversion stays deferred
+to slices #4-#1 (the cut itself).
+
 ### Release notes — v0.4 deferral list audit (slice #19)
 
 Bi-directional audit of the "Deferred to v0.4" lists in

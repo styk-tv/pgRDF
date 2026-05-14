@@ -177,7 +177,7 @@ responsibility.
   tuning lives in [`docs/10-roadmap.md`](10-roadmap.md) Phase 4.
 - **No TOAST tuning.** Literals are stored inline; long literals
   (≥ 2 KB) compress under default TOAST policy.
-- **No PostgreSQL custom scan hooks** at v0.2.0 — Phase 2.x
+- **No PostgreSQL custom scan hooks** at v0.3.0 — Phase 2.x
   performance follow-on per LLD §4.2.
 - **No foreign keys** from `_pgrdf_quads` to `_pgrdf_dictionary`.
   Intentional — the loader enforces referential integrity by
