@@ -82,8 +82,10 @@ For the long-form plan see
 - **Not a full OWL 2 reasoner.** The OWL 2 RL profile is supported via
   the `reasonable` crate; EL/QL profiles aren't.
 - **Not RDF-star.** Quoted triples in subject / object position are
-  rejected at load time; pgRDF v0.3 treats them as out-of-scope per
-  SPEC.pgRDF.LLD §2.
+  rejected at load time; pgRDF v0.3 treats them as out-of-scope.
+  Adding RDF 1.2 triple-term support is tracked under
+  [ERRATA E-009](../specs/ERRATA.v0.2.md) (the same feature-unification
+  issue that blocks the real SHACL impl).
 - **Not a replacement for a graph database when you don't already
   have Postgres.** If you're starting from zero with a 100M-edge
   social graph, Neo4j or DuckDB-graph are likely better fits. pgRDF

@@ -6,6 +6,48 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Docs — guide intro + install audit (slice #44)
+
+Companion pass to slice #45: walked the three user-guide entry-point files
+(`guide/README.md`, `guide/00-intro.md`, `guide/01-install.md`) end-to-end
+against current shipped reality — same discipline as the README audit, no
+restructuring, only drift correction.
+
+Audit scope and results:
+
+| File | Surface | Result |
+| --- | --- | --- |
+| `guide/README.md` | All internal + external links, page-row blurbs, client-page targets, GitHub-issues URL | clean — every link resolves; the four pages and four client guides exist on disk |
+| `guide/00-intro.md` | Status block ("Alpha, v0.3 engine feature-complete"), SPARQL feature row vs LLD §3 capability matrix, deferred-to-v0.4 list vs LLD §3 ⏳ entries, ERRATA E-009 link, naming + conventions claims | one fix — RDF-star out-of-scope citation pointed at "SPEC.pgRDF.LLD §2" but neither LLD v0.2 §2 ("High-Level Architecture") nor LLD v0.3 §2 ("What's shipped") addresses RDF-star / quoted triples. The citation is unfounded; re-pointed to ERRATA E-009 (the actual upstream feature-unification block on RDF 1.2 triple-term support, same root cause that gates the real SHACL impl) |
+| `guide/00-intro.md` | SPARQL feature line: SELECT/ASK with BGP + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias **and** inline aggregate) + BIND | clean — matches LLD §3 verbatim and the README status pill |
+| `guide/00-intro.md` | Code-block UDF signatures (`load_turtle`, `count_quads`, `sparql`, `materialize`, `add_graph`) | clean — every example matches `src/storage/`, `src/inference/`, `src/query/` current arity |
+| `guide/00-intro.md` | "What's NOT" list (federated SPARQL, full OWL 2 reasoner, RDF-star, replacement for graph DB) | clean |
+| `guide/01-install.md` | Path A compose flow (`build-ext`, `compose-up`, `psql`, `CREATE EXTENSION`, `pgrdf.version() → 0.2.0`) | clean — every recipe is in the `Justfile`; `compose/.env.example` exists; `pgrdf.version()` returns `env!("CARGO_PKG_VERSION") = "0.2.0"` |
+| `guide/01-install.md` | PG-version range claim (`postgres:14..postgres:17`) | clean — matches ERRATA E-006 hold (pgrx 0.16.1, PG 14-17) for v0.3; PG 18 deferred to v0.4 |
+| `guide/01-install.md` | Path B Kubernetes ref to `specs/SPEC.pgRDF.INSTALL.v0.2.md` | clean — spec is unchanged in v0.3 per LLD §0 |
+| `guide/01-install.md` | Path C manual-install URL (`releases/download/v0.2.0/pgrdf-0.2.0-pg17-glibc-amd64.tar.gz`) | acknowledged as illustrative — no `v0.2.0` GitHub release exists yet (no git tag in the repo), but the section header is "If you have a Postgres server you control" with a "Download the matching tarball" comment that reads as a worked example for the post-release case. INSTALL spec §3 uses the same placeholder pattern with `0.4.1`. Left as-is per the conservative rule. |
+| `guide/01-install.md` | Verify-install snippet (`SHOW shared_preload_libraries`, `pgrdf.stats() -> 'shmem_ready'`) | clean — `shmem_ready` is the documented field in `src/storage/stats.rs:45` |
+| All three files | "Phase 3 — Extended SPARQL surface" stale-label check (slice #45 adjacent finding) | not present — the guide files don't carry the conflicting roadmap label |
+| All three files | `just test-all` / new recipe coverage | not referenced — the guide intentionally points users at `compose-up` + `psql`, not the test harness |
+
+**Result: one citation correction.** The §2 reference for the RDF-star
+out-of-scope policy was unfounded — the policy stands as a project
+decision rooted in ERRATA E-009 (`oxrdf` `rdf-12` feature surface
+conflicting with `reasonable 0.4.1`), not in any LLD section. Re-pointed
+the citation; no other text moved.
+
+Drift sources surveyed for completeness:
+- v0.3 vs v0.4 target labels — every deferred bullet in the guide files
+  already says `⏳ v0.4` correctly.
+- "Alpha"/"unstable"/"experimental" framing — the guide says
+  "Alpha, v0.3 engine feature-complete" which is the same status the
+  README pill carries. No "experimental" / "unstable" wording leaked in.
+- Test counts (93/39/23/3 = 158) — guide files don't cite specific
+  counts (those live in the README + `docs/08-testing.md`); no drift
+  surface here.
+
+This completes the three-file user-guide entry-point sweep.
+
 ### Docs — README audit (slice #45)
 
 Final pre-release pass over `README.md` — every badge, every link, every
