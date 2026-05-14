@@ -270,7 +270,7 @@ sub-SELECT per MINUS block.
 | 1 | Core Storage & Build Automation | ✅ done (schema, hexastore, compose, BuildKit) |
 | 2 | Functional SPARQL Coverage | ✅ done — Phase 2.0-2.2 (storage CRUD, Turtle ingest, dict cache + batch, SPARQL parser + BGP-to-SQL) and v0.2's "Phase 3" merged into a single delivery track (§3) |
 | **3** | **Storage Performance** (NEW) | **⏳ next** |
-| 4 | Inference Engine (OWL 2 RL via `reasonable`) | ⏳ |
+| 4 | Inference Engine (OWL 2 RL via `reasonable`) | ✅ done — `src/inference/reasonable.rs`, `60-materialize-owl-rl.sql` |
 | 5 | Validation Engine (SHACL via `shacl_validation`) | ⏳ |
 | 6 | W3C Conformance + LUBM Perf + Release | ⏳ |
 
@@ -299,17 +299,33 @@ OPTIONAL, VALUES, BIND-in-FILTER, etc.) land as Phase 3 sub-steps
 once their refactor is cheap enough — none of them block the
 performance work.
 
-### 5.2 Phase 4 — Inference Engine
+### 5.2 Phase 4 — Inference Engine — **SHIPPED**
 
-`pgrdf.materialize(graph_id BIGINT)` streams the graph's quads
-through `reasonable`'s OWL 2 RL evaluator and writes inferred
-quads back into the same partition with `is_inferred = TRUE`.
+`pgrdf.materialize(graph_id BIGINT) → JSONB`
+(`src/inference/reasonable.rs`) rehydrates the graph's base quads
+into `oxrdf::Triple`s in a single SPI scan with three dictionary
+JOINs, runs them through `reasonable::reasoner::Reasoner`, and
+writes the inferred set back with `is_inferred = TRUE`.
 
-Streaming uses the COPY BINARY path from Phase 3 step 3 (so
-Phase 4 effectively depends on that slice landing first).
+Set-diff is used to isolate entailed-but-not-asserted triples
+(filters out base AND the OWL 2 RL axiomatic triples that happen
+to match the input).
 
-Idempotency: repeated calls re-derive from scratch; covering
-indexes prevent duplicates.
+Idempotency: each call wipes prior inferred rows in the graph
+before re-deriving; `previous_inferred_dropped` in the stats
+JSONB reports the count.
+
+**Loader interaction.** The Phase 4 writeback path is currently
+row-by-row INSERT — once Phase 3 step 3b (heap_multi_insert /
+COPY BINARY) lands the loader's `flush_batch` will be shared with
+materialize for a single ingest pipeline.
+
+Test surface:
+- 3 pgrx integration tests (`materialize_subclass_chain`,
+  `materialize_is_idempotent`,
+  `materialize_pure_data_preserves_input`).
+- Regression `60-materialize-owl-rl.sql` covers two-hop
+  subClassOf + idempotence + `owl:inverseOf`.
 
 ### 5.3 Phase 5 — Validation Engine
 

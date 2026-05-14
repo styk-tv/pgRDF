@@ -172,22 +172,25 @@ Phase 3 backlog (each its own slice):
 
 ---
 
-## Phase 4 — Semantic Engine (Inference + Validation) ⏳
+## Phase 4 — Inference Engine 🚧 (partial)
 
-Outcome: materialized OWL 2 RL inference and SHACL validation work
-against real ontologies. Tracks LLD §7 Phase 3.
+Outcome: materialized OWL 2 RL inference works against real
+ontologies; SHACL validation is its own Phase 5. Tracks LLD v0.3
+§5.2.
 
 Gates:
-- ⏳ `pgrdf.materialize(graph_id BIGINT)` — streams `_pgrdf_quads`
-      through `reasonable` (OWL 2 RL — see ERRATA E-002), writes
-      inferred quads with `is_inferred = TRUE`. Target ingest path
-      is the same one that lands for §4.3 (COPY BINARY).
-- ⏳ `pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` —
-      W3C-conformant `sh:ValidationReport` via `shacl_validation`
-      (per ERRATA E-001, NOT `shacl-rust`).
-- ⏳ W3C SPARQL 1.1: ≥ 70 % pass. SHACL: ≥ 50 % pass.
-- ⏳ Reasoner correctness gated by a small fixed OWL 2 RL fixture
-      (pizza ontology subset) + diff against expected closure.
+- ✅ `pgrdf.materialize(graph_id BIGINT) → JSONB` —
+      `src/inference/reasonable.rs` rehydrates base quads via a
+      single SPI scan + 3 dict-JOINs, runs `reasonable::Reasoner`
+      (OWL 2 RL — see ERRATA E-002), set-diffs against the input,
+      and INSERTs the entailed-but-not-asserted triples with
+      `is_inferred = TRUE`. Idempotent. Verified by
+      `tests/regression/sql/60-materialize-owl-rl.sql`.
+- ⏳ Reasoner-coverage fixture (e.g. pizza ontology subset) with a
+      golden expected-closure diff. Deferred — current regression
+      uses minimal hand-authored TBoxes.
+- ⏳ Loader-side writeback via `flush_batch` (depends on Phase 3
+      step 3b shipping the bulk-INSERT primitive).
 
 ---
 
@@ -235,4 +238,5 @@ phase 3 step table above.
 | Phase 3 steps 8–12 | 79 | 25 | + HAVING, GROUP_CONCAT/SAMPLE, expression richness, BIND, multi-triple MINUS, ASK |
 | v0.3 Phase 3 step 1 | 86 | 26 | + shmem dict cache (LLD §4.1), `pgrdf.stats()`, perf regression `50-shmem-dict-cache.sql` |
 | v0.3 Phase 3 step 2 | 88 | 27 | + prepared-plan cache (LLD §4.2), parameterised SQL, perf regression `51-plan-cache.sql` |
-| v0.3 Phase 3 step 3 phase A (current) | 88 | 28 | + bulk-ingest prepared INSERT (LLD §4.3 phase A), `synth-10k.ttl`, perf regression `52-bulk-ingest-perf.sql`. 2× wall-clock target deferred to phase B / v0.4 |
+| v0.3 Phase 3 step 3 phase A | 88 | 28 | + bulk-ingest prepared INSERT (LLD §4.3 phase A), `synth-10k.ttl`, perf regression `52-bulk-ingest-perf.sql`. 2× wall-clock target deferred to phase B / v0.4 |
+| v0.3 Phase 4 (current) | 91 | 29 | + `pgrdf.materialize` OWL 2 RL inference via `reasonable` 0.4, set-diff isolation, idempotent re-derivation, regression `60-materialize-owl-rl.sql` |

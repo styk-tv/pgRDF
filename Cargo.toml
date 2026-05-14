@@ -44,14 +44,17 @@ oxrdf      = "0.3"
 oxttl      = "0.2"   # Turtle / N-Triples / TriG / N-Quads. Latest stable as of 2026-05-13.
 spargebra  = "0.4"   # SPARQL 1.1 parser → algebra AST. Pins =0.3.3 on oxrdf (matches our own).
 serde_json = "1"     # Used by load_turtle_verbose and sparql_parse to emit JSONB.
+# Phase 4: OWL 2 RL forward-chain reasoner. Pulls in `oxrdf ^0.3.3`
+# transitively (matches our own pin) plus datafrog / disjoint-sets /
+# roaring / rio_api. 0.4.1 (2026-05-10) supersedes the v0.2-LLD
+# reference to 0.2; see specs/ERRATA.v0.2.md for the rationale.
+reasonable = "0.4"
 
 # Stack-out per SPEC.pgRDF.LLD.v0.2 + ERRATA. Kept here as commented-out
 # pins so the dependency surface is reviewable without compiling them
 # until the relevant module work begins. Uncomment when work on that
 # module starts so reviewers see one dep enter the surface at a time.
 #
-# spargebra        = "0.4"     # SPARQL parser + algebra AST (oxigraph workspace)
-# reasonable       = "0.2"     # OWL 2 RL forward-chain reasoner
 # shacl_validation = "0.4"     # SHACL processor — replaces the v0.2 LLD reference to `shacl-rust` (see specs/ERRATA.v0.2.md)
 
 [dev-dependencies]

@@ -6,6 +6,54 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 4 — OWL 2 RL materialization via `reasonable`
+
+- `Cargo.toml`: `reasonable = "0.4"` (0.4.1, 2026-05-10 publish).
+  Pulls in `datafrog 2`, `disjoint-sets 0.4`, `roaring 0.5`,
+  `rio_api / rio_turtle 0.7`, `farmhash 1`, `serde_sexpr 0.1`. The
+  oxrdf version requirement (`^0.3.3`) matches our existing pin so
+  triple types unify cleanly across the codebase.
+- `src/inference/reasonable.rs`: full implementation of
+  `pgrdf.materialize(graph_id BIGINT) → JSONB`. Flow:
+  1. Idempotency — wipe every `is_inferred = TRUE` row in this
+     graph via a single `DELETE … RETURNING 1` + count aggregate.
+  2. Bulk-rehydrate base triples — one `SELECT … JOIN
+     _pgrdf_dictionary × 3 + LEFT JOIN dt` round-trip builds
+     `Vec<oxrdf::Triple>` directly. Datatype + language tag both
+     carried; blank-node subjects + object IRIs / literals all
+     supported.
+  3. `Reasoner::new().load_triples(base).reason()` — OWL 2 RL
+     forward chain.
+  4. Set-diff against the base `HashSet<Triple>` to isolate
+     entailed-but-not-asserted triples (filters out the base AND
+     the OWL 2 RL axiomatic triples that match the input).
+  5. Each new triple's terms intern via `put_term_full` (shmem-
+     warm path from Phase 3 step 1) and INSERT with
+     `is_inferred = TRUE`.
+- Stats JSONB:
+  `base_triples / inferred_triples_written /
+  previous_inferred_dropped / reasoner_errors[] / elapsed_ms`.
+- 3 new pgrx tests:
+  `materialize_subclass_chain` (verifies
+  `?a a :Engineer ⇒ ?a a :Person`),
+  `materialize_is_idempotent` (two calls produce the same row count
+  and drop the prior output),
+  `materialize_pure_data_preserves_input` (base survives).
+- New regression `60-materialize-owl-rl.sql` covers:
+  - 2-hop subClassOf chain
+    (`Engineer ⊑ Person ⊑ Agent` plus assertions →
+     `alice a Person`, `alice a Agent`, `bob a Agent`).
+  - Idempotence — `previous_inferred_dropped` equals the prior
+    `inferred_triples_written`.
+  - `owl:inverseOf` entailment
+    (`:owner :owns :store` ⇒ `:store :ownedBy :owner`).
+- Test bar: **88 → 91 pgrx + 28 → 29 regression**, green.
+
+Scope honest. `reasonable` implements OWL 2 RL only. OWL 2 EL/QL
+and arbitrary Datalog beyond RL are NOT covered. Pre-existing
+ERRATA E-002 (LLD §2 → "reasonable Datalog reasoner") remains
+correct; v0.3 LLD §5.2 already restricts the slice to RL.
+
 ### Phase 3 step 3 — bulk-ingest prepared INSERT (LLD §4.3 phase A)
 
 - `src/storage/loader.rs`: the batch-flush SQL is a constant
