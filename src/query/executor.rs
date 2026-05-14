@@ -1052,9 +1052,8 @@ fn translate_filter_with_aggregates(
     // Look up an aggregate by either its current output_var or any
     // of the synthetic names spargebra used internally.
     let find_agg = |name: &str| -> Option<&AggregateSpec> {
-        aggs.iter().find(|a| {
-            a.output_var == name || a.synth_aliases.iter().any(|s| s == name)
-        })
+        aggs.iter()
+            .find(|a| a.output_var == name || a.synth_aliases.iter().any(|s| s == name))
     };
     let numeric_side = |e: &Expression| -> Option<String> {
         match e {
