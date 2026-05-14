@@ -148,6 +148,11 @@ struct ParsedSelect {
     /// migrating any filter that names an aggregate alias out of
     /// `ps.filters`.
     having_filters: Vec<Expression>,
+    /// BIND specs — `BIND(expr AS ?var)` (or the `(EXPR AS ?var)`
+    /// form in SELECT-DISTINCT-aside cases). Each entry becomes an
+    /// extra SELECT-list column whose value is the translated
+    /// expression. Filtering on a BIND output isn't supported yet.
+    binds: Vec<BindSpec>,
     /// When non-empty, this is a UNION query — each entry is a
     /// self-contained branch with its own BGP / filters / optionals.
     /// Single-branch fields (`bgp`, `filters`, `optionals`) remain
@@ -168,6 +173,11 @@ struct OptionalBlock {
     /// Translated into the LEFT JOIN's ON clause so rejected rows
     /// still survive with the optional variables NULL.
     filter: Option<Expression>,
+}
+
+struct BindSpec {
+    output_var: String,
+    expression: Expression,
 }
 
 struct AggregateSpec {
@@ -267,6 +277,42 @@ fn parse_select(p: &GraphPattern) -> ParsedSelect {
         }
     }
     ps
+}
+
+/// Translate a BIND expression into a SQL fragment that yields a
+/// TEXT value (consistent with all other projected columns; the
+/// JSONB row emits each cell as a string).
+///
+/// Supported today:
+///   * Literal / NamedNode / Variable (text form).
+///   * STR / LANG / DATATYPE / UCASE / LCASE / STRLEN-as-text.
+///   * Arithmetic, cast to text.
+///   * CONCAT(?a, ?b, …) → Postgres `concat`.
+/// Anything else returns None (translator panics with a clear
+/// "BIND expression not translatable" message).
+fn translate_bind_expression(
+    e: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> Option<String> {
+    // Try text-valued first (literal, NamedNode, STR/LANG/DATATYPE/
+    // UCASE/LCASE/STRLEN-derived, plain variable).
+    if let Some(s) = expr_to_lexical_sql(e, anchors) {
+        return Some(s);
+    }
+    // Otherwise try numeric — wrap as text so the JSONB output stays
+    // a string.
+    if let Some(n) = expr_to_numeric_sql(e, anchors) {
+        return Some(format!("({n})::text"));
+    }
+    // CONCAT — variable arg count, string-yielding.
+    if let Expression::FunctionCall(Function::Concat, args) = e {
+        let parts: Vec<String> = args
+            .iter()
+            .map(|a| expr_to_lexical_sql(a, anchors))
+            .collect::<Option<Vec<_>>>()?;
+        return Some(format!("concat({})", parts.join(", ")));
+    }
+    None
 }
 
 /// Does any sub-expression of `e` reference a variable in `names`?
@@ -496,34 +542,28 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
             walk_select(inner, ps);
         }
         GraphPattern::Extend { inner, variable, expression } => {
-            // Walk inner FIRST so the Group below has populated
-            // ps.aggregates by the time we process the rename.
+            // Walk inner FIRST so any Group below has populated
+            // ps.aggregates by the time we decide what kind of
+            // Extend this is.
             walk_select(inner, ps);
-            // SPARQL `(EXPR AS ?v)` lowers to Extend wrapping Group.
-            // For aggregates the expression is a Variable($agg_N)
-            // referencing a synthesised name from the Group layer —
-            // we rename the matching AggregateSpec to ?variable.
-            match expression {
-                Expression::Variable(v) => {
-                    let synth = v.as_str();
-                    let new_name = variable.as_str().to_string();
-                    let agg = ps
-                        .aggregates
-                        .iter_mut()
-                        .find(|a| a.output_var == synth)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "sparql: Extend ?{new_name} <- ?{synth} doesn't match any aggregate; \
-                                 BIND on non-aggregate expressions isn't supported yet"
-                            )
-                        });
+            // Two kinds of Extend matter today:
+            //   1) Aggregate rename — `(EXPR AS ?v)` lowers to Extend
+            //      wrapping Group, with `expression == Variable($agg_N)`.
+            //      Match and rename the matching AggregateSpec.
+            //   2) General BIND — `BIND(expr AS ?v)` or `(EXPR AS ?v)`
+            //      on a non-aggregate expression. Capture as a BindSpec.
+            let new_name = variable.as_str().to_string();
+            if let Expression::Variable(v) = expression {
+                let synth = v.as_str();
+                if let Some(agg) = ps.aggregates.iter_mut().find(|a| a.output_var == synth) {
                     agg.output_var = new_name;
+                    return;
                 }
-                other => panic!(
-                    "sparql: BIND ({other:?} AS ?{}) — only aggregate aliases are supported today",
-                    variable.as_str()
-                ),
             }
+            ps.binds.push(BindSpec {
+                output_var: new_name,
+                expression: expression.clone(),
+            });
         }
         GraphPattern::Bgp { patterns } => {
             ps.bgp = patterns.clone();
@@ -610,8 +650,21 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
     // lookup → aliased to the variable name (so SETOF JSONB emission
     // pulls the right column by ordinal). Hidden trailing columns
     // are appended for ORDER BY variables that aren't projected.
+    // BIND-bound variables emit their expression SQL instead of a
+    // dict-lookup.
     let mut select_clauses: Vec<String> = Vec::new();
     for var in &ps.projected {
+        if let Some(bind) = ps.binds.iter().find(|b| &b.output_var == var) {
+            let expr_sql = translate_bind_expression(&bind.expression, &anchors)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "sparql: BIND expression for ?{var} not translatable: {:?}",
+                        bind.expression
+                    )
+                });
+            select_clauses.push(format!("{expr_sql} AS {}", quote_identifier(var)));
+            continue;
+        }
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
             panic!("sparql: projected variable ?{var} is not bound in any BGP pattern")
         });
@@ -2146,6 +2199,76 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2);
+    }
+
+    /// BIND with UCASE — derived text column.
+    #[pg_test]
+    fn sparql_bind_ucase() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:n \"Alice\" .
+                 ex:b ex:n \"Bob\"   .',
+                8_100)",
+        )
+        .unwrap();
+
+        let row: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'SELECT ?upper
+                  WHERE { ?s <http://example.com/n> \"Alice\"
+                          BIND(UCASE(\"Alice\") AS ?upper) }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.0["upper"], "ALICE");
+    }
+
+    /// BIND with arithmetic — derived numeric column (emitted as text).
+    #[pg_test]
+    fn sparql_bind_arithmetic() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:age 30 .',
+                8_101)",
+        )
+        .unwrap();
+
+        let row: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'SELECT ?double
+                  WHERE { ?s <http://example.com/age> ?age
+                          BIND(?age * 2 AS ?double) }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.0["double"], "60");
+    }
+
+    /// BIND with CONCAT.
+    #[pg_test]
+    fn sparql_bind_concat() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:n \"Alice\" .',
+                8_102)",
+        )
+        .unwrap();
+
+        let row: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'SELECT ?greeting
+                  WHERE { ?s <http://example.com/n> ?n
+                          BIND(CONCAT(\"Hi, \", ?n) AS ?greeting) }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.0["greeting"], "Hi, Alice");
     }
 
     /// Arithmetic in FILTER — `?a + ?b > N`.

@@ -6,6 +6,31 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 10 — BIND (non-aggregate)
+
+- `BIND(expr AS ?v)` (and the equivalent `SELECT (expr AS ?v)` form
+  on non-aggregate expressions) now adds a virtual column. `walk_select`'s
+  Extend handler falls through to a `BindSpec` when the expression
+  isn't a Variable-rename of an existing aggregate.
+- Projection in `build_single_branch_outer` checks `ps.binds` before
+  falling back to the BGP anchor lookup, emitting the translated
+  expression with the BIND var as the column alias.
+- `translate_bind_expression` covers Literal / NamedNode / Variable,
+  STR / LANG / DATATYPE / UCASE / LCASE, arithmetic, STRLEN, and
+  `CONCAT(?a, ?b, …)` via Postgres `concat`. All values surface as
+  text in the JSONB row.
+- Today's restriction: a BIND output variable referenced in a later
+  FILTER / BGP isn't yet supported (would need expression substitution
+  during translation). Filtering on BIND output is Phase 3 backlog.
+- 3 new pg_tests + `tests/regression/sql/42-sparql-bind.sql`
+  (6 query shapes: UCASE, arithmetic, CONCAT, literal-constant,
+  STRLEN, two-BINDs in one query).
+- `README.md` pills: 73+22 → 76+23.
+
+Test bar:
+  pg_test:    76 passed; 0 failed  (was 73)
+  regression: 23 passed; 0 failed  (was 22)
+
 ### Phase 3 step 9 — Expression richness in FILTER
 
 - `pgrdf.sparql` FILTER translator gains a much wider expression
