@@ -6,6 +6,31 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 12 — ASK query form
+
+- `pgrdf.sparql('ASK { … }')` now works. Returns a single JSONB
+  row `{"_ask": "true"}` or `{"_ask": "false"}` reflecting whether
+  the pattern has at least one solution.
+- The pattern walk reuses `parse_select` so ASK transparently
+  supports FILTER, OPTIONAL, UNION, MINUS, and any combination
+  the SELECT executor handles. `build_ask_probe_sql` emits a
+  `SELECT 1 FROM …` probe wrapped in `EXISTS(…)` in the outer
+  query.
+- `pgrdf.sparql_parse` now reports `form: "ASK"` with the same
+  `bgp_pattern_count` / `bgp_patterns` / `unsupported_algebra`
+  shape it gives SELECT, rather than `supported: false`.
+- 2 new pg_tests: ASK match/no-match, ASK with FILTER.
+- `tests/regression/sql/44-sparql-ask.sql` covers 6 query shapes:
+  match, no-match, FILTER pass/fail, ASK with OPTIONAL, ASK with
+  UNION.
+- `README.md` pills: 77+24 → 79+25.
+- `CONSTRUCT` and `DESCRIBE` change the output shape (triples
+  instead of solutions) and are **deferred to v0.4**.
+
+Test bar:
+  pg_test:    79 passed; 0 failed  (was 77)
+  regression: 25 passed; 0 failed  (was 24)
+
 ### Phase 3 step 11 — Multi-triple MINUS
 
 - `MINUS { ?s :p ?o . ?s :q ?r . … }` now accepts arbitrary

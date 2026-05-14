@@ -8,8 +8,11 @@
 //!
 //! Today's scope:
 //!   * SELECT queries (any form) — variables + BGP triples extracted.
-//!   * CONSTRUCT / ASK / DESCRIBE — recognised but reported as
-//!     `supported: false` until the translator covers them.
+//!   * ASK — supported. The parser reports `bgp_pattern_count` +
+//!     `unsupported_algebra` just like SELECT; the executor wraps
+//!     the probe SELECT in `EXISTS(...)`.
+//!   * CONSTRUCT / DESCRIBE — recognised but reported as
+//!     `supported: false`; the executor doesn't handle them yet.
 //!   * Non-BGP graph patterns (OPTIONAL, UNION, GRAPH, …) — the
 //!     parser handles them fine; the JSONB output flags them under
 //!     `unsupported_algebra` so the user knows the AST has shape
@@ -54,9 +57,14 @@ fn serialize_query(q: &Query) -> Value {
             json!({ "form": "CONSTRUCT", "supported": false,
                     "reason": "CONSTRUCT not in Phase 2.2 scope" })
         }
-        Query::Ask { .. } => {
-            json!({ "form": "ASK", "supported": false,
-                    "reason": "ASK not in Phase 2.2 scope" })
+        Query::Ask { pattern, .. } => {
+            let (_vars, bgp, unsupported) = walk_select_pattern(pattern);
+            json!({
+                "form":                "ASK",
+                "bgp_pattern_count":   bgp.len(),
+                "bgp_patterns":        bgp,
+                "unsupported_algebra": unsupported,
+            })
         }
         Query::Describe { .. } => {
             json!({ "form": "DESCRIBE", "supported": false,

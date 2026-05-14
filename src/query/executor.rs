@@ -217,16 +217,85 @@ struct UnionBranch {
 }
 
 fn translate(q: &Query) -> ExecPlan {
-    let pattern = match q {
-        Query::Select { pattern, .. } => pattern,
-        other => panic!("sparql: only SELECT supported in v0.2 (got {other:?})"),
-    };
-    let ps = parse_select(pattern);
-    if ps.bgp.is_empty() && ps.union_branches.is_empty() {
-        panic!("sparql: empty BGP");
+    match q {
+        Query::Select { pattern, .. } => {
+            let ps = parse_select(pattern);
+            if ps.bgp.is_empty() && ps.union_branches.is_empty() {
+                panic!("sparql: empty BGP");
+            }
+            let sql = build_bgp_sql(&ps);
+            ExecPlan { projected: ps.projected, sql }
+        }
+        Query::Ask { pattern, .. } => {
+            // ASK reuses the SELECT pattern walk but only cares
+            // whether the resulting solution sequence is non-empty.
+            let mut ps = parse_select(pattern);
+            if ps.bgp.is_empty() && ps.union_branches.is_empty() {
+                panic!("sparql: ASK with empty BGP");
+            }
+            // Force a stable single-row projection so build_*_sql
+            // doesn't fail looking for projected vars in anchors —
+            // we'll discard the inner SELECT below.
+            ps.projected = Vec::new();
+            ps.distinct = false;
+            ps.order_by.clear();
+            ps.limit = Some(1);
+            ps.offset = 0;
+            // Build a probe SELECT that yields any row when the
+            // pattern matches; wrap it in EXISTS and cast to text.
+            let probe = build_ask_probe_sql(&ps);
+            let sql = format!(
+                "SELECT CASE WHEN EXISTS ({probe}) THEN 'true' ELSE 'false' END AS \"_ask\""
+            );
+            ExecPlan {
+                projected: vec!["_ask".to_string()],
+                sql,
+            }
+        }
+        other => panic!("sparql: query form not supported yet (got {other:?})"),
     }
-    let sql = build_bgp_sql(&ps);
-    ExecPlan { projected: ps.projected, sql }
+}
+
+/// Build a probe SELECT for ASK — same machinery as
+/// build_single_branch_outer / build_union_sql but with an empty
+/// SELECT clause (`SELECT 1`) so the SQL is well-formed before
+/// being wrapped in EXISTS().
+fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
+    if !ps.union_branches.is_empty() {
+        let branch_sqls: Vec<String> = ps
+            .union_branches
+            .iter()
+            .map(|b| {
+                let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+                let (from_sql, where_clauses) = build_from_and_where(
+                    &b.bgp, &b.filters, &b.optionals, &b.minuses, &mut anchors, 0,
+                );
+                let mut sql = format!("SELECT 1 FROM {from_sql}");
+                if !where_clauses.is_empty() {
+                    sql.push_str(" WHERE ");
+                    sql.push_str(&where_clauses.join(" AND "));
+                }
+                sql
+            })
+            .collect();
+        return branch_sqls.join(" UNION ALL ");
+    }
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    let (from_sql, where_clauses) = build_from_and_where(
+        &ps.bgp,
+        &ps.filters,
+        &ps.optionals,
+        &ps.minuses,
+        &mut anchors,
+        0,
+    );
+    let mut sql = format!("SELECT 1 FROM {from_sql}");
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+    sql.push_str(" LIMIT 1");
+    sql
 }
 
 /// Walk the algebra wrappers around the SELECT's inner BGP,
@@ -2731,6 +2800,65 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2, "ex:p (3 rows, sum 60) and ex:q (2 rows, sum 20)");
+    }
+
+    /// ASK — matching pattern returns "true", non-matching "false".
+    #[pg_test]
+    fn sparql_ask_matches() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:b .',
+                8_120)",
+        )
+        .unwrap();
+
+        let yes: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql('ASK { ?s ?p ?o }')",
+        )
+        .unwrap()
+        .unwrap();
+        let no: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'ASK { <http://example.com/zz> <http://nope/> <http://example.com/yy> }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(yes.0["_ask"], "true");
+        assert_eq!(no.0["_ask"], "false");
+    }
+
+    /// ASK with FILTER. Pattern exists but filter rejects → false.
+    #[pg_test]
+    fn sparql_ask_with_filter() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:age 30 .',
+                8_121)",
+        )
+        .unwrap();
+
+        let young: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                ASK { ?s foaf:age ?a FILTER(?a > 60) }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        let any: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                ASK { ?s foaf:age ?a FILTER(?a > 10) }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(young.0["_ask"], "false");
+        assert_eq!(any.0["_ask"], "true");
     }
 
     /// Multi-triple MINUS — subtract subjects that match BOTH
