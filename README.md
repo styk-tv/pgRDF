@@ -5,7 +5,7 @@
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20v0.3%20engine%20feature--complete-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-93%20pgrx%20%2B%2037%20regression%20%2B%2023%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-93%20pgrx%20%2B%2038%20regression%20%2B%2023%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
 [![SPARQL](https://img.shields.io/badge/SPARQL-FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
@@ -225,8 +225,8 @@ For people working on pgRDF itself.
 | Ontology smoke | Real-world Turtle parses cleanly | `tests/perf/smoke-ontologies.sh` |
 | Full bar | Both `just test` + `just test-regression` | `just test-all` |
 
-Current bar — **93 pgrx + 37 pg_regress + 23 W3C-shape + 3
-LUBM-shape = 156 tests** green across the full pgrx PG 14-17
+Current bar — **93 pgrx + 38 pg_regress + 23 W3C-shape + 3
+LUBM-shape = 157 tests** green across the full pgrx PG 14-17
 matrix and the compose-based regression runtime (PG 17). Covers:
 - Storage CRUD + Turtle ingest (Phase 2.0-2.2).
 - SPARQL SELECT/ASK surface (Phase 3 steps 1-12, plus inline

@@ -179,8 +179,37 @@ the test still passing as long as the contract holds. Bare-row
 way to drive distinct plans into the cache; `\gset` captures the
 snapshots without polluting the expected-output stream.
 
-Test bar: **93 pgrx + 37 pg_regress + 23 W3C-shape + 3 LUBM-shape
-= 156 tests**, green locally.
+Locks #59 of the countdown: `pgrdf.parse_turtle()` MUST accept
+*triple-free* Turtle input without panicking and MUST return `0`
+as the inserted-triple count. The parser path in
+`src/storage/loader.rs::ingest_turtle_with_stats` drives an oxttl
+`TurtleParser` iterator whose for-loop body — the only site that
+interns dict ids and pushes onto `batch_s/p/o` — runs ONCE PER
+TRIPLE. Inputs that contain no triples (empty string,
+whitespace-only, Turtle comment lines, bare `@prefix` declaration)
+yield zero iterator items: the loop body never executes,
+`stats.triples` stays `0`, the trailing `flush_batch()` flushes
+empty vectors (no SQL is emitted to `_pgrdf_quads`), and the
+function returns `0`. New `tests/regression/sql/65-parse-turtle-empty.sql`
+locks six invariants in one go: each of the four
+zero-triple inputs returns `0` (four booleans), `_pgrdf_quads`
+for the test graph stays empty (one boolean), and
+`_pgrdf_dictionary` stays empty across all four parses (one
+boolean — interning is loop-body-only, so the `@prefix` IRI in
+case 4 is parser-scope state, not a dict write). This is the
+orthogonal correct-path companion to the malformed-input case
+noted in `81-error-paths.sql` (where the parser panics with the
+literal `load_turtle: turtle parse error: …` prefix): an EMPTY
+parser iterator is NOT a parse error — it returns `0` cleanly.
+Guards against a refactor that wraps the loop in a "fast-path"
+panicking on empty input, that seeds a placeholder dict/quad row,
+or that mishandles `flush_batch()` of zero-length arrays. The
+whitespace-only case uses an `E''` extended-string literal so
+`\n` / `\t` reach the parser as actual whitespace rather than
+literal backslash-n (which the Turtle grammar correctly rejects).
+
+Test bar: **93 pgrx + 38 pg_regress + 23 W3C-shape + 3 LUBM-shape
+= 157 tests**, green locally.
 
 ### Translator fix — type-aware `MIN` / `MAX`
 
