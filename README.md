@@ -222,8 +222,17 @@ For people working on pgRDF itself.
 |---|---|---|
 | pgrx integration | UDF correctness inside a managed PG | `just test` |
 | pg_regress-style | UDF correctness over the wire to compose Postgres | `just test-regression` |
+| W3C-shape SPARQL | Per-test data.ttl + query.rq vs expected.jsonl | `just test-w3c` |
+| LUBM-shape | LUBM-style correctness gates against a hand-authored fixture | `just test-lubm` |
 | Ontology smoke | Real-world Turtle parses cleanly | `tests/perf/smoke-ontologies.sh` |
-| Full bar | Both `just test` + `just test-regression` | `just test-all` |
+| Narrow bar | `just test` + `just test-regression` (back-compat shape) | `just test-all` |
+| Compose-based bar | regression + W3C-shape + LUBM-shape | `just test-conformance` |
+| Full bar | pgrx integration + test-conformance — the broadest sweep | `just test-everything` |
+| Cold-compose smoke | Wipe compose, rebuild, re-up, run test-conformance | `just smoke-cold` |
+
+`just test-everything` is the comprehensive entry point; `just
+smoke-cold` is the cold-compose verification (use after touching
+anything in `compose/`, `fixtures/`, or the test SQL fixtures).
 
 Current bar — **93 pgrx + 39 pg_regress + 23 W3C-shape + 3
 LUBM-shape = 158 tests** green across the full pgrx PG 14-17

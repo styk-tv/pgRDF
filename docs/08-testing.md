@@ -66,8 +66,20 @@ file's stdout is diffed against `tests/regression/expected/*.out`.
 
 ```bash
 just test-regression
-just test-all       # = just test && just test-regression
+just test-all          # narrow bar: just test && just test-regression
+just test-conformance  # every compose-based harness: regression + W3C-shape + LUBM-shape
+just test-everything   # the lot: pgrx integration + test-conformance
+just smoke-cold        # wipe compose, rebuild, re-up, run test-conformance
 ```
+
+`just test-everything` is the comprehensive entry point — pgrx
+integration plus every compose-based harness end-to-end. `just
+smoke-cold` is the cold-compose verification: it tears compose down
+with `compose-down`, rebuilds the extension, brings compose back up,
+recreates the extension, and runs `test-conformance` against the
+fresh stack. Use it after touching anything in `compose/`,
+`fixtures/`, or the test SQL fixtures themselves — those changes
+can pass on a warm compose and break on the next cold boot.
 
 New tests start by baselining (`ACCEPT=1 just test-regression`), but
 the discipline is to hand-compute expected outputs from the SQL

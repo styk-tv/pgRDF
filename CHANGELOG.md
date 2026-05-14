@@ -118,6 +118,34 @@ locks the *correctness contract* on **edge-case but valid** inputs
 the engine must handle without surprise. The countdown shifts from
 66→63 (error-path locks) into 62→onward (edge-case locks).
 
+Locks #55 — the final entry in the 66→1 coverage countdown — promotes
+the W3C-shape and LUBM-shape harnesses to first-class Justfile
+recipes and adds a cold-compose smoke that exercises every
+compose-based test layer end-to-end. New recipes: `just test-w3c`
+(wraps `bash tests/w3c-sparql/run.sh`), `just test-lubm` (wraps
+`bash tests/perf/lubm-shape/run.sh`), `just test-conformance` (the
+three compose-based layers: regression + W3C-shape + LUBM-shape),
+`just test-everything` (pgrx integration + test-conformance — the
+broadest sweep), and `just smoke-cold` (`compose-down` →
+`build-ext` → `compose-up` → `CREATE EXTENSION` → test-conformance,
+the cold-compose discipline gate). `just test-all` keeps its
+original narrow shape (`test` + `test-regression`) for back-compat;
+`docs/08-testing.md` and `README.md`'s Tests block point at
+`test-everything` and `smoke-cold` as the new entry points. The
+shift matters because two of the three compose-based harnesses
+(W3C-shape, LUBM-shape) were previously discoverable only by
+knowing the bash paths — a contributor running `just --list`
+saw nothing about them, and `just test-all` silently skipped
+them. Cold-compose smoke is the verification half: it tears the
+compose stack down with `compose-down` first (no shortcuts to a
+warm `compose-up`), rebuilds the extension artefacts, brings the
+stack back, recreates `CREATE EXTENSION pgrdf`, and runs all
+three compose-based layers against the fresh state — catching the
+class of bugs that pass on a warm compose because some prior
+DROP/CREATE left state behind, and break on the next cold boot.
+This is the final coverage-countdown slice before the hygiene
+phase opens.
+
 Locks #62 of the 66→1 countdown: `pgrdf.materialize(N)` on a graph
 with zero base triples MUST NOT panic and MUST return a JSONB stats
 object with `base_triples = 0`. The UDF still emits OWL 2 RL

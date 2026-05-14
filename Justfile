@@ -73,8 +73,27 @@ test-regression:
 test-regression-accept:
     ACCEPT=1 PGRDF_RUNTIME={{RUN}} bash tests/regression/run.sh
 
+# W3C-shape SPARQL harness against the compose Postgres on podman.
+# Each subdir of tests/w3c-sparql/ is one test (data.ttl + query.rq + expected.jsonl).
+test-w3c:
+    PGRDF_RUNTIME={{RUN}} bash tests/w3c-sparql/run.sh
+
+# LUBM-shape correctness gate against the compose Postgres on podman.
+# Same pattern as test-w3c; deferred LUBM-1/10/100 + cross-engine bench
+# tracked in tests/perf/README.md.
+test-lubm:
+    PGRDF_RUNTIME={{RUN}} bash tests/perf/lubm-shape/run.sh
+
 # Full local test bar: container-based pgrx tests + compose regression.
+# Kept narrow for back-compat; `just test-everything` is the broader sweep.
 test-all: test test-regression
+
+# Every test layer that runs against the live compose Postgres
+# (no pgrx framework needed — the compose runtime is the only dep).
+test-conformance: test-regression test-w3c test-lubm
+
+# Every test layer end-to-end: pgrx integration + every compose-based harness.
+test-everything: test test-conformance
 
 # Build the extension package locally (target/release/pgrdf-pgN/).
 package:
@@ -123,3 +142,12 @@ smoke: build-ext compose-up
     sleep 5
     cd compose && {{RUN}} compose exec postgres psql -U pgrdf -d pgrdf -c "CREATE EXTENSION IF NOT EXISTS pgrdf;"
     cd compose && {{RUN}} compose exec postgres psql -U pgrdf -d pgrdf -c "SELECT pgrdf.version();"
+
+# Fresh-compose smoke — wipe compose, rebuild the extension, boot from
+# scratch, then run every compose-based test harness (regression +
+# W3C-shape + LUBM-shape). Use this after touching anything in compose/,
+# fixtures/, or the test SQL fixtures themselves.
+smoke-cold: compose-down build-ext compose-up
+    sleep 5
+    cd compose && {{RUN}} compose exec postgres psql -U pgrdf -d pgrdf -c "CREATE EXTENSION IF NOT EXISTS pgrdf;"
+    just test-conformance
