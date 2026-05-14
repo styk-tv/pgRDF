@@ -1,0 +1,5 @@
+PREFIX lubm: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?student (COUNT(?course) AS ?n)
+WHERE { ?student lubm:takesCourse ?course }
+GROUP BY ?student
+ORDER BY ?student

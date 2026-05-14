@@ -284,4 +284,5 @@ phase 3 step table above.
 | v0.3 Phase 6 step 1 | 93 | 30 | + regression suite wired into CI (`.github/workflows/ci.yml` `regression` job); compose builder + runtime on every PR. W3C runners + LUBM benchmarks remain deferred |
 | v0.3 Phase 6 step 2 starter | 93 | 30+5 | + W3C-shape SPARQL harness — 5 starter tests in `tests/w3c-sparql/` wired into the CI regression job. Full W3C TTL-manifest runner deferred to v0.4 |
 | v0.3 Phase 6 step 2 expanded | 93 | 30+13 | + 8 more W3C-shape tests covering FILTER, COUNT/HAVING, ORDER BY DESC, LIMIT/OFFSET, BIND/CONCAT, ASK true/false |
-| v0.3 Phase 6 step 2 expanded II (current) | 93 | 30+18 | + 5 more W3C-shape tests covering REGEX, IN, STRLEN, LANG, UCASE |
+| v0.3 Phase 6 step 2 expanded II | 93 | 30+18 | + 5 more W3C-shape tests covering REGEX, IN, STRLEN, LANG, UCASE |
+| v0.3 translator-gap signals + step 3 scaffold (current) | 93 | 31+18+3 | + 8 negative regression signals (`80-unsupported-shapes.sql`) locking the error-message contract for unsupported SPARQL shapes; + 3 LUBM-shape correctness gates (`tests/perf/lubm-shape/`) against a hand-authored fixture |

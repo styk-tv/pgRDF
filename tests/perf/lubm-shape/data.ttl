@@ -1,0 +1,47 @@
+# Small LUBM-shape fixture. NOT the real LUBM dataset — that comes
+# from the Java generator at https://swat.cse.lehigh.edu/projects/lubm/
+# and is v0.4 work. This is a hand-authored mini-graph that exercises
+# the same TBox patterns at a scale that fits in `git diff` (~40
+# triples) so the SPARQL surface gets a LUBM-shape correctness gate
+# without requiring the LUBM Java toolchain on every CI run.
+#
+# Real LUBM-1/10/100 + cross-engine comparison vs Apache Jena TDB and
+# Apache AGE land in v0.3 Phase 6 step 3 phase B (deferred).
+
+@prefix lubm: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix u0:   <http://www.University0.edu/> .
+@prefix u1:   <http://www.University1.edu/> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# TBox: minimal class + property hierarchy.
+lubm:GraduateStudent     rdfs:subClassOf lubm:Student .
+lubm:UndergraduateStudent rdfs:subClassOf lubm:Student .
+lubm:Student             rdfs:subClassOf lubm:Person .
+lubm:Faculty             rdfs:subClassOf lubm:Employee .
+lubm:Professor           rdfs:subClassOf lubm:Faculty .
+lubm:AssistantProfessor  rdfs:subClassOf lubm:Professor .
+lubm:AssociateProfessor  rdfs:subClassOf lubm:Professor .
+lubm:FullProfessor       rdfs:subClassOf lubm:Professor .
+
+# ABox: two universities, a small mix of people + courses.
+u0:Alice    rdf:type lubm:GraduateStudent ;
+            lubm:takesCourse u0:CS101 ;
+            lubm:takesCourse u0:CS202 .
+u0:Bob      rdf:type lubm:UndergraduateStudent ;
+            lubm:takesCourse u0:CS101 .
+u0:Carol    rdf:type lubm:FullProfessor ;
+            lubm:teacherOf u0:CS101 ;
+            lubm:teacherOf u0:CS202 .
+u0:Dan      rdf:type lubm:AssistantProfessor ;
+            lubm:teacherOf u0:CS303 .
+
+u1:Eve      rdf:type lubm:GraduateStudent ;
+            lubm:takesCourse u1:MATH200 .
+u1:Frank    rdf:type lubm:AssociateProfessor ;
+            lubm:teacherOf u1:MATH200 .
+
+u0:CS101    rdf:type lubm:Course .
+u0:CS202    rdf:type lubm:Course .
+u0:CS303    rdf:type lubm:Course .
+u1:MATH200  rdf:type lubm:Course .

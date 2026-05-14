@@ -1,0 +1,3 @@
+PREFIX lubm: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#>
+SELECT ?prof ?course
+WHERE { ?prof lubm:teacherOf ?course }

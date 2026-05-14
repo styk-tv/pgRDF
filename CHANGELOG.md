@@ -6,6 +6,52 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Translator-gap regression signals + Phase 6 step 3 scaffolding
+
+Two adjacent additions, motivated by a real translator gap I hit
+while expanding the W3C-shape harness (W3C 08 — inline `HAVING(SUM
+(?v) > c)` falls through with `FILTER expression not translatable`
+when spargebra synthesises a fresh aggregate node for the HAVING).
+
+**1. `tests/regression/sql/80-unsupported-shapes.sql`** —
+regression signals locking the failure-mode contract for every
+known unsupported SPARQL shape. Each gap drives a query that MUST
+fail, and asserts via plpgsql `EXCEPTION WHEN OTHERS` that
+`SQLERRM` contains a stable error-prefix substring. The check
+helper outputs a clean boolean (`t` = expected substring present)
+rather than the raw error message — so the baseline isn't pinned
+to spargebra's algebra-dump format, synthetic variable hashes, or
+upstream `dataset` / `base_iri` internals.
+
+Gaps locked in:
+- `gap-1` — `HAVING(SUM(?v) > c)` inline (vs the supported
+  alias form `HAVING(?total > c)`).
+- `gap-2` — multi-triple OPTIONAL.
+- `gap-3` — VALUES inline data block.
+- `gap-4` — GRAPH named-graph clause.
+- `gap-5` — CONSTRUCT query form.
+- `gap-6` — DESCRIBE query form.
+- `gap-7` — property path with `*` repetition.
+- `gap-8` — aggregates over UNION.
+
+If pgRDF accidentally starts producing wrong results for any of
+these shapes (translator regression), the baseline diff fires
+with `unexpected success`. If we genuinely add support for a
+shape, this file is the single place to flip the assertion to a
+positive test.
+
+**2. `tests/perf/lubm-shape/`** — Phase 6 step 3 scaffolding.
+Three hand-authored LUBM-shape queries (`Q1` class membership,
+`Q2` `teacherOf`, `Q3` `takesCourse` aggregate) against a small
+LUBM-shape fixture. Same directory-per-test layout + bash runner
+shape as `tests/w3c-sparql/`; runs alongside the W3C harness in
+the CI `regression` job. Real LUBM-1/10/100 with the Java
+generator + cross-engine comparison vs Apache Jena TDB and
+Apache AGE remains v0.4 work (see `tests/perf/README.md`).
+
+Test bar: **93 pgrx + 31 pg_regress + 18 W3C-shape + 3 LUBM-shape
+= 145 tests**, green locally.
+
 ### Phase 6 step 2 starter — W3C-shape SPARQL harness
 
 - `tests/w3c-sparql/` ships a directory-per-test harness with **13

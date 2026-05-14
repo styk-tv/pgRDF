@@ -1,0 +1,13 @@
+
+t
+10
+gap-1 HAVING inline aggregate: t
+gap-2 multi-triple OPTIONAL: t
+gap-3 VALUES inline data: t
+gap-4 GRAPH clause: t
+gap-5 CONSTRUCT: t
+gap-6 DESCRIBE: t
+gap-7 property path zero-or-more: t
+gap-8 aggregates over UNION: t
+
+1

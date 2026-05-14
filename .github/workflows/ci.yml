@@ -114,12 +114,18 @@ jobs:
       - name: Run W3C-shape SPARQL harness
         env:
           PGRDF_RUNTIME: docker
-        # Phase 6 step 2 starter: 5 hand-authored tests covering W3C
-        # SPARQL 1.1 patterns (basic BGP, DISTINCT, UNION-disjoint,
-        # OPTIONAL chain, MINUS no-shared-vars). The full TTL-manifest
-        # runner against w3c/rdf-tests is v0.4 work — see
-        # tests/w3c-sparql/README.md.
+        # Phase 6 step 2: 18 hand-authored tests covering W3C SPARQL
+        # 1.1 patterns. The full TTL-manifest runner against
+        # w3c/rdf-tests is v0.4 work — see tests/w3c-sparql/README.md.
         run: bash tests/w3c-sparql/run.sh
+      - name: Run LUBM-shape correctness gate
+        env:
+          PGRDF_RUNTIME: docker
+        # Phase 6 step 3 scaffolding: 3 hand-authored LUBM-shape
+        # queries against a small fixture. Real LUBM-1/10/100 with
+        # the Java generator + cross-engine comparison vs Jena TDB /
+        # Apache AGE is v0.4 work — see tests/perf/README.md.
+        run: bash tests/perf/lubm-shape/run.sh
       - name: Postgres logs (on failure)
         if: failure()
         run: docker logs pgrdf-postgres | tail -100
