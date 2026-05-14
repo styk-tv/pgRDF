@@ -6,6 +6,20 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+(No entries yet — v0.4 work begins after this point.)
+
+## [0.3.0] — 2026-05-14
+
+The first official pgRDF release. Ships the v0.3 engine surface
+feature-complete state: storage (dictionary-encoded terms,
+LIST-partitioned quads, hexastore indexes), SPARQL SELECT/ASK
+surface, OWL 2 RL inference, SHACL validation stub, storage
+performance (shmem dict cache + prepared-plan cache + prepared
+bulk-insert), 158 automated tests + 24-ontology smoke, License
+attribution + MSRV declared, and the full release pipeline
+exercised end-to-end. PG 14-17 across {amd64, arm64} = 8
+prebuilt tarballs.
+
 ### Release pre-flight — final CI sweep (slices #10-#5)
 
 Last verification gate before tagging v0.3.0. Ran every test/lint
