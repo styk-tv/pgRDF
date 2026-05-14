@@ -51,7 +51,9 @@ PG 14, 15, 16, 17 across {amd64, arm64} = 8 prebuilt tarballs. PG 18 deferred pe
 ## Known issues
 
 - **E-006** — pgrx 0.18 / Postgres 18 deferred to v0.4.
-- **E-007** — `workflow.ttl` held out (non-RFC IRI).
+- **E-007** — INSTALL §7's `extension_control_path` GUC forward
+  path is blocked by E-006; v0.3 ships via per-file bind mounts at
+  canonical `$libdir`/`$sharedir/extension` paths instead.
 - **E-009** — SHACL real integration blocked by upstream dep conflict.
 - **E-010** — cargo audit advisories — all informational, no security impact.
 
