@@ -20,11 +20,23 @@ runs:
         echo "deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
           | sudo tee /etc/apt/sources.list.d/pgdg.list
         sudo apt-get update
-        sudo apt-get install -y postgresql-server-dev-${{ inputs.pg }}
+        # Both packages required: -server-dev-N provides pg_config and
+        # headers (`cargo pgrx package` needs these); postgresql-N
+        # provides the actual `initdb` binary that `cargo pgrx init`
+        # invokes when laying out the per-version $PGDATA. Without the
+        # runtime package init fails with `unable to execute:
+        # /usr/lib/postgresql/N/bin/initdb`.
+        sudo apt-get install -y \
+          postgresql-server-dev-${{ inputs.pg }} \
+          postgresql-${{ inputs.pg }}
 
     - name: Install cargo-pgrx
       shell: bash
-      run: cargo install cargo-pgrx --locked --version "^${PGRX_VERSION:-0.17}"
+      # PGRX_VERSION default matches the workspace pin in
+      # Cargo.toml (`pgrx = "0.16"`). The default fallback (0.17)
+      # diverges from the runtime version and ICEs at init time
+      # (see specs/ERRATA.v0.2.md E-006 for pgrx 0.17+ status).
+      run: cargo install cargo-pgrx --locked --version "^${PGRX_VERSION:-0.16}"
 
     - name: cargo pgrx init
       shell: bash

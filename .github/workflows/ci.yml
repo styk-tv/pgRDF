@@ -42,7 +42,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/setup-pgrx
         with: { pg: "${{ matrix.pg }}" }
-      - run: cargo pgrx test pg${{ matrix.pg }}
+      - run: cargo pgrx test --no-default-features --features pg${{ matrix.pg }} pg${{ matrix.pg }}
 
   # Compose-based regression suite. Mirrors the local dev loop
   # (`just build-ext && just test-regression`) byte-for-byte: builds the
