@@ -6,6 +6,72 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release notes — known issues block consolidated (slice #20)
+
+Cross-file audit of the Known Issues surface across `RELEASE_NOTES.md`,
+`docs/09-release.md`, and `specs/ERRATA.v0.2.md` to make sure
+consumer-facing release docs cite the v0.3.0-era errata consistently
+with the authoritative ERRATA table. Triggered by the E-007
+"workflow.ttl" mis-cite caught in slice #22 (corrected in `52c13bf`);
+this pass verifies nothing else drifted across the remaining v0.3.0
+errata entries (E-006, E-007, E-008, E-009, E-010) and that the
+pre-v0.3 entries (E-001, E-002, E-003, E-004, E-005) are correctly
+omitted from the v0.3.0 release surface as resolved-by-design or
+out-of-scope-for-consumers.
+
+Findings, per E-NNN:
+
+- **E-001** (`shacl-rust` → `shacl_validation` supersession), **E-002**
+  (OWL 2 RL only, EL/QL out-of-scope), **E-003** (PG 18 GUC path,
+  effectively rolled into E-006), **E-004** (init-script-on-PG18+ no
+  longer needed; compose has no init script), **E-005** (repo URL
+  `styk-tv/pgRDF` placeholder fix) — **all pre-v0.3 spec corrections
+  folded into the v0.3 LLD body or otherwise resolved-by-design.**
+  Correctly omitted from v0.3.0 release notes in both files; no
+  consumer-facing impact on the v0.3.0 tarball.
+- **E-006** (pgrx 0.18 / PG 18 deferred) — cited in both files,
+  consistent: `RELEASE_NOTES.md` "pgrx 0.18 / Postgres 18 deferred to
+  v0.4."; `docs/09-release.md` "pgrx held at 0.16.1; PG 18 deferred
+  to v0.4." Both match ERRATA's "Hold pgrx 0.16.1 for v0.3. Support
+  matrix: PG 14–17."
+- **E-007** (`extension_control_path` GUC forward path blocked by
+  E-006) — cited in both files, consistent: both call out INSTALL §7,
+  the E-006 blocker, and the per-file bind-mount workaround. The
+  earlier "workflow.ttl" mis-cite from slice #22 is gone (fixed in
+  `52c13bf`).
+- **E-008** (Linux builder container instead of native macOS) —
+  **correctly omitted from both consumer-facing files.** This is a
+  contributor / build-environment fact, not a tarball-consumer fact;
+  end-users of the release artifacts never encounter the dev-only
+  macOS → Linux builder routing. Listed in ERRATA for the dev path.
+- **E-009** (SHACL real integration blocked upstream) — cited in
+  both files, consistent: `RELEASE_NOTES.md` "SHACL real integration
+  blocked by upstream dep conflict."; `docs/09-release.md`
+  "`pgrdf.validate` ships as a stub; real SHACL execution blocked by
+  upstream `shacl_validation` / `reasonable` feature unification."
+  Both match ERRATA's `iri_s` migration + `rdf-12` feature-unification
+  story.
+- **E-010** (cargo audit informational advisories) — cited in both
+  files, consistent: `RELEASE_NOTES.md` "cargo audit advisories — all
+  informational, no security impact."; `docs/09-release.md` "4
+  informational `cargo audit` advisories accepted for v0.3 (all in
+  subtrees of pgrx 0.16.1 / `reasonable 0.4.1` and clear automatically
+  when E-006 / E-009 resolve)." Both match ERRATA's "Accept the 4
+  informational warnings for v0.3."
+
+Cross-link verification: `specs/ERRATA.v0.2.md` resolves on disk from
+both consumer-facing files (`RELEASE_NOTES.md` root-relative;
+`docs/09-release.md` via `../specs/ERRATA.v0.2.md`).
+
+**Outcome: zero drift. No edits to `RELEASE_NOTES.md` or
+`docs/09-release.md` required.** The two files cite exactly the same
+set (E-006, E-007, E-009, E-010), describe each at appropriate
+granularity for their audience (marketing-style summary vs engineering
+release note), and classify all four as known-issues with no
+security-blocking impact. ERRATA remains the source of truth; both
+consumer-facing docs are aligned to it. This audit slice is
+documentation-only — no code, no spec, no other doc touched.
+
 ### Release notes — upgrade policy documented (slice #21)
 
 The v0.x upgrade discipline written down as consumer-facing contract.
