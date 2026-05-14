@@ -8,20 +8,26 @@ env:
   CARGO_TERM_COLOR: always
   PGRX_VERSION: "0.16"
 
-# PLACEHOLDER — wire each job up as the corresponding tests/ runner lands.
-# The shape below is the destination; jobs are commented out until their
-# fixtures (W3C test suites) and runners exist.
+# Phase 6 step 2 progression:
+#   v0.3 starter:    hand-authored W3C-shape tests in tests/w3c-sparql/<NN>-name/
+#                    run on every PR via ci.yml's `regression` job.
+#   v0.4 (deferred): pgrdf-w3c-sparql binary that parses
+#                    w3c/rdf-tests/sparql/sparql11/manifest.ttl and
+#                    drives every mf:QueryEvaluationTest at scale.
+# This nightly workflow holds the destination shape for the v0.4
+# runner. Each job stays gated `if: false` until the corresponding
+# binary + fixture submodule lands.
 
 jobs:
   sparql11:
     runs-on: ubuntu-22.04
-    if: false  # enabled once tests/w3c-sparql/manifest_runner is in.
+    if: false  # awaiting `pgrdf-w3c-sparql` binary (v0.4)
     steps:
       - uses: actions/checkout@v4
         with: { submodules: recursive }
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/setup-pgrx
-        with: { pg: "18" }
+        with: { pg: "17" }
       - name: Run W3C SPARQL 1.1 test suite
         run: cargo run --release -p pgrdf-w3c-sparql -- tests/w3c-sparql/fixtures/sparql11/manifest.ttl
       - name: Upload report

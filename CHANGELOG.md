@@ -6,6 +6,39 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 6 step 2 starter — W3C-shape SPARQL harness
+
+- `tests/w3c-sparql/` ships a directory-per-test harness with **5
+  hand-authored W3C-shape conformance tests** covering common
+  spec patterns:
+  - `01-basic-bgp` — §5 Basic Graph Pattern.
+  - `02-distinct` — §15.4 `SELECT DISTINCT` multiset → set.
+  - `03-union-disjoint` — §18.2.4 `UNION` with disjoint variables
+    (unbound → null in cross-branch rows).
+  - `04-optional-chain` — §6 `OPTIONAL` keeps the row when the
+    optional pattern fails to match.
+  - `05-minus-no-shared` — §8.3.2 `MINUS` with no shared variables
+    is a no-op (the translator elides the WHERE NOT EXISTS).
+- `tests/w3c-sparql/run.sh` is a bash runner: for each test it
+  drops + recreates the extension, loads `data.ttl`, runs
+  `query.rq` via `pgrdf.sparql`, sorts both sides
+  lexicographically (bag-equivalent comparison; SPARQL solutions
+  are unordered absent ORDER BY), and `diff -u`s against
+  `expected.jsonl`. `ACCEPT=1` regenerates expected; every
+  baseline must be hand-verified against the W3C spec.
+- Each test ships a `description.md` quoting the spec section
+  exercised + the hand-computed expected JSONL — load-bearing for
+  reviewers and for the "never ACCEPT=1 blind" rule from v0.3 §6.2.
+- Wired into CI's `regression` job (right after the pg_regress
+  suite, using the same compose Postgres). The W3C harness is
+  gated PR-on / push-on like the rest of the regression suite.
+- `regression-w3c.yml` nightly workflow stays gated `if: false`
+  — it's the destination shape for the **full W3C TTL-manifest
+  runner** (`pgrdf-w3c-sparql` Rust binary parsing
+  `w3c/rdf-tests/sparql/sparql11/manifest.ttl` against the
+  ratcheting coverage targets `≥ 30 % → ≥ 70 % → ≥ 95 %`).
+  v0.4 work item; not blocking the v0.3 release.
+
 ### Phase 6 step 1 — regression suite in CI
 
 - `.github/workflows/ci.yml`: new `regression` job runs the

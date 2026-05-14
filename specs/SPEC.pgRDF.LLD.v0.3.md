@@ -374,15 +374,21 @@ drives `tests/regression/sql/NN-*.sql` via
 `PGRDF_RUNTIME=docker tests/regression/run.sh`. Pinned to PG 17
 (ERRATA E-006) until pgrx supports newer majors.
 
-**Step 2 — W3C conformance runners** ⏳
-- W3C SPARQL 1.1 manifest runner; coverage targets ratchet per
-  release: ≥ 30 % → ≥ 70 % → ≥ 95 %.
-- W3C SHACL manifest runner; ≥ 50 % → ≥ 90 %. Gated on ERRATA
-  E-009 — until the real `shacl_validation` integration lands,
-  SHACL is at 0 %.
-- LUBM-10 / LUBM-100 against Apache Jena TDB + Apache AGE.
-- `regression-w3c.yml` placeholders gated `if: false` await the
-  runner binaries.
+**Step 2 — W3C conformance** 🚧 (starter shipped)
+- ✅ Hand-authored W3C-shape SPARQL harness in
+  `tests/w3c-sparql/` — 5 starter tests covering BGP, DISTINCT,
+  UNION-disjoint, OPTIONAL chain, MINUS-no-shared. Wired into
+  CI's `regression` job. Each expected output hand-verified
+  against the W3C spec section it exercises.
+- ⏳ Full W3C SPARQL 1.1 TTL-manifest runner
+  (`pgrdf-w3c-sparql` Rust binary against `w3c/rdf-tests`).
+  Coverage ratchets per release: `≥ 30 % → ≥ 70 % → ≥ 95 %`.
+  `regression-w3c.yml::sparql11` holds the destination shape
+  gated `if: false`. v0.4 work item.
+- ⏳ W3C SHACL manifest runner; `≥ 50 % → ≥ 90 %`. Gated on
+  ERRATA E-009 — until the real `shacl_validation` integration
+  lands, SHACL conformance is at 0 %.
+- ⏳ LUBM-10 / LUBM-100 against Apache Jena TDB + Apache AGE.
 
 **Step 3 — Release artifacts** ⏳
 - CI matrix green on tag: pg14–17 × {amd64, arm64} (workflow

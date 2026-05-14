@@ -1,0 +1,7 @@
+@prefix ex: <http://example.com/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+
+# Three people, one shared name (Alice vs alice-2).
+ex:p1 foaf:name "Alice" .
+ex:p2 foaf:name "Bob" .
+ex:p3 foaf:name "Alice" .

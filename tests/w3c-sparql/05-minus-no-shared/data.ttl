@@ -1,0 +1,9 @@
+@prefix ex:   <http://example.com/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+
+# Two people, plus a disconnected fact whose only var (?other) is
+# not shared with the MINUS RHS.
+ex:alice foaf:name "Alice" .
+ex:bob   foaf:name "Bob" .
+
+ex:place a <http://example.com/Place> .

@@ -1,36 +1,72 @@
-# W3C SPARQL 1.1 conformance harness
+# tests/w3c-sparql
 
-This directory hosts the runner that drives the W3C SPARQL 1.1 test
-suite against pgRDF. The suite itself lives at https://github.com/w3c/rdf-tests
-and is pulled in as a git submodule once the runner is in.
+Hand-authored W3C-shape SPARQL conformance tests. Each subdirectory
+is one test:
 
-## Layout (target)
+```
+01-basic-bgp/
+  data.ttl       — Turtle input loaded into a fresh graph
+  query.rq       — SPARQL query executed via pgrdf.sparql
+  expected.jsonl — one JSONB result row per line, lexicographically sorted
+  description.md — optional prose explaining the W3C spec section exercised
+```
 
-    tests/w3c-sparql/
-    ├── README.md                  (this file)
-    ├── manifest_runner.rs         (Phase 2)
-    └── fixtures/                  (submodule: w3c/rdf-tests, sparse-checked to sparql/sparql11/)
+**Phase 6 step 2 (v0.3) ships the runner + 5 starter tests.** The
+**actual W3C SPARQL 1.1 manifest runner** — reading
+`https://w3c.github.io/rdf-tests/sparql/sparql11/manifest.ttl`,
+materialising each test from `mf:QueryEvaluationTest`, comparing
+SRX / SRJ result graphs — is a v0.4 work item; we don't yet
+parse SRX/SRJ.
 
-## Manifest format
+## Runner
 
-W3C tests use RDF/Turtle manifests (`manifest.ttl`) declaring
-`mf:Manifest` with `mf:entries` lists. Each entry references:
+```bash
+bash tests/w3c-sparql/run.sh                  # all tests
+bash tests/w3c-sparql/run.sh 01-basic-bgp     # one test
+ACCEPT=1 bash tests/w3c-sparql/run.sh         # regenerate expected.jsonl
+```
 
-- `mf:action` → the SPARQL query file
-- `mf:result` → the expected SPARQL Results XML / JSON
-- `qt:data`   → input RDF graph (Turtle/N-Triples)
+The runner:
+1. `DROP EXTENSION IF EXISTS pgrdf CASCADE; CREATE EXTENSION pgrdf;`
+   (fresh dictionary each test — no cross-test pollution).
+2. Picks a graph id from the test name so tests stay isolated.
+3. Loads `data.ttl` via `pgrdf.parse_turtle`.
+4. Runs `query.rq` via `pgrdf.sparql`.
+5. Sorts both expected and actual JSONL lexicographically (so the
+   comparison is bag-equivalent — SPARQL solution sequences are
+   un-ordered unless ORDER BY is present).
+6. `diff -u` reports any mismatch.
 
-The runner parses the manifest, iterates entries, executes the query
-through `pgrdf.sparql()`, and diffs results against expected.
+## Adding a new test
 
-## Coverage gates per phase
+```bash
+mkdir tests/w3c-sparql/06-new-name
+$EDITOR tests/w3c-sparql/06-new-name/data.ttl
+$EDITOR tests/w3c-sparql/06-new-name/query.rq
+ACCEPT=1 bash tests/w3c-sparql/run.sh 06-new-name   # write expected.jsonl
+# Hand-verify the output against the W3C spec — never trust
+# ACCEPT=1 blind.
+git add tests/w3c-sparql/06-new-name
+```
 
-See [docs/10-roadmap.md](../../docs/10-roadmap.md):
-- Phase 2: ≥ 30% pass
-- Phase 3: ≥ 70% pass
-- Phase 4: ≥ 95% pass
+`ACCEPT=1` captures what the engine emits today; verifying it
+against the W3C spec is the load-bearing part.
 
-## Running locally (once the runner ships)
+## Scope
 
-    git submodule update --init tests/w3c-sparql/fixtures
-    cargo run -p pgrdf-w3c-sparql -- tests/w3c-sparql/fixtures/sparql11/manifest.ttl
+| Pattern | Covered? |
+|---|---|
+| Basic BGP | ✅ 01 |
+| DISTINCT semantics | ✅ 02 |
+| UNION with disjoint variables (unbound → NULL) | ✅ 03 |
+| Chained OPTIONAL with filter | ✅ 04 |
+| MINUS no-shared-vars elision | ✅ 05 |
+| Property paths beyond `:a/:b` sequence | ❌ deferred — see v0.4 |
+| GRAPH `{ … }` named-graph clause | ❌ deferred — needs storage schema work |
+| VALUES / FROM NAMED / CONSTRUCT / DESCRIBE | ❌ deferred — see v0.3 LLD §3 |
+
+## See also
+
+- v0.3 LLD `§5.4` Phase 6 (step 2) — `specs/SPEC.pgRDF.LLD.v0.3.md`
+- v0.3 LLD coverage targets — `≥ 30 % → ≥ 70 % → ≥ 95 %`
+- Roadmap — `docs/10-roadmap.md` Phase 6

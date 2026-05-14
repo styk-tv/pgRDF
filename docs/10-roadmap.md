@@ -223,12 +223,19 @@ LLD v0.3 §5.4.
   compose-based pg_regress suite on every PR + push to main.
   Pinned to PG 17 today (compose pin per ERRATA E-006).
 
-**Step 2 — W3C conformance runners** ⏳
-- `.github/workflows/regression-w3c.yml` placeholders (sparql11,
-  shacl, lubm) wait for the runner binaries to ship. Need a
-  manifest-TTL-driven harness in Rust that loads each test's
-  fixture, executes the SPARQL / SHACL operation, and diffs
-  against the expected result.
+**Step 2 — W3C conformance** 🚧 (starter shipped)
+- ✅ `tests/w3c-sparql/` hand-authored harness — 5 starter tests
+  covering basic BGP, DISTINCT, UNION-disjoint, OPTIONAL chain,
+  MINUS-no-shared. Bash runner; runs alongside `tests/regression/`
+  in the same CI job. Each expected output cites the W3C spec
+  section it exercises.
+- ⏳ Full W3C TTL-manifest runner against `w3c/rdf-tests`. The
+  `pgrdf-w3c-sparql` Rust binary placeholder in
+  `regression-w3c.yml::sparql11` (gated `if: false`) is the
+  destination shape; lands as v0.4.
+- ⏳ W3C SHACL manifest runner. Gated on ERRATA E-009 unblocking.
+- ⏳ Coverage targets ratchet per release:
+  SPARQL `≥ 30 % → ≥ 70 % → ≥ 95 %`; SHACL `≥ 50 % → ≥ 90 %`.
 
 **Step 3 — Release artifacts** ⏳
 - `.github/workflows/release.yml` already builds and packages on
@@ -274,4 +281,5 @@ phase 3 step table above.
 | v0.3 Phase 3 step 3 phase A | 88 | 28 | + bulk-ingest prepared INSERT (LLD §4.3 phase A), `synth-10k.ttl`, perf regression `52-bulk-ingest-perf.sql`. 2× wall-clock target deferred to phase B / v0.4 |
 | v0.3 Phase 4 | 91 | 29 | + `pgrdf.materialize` OWL 2 RL inference via `reasonable` 0.4, set-diff isolation, idempotent re-derivation, regression `60-materialize-owl-rl.sql` |
 | v0.3 Phase 5 stub | 93 | 30 | + `pgrdf.validate(data, shapes)` JSONB stub. Real `shacl_validation` integration deferred — ERRATA E-009 (upstream iri_s/rdf-12 dep block). Regression `70-validate-stub.sql` |
-| v0.3 Phase 6 step 1 (current) | 93 | 30 | + regression suite wired into CI (`.github/workflows/ci.yml` `regression` job); compose builder + runtime on every PR. W3C runners + LUBM benchmarks remain deferred |
+| v0.3 Phase 6 step 1 | 93 | 30 | + regression suite wired into CI (`.github/workflows/ci.yml` `regression` job); compose builder + runtime on every PR. W3C runners + LUBM benchmarks remain deferred |
+| v0.3 Phase 6 step 2 starter (current) | 93 | 30+5 | + W3C-shape SPARQL harness — 5 starter tests in `tests/w3c-sparql/` wired into the CI regression job. Full W3C TTL-manifest runner deferred to v0.4 |

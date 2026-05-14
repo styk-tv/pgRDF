@@ -111,6 +111,15 @@ jobs:
         env:
           PGRDF_RUNTIME: docker
         run: bash tests/regression/run.sh
+      - name: Run W3C-shape SPARQL harness
+        env:
+          PGRDF_RUNTIME: docker
+        # Phase 6 step 2 starter: 5 hand-authored tests covering W3C
+        # SPARQL 1.1 patterns (basic BGP, DISTINCT, UNION-disjoint,
+        # OPTIONAL chain, MINUS no-shared-vars). The full TTL-manifest
+        # runner against w3c/rdf-tests is v0.4 work — see
+        # tests/w3c-sparql/README.md.
+        run: bash tests/w3c-sparql/run.sh
       - name: Postgres logs (on failure)
         if: failure()
         run: docker logs pgrdf-postgres | tail -100

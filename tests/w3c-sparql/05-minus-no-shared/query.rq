@@ -1,0 +1,7 @@
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX ex:   <http://example.com/>
+SELECT ?n
+WHERE {
+  ?s foaf:name ?n .
+  MINUS { ?other a ex:Place }
+}
