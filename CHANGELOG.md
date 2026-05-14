@@ -6,6 +6,22 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Spec — SPEC.pgRDF.LLD.v0.4 draft landed (forward-looking)
+
+New `specs/SPEC.pgRDF.LLD.v0.4.md` is a draft, forward-looking
+target spec for the next cut; v0.3 remains the authoritative
+shipped contract until v0.4 actually lands. The draft scopes five
+new substantive tracks — named-graph scoping with an IRI ↔ graph_id
+mapping table (§3), SPARQL UPDATE including the graph-scoped
+variants (§4), graph-level lifecycle UDFs over the LIST-partitioned
+quads table (§5), CONSTRUCT returning triple-shaped JSONB rows
+(§6), and property paths `*` / `+` / `?` / `^` with
+materialised-closure-aware translation (§7) — plus the v0.3-deferred
+SPARQL surface backlog (multi-triple OPTIONAL, VALUES,
+BIND-downstream, aggregates over UNION, DESCRIBE) which shares
+enough translator machinery with §4 and §6 to ship in the same cut.
+v0.3 §0 gains a one-line cross-link to the new draft.
+
 ### Coverage — error-path regression signals
 
 New `tests/regression/sql/81-error-paths.sql` opens a sibling track
