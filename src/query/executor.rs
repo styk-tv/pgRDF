@@ -11,13 +11,15 @@
 //! against that anchor (`q2.subject_id = q1.subject_id`) — that's
 //! how shared variables across patterns become INNER JOINs.
 //!
-//! Constants are resolved to dictionary ids up-front so the dynamic
-//! SQL only carries integer constants (never user-supplied IRI
-//! strings — that's how the translator avoids SQL injection while
-//! still building the query at function-call time).
+//! Constants are resolved to dictionary ids up-front and bound as
+//! positional `$N` parameters (LLD §4.2) — the generated SQL never
+//! carries user-supplied IRI strings or inlined dict ids, which is
+//! how the translator avoids SQL injection while still building the
+//! query shape at function-call time.
 //!
 //! Scope today:
-//!   * SELECT only (no CONSTRUCT/ASK/DESCRIBE).
+//!   * SELECT and ASK. CONSTRUCT / DESCRIBE remain unsupported
+//!     (CONSTRUCT lands in v0.4 — see SPEC.pgRDF.LLD.v0.4-FUTURE.md §6).
 //!   * N BGP triples joined by shared variables.
 //!   * FILTER expressions:
 //!     - identity (`=`, `!=`, `sameTerm`) via dict-id comparison,
@@ -58,14 +60,23 @@
 //!     is a no-op and is elided. Restriction: single-triple right
 //!     side (same as OPTIONAL today).
 //!   * Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`,
-//!     `SUM(?v)`, `AVG(?v)`, `MIN(?v)`, `MAX(?v)`, with or without
-//!     `GROUP BY ?vars`. SUM/AVG are numeric-aware (non-numeric
-//!     literals contribute NULL); MIN/MAX are lexicographic on the
-//!     term's `lexical_value`. Aggregate output values come back as
-//!     strings in the JSONB row (consistent with the rest of the
-//!     surface). HAVING and `GROUP_CONCAT` / `SAMPLE` are Phase 3
-//!     backlog.
-//!   * Paths / VALUES / BIND / SERVICE remain unsupported.
+//!     `SUM(?v)`, `AVG(?v)`, `MIN(?v)`, `MAX(?v)`,
+//!     `GROUP_CONCAT(?v [; SEPARATOR = "…"])` (via Postgres
+//!     `string_agg`), `SAMPLE(?v)` (`MIN(...)` surrogate), with or
+//!     without `GROUP BY ?vars`. SUM/AVG are numeric-aware
+//!     (non-numeric literals contribute NULL); MIN/MAX are
+//!     type-aware (numeric on numeric datatypes, lexical otherwise).
+//!     HAVING is supported — filters that name an aggregate output
+//!     migrate from WHERE to HAVING during `parse_select`.
+//!     Aggregate output values come back as strings in the JSONB
+//!     row (consistent with the rest of the surface).
+//!   * `BIND(expr AS ?v)` — captured as a BindSpec and rendered as
+//!     an extra SELECT-list column via `translate_bind_expression`.
+//!     Filtering on a BIND output is not yet supported.
+//!   * Property paths, inline VALUES, SERVICE, named-graph
+//!     `GRAPH` clauses remain unsupported (named graphs land in
+//!     v0.4 — see SPEC.pgRDF.LLD.v0.4-FUTURE.md §3; paths in §7;
+//!     VALUES + DESCRIBE in §4-deferred backlog).
 //!
 //! Output shape:
 //!   `SETOF JSONB` — one row per solution, keys = projected variable
@@ -496,7 +507,8 @@ fn expression_references_any(e: &Expression, names: &[String]) -> bool {
 
 /// Lower a spargebra `AggregateExpression` into our AggregateSpec.
 /// Supported: COUNT(*), COUNT(?v) [DISTINCT], SUM(?v) [DISTINCT],
-/// AVG(?v), MIN(?v), MAX(?v). Anything else panics.
+/// AVG(?v), MIN(?v), MAX(?v), GROUP_CONCAT(?v [; SEPARATOR = "…"]),
+/// SAMPLE(?v). Custom IRI aggregates panic.
 fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec {
     match agg {
         AggregateExpression::CountSolutions { distinct } => AggregateSpec {
@@ -1391,17 +1403,25 @@ fn translate_minus(
 /// Supported today:
 ///   * `?a = ?b`, `?a = <iri>`, `?a = "literal"` (and `sameTerm`):
 ///     compared as dictionary ids. Sound because our dict deduplicates
-///     terms by (term_type, lexical, datatype, lang).
+///     terms by (term_type, lexical, datatype, lang). Falls back to
+///     a lexical compare when STR / LANG / DATATYPE wrappers force it.
 ///   * `?a != …`: negated identity comparison.
 ///   * `&&`, `||`, `!`: boolean composition.
+///   * Numeric ordering `<` / `>` / `<=` / `>=` — via
+///     `translate_numeric_cmp` with XSD-numeric-aware NUMERIC casts.
+///   * `?a IN (x, y, z)` — dict-id `IN` list via `translate_in`.
 ///   * `isIRI(?v)`, `isLiteral(?v)`, `isBlank(?v)`: emit a correlated
 ///     subselect against `_pgrdf_dictionary.term_type`.
-///   * `BOUND(?v)`: trivially TRUE in a BGP context (every BGP
-///     variable is bound on every row).
+///   * `BOUND(?v)`: trivially TRUE for mandatory anchors;
+///     `qOPT_i.col IS NOT NULL` for OPTIONAL anchors.
+///   * `REGEX(?v, "pat" [, "flags"])` and the string predicates
+///     CONTAINS / STRSTARTS / STRENDS — dispatched through
+///     `translate_function_call`.
 ///
-/// Not yet supported (would return None): numeric ordering
-/// (`<`/`>`/`<=`/`>=`), arithmetic, `regex`, `str`, `lang`,
-/// `datatype`, `IN`, `EXISTS`, conditional expressions.
+/// Not yet supported (would return None): `EXISTS` / `NOT EXISTS`
+/// inside FILTER, conditional `IF` expressions. Arithmetic appears
+/// inside numeric ordering (handled there) but is not yet a
+/// boolean-yielding top-level FILTER operator on its own.
 fn translate_filter(
     expr: &Expression,
     anchors: &HashMap<String, (usize, &'static str)>,
@@ -1524,9 +1544,9 @@ fn term_type_check(
 }
 
 /// Resolve an Expression to a SQL fragment that evaluates to a
-/// dictionary id (BIGINT). Variables → `qN.col`; constants → an
-/// inlined integer literal (post dict-lookup, defaulting to `-1`
-/// when the constant isn't in the dictionary so the predicate
+/// dictionary id (BIGINT). Variables → `qN.col`; constants →
+/// a `$N` parameter placeholder bound to the resolved dict id (or
+/// `-1` when the constant isn't in the dictionary, so the predicate
 /// reliably returns no rows rather than erroring).
 fn expr_to_id_sql(
     e: &Expression,
@@ -2096,8 +2116,8 @@ mod tests {
     }
 
     /// A query whose predicate hasn't been loaded should return zero
-    /// rows, NOT error out. The translator inlines `-1` as the
-    /// dict id which no row can match.
+    /// rows, NOT error out. The translator binds `-1` as the
+    /// parameterised dict id sentinel which no row can match.
     #[pg_test]
     fn sparql_unknown_predicate_returns_zero_rows() {
         let rows: i64 = Spi::get_one(

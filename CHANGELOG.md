@@ -6,6 +6,35 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Hygiene — stale-docstring sweep
+
+Audited every public `#[pg_extern]` and module-level docstring under
+`src/` against actual signatures and behavior, looking for prose that
+lied about current code (wrong return types, missing JSONB fields,
+"Phase N backlog" claims for features that have since shipped, "still
+unsupported" lists that the executor now handles). Eleven category-A
+fixes landed across 7 files:
+
+| file:line | drift | fix |
+| --- | --- | --- |
+| `src/storage/hexastore.rs:46` | `add_graph` SQL surface doc claimed `→ VOID` | corrected to `→ BOOLEAN`, documented return semantics (TRUE = created) |
+| `src/storage/loader.rs:320-321` | `load_turtle_verbose` JSONB-field list missed `shmem_cache_hits` | added the field to the doc |
+| `src/storage/stats.rs:17-29` | `stats()` JSON example showed only `shmem_*` keys; `plan_cache_*` keys (added in Phase 3 step 2) were missing | extended the example with all four `plan_cache_*` fields + explanatory note |
+| `src/storage/mod.rs:3-5` | module doc said "Implementation status: skeleton" | replaced with a submodule index reflecting the v0.3 reality |
+| `src/query/parser.rs:9-21` | "Today's scope" claimed OPTIONAL/UNION/non-BGP get flagged in `unsupported_algebra`; code walks through them | rewrote scope list to reflect the actual `unsupported_algebra` rejection set + added v0.4 cross-refs |
+| `src/query/plan_cache.rs:103` | `plan_cache_clear` SQL surface doc said `→ integer` | corrected to `→ BIGINT` (matches `i64` return) |
+| `src/query/executor.rs:14-17` | module doc claimed "dynamic SQL only carries integer constants" — incorrect post-Phase-3-step-2 (placeholders, not inlined constants) | rewrote to reflect `$N` positional parameter binding |
+| `src/query/executor.rs:20-21` | "Scope today: SELECT only (no CONSTRUCT/ASK/DESCRIBE)" | ASK ships — fixed; CONSTRUCT/DESCRIBE marked with v0.4-FUTURE §6 pointer |
+| `src/query/executor.rs:61-69` | scope said "HAVING and `GROUP_CONCAT` / `SAMPLE` are Phase 3 backlog" and "BIND remain unsupported" — all three landed | rewrote aggregates + BIND blocks to reflect implementation; v0.4-FUTURE pointers on the still-unsupported set |
+| `src/query/executor.rs:498-499` | `parse_aggregate` doc listed only COUNT/SUM/AVG/MIN/MAX | added GROUP_CONCAT and SAMPLE; noted Custom IRI panic |
+| `src/query/executor.rs:1391-1404` | `translate_filter` doc said numeric ordering, IN, REGEX were "not yet supported" — they are | rewrote both lists; left `EXISTS` + conditional `IF` as still-unsupported |
+| `src/query/executor.rs:1535-1539` | `expr_to_id_sql` doc said constants → "inlined integer literal" | corrected to "`$N` parameter placeholder bound to the resolved dict id" |
+| `src/query/executor.rs:2107-2109` | test docstring `sparql_unknown_predicate_returns_zero_rows` said translator "inlines `-1`" | corrected to "binds `-1` as the parameterised dict id sentinel" |
+| `src/validation/shacl.rs:38-52` | `validate` JSONB schema doc listed `data_graph_exists` + `shapes_graph_exists` fields the body does not emit | removed the two fields from the doc (the stub doesn't emit existence flags — only counts) |
+
+No behavior changes. `cargo check --features pg17` is green. Test bar
+unchanged (39 pg_regress + 93 pgrx + 23 W3C + 3 LUBM = 158).
+
 ### Licensing — explicit attribution surface
 
 `LICENSE` carries the resolved Apache 2.0 copyright notice

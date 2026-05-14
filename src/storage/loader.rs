@@ -318,8 +318,9 @@ fn load_turtle(path: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL
 }
 
 /// Same as `load_turtle` but returns JSONB stats: triples,
-/// dict_cache_hits, dict_db_calls, quad_batches, elapsed_ms.
-/// Useful for measuring whether the cache + batching paths are firing.
+/// dict_cache_hits, shmem_cache_hits, dict_db_calls, quad_batches,
+/// elapsed_ms. Useful for measuring whether the cache + batching
+/// paths are firing.
 ///
 /// SQL: `pgrdf.load_turtle_verbose(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) -> JSONB`.
 #[pg_extern]

@@ -41,9 +41,10 @@ fn count_quads(g: default!(i64, 0)) -> i64 {
 /// Create a LIST partition of `_pgrdf_quads` for the named graph.
 /// Idempotent. Required before `put_quad(.., g)` for non-default `g`
 /// values to physically land in their own partition (otherwise tuples
-/// route to `_pgrdf_quads_default`).
+/// route to `_pgrdf_quads_default`). Returns TRUE if the partition
+/// was created on this call, FALSE if it already existed.
 ///
-/// SQL surface: `pgrdf.add_graph(g BIGINT) → VOID`.
+/// SQL surface: `pgrdf.add_graph(g BIGINT) → BOOLEAN`.
 #[pg_extern]
 fn add_graph(g: i64) -> bool {
     if g < 0 {

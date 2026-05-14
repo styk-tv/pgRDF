@@ -44,8 +44,6 @@ use serde_json::json;
 ///   "shapes_graph_id":   <i64>,
 ///   "data_triples":      <i64>,
 ///   "shapes_triples":    <i64>,
-///   "data_graph_exists":   <bool>,
-///   "shapes_graph_exists": <bool>,
 ///   "conforms":          null,
 ///   "results":           []
 /// }

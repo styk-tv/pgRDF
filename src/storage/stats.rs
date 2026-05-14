@@ -16,17 +16,25 @@ use serde_json::json;
 /// Cumulative cache snapshot as JSONB:
 /// ```json
 /// {
-///   "shmem_ready":   true,
-///   "shmem_slots":   16384,
-///   "shmem_hits":    1234,
-///   "shmem_misses":   567,
-///   "shmem_inserts":  600,
-///   "shmem_evictions": 0
+///   "shmem_ready":           true,
+///   "shmem_slots":           16384,
+///   "shmem_hits":            1234,
+///   "shmem_misses":           567,
+///   "shmem_inserts":          600,
+///   "shmem_evictions":          0,
+///   "plan_cache_hits":         42,
+///   "plan_cache_misses":        7,
+///   "plan_cache_inserts":       7,
+///   "plan_cache_local_size":    7
 /// }
 /// ```
 /// `shmem_ready: false` means the .so was not loaded via
-/// `shared_preload_libraries`; counters are all zero in that case
-/// and `put_term_full` runs without the cross-backend cache.
+/// `shared_preload_libraries`; the shmem counters are all zero in
+/// that case and `put_term_full` runs without the cross-backend
+/// cache. The `plan_cache_*` fields come from the per-backend
+/// prepared-statement cache (LLD §4.2); `plan_cache_local_size`
+/// is THIS backend's cache size — the other plan_cache counters
+/// are cumulative across all backends in shmem.
 ///
 /// SQL: `pgrdf.stats() -> JSONB`.
 #[pg_extern]

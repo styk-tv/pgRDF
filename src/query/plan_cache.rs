@@ -99,7 +99,7 @@ pub fn with_plan<R>(sql: &str, f: impl FnOnce(Option<&OwnedPreparedStatement>) -
 /// call this directly; provided for diagnostics and as a tear-down
 /// hook for tests.
 ///
-/// SQL: `pgrdf.plan_cache_clear() -> integer` (returns the number of
+/// SQL: `pgrdf.plan_cache_clear() -> BIGINT` (returns the number of
 /// plans dropped).
 #[pg_extern]
 fn plan_cache_clear() -> i64 {
