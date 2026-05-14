@@ -39,6 +39,22 @@ short-circuit before `with_base_iri()` runs, so callers can
 safely pass `''` to mean "no base"; only a non-empty value that
 fails oxiri's IRI grammar trips the prefix.
 
+Locks #64 of the countdown: syntactically malformed Turtle bytes
+must surface the prefix `load_turtle: turtle parse error` (from
+`src/storage/loader.rs:256`'s `triple_result.expect(...)` inside
+the parser-iterator loop). The check fires through
+`pgrdf.parse_turtle(':alice :name "Alice"', 9964)` — the
+fragment uses the default `:` prefix without declaring it, so
+oxttl rejects at byte 0 with `The prefix : has not been
+declared`; that specific complaint is tail / volatile, the
+locked substring is just the `load_turtle: turtle parse error`
+prefix. The same cross-UDF prefix invariance as error-65
+applies: the panic text says `load_turtle:` regardless of
+whether bytes entered via `load_turtle()` or `parse_turtle()`,
+so downstream tooling routes on one substring. Any malformed
+Turtle variant (missing trailing dot, undeclared prefix, bad
+IRI ref, RDF-star in default mode) trips the same prefix.
+
 Test bar: **93 pgrx + 34 pg_regress + 23 W3C-shape + 3 LUBM-shape
 = 153 tests**, green locally.
 

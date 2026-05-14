@@ -1,5 +1,6 @@
 
 error-66 load_turtle missing file: t
 error-65 load_turtle invalid base IRI: t
+error-64 parse_turtle malformed input: t
 
 0

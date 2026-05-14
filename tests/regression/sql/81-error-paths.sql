@@ -22,6 +22,7 @@
 -- 66 → 1 countdown toward v0.3.0 progresses:
 --   error-66 load_turtle missing file    → 'load_turtle: failed to open'
 --   error-65 load_turtle invalid base IRI → 'load_turtle: invalid base IRI'
+--   error-64 parse_turtle malformed input → 'load_turtle: turtle parse error'
 
 DROP EXTENSION IF EXISTS pgrdf CASCADE;
 CREATE EXTENSION pgrdf;
@@ -92,6 +93,33 @@ SELECT _check_error(
   'error-65 load_turtle invalid base IRI',
   $$SELECT pgrdf.parse_turtle('@prefix ex: <http://e/> . ex:a ex:b ex:c .', 9982, 'not an iri at all')$$,
   'load_turtle: invalid base IRI'
+);
+
+-- ─── Error 64: parse_turtle malformed input ──────────────────────
+-- `src/storage/loader.rs::ingest_turtle_with_stats` iterates the
+-- oxttl parser with `for triple_result in parser { triple_result
+-- .expect("load_turtle: turtle parse error") }`. Any syntactically
+-- invalid Turtle — missing trailing dot, undeclared prefix, bad
+-- IRI ref, RDF-star in default mode, etc. — surfaces an oxttl
+-- `Err(...)` that `.expect()` panics through with the literal
+-- prefix `load_turtle: turtle parse error` followed by the oxttl
+-- error Display (line:col coordinates, structural shape, etc.).
+-- The prefix says `load_turtle:` regardless of whether the caller
+-- entered through `pgrdf.load_turtle()` or `pgrdf.parse_turtle()`
+-- — the cross-UDF prefix invariance (locked in error-65) extends
+-- here too: downstream tooling routes on one substring whichever
+-- UDF parsed the bytes.
+--
+-- We fire via `parse_turtle` so the regression has no file fixture.
+-- The fragment `':alice :name "Alice"'` uses the default `:`
+-- prefix without declaring it; oxttl rejects at byte 0 with
+-- `The prefix : has not been declared`. Any of the malformed
+-- variants would trip the same prefix; we lock the prefix, not
+-- the specific oxttl complaint (which is tail / volatile).
+SELECT _check_error(
+  'error-64 parse_turtle malformed input',
+  $$SELECT pgrdf.parse_turtle(':alice :name "Alice"', 9964)$$,
+  'load_turtle: turtle parse error'
 );
 
 DROP FUNCTION _check_error(TEXT, TEXT, TEXT);
