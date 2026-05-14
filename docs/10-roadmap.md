@@ -1,6 +1,11 @@
 # 10 — Roadmap
 
-Phase structure mirrors LLD §7 (Development Checklist & Progression).
+> **v0.3 LLD has shipped** ([`specs/SPEC.pgRDF.LLD.v0.3.md`](../specs/SPEC.pgRDF.LLD.v0.3.md)).
+> Phase numbering on this page tracks the v0.3 progression: Phase 1
+> done, Phase 2 (functional SPARQL) done through the sub-steps below,
+> Phase 3 (storage performance) is next. See the v0.3 LLD for the
+> authoritative phase map.
+
 Within each phase, sub-steps track delivery cadence — each one is a
 git commit on `main` with both pgrx + regression coverage green.
 
@@ -128,7 +133,13 @@ each shipping with pgrx + regression coverage.
 | 9 | Expression richness — arithmetic (`+`/`-`/`*`/`/`), `STRLEN`, `CONTAINS`/`STRSTARTS`/`STRENDS`, `LANG`/`DATATYPE`/`UCASE`/`LCASE` | `78df3a6` | 73 | 22 |
 | 10 | `BIND(expr AS ?v)` for projection (Literal/NamedNode/Variable, STR/LANG/DATATYPE/UCASE/LCASE/STRLEN, arithmetic, CONCAT) | `99069a6` | 76 | 23 |
 | 11 | Multi-triple MINUS (sub-pattern with N triples joined inside the NOT EXISTS) | `bc6d0a8` | 77 | 24 |
-| 12 | `ASK { … }` query form → single JSONB row `{"_ask": "true"\|"false"}` | (pending) | 79 | 25 |
+| 12 | `ASK { … }` query form → single JSONB row `{"_ask": "true"\|"false"}` | `fc67285` | 79 | 25 |
+
+**SPARQL surface declared substantively complete with step 12 — the
+deferred items (multi-triple OPTIONAL, VALUES, GRAPH, BIND-in-FILTER,
+aggregates-over-UNION, CONSTRUCT, DESCRIBE, type-aware MIN/MAX,
+property paths beyond simple sequence) move to v0.4 work; they don't
+block the storage-performance Phase 3 of the v0.3 LLD.**
 
 Phase 3 backlog (each its own slice):
 

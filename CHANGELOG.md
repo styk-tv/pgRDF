@@ -6,6 +6,42 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### LLD v0.3 — Refocus
+
+- [`specs/SPEC.pgRDF.LLD.v0.3.md`](specs/SPEC.pgRDF.LLD.v0.3.md)
+  shipped. Supersedes v0.2 at the contract level; v0.2 LLD is now
+  historical (still referenced for §4.1–4.3 internals that haven't
+  changed). INSTALL spec (`SPEC.pgRDF.INSTALL.v0.2.md`) unchanged.
+- The v0.3 LLD acknowledges Phase 3 steps 1–12 (SPARQL surface)
+  as substantively complete (BGP + FILTER + OPTIONAL + UNION +
+  MINUS + DISTINCT/LIMIT/OFFSET/ORDER BY + aggregates + HAVING +
+  GROUP_CONCAT/SAMPLE + expression richness + BIND + multi-triple
+  MINUS + ASK) and re-bins forward work:
+  - **Phase 3 (NEW): Storage Performance** — shmem dict cache
+    (v0.2 LLD §4.1), prepared-plan cache (§4.2), COPY BINARY
+    ingestion (§4.3). The single biggest remaining LLD gap.
+  - **Phase 4**: Inference engine (OWL 2 RL via `reasonable`).
+  - **Phase 5**: Validation engine (SHACL via `shacl_validation`).
+  - **Phase 6**: W3C SPARQL/SHACL conformance + LUBM + release
+    artifacts + CI matrix.
+- v0.4 deferral list (none block Phase 3):
+  - GRAPH `{ … }` named-graph clause (needs storage schema work)
+  - VALUES inline tables
+  - Property paths beyond simple sequence (`*`, `+`, `?`, `^`)
+  - Multi-triple OPTIONAL (needs LATERAL refactor)
+  - CONSTRUCT, DESCRIBE (different output shape)
+  - Aggregates over UNION
+  - BIND output referenced in later FILTER / BGP
+  - Type-aware ORDER BY / MIN / MAX
+- v0.3 also formalises the **empirical-verification rule**: new
+  regression fixtures hand-compute their expected output; no
+  `ACCEPT=1` autobaselining of new query coverage.
+- Per-call `pgrdf.load_turtle_verbose` stats will gain
+  `shmem_cache_hits` + `plan_cache_hits` in Phase 3 to support
+  perf regression tests on the synth-100 fixture.
+- Cross-references updated: `README.md`, `docs/README.md`,
+  `docs/10-roadmap.md`, `specs/ERRATA.v0.2.md`.
+
 ### Phase 3 step 12 — ASK query form
 
 - `pgrdf.sparql('ASK { … }')` now works. Returns a single JSONB

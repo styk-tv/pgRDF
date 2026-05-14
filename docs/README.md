@@ -17,9 +17,10 @@ Order is meaningful — read top-down if you're new to the project.
 
 ## Authoritative references
 
-- [specs/SPEC.pgRDF.LLD.v0.2.md](../specs/SPEC.pgRDF.LLD.v0.2.md)
-- [specs/SPEC.pgRDF.INSTALL.v0.2.md](../specs/SPEC.pgRDF.INSTALL.v0.2.md)
-- [specs/ERRATA.v0.2.md](../specs/ERRATA.v0.2.md) — read this **first** for known v0.2 spec deltas.
+- [specs/SPEC.pgRDF.LLD.v0.3.md](../specs/SPEC.pgRDF.LLD.v0.3.md) — **current** LLD; supersedes v0.2 at the contract level.
+- [specs/SPEC.pgRDF.LLD.v0.2.md](../specs/SPEC.pgRDF.LLD.v0.2.md) — historical, still referenced for §4.1–4.3 internals.
+- [specs/SPEC.pgRDF.INSTALL.v0.2.md](../specs/SPEC.pgRDF.INSTALL.v0.2.md) — install spec; unchanged in v0.3.
+- [specs/ERRATA.v0.2.md](../specs/ERRATA.v0.2.md) — read alongside v0.2 LLD; still authoritative for the deltas it lists.
 
 When this directory disagrees with `specs/`, the spec wins. If a doc
 finds the spec wrong, the correction lands in `ERRATA.v0.2.md`, not in

@@ -169,8 +169,9 @@ For people working on pgRDF itself.
 
 ### Authoritative specs
 
-- [SPEC.pgRDF.LLD.v0.2.md](specs/SPEC.pgRDF.LLD.v0.2.md) — low-level design
-- [SPEC.pgRDF.INSTALL.v0.2.md](specs/SPEC.pgRDF.INSTALL.v0.2.md) — runtime install on stock PG containers
+- [SPEC.pgRDF.LLD.v0.3.md](specs/SPEC.pgRDF.LLD.v0.3.md) — **current** low-level design (supersedes v0.2)
+- [SPEC.pgRDF.LLD.v0.2.md](specs/SPEC.pgRDF.LLD.v0.2.md) — historical (§4.1/§4.2/§4.3 internals still referenced)
+- [SPEC.pgRDF.INSTALL.v0.2.md](specs/SPEC.pgRDF.INSTALL.v0.2.md) — runtime install on stock PG containers (unchanged in v0.3)
 - [ERRATA.v0.2.md](specs/ERRATA.v0.2.md) — corrections discovered during implementation
 
 ## Tests

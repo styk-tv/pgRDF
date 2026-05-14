@@ -1,5 +1,12 @@
 # ERRATA.v0.2
 
+> **Status (2026-05-14):** [`SPEC.pgRDF.LLD.v0.3.md`](SPEC.pgRDF.LLD.v0.3.md)
+> has shipped and supersedes `SPEC.pgRDF.LLD.v0.2.md` at the contract
+> level. This errata document remains authoritative for the deltas
+> below — v0.3 folds the architectural facts into the body but does
+> NOT void the entries here. INSTALL spec (`SPEC.pgRDF.INSTALL.v0.2.md`)
+> is unchanged in v0.3; errata against it still apply.
+
 Corrections to v0.2 specs discovered during implementation. Each entry
 states the **claim in the spec**, the **observed reality**, and the
 **resolution** applied in this repository.
