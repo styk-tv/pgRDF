@@ -6,6 +6,58 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Hygiene — Cargo.lock freshness audit (slice #46)
+
+Final entry in the hygiene group (54 → 46, sixty-six → forty-six). Verified
+`Cargo.lock` is committed (`git ls-files Cargo.lock` returns the path) and
+matches `Cargo.toml`: `cargo metadata --format-version 1` resolves clean on
+the online index. **Reproducibility check** — captured the lock's MD5
+(`1627cb986cfb73ca300550854b9564d5`), ran `cargo build --no-default-features
+--features pg17` (via the rustup-managed `stable-aarch64-apple-darwin`
+toolchain at rustc 1.95, since Homebrew's PATH-first rustc 1.88 is below
+the declared MSRV); link step fails on the workstation as expected (pgrx
+final link wants `pg_config` on PATH, not in scope here), but resolution
+completes and the post-build MD5 is byte-for-byte identical. The lock is
+stable — Cargo did not touch it during a fresh resolution pass.
+
+**`cargo update --dry-run --verbose`** (online):
+
+```
+Updating crates.io index
+ Locking 1 package to latest compatible version
+Unchanged pgrx v0.16.1 (available: v0.18.0)
+Unchanged pgrx-tests v0.16.1 (available: v0.18.0)
+Updating winnow v1.0.2 -> v1.0.3
+warning: not updating lockfile due to dry run
+```
+
+| Crate | Bump | Classification | Root |
+| --- | --- | --- | --- |
+| `winnow` | 1.0.2 → 1.0.3 | Safe patch of a build-time transitive | `pgrx-pg-config → cargo_toml → toml 0.9.12+spec-1.1.0 → toml_parser 1.1.2 → winnow 1.0` |
+| `pgrx` | 0.16.1 → 0.18.0 (held) | Pinned root (E-006) — not eligible under current `Cargo.toml` constraint `0.16` | direct |
+| `pgrx-tests` | 0.16.1 → 0.18.0 (held) | Pinned root (E-006) — same | dev-dep |
+
+The single eligible bump (`winnow` 1.0.2 → 1.0.3) is a patch on the
+inner parser used by `cargo_toml` at build time — no runtime crate
+touched, no `serde_json`/`serde_core`/`tokio`/-sys edge in scope, no
+pinned root moves. Under a v0.4-cycle policy this would land
+automatically alongside a `just test-regression` re-run.
+
+**Decision: skip and defer to the v0.4 hygiene cycle.** Rationale:
+the lock is reproducing cleanly, the only eligible bump is a single
+transitive patch with zero behavioural surface, and the v0.3 tag is
+imminent. Intentional churn against `Cargo.lock` this close to a
+release tag adds risk (new regression-test pass required, new
+artifact hash, new container layer) without proportionate benefit.
+The held bumps on `pgrx` 0.16 → 0.18 are gated by ERRATA E-006 and
+will move only when E-006 resolves; that's a v0.4 work item already
+on the roadmap, and `winnow` will ride along on the same `cargo
+update` invocation at that point.
+
+This closes the hygiene group (slices #54 → #46, 9 entries). Lock
+is fresh, reproducible, and audited; the next intentional refresh
+is owed in the v0.4 cycle.
+
 ### Hygiene — lints allowlist review (slice #47)
 
 Audited every `#![allow(...)]` / `#[allow(...)]` attribute in `src/`
