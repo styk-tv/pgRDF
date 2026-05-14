@@ -1,0 +1,7 @@
+@prefix ex:   <http://example.com/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+
+# Mixed object terms: one IRI, two literals.
+ex:alice foaf:knows ex:bob .
+ex:alice foaf:name  "Alice" .
+ex:bob   foaf:name  "Bob" .

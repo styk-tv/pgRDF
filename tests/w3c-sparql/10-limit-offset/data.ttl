@@ -1,0 +1,9 @@
+@prefix ex: <http://example.com/> .
+
+# Six numbered items.
+ex:i1 ex:rank 1 .
+ex:i2 ex:rank 2 .
+ex:i3 ex:rank 3 .
+ex:i4 ex:rank 4 .
+ex:i5 ex:rank 5 .
+ex:i6 ex:rank 6 .

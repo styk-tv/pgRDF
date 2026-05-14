@@ -54,16 +54,25 @@ against the W3C spec is the load-bearing part.
 
 ## Scope
 
-| Pattern | Covered? |
-|---|---|
-| Basic BGP | ✅ 01 |
-| DISTINCT semantics | ✅ 02 |
-| UNION with disjoint variables (unbound → NULL) | ✅ 03 |
-| Chained OPTIONAL with filter | ✅ 04 |
-| MINUS no-shared-vars elision | ✅ 05 |
-| Property paths beyond `:a/:b` sequence | ❌ deferred — see v0.4 |
-| GRAPH `{ … }` named-graph clause | ❌ deferred — needs storage schema work |
-| VALUES / FROM NAMED / CONSTRUCT / DESCRIBE | ❌ deferred — see v0.3 LLD §3 |
+| Pattern | W3C §       | Covered? |
+|---|---|---|
+| Basic BGP | §5 | ✅ 01 |
+| DISTINCT semantics | §15.4 | ✅ 02 |
+| UNION with disjoint variables (unbound → NULL) | §18.2.4 | ✅ 03 |
+| Chained OPTIONAL with FILTER | §6 | ✅ 04 |
+| MINUS no-shared-vars elision | §8.3.2 | ✅ 05 |
+| `isIRI` term-type FILTER | §17.4.2.1 | ✅ 06 |
+| `COUNT(?v)` + `GROUP BY` | §11 | ✅ 07 |
+| `HAVING(?alias > c)` after SUM | §11.5 | ✅ 08 |
+| `ORDER BY DESC(?v)` | §15.1 | ✅ 09 |
+| `LIMIT` / `OFFSET` | §15.2 / §15.3 | ✅ 10 |
+| `BIND(CONCAT(...) AS ?v)` | §10.1 + §17.4.3.2 | ✅ 11 |
+| `ASK` → true | §16.2 | ✅ 12 |
+| `ASK` → false | §16.2 | ✅ 13 |
+| Inline `HAVING(SUM(?v) > c)` | §11.5 | ❌ deferred — see v0.4 |
+| Property paths beyond `:a/:b` sequence | §9 | ❌ deferred — see v0.4 |
+| GRAPH `{ … }` named-graph clause | §13 | ❌ deferred — needs storage schema work |
+| VALUES / FROM NAMED / CONSTRUCT / DESCRIBE | §10.2 / §13 / §16 | ❌ deferred — see v0.3 LLD §3 |
 
 ## See also
 

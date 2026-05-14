@@ -1,0 +1,5 @@
+@prefix ex:   <http://example.com/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+
+# Only a name triple — no foaf:knows.
+ex:alice foaf:name "Alice" .

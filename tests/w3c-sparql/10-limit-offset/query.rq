@@ -1,0 +1,6 @@
+PREFIX ex: <http://example.com/>
+SELECT ?s
+WHERE { ?s ex:rank ?r }
+ORDER BY ?s
+LIMIT 2
+OFFSET 2

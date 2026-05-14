@@ -8,7 +8,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ### Phase 6 step 2 starter — W3C-shape SPARQL harness
 
-- `tests/w3c-sparql/` ships a directory-per-test harness with **5
+- `tests/w3c-sparql/` ships a directory-per-test harness with **13
   hand-authored W3C-shape conformance tests** covering common
   spec patterns:
   - `01-basic-bgp` — §5 Basic Graph Pattern.
@@ -19,6 +19,14 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
     optional pattern fails to match.
   - `05-minus-no-shared` — §8.3.2 `MINUS` with no shared variables
     is a no-op (the translator elides the WHERE NOT EXISTS).
+  - `06-filter-isiri` — §17.4.2.1 `isIRI` term-type filter.
+  - `07-aggregates-count` — §11 `COUNT(?v) GROUP BY ?s`.
+  - `08-aggregates-having` — §11.5 `HAVING(?alias > c)` after `SUM`.
+  - `09-order-by-desc` — §15.1 `ORDER BY DESC(?v)`.
+  - `10-limit-offset` — §15.2 / §15.3 `LIMIT 2 OFFSET 2`.
+  - `11-bind-concat` — §10.1 `BIND` + §17.4.3.2 `CONCAT(...)`.
+  - `12-ask-true` — §16.2 `ASK` returning `true`.
+  - `13-ask-false` — §16.2 `ASK` returning `false`.
 - `tests/w3c-sparql/run.sh` is a bash runner: for each test it
   drops + recreates the extension, loads `data.ttl`, runs
   `query.rq` via `pgrdf.sparql`, sorts both sides

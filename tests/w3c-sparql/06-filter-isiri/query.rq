@@ -1,0 +1,6 @@
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+SELECT ?s ?o
+WHERE {
+  ?s ?p ?o
+  FILTER(isIRI(?o))
+}

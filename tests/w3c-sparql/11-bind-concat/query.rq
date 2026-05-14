@@ -1,0 +1,7 @@
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+SELECT ?full
+WHERE {
+  ?s foaf:givenName ?g ;
+     foaf:familyName ?f .
+  BIND(CONCAT(?g, " ", ?f) AS ?full)
+}
