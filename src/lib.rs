@@ -25,6 +25,7 @@ pub extern "C-unwind" fn _PG_init() {
     let in_postmaster = unsafe { pgrx::pg_sys::process_shared_preload_libraries_in_progress };
     if in_postmaster {
         storage::shmem_cache::init_in_postmaster();
+        query::plan_cache::init_in_postmaster();
     }
 }
 

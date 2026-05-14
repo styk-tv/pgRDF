@@ -6,6 +6,47 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 2 — prepared-plan cache (LLD §4.2)
+
+- `src/query/plan_cache.rs`: per-backend `thread_local!`
+  `HashMap<String, OwnedPreparedStatement>`. Cumulative
+  `plan_cache_hits / misses / inserts` counters live in shmem
+  (alongside the dict-cache counters) so a multi-backend view is
+  available through `pgrdf.stats()`. Per-backend cache size is
+  surfaced as `plan_cache_local_size`.
+- `src/query/executor.rs`: every dict-id constant that used to be
+  inlined into the dynamic SQL (`bind_subject/predicate/object`,
+  `expr_to_id_sql`, `translate_in`, `numeric_datatype_id_list`,
+  …) now becomes a `$N` positional placeholder. A thread-local
+  `PARAM_BUF` collects the resolved i64s in declaration order;
+  `translate()` snapshots it into `ExecPlan { sql, params }`.
+  The SQL string itself is the canonical cache key — identical
+  algebra shape → identical key by construction.
+- `execute()` consults the per-backend cache before paying for
+  parse + plan. Miss path uses `client.prepare(sql, &[INT8OID; n])`
+  followed by `.keep()` to promote to `'static`-lifetime
+  `OwnedPreparedStatement`. Hit path reuses the stashed statement
+  with a fresh `Vec<DatumWithOid>` built from `plan.params`.
+- `pgrdf.plan_cache_clear() -> bigint` returns the number of
+  plans dropped from THIS backend's cache. Useful for diagnostics
+  and tear-down; production workloads never need it.
+- `pgrdf.stats()` JSONB now includes four new fields:
+  `plan_cache_hits`, `plan_cache_misses`, `plan_cache_inserts`,
+  `plan_cache_local_size`.
+- **Perf regression**: new `tests/regression/sql/51-plan-cache.sql`
+  exercises three blocks:
+  - 5 identical queries → 1 miss + 4 hits (single shape, repeat).
+  - 2 queries with same parametric shape but different IRI
+    constants → 1 miss + 1 hit (parameterisation works — SQL
+    string stays byte-identical despite constant change).
+  - 1 structurally distinct query (FILTER added) → 1 miss + 0 hits.
+  Also asserts `plan_cache_clear() >= 2` and
+  `plan_cache_local_size == 0` post-clear. **All deltas
+  hand-computed**.
+- 2 new pgrx integration tests: `plan_cache_repeats_hit`,
+  `plan_cache_clear_returns_count`.
+- Test bar: **86 → 88 pgrx + 26 → 27 regression** tests, green.
+
 ### Phase 3 step 1 — shmem dict cache (LLD §4.1)
 
 - `src/storage/shmem_cache.rs`: process-wide, cross-backend

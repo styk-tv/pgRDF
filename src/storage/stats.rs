@@ -8,6 +8,7 @@
 //! Counters are cumulative since postmaster start. Tests compare
 //! deltas rather than absolutes.
 
+use crate::query::plan_cache;
 use crate::storage::shmem_cache;
 use pgrx::prelude::*;
 use serde_json::json;
@@ -31,13 +32,18 @@ use serde_json::json;
 #[pg_extern]
 fn stats() -> pgrx::JsonB {
     let s = shmem_cache::snapshot();
+    let p = plan_cache::snapshot();
     pgrx::JsonB(json!({
-        "shmem_ready":     s.ready,
-        "shmem_slots":     s.slots,
-        "shmem_hits":      s.hits,
-        "shmem_misses":    s.misses,
-        "shmem_inserts":   s.inserts,
-        "shmem_evictions": s.evictions,
+        "shmem_ready":          s.ready,
+        "shmem_slots":          s.slots,
+        "shmem_hits":           s.hits,
+        "shmem_misses":         s.misses,
+        "shmem_inserts":        s.inserts,
+        "shmem_evictions":      s.evictions,
+        "plan_cache_hits":      p.hits,
+        "plan_cache_misses":    p.misses,
+        "plan_cache_inserts":   p.inserts,
+        "plan_cache_local_size": p.local_size,
     }))
 }
 

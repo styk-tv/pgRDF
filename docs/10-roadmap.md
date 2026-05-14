@@ -102,11 +102,13 @@ end-to-end; ingestion is fast enough to load real-world ontologies.
       `pgrdf.stats()` counters; regression
       `50-shmem-dict-cache.sql` asserts 100 % shmem hit rate on the
       second load of `synth-100.ttl`.
-- ⏳ **Prepared-plan cache (LLD §4.2)** — `Spi::prepare` + algebra-hash
-      keyed cache. Today the executor builds a dynamic SQL string
-      per call and runs `Spi::connect_mut(|c| c.update(...))`.
-      Postgres re-parses + re-plans every call; the LLD's optimization
-      is to bypass both via prepared statements.
+- ✅ **Prepared-plan cache (LLD §4.2)** — parameterised SPARQL SQL +
+      per-backend `OwnedPreparedStatement` cache keyed by the SQL
+      string. `pgrdf.stats()` exposes
+      `plan_cache_hits / misses / inserts / local_size`. Operator
+      hook: `pgrdf.plan_cache_clear()`. Regression
+      `51-plan-cache.sql` asserts the hit / miss / parametric-reuse
+      arithmetic for three workload shapes.
 - ⏳ **COPY BINARY ingestion (LLD §4.3)** — current batched INSERT is
       ~50× faster than row-by-row INSERT but still slower than the
       LLD's stated COPY-BINARY target. Worth re-measuring against
@@ -225,4 +227,5 @@ phase 3 step table above.
 | Phase 3 step 6 | 56 | 19 | + FILTER, modifiers, OPTIONAL, UNION, MINUS |
 | Phase 3 step 7 | 63 | 20 | + aggregates (COUNT/SUM/AVG/MIN/MAX + GROUP BY) |
 | Phase 3 steps 8–12 | 79 | 25 | + HAVING, GROUP_CONCAT/SAMPLE, expression richness, BIND, multi-triple MINUS, ASK |
-| v0.3 Phase 3 step 1 (current) | 86 | 26 | + shmem dict cache (LLD §4.1), `pgrdf.stats()`, perf regression `50-shmem-dict-cache.sql` |
+| v0.3 Phase 3 step 1 | 86 | 26 | + shmem dict cache (LLD §4.1), `pgrdf.stats()`, perf regression `50-shmem-dict-cache.sql` |
+| v0.3 Phase 3 step 2 (current) | 88 | 27 | + prepared-plan cache (LLD §4.2), parameterised SQL, perf regression `51-plan-cache.sql` |

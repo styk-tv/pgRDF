@@ -62,21 +62,63 @@ result rows ─► SETOF JSONB
 | ORDER BY ?v | `ORDER BY (SELECT lex …) ASC/DESC NULLS LAST` or by ordinal | Unprojected ?v → hidden trailing SELECT column |
 | LIMIT N / OFFSET N | `LIMIT N` / `OFFSET N` | Postgres-native |
 
-## What is *not* yet shipped (Phase 2.x performance backlog)
+## Prepared-plan cache (LLD §4.2, **shipped — Phase 3 step 2**)
 
-The LLD §4.2 design is **prepared statements via `Spi::prepare`**
-keyed by an algebra hash. We don't ship that yet — every
-`pgrdf.sparql` call builds a fresh SQL string and runs `c.update`,
-which forces Postgres to re-parse + re-plan. For a fixed query
-shape with varying constants, that's wasted work on every call.
+Lives in [`src/query/plan_cache.rs`](../src/query/plan_cache.rs).
+The flow:
 
-Plan-cache landing notes for the future slice:
+```
+parse → translate → ExecPlan { sql: "...$1...$2...", params: [..] }
+                          │
+                          ▼
+                  Spi::connect_mut
+                          │
+                          ├── plan_cache.contains(sql) ?
+                          │      │
+                          │      └── miss → client.prepare(sql, &[INT8OID; n])
+                          │                          │
+                          │                          └── .keep() → OwnedPreparedStatement
+                          │                                              │
+                          │                          plan_cache.insert(sql, ↑)
+                          │      │
+                          │      └── hit  → record_hit()
+                          │
+                          ▼
+                  client.update(&owned, None, &datums)
+```
 
-- **Key:** canonical algebra hash with constants stripped (so
-  `?s :p "Alice"` and `?s :p "Bob"` share a plan).
-- **Value:** a `pgrx::Spi`-prepared statement + parameter shape.
-- **Eviction:** bounded LRU per backend. Cross-backend sharing
-  via shmem belongs with the dict-cache shmem work (LLD §4.1).
+Concrete shape:
+- **Parameterisation.** Every dict-id constant in the dynamic SQL
+  (subject / predicate / object literals in BGP triples; constants
+  in FILTER `=` `!=` `IN(…)`; the xsd:numeric dict-id list inside
+  numeric-comparison sub-SELECTs) becomes a `$N` positional
+  placeholder. A `thread_local!` `PARAM_BUF` collects the resolved
+  i64s in declaration order. `translate()` snapshots the buffer
+  into `ExecPlan { sql, params }`. The SQL string itself is the
+  canonical cache key — same algebra shape ⇒ same SQL byte-for-byte
+  ⇒ same key, no extra hashing layer.
+- **Cache.** Per-backend `thread_local!`
+  `RefCell<HashMap<String, OwnedPreparedStatement>>`. Lifetime-
+  promoted via `PreparedStatement::keep()` (`SPI_keepplan`).
+  Capacity is unbounded for v1; typical backends touch a few
+  dozen distinct shapes per session. Eviction (bounded LRU) is a
+  v0.4 polish.
+- **Counters.** `plan_cache_hits / misses / inserts` live in shmem
+  (`PgAtomic<AtomicU64>`) so a multi-backend benchmark reads a
+  single fleet-wide view through `pgrdf.stats()`. Per-backend
+  `plan_cache_local_size` is also exposed in stats — useful for
+  catching unbounded growth in a misbehaving session.
+- **Invalidation.** Plans are parameterised, so dict-id reshuffles
+  from `DROP EXTENSION; CREATE EXTENSION` don't invalidate the SQL
+  itself — only the parameter VALUES change next call. Postgres's
+  own SPI cached-plan invalidation handles relation drops. For
+  paranoia, `pgrdf.plan_cache_clear() -> bigint` empties THIS
+  backend's cache and returns the count.
+- **Acceptance criterion** (LLD §4.2): repeated structural queries
+  with varying constants reuse the cached plan. `tests/regression/sql/51-plan-cache.sql`
+  verifies: 5 identical queries → 1 miss + 4 hits; 2 queries with
+  same shape but different IRI constants → 1 miss + 1 hit; a
+  structurally distinct query → 1 miss + 0 hits.
 
 ## Surface today (Phase 3 step 6)
 
@@ -100,10 +142,11 @@ Plan-cache landing notes for the future slice:
 
 ## Postgres custom scan hooks
 
-Aspirational — not in scope for v0.2. Once the prepared-plan cache
-is in place, the next performance lever is bypassing the standard
-executor for specific quad-shape access patterns via the Postgres
-custom scan API. Earliest v0.3 target.
+Aspirational — out of scope for v0.3. With the prepared-plan cache
+now in place (Phase 3 step 2), the next performance lever after
+COPY BINARY (step 3) is bypassing the standard executor for specific
+quad-shape access patterns via the Postgres custom scan API.
+Earliest v0.4 target.
 
 ## See also
 

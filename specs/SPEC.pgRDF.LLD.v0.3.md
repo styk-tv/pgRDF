@@ -153,22 +153,40 @@ Acceptance criteria — both met:
   calls / 115 shmem hits. All expected values hand-computed;
   baseline NOT autocommitted from runtime output.
 
-### 4.2 SPARQL Executor (LLD §4.2) — partial
+### 4.2 SPARQL Executor (LLD §4.2) — **SHIPPED — Phase 3 step 2**
 
-v0.2 specified `Spi::prepare`-cached parameterised execution plans
-keyed by a canonical algebra hash. Today's executor builds a
-**dynamic SQL string per call** and runs `Spi::connect_mut(|c|
-c.update(sql, None, &[]))`. Postgres re-parses + re-plans every
-call.
+`src/query/plan_cache.rs` (commit landed during this LLD's cycle)
+caches `Spi::prepare`d statements per backend. The translator now
+produces parameterised SQL:
 
-The translator already produces algebra-stable SQL up to the
-inlined constant dict ids; the prepared-plan slice swaps the
-constants for `$1..$N` parameters and caches the prepared
-statement.
+```
+… WHERE q1.subject_id = $1 AND q2.predicate_id = $2 …
+```
 
-Acceptance criterion: identical structural queries with varying
-constants reuse the cached plan; cache hit ratio reported via a
-new `pgrdf.stats()` UDF.
+— every dict-id constant goes through `id_placeholder`, which pushes
+to a thread-local `PARAM_BUF` and emits the next `$N`. `translate()`
+snapshots the buffer into `ExecPlan { sql, params }`. The SQL
+string is the canonical cache key (algebra-shape-stable by
+construction).
+
+Cache: per-backend `thread_local! HashMap<String,
+OwnedPreparedStatement>`. Counters
+(`plan_cache_hits/misses/inserts`) are shmem-backed `PgAtomic<u64>`
+so a multi-backend benchmark can read a single fleet-wide view via
+`pgrdf.stats()`. Per-backend cache size surfaces as
+`plan_cache_local_size`.
+
+Acceptance criteria (LLD §4.2) — both met:
+- **Identical structural queries with varying constants reuse the
+  cached plan**: same IRI constants → same SQL → same key (verified
+  by `51-plan-cache.sql` Block B).
+- **Cache hit ratio reported**: `pgrdf.stats() → JSONB` exposes
+  `plan_cache_hits / misses / inserts / local_size`.
+
+Operator surface:
+- `pgrdf.plan_cache_clear() → bigint` empties THIS backend's cache
+  and returns the count. Production workloads never need this;
+  provided for diagnostics + tear-down.
 
 ### 4.3 Bulk Ingestion (LLD §4.3) — **NOT yet shipped as COPY BINARY**
 
@@ -343,7 +361,7 @@ shipped rather than being a no-op refactor.
 | `_pgrdf_quads` partitioned by LIST(graph_id) | ✅ shipped |
 | SPO / POS / OSP `INCLUDE (is_inferred)` indexes | ✅ shipped |
 | §4.1 shmem dict cache | ✅ Phase 3 step 1 (`src/storage/shmem_cache.rs`) |
-| §4.2 prepared plans | ⏳ Phase 3 (dynamic SQL is current) |
+| §4.2 prepared plans | ✅ Phase 3 step 2 (`src/query/plan_cache.rs`) |
 | §4.3 COPY BINARY | ⏳ Phase 3 (batched INSERT via unnest is current) |
 | §5 zero-install container init script | ⏳ Phase 6 (compose works for dev) |
 | §6 CI matrix pg14×17 × {amd64, arm64} | ⏳ Phase 6 (workflow stubs in `.github/workflows/`) |

@@ -72,8 +72,11 @@
 //!   names, values = lexical strings (NULL when the binding maps to
 //!   a term id missing from the dictionary).
 
+use crate::query::plan_cache;
 use crate::storage::dict::term_type;
+use pgrx::datum::DatumWithOid;
 use pgrx::iter::SetOfIterator;
+use pgrx::pg_sys::{Oid, PgBuiltInOids};
 use pgrx::prelude::*;
 use serde_json::{Map, Value};
 use spargebra::algebra::{
@@ -81,7 +84,44 @@ use spargebra::algebra::{
 };
 use spargebra::term::{Literal, NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{Query, SparqlParser};
+use std::cell::RefCell;
 use std::collections::HashMap;
+
+// ─────────────────────────────────────────────────────────────────────
+// Parameter buffer
+//
+// Phase 3 step 2 (LLD §4.2): every dict-id constant that used to be
+// inlined into the SQL string now becomes a `$N` placeholder. The
+// resolved i64 lands here in declaration order; `translate()` clears
+// the buffer before each top-level walk and snapshots it into the
+// ExecPlan once the walk finishes. Single-threaded per backend so a
+// thread_local is sufficient and avoids signature churn through the
+// ~3 500 lines of translator.
+// ─────────────────────────────────────────────────────────────────────
+
+thread_local! {
+    static PARAM_BUF: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
+}
+
+fn params_clear() {
+    PARAM_BUF.with(|b| b.borrow_mut().clear());
+}
+
+fn params_take() -> Vec<i64> {
+    PARAM_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()))
+}
+
+/// Append `id` to the param buffer and return its `$N` placeholder
+/// (1-based, matching Postgres positional-parameter syntax). The
+/// translator uses this everywhere a resolved dict id would have
+/// previously been baked into the SQL string.
+fn id_placeholder(id: i64) -> String {
+    PARAM_BUF.with(|b| {
+        let mut v = b.borrow_mut();
+        v.push(id);
+        format!("${}", v.len())
+    })
+}
 
 /// Execute a SPARQL SELECT query and return one JSONB row per solution.
 /// Each row is a JSON object keyed by the projected variable names.
@@ -113,11 +153,13 @@ struct ExecPlan {
     /// Projected variables, in SELECT-clause order. These are the
     /// JSONB keys in each output row.
     projected: Vec<String>,
-    /// Fully-built SQL string with constant dict IDs already
-    /// inlined. The translator never passes user IRI strings into
-    /// the dynamic SQL — only the SMALL number of integer IDs we
-    /// resolved upfront.
+    /// Parameterised SQL string. Every dict id constant is rendered
+    /// as a positional placeholder (`$1`, `$2`, …); the translator
+    /// never inlines user-supplied IRI strings directly.
     sql: String,
+    /// Resolved dict ids in `$1`-onwards order. Bound at execute
+    /// time as `INT8` Datums alongside the cached prepared plan.
+    params: Vec<i64>,
 }
 
 #[derive(Default)]
@@ -217,6 +259,10 @@ struct UnionBranch {
 }
 
 fn translate(q: &Query) -> ExecPlan {
+    // Clear before each top-level translation so a previous panic
+    // mid-walk can't leak a stale partial-parameter list into this
+    // call. Buffer fills as the walk emits `$N` placeholders.
+    params_clear();
     match q {
         Query::Select { pattern, .. } => {
             let ps = parse_select(pattern);
@@ -224,7 +270,11 @@ fn translate(q: &Query) -> ExecPlan {
                 panic!("sparql: empty BGP");
             }
             let sql = build_bgp_sql(&ps);
-            ExecPlan { projected: ps.projected, sql }
+            ExecPlan {
+                projected: ps.projected,
+                sql,
+                params: params_take(),
+            }
         }
         Query::Ask { pattern, .. } => {
             // ASK reuses the SELECT pattern walk but only cares
@@ -250,6 +300,7 @@ fn translate(q: &Query) -> ExecPlan {
             ExecPlan {
                 projected: vec!["_ask".to_string()],
                 sql,
+                params: params_take(),
             }
         }
         other => panic!("sparql: query form not supported yet (got {other:?})"),
@@ -1429,11 +1480,11 @@ fn expr_to_id_sql(
         }
         Expression::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            Some(id.to_string())
+            Some(id_placeholder(id))
         }
         Expression::Literal(l) => {
             let id = lookup_literal_id(l).unwrap_or(-1);
-            Some(id.to_string())
+            Some(id_placeholder(id))
         }
         _ => None,
     }
@@ -1683,9 +1734,16 @@ fn numeric_datatype_id_list() -> String {
         .filter_map(|iri| lookup_iri_id(iri))
         .collect();
     if ids.is_empty() {
-        "-1".to_string()
+        // No xsd:numeric IRIs in the dictionary yet — emit a literal
+        // -1 placeholder that won't match any real dict id. Routed
+        // through id_placeholder so the surrounding SQL string is
+        // still parameterised consistently.
+        id_placeholder(-1)
     } else {
-        ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+        ids.iter()
+            .map(|i| id_placeholder(*i))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -1716,7 +1774,8 @@ fn bind_subject(
         TermPattern::Variable(v) => bind_var(v.as_str(), qi, "subject_id", anchors, clauses),
         TermPattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            clauses.push(format!("q{qi}.subject_id = {id}"));
+            let p = id_placeholder(id);
+            clauses.push(format!("q{qi}.subject_id = {p}"));
         }
         TermPattern::BlankNode(_) => {
             panic!("sparql: blank-node subject in query not supported")
@@ -1738,7 +1797,8 @@ fn bind_predicate(
         }
         NamedNodePattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            clauses.push(format!("q{qi}.predicate_id = {id}"));
+            let p = id_placeholder(id);
+            clauses.push(format!("q{qi}.predicate_id = {p}"));
         }
     }
 }
@@ -1753,11 +1813,13 @@ fn bind_object(
         TermPattern::Variable(v) => bind_var(v.as_str(), qi, "object_id", anchors, clauses),
         TermPattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
-            clauses.push(format!("q{qi}.object_id = {id}"));
+            let p = id_placeholder(id);
+            clauses.push(format!("q{qi}.object_id = {p}"));
         }
         TermPattern::Literal(l) => {
             let id = lookup_literal_id(l).unwrap_or(-1);
-            clauses.push(format!("q{qi}.object_id = {id}"));
+            let p = id_placeholder(id);
+            clauses.push(format!("q{qi}.object_id = {p}"));
         }
         TermPattern::BlankNode(_) => {
             panic!("sparql: blank-node object in query not supported")
@@ -1850,21 +1912,52 @@ fn lookup_literal_id(lit: &Literal) -> Option<i64> {
 
 fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
     Spi::connect_mut(|client| {
-        let table = client
-            .update(plan.sql.as_str(), None, &[])
-            .expect("sparql: dynamic SELECT failed");
-        let mut rows: Vec<pgrx::JsonB> = Vec::new();
-        for row in table {
-            let mut obj = Map::new();
-            for (i, var) in plan.projected.iter().enumerate() {
-                let val: Option<String> = row.get::<String>(i + 1).ok().flatten();
-                obj.insert(
-                    var.clone(),
-                    val.map(Value::String).unwrap_or(Value::Null),
-                );
-            }
-            rows.push(pgrx::JsonB(Value::Object(obj)));
+        // Phase 3 step 2 (LLD §4.2): consult the per-backend plan
+        // cache before paying for parse + plan. Hit ⇒ reuse the
+        // `SPI_keepplan`-promoted statement; miss ⇒ prepare, then
+        // promote and stash for next time.
+        if !plan_cache::contains(&plan.sql) {
+            let arg_oids: Vec<PgOid> =
+                vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); plan.params.len()];
+            let prepared = client
+                .prepare(plan.sql.as_str(), &arg_oids)
+                .expect("sparql: prepare failed")
+                .keep();
+            plan_cache::insert(plan.sql.clone(), prepared);
+            plan_cache::record_miss();
+        } else {
+            plan_cache::record_hit();
         }
+
+        // SAFETY-adjacent: DatumWithOid::new is unsafe because Rust
+        // can't verify the (value, type-oid) pair matches at the
+        // type level. We pass INT8 i64 values everywhere — all
+        // dict ids — so this contract holds.
+        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+        let datums: Vec<DatumWithOid<'_>> = plan
+            .params
+            .iter()
+            .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
+            .collect();
+
+        let mut rows: Vec<pgrx::JsonB> = Vec::new();
+        plan_cache::with_plan(&plan.sql, |maybe_owned| {
+            let owned = maybe_owned.expect("plan must be in cache after insert");
+            let table = client
+                .update(owned, None, &datums)
+                .expect("sparql: prepared SELECT failed");
+            for row in table {
+                let mut obj = Map::new();
+                for (i, var) in plan.projected.iter().enumerate() {
+                    let val: Option<String> = row.get::<String>(i + 1).ok().flatten();
+                    obj.insert(
+                        var.clone(),
+                        val.map(Value::String).unwrap_or(Value::Null),
+                    );
+                }
+                rows.push(pgrx::JsonB(Value::Object(obj)));
+            }
+        });
         rows
     })
 }
