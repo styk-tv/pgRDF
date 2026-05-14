@@ -36,8 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 // Cumulative counters live in shmem so a multi-backend benchmark
 // can read a single fleet-wide view through `pgrdf.stats()`.
-pub(crate) static HITS: PgAtomic<AtomicU64> =
-    unsafe { PgAtomic::new(c"pgrdf_plan_cache_hits") };
+pub(crate) static HITS: PgAtomic<AtomicU64> = unsafe { PgAtomic::new(c"pgrdf_plan_cache_hits") };
 pub(crate) static MISSES: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pgrdf_plan_cache_misses") };
 pub(crate) static INSERTS: PgAtomic<AtomicU64> =
@@ -164,29 +163,25 @@ mod tests {
 
         // Snapshot AFTER the load. The INSERT plan is now cached;
         // a SPARQL call should add exactly one more slot.
-        let size_before: i64 = Spi::get_one(
-            "SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint",
-        )
-        .unwrap()
-        .unwrap();
-        let inserts_before: i64 = Spi::get_one(
-            "SELECT (pgrdf.stats()->>'plan_cache_inserts')::bigint",
-        )
-        .unwrap()
-        .unwrap();
+        let size_before: i64 =
+            Spi::get_one("SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint")
+                .unwrap()
+                .unwrap();
+        let inserts_before: i64 =
+            Spi::get_one("SELECT (pgrdf.stats()->>'plan_cache_inserts')::bigint")
+                .unwrap()
+                .unwrap();
 
         // First SPARQL call — prepare + insert one new plan.
         let _ = Spi::run("SELECT count(*) FROM pgrdf.sparql('SELECT ?s WHERE { ?s ?p ?o }')");
-        let size_after_first: i64 = Spi::get_one(
-            "SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint",
-        )
-        .unwrap()
-        .unwrap();
-        let inserts_after_first: i64 = Spi::get_one(
-            "SELECT (pgrdf.stats()->>'plan_cache_inserts')::bigint",
-        )
-        .unwrap()
-        .unwrap();
+        let size_after_first: i64 =
+            Spi::get_one("SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint")
+                .unwrap()
+                .unwrap();
+        let inserts_after_first: i64 =
+            Spi::get_one("SELECT (pgrdf.stats()->>'plan_cache_inserts')::bigint")
+                .unwrap()
+                .unwrap();
         assert_eq!(
             size_after_first - size_before,
             1,
@@ -200,16 +195,14 @@ mod tests {
 
         // Second call — hit.
         let _ = Spi::run("SELECT count(*) FROM pgrdf.sparql('SELECT ?s WHERE { ?s ?p ?o }')");
-        let size_after_second: i64 = Spi::get_one(
-            "SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint",
-        )
-        .unwrap()
-        .unwrap();
-        let inserts_after_second: i64 = Spi::get_one(
-            "SELECT (pgrdf.stats()->>'plan_cache_inserts')::bigint",
-        )
-        .unwrap()
-        .unwrap();
+        let size_after_second: i64 =
+            Spi::get_one("SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint")
+                .unwrap()
+                .unwrap();
+        let inserts_after_second: i64 =
+            Spi::get_one("SELECT (pgrdf.stats()->>'plan_cache_inserts')::bigint")
+                .unwrap()
+                .unwrap();
         assert_eq!(
             size_after_second, size_after_first,
             "second identical call must NOT add a slot"
@@ -242,11 +235,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(dropped >= 2, "should have at least two cached plans");
-        let after: i64 = Spi::get_one(
-            "SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint",
-        )
-        .unwrap()
-        .unwrap();
+        let after: i64 = Spi::get_one("SELECT (pgrdf.stats()->>'plan_cache_local_size')::bigint")
+            .unwrap()
+            .unwrap();
         assert_eq!(after, 0);
     }
 }

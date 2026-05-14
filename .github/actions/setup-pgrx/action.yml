@@ -29,6 +29,15 @@ runs:
         sudo apt-get install -y \
           postgresql-server-dev-${{ inputs.pg }} \
           postgresql-${{ inputs.pg }}
+        # `cargo pgrx install` (called transitively by
+        # `cargo pgrx test`) writes the built extension to
+        # `pg_config --pkglibdir` and `pg_config --sharedir/extension`,
+        # both of which are root-owned on a PGDG install. Hand
+        # ownership over to the workflow runner so the rest of the
+        # tooling runs without sudo.
+        sudo chown -R "$USER" \
+          "/usr/lib/postgresql/${{ inputs.pg }}/lib" \
+          "/usr/share/postgresql/${{ inputs.pg }}/extension"
 
     - name: Install cargo-pgrx
       shell: bash

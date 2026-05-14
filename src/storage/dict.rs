@@ -145,27 +145,18 @@ mod tests {
 
     #[pg_test]
     fn term_roundtrip() {
-        let id = Spi::get_one_with_args::<i64>(
-            "SELECT pgrdf.put_term('hello', 3::smallint)",
-            &[],
-        )
-        .unwrap()
-        .unwrap();
-        let back: Option<String> = Spi::get_one_with_args(
-            "SELECT pgrdf.get_term($1)",
-            &[id.into()],
-        )
-        .unwrap();
+        let id = Spi::get_one_with_args::<i64>("SELECT pgrdf.put_term('hello', 3::smallint)", &[])
+            .unwrap()
+            .unwrap();
+        let back: Option<String> =
+            Spi::get_one_with_args("SELECT pgrdf.get_term($1)", &[id.into()]).unwrap();
         assert_eq!(back.as_deref(), Some("hello"));
     }
 
     #[pg_test]
     fn get_term_missing() {
-        let v: Option<String> = Spi::get_one_with_args(
-            "SELECT pgrdf.get_term($1)",
-            &[i64::MAX.into()],
-        )
-        .unwrap();
+        let v: Option<String> =
+            Spi::get_one_with_args("SELECT pgrdf.get_term($1)", &[i64::MAX.into()]).unwrap();
         assert!(v.is_none());
     }
 }

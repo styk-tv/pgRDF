@@ -77,8 +77,7 @@ static EVICTIONS: PgAtomic<AtomicU64> = unsafe { PgAtomic::new(c"pgrdf_dict_cach
 /// after `DROP EXTENSION pgrdf; CREATE EXTENSION` to invalidate every
 /// slot in one atomic increment. Starts at 1 so the all-zero initial
 /// slot state reads as stale (slot.generation 0 ≠ current 1).
-static GENERATION: PgAtomic<AtomicU64> =
-    unsafe { PgAtomic::new(c"pgrdf_dict_cache_generation") };
+static GENERATION: PgAtomic<AtomicU64> = unsafe { PgAtomic::new(c"pgrdf_dict_cache_generation") };
 
 /// Register shmem requests + startup hooks for the dict cache and
 /// its counters + generation flag. Must be called from inside
@@ -370,14 +369,36 @@ mod tests {
     /// Two different keys live in different slots.
     #[pg_test]
     fn shmem_disambiguates_keys() {
-        insert_committed(term_type::URI, "http://example.com/shmem-test-2a", None, None, 100);
-        insert_committed(term_type::URI, "http://example.com/shmem-test-2b", None, None, 200);
+        insert_committed(
+            term_type::URI,
+            "http://example.com/shmem-test-2a",
+            None,
+            None,
+            100,
+        );
+        insert_committed(
+            term_type::URI,
+            "http://example.com/shmem-test-2b",
+            None,
+            None,
+            200,
+        );
         assert_eq!(
-            lookup(term_type::URI, "http://example.com/shmem-test-2a", None, None),
+            lookup(
+                term_type::URI,
+                "http://example.com/shmem-test-2a",
+                None,
+                None
+            ),
             Some(100)
         );
         assert_eq!(
-            lookup(term_type::URI, "http://example.com/shmem-test-2b", None, None),
+            lookup(
+                term_type::URI,
+                "http://example.com/shmem-test-2b",
+                None,
+                None
+            ),
             Some(200)
         );
     }
@@ -402,7 +423,13 @@ mod tests {
         assert!(after_miss.misses > before.misses);
 
         // Insert + hit
-        insert_committed(term_type::URI, "http://example.com/warm-hit", None, None, 9999);
+        insert_committed(
+            term_type::URI,
+            "http://example.com/warm-hit",
+            None,
+            None,
+            9999,
+        );
         let _ = lookup(term_type::URI, "http://example.com/warm-hit", None, None);
         let after_hit = snapshot();
         assert!(after_hit.hits > after_miss.hits);

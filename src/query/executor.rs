@@ -243,7 +243,9 @@ enum AggregateFn {
     Max,
     /// GROUP_CONCAT(?v [; SEPARATOR = "…"]) — Postgres `string_agg`.
     /// Separator defaults to a single space per SPARQL spec.
-    GroupConcat { separator: String },
+    GroupConcat {
+        separator: String,
+    },
     /// SAMPLE(?v) — "any value from the group". Postgres has no
     /// SAMPLE; we use `MIN(...)` as a deterministic surrogate which
     /// is spec-conformant ("an implementation-defined element").
@@ -319,7 +321,12 @@ fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
             .map(|b| {
                 let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
                 let (from_sql, where_clauses) = build_from_and_where(
-                    &b.bgp, &b.filters, &b.optionals, &b.minuses, &mut anchors, 0,
+                    &b.bgp,
+                    &b.filters,
+                    &b.optionals,
+                    &b.minuses,
+                    &mut anchors,
+                    0,
                 );
                 let mut sql = format!("SELECT 1 FROM {from_sql}");
                 if !where_clauses.is_empty() {
@@ -478,7 +485,11 @@ fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec 
             distinct: *distinct,
             arg_var: None,
         },
-        AggregateExpression::FunctionCall { name, expr, distinct } => {
+        AggregateExpression::FunctionCall {
+            name,
+            expr,
+            distinct,
+        } => {
             let arg_var = match expr {
                 Expression::Variable(v) => v.as_str().to_string(),
                 other => panic!(
@@ -539,7 +550,11 @@ fn walk_branch(p: &GraphPattern, ub: &mut UnionBranch) {
             ub.filters.push(expr.clone());
             walk_branch(inner, ub);
         }
-        GraphPattern::LeftJoin { left, right, expression } => {
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
             walk_branch(left, ub);
             let triple = match right.as_ref() {
                 GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns[0].clone(),
@@ -583,7 +598,11 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
             ps.distinct = true;
             walk_select(inner, ps);
         }
-        GraphPattern::Slice { inner, start, length } => {
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => {
             // Slice is OFFSET (start) + LIMIT (length).
             ps.offset = *start;
             ps.limit = *length;
@@ -610,7 +629,11 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
             ps.filters.push(expr.clone());
             walk_select(inner, ps);
         }
-        GraphPattern::LeftJoin { left, right, expression } => {
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
             // Walk the left arm first — it may itself be another
             // LeftJoin (chained OPTIONALs) or a Filter wrapping a BGP.
             walk_select(left, ps);
@@ -641,22 +664,29 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
             walk_select(left, ps);
             let triples = match right.as_ref() {
                 GraphPattern::Bgp { patterns } => patterns.clone(),
-                other => panic!(
-                    "sparql: MINUS right side must be a BGP (got {other:?})"
-                ),
+                other => panic!("sparql: MINUS right side must be a BGP (got {other:?})"),
             };
             ps.minuses.push(triples);
         }
-        GraphPattern::Group { inner, variables, aggregates } => {
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
             for v in variables {
                 ps.group_vars.push(v.as_str().to_string());
             }
             for (synth_var, agg_expr) in aggregates {
-                ps.aggregates.push(parse_aggregate(synth_var.as_str(), agg_expr));
+                ps.aggregates
+                    .push(parse_aggregate(synth_var.as_str(), agg_expr));
             }
             walk_select(inner, ps);
         }
-        GraphPattern::Extend { inner, variable, expression } => {
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
             // Walk inner FIRST so any Group below has populated
             // ps.aggregates by the time we decide what kind of
             // Extend this is.
@@ -770,8 +800,8 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
     let mut select_clauses: Vec<String> = Vec::new();
     for var in &ps.projected {
         if let Some(bind) = ps.binds.iter().find(|b| &b.output_var == var) {
-            let expr_sql = translate_bind_expression(&bind.expression, &anchors)
-                .unwrap_or_else(|| {
+            let expr_sql =
+                translate_bind_expression(&bind.expression, &anchors).unwrap_or_else(|| {
                     panic!(
                         "sparql: BIND expression for ?{var} not translatable: {:?}",
                         bind.expression
@@ -905,15 +935,11 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
     if !ps.having_filters.is_empty() {
         let mut having_parts: Vec<String> = Vec::new();
         for expr in &ps.having_filters {
-            let sql_pred = translate_filter_with_aggregates(
-                expr,
-                &anchors,
-                &ps.aggregates,
-                &group_exprs,
-            )
-            .unwrap_or_else(|| {
-                panic!("sparql: HAVING expression not translatable: {expr:?}")
-            });
+            let sql_pred =
+                translate_filter_with_aggregates(expr, &anchors, &ps.aggregates, &group_exprs)
+                    .unwrap_or_else(|| {
+                        panic!("sparql: HAVING expression not translatable: {expr:?}")
+                    });
             having_parts.push(sql_pred);
         }
         sql.push_str(" HAVING ");
@@ -958,9 +984,7 @@ fn translate_aggregate(
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
             panic!("sparql: aggregate over ?{var} but variable not bound in any BGP pattern")
         });
-        format!(
-            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
-        )
+        format!("(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})")
     };
     match (&agg.func, &agg.arg_var) {
         (AggregateFn::Count, None) => "COUNT(*)".to_string(),
@@ -982,10 +1006,7 @@ fn translate_aggregate(
         (AggregateFn::Max, Some(var)) => format!("MAX({distinct}{})", lex_subselect(var)),
         (AggregateFn::GroupConcat { separator }, Some(var)) => {
             let escaped = separator.replace('\'', "''");
-            format!(
-                "STRING_AGG({distinct}{}, '{escaped}')",
-                lex_subselect(var)
-            )
+            format!("STRING_AGG({distinct}{}, '{escaped}')", lex_subselect(var))
         }
         (AggregateFn::Sample, Some(var)) => format!("MIN({})", lex_subselect(var)),
         (_, None) => panic!("sparql: aggregate over `*` only supported for COUNT"),
@@ -1082,10 +1103,7 @@ fn translate_filter_with_aggregates(
 /// Build the same NUMERIC-cast CASE expression we use for FILTER
 /// ordering — restricted to dict rows whose datatype is one of the
 /// XSD numeric IRIs, else NULL.
-fn numeric_cast_subselect(
-    var: &str,
-    anchors: &HashMap<String, (usize, &'static str)>,
-) -> String {
+fn numeric_cast_subselect(var: &str, anchors: &HashMap<String, (usize, &'static str)>) -> String {
     let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
         panic!("sparql: numeric aggregate over ?{var} but variable not bound in any BGP pattern")
     });
@@ -1117,9 +1135,7 @@ fn build_union_sql(ps: &ParsedSelect) -> String {
         .map(|v| quote_identifier(v))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut sql = format!(
-        "SELECT {distinct_kw}{outer_cols} FROM ({union_inner}) AS _pgrdf_union"
-    );
+    let mut sql = format!("SELECT {distinct_kw}{outer_cols} FROM ({union_inner}) AS _pgrdf_union");
 
     if !ps.order_by.is_empty() {
         let mut order_parts: Vec<String> = Vec::new();
@@ -1213,9 +1229,7 @@ fn build_from_and_where(
             } else {
                 clauses.join(" AND ")
             };
-            from_sql.push_str(&format!(
-                " INNER JOIN pgrdf._pgrdf_quads q{qi} ON ({on})"
-            ));
+            from_sql.push_str(&format!(" INNER JOIN pgrdf._pgrdf_quads q{qi} ON ({on})"));
         }
     }
     // OPTIONAL blocks — each becomes a LEFT JOIN whose ON includes
@@ -1245,9 +1259,8 @@ fn build_from_and_where(
     // result. NULL comparisons drop the row (SPARQL "type error →
     // unbound" semantics).
     for expr in filters {
-        let sql = translate_filter(expr, anchors).unwrap_or_else(|| {
-            panic!("sparql: FILTER expression not translatable: {expr:?}")
-        });
+        let sql = translate_filter(expr, anchors)
+            .unwrap_or_else(|| panic!("sparql: FILTER expression not translatable: {expr:?}"));
         where_clauses.push(sql);
     }
     // MINUS blocks → `NOT EXISTS (SELECT 1 FROM … WHERE shared_vars)`.
@@ -1407,9 +1420,9 @@ fn translate_function_call(
         Function::IsBlank => term_type_check(args, anchors, term_type::BLANK_NODE),
         Function::IsLiteral => term_type_check(args, anchors, term_type::LITERAL),
         Function::Regex => translate_regex(args, anchors),
-        Function::Contains => translate_string_fn(args, anchors, |s, sub| {
-            format!("(strpos({s}, {sub}) > 0)")
-        }),
+        Function::Contains => {
+            translate_string_fn(args, anchors, |s, sub| format!("(strpos({s}, {sub}) > 0)"))
+        }
         Function::StrStarts => translate_string_fn(args, anchors, |s, prefix| {
             format!("(left({s}, length({prefix})) = {prefix})")
         }),
@@ -1569,9 +1582,7 @@ fn expr_to_numeric_sql(
             expr_to_numeric_sql(a, anchors)?,
             expr_to_numeric_sql(b, anchors)?
         )),
-        Expression::UnaryMinus(a) => {
-            Some(format!("(-{})", expr_to_numeric_sql(a, anchors)?))
-        }
+        Expression::UnaryMinus(a) => Some(format!("(-{})", expr_to_numeric_sql(a, anchors)?)),
         Expression::UnaryPlus(a) => expr_to_numeric_sql(a, anchors),
         // STRLEN(?v) → length of lexical_value
         Expression::FunctionCall(Function::StrLen, args) if args.len() == 1 => {
@@ -1792,9 +1803,7 @@ fn bind_predicate(
     clauses: &mut Vec<String>,
 ) {
     match &tp.predicate {
-        NamedNodePattern::Variable(v) => {
-            bind_var(v.as_str(), qi, "predicate_id", anchors, clauses)
-        }
+        NamedNodePattern::Variable(v) => bind_var(v.as_str(), qi, "predicate_id", anchors, clauses),
         NamedNodePattern::NamedNode(n) => {
             let id = lookup_iri_id(n.as_str()).unwrap_or(-1);
             let p = id_placeholder(id);
@@ -1878,11 +1887,7 @@ fn lookup_literal_id(lit: &Literal) -> Option<i64> {
                         AND language_tag  = $3
                         AND datatype_iri_id IS NULL
                       LIMIT 1)",
-            &[
-                term_type::LITERAL.into(),
-                value.into(),
-                lang.into(),
-            ],
+            &[term_type::LITERAL.into(), value.into(), lang.into()],
         )
         .ok()
         .flatten()
@@ -1895,11 +1900,7 @@ fn lookup_literal_id(lit: &Literal) -> Option<i64> {
                         AND datatype_iri_id = $3
                         AND language_tag IS NULL
                       LIMIT 1)",
-            &[
-                term_type::LITERAL.into(),
-                value.into(),
-                dt_id.into(),
-            ],
+            &[term_type::LITERAL.into(), value.into(), dt_id.into()],
         )
         .ok()
         .flatten()
@@ -1950,10 +1951,7 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
                 let mut obj = Map::new();
                 for (i, var) in plan.projected.iter().enumerate() {
                     let val: Option<String> = row.get::<String>(i + 1).ok().flatten();
-                    obj.insert(
-                        var.clone(),
-                        val.map(Value::String).unwrap_or(Value::Null),
-                    );
+                    obj.insert(var.clone(), val.map(Value::String).unwrap_or(Value::Null));
                 }
                 rows.push(pgrx::JsonB(Value::Object(obj)));
             }
@@ -1994,7 +1992,10 @@ mod tests {
         // Each pgrx #[pg_test] runs in an auto-rollback transaction,
         // so the dictionary + quads only contain what we just loaded
         // — 3 triples.
-        assert_eq!(n, 3, "expected 3 triples from the 3 we just loaded, got {n}");
+        assert_eq!(
+            n, 3,
+            "expected 3 triples from the 3 we just loaded, got {n}"
+        );
     }
 
     /// Bound predicate → just the matching triples.
@@ -2114,7 +2115,10 @@ mod tests {
         )
         .unwrap()
         .unwrap_or(0);
-        assert_eq!(rows, 1, "FILTER(?n = \"Alice\") should match one row, got {rows}");
+        assert_eq!(
+            rows, 1,
+            "FILTER(?n = \"Alice\") should match one row, got {rows}"
+        );
     }
 
     /// FILTER(?o != "B") — the negation form.
@@ -2906,11 +2910,9 @@ mod tests {
         )
         .unwrap();
 
-        let yes: pgrx::JsonB = Spi::get_one(
-            "SELECT sparql FROM pgrdf.sparql('ASK { ?s ?p ?o }')",
-        )
-        .unwrap()
-        .unwrap();
+        let yes: pgrx::JsonB = Spi::get_one("SELECT sparql FROM pgrdf.sparql('ASK { ?s ?p ?o }')")
+            .unwrap()
+            .unwrap();
         let no: pgrx::JsonB = Spi::get_one(
             "SELECT sparql FROM pgrdf.sparql(
                'ASK { <http://example.com/zz> <http://nope/> <http://example.com/yy> }'
@@ -3449,7 +3451,10 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(baseline, 3, "expected 3 raw rows, got {baseline}");
-        assert_eq!(with_distinct, 2, "expected 2 distinct ?o (x, y), got {with_distinct}");
+        assert_eq!(
+            with_distinct, 2,
+            "expected 2 distinct ?o (x, y), got {with_distinct}"
+        );
     }
 
     /// LIMIT caps the number of rows returned.

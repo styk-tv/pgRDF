@@ -112,7 +112,7 @@ fn walk(
             }
         }
         GraphPattern::Distinct { inner } => walk(inner, vars, bgp, unsupported),
-        GraphPattern::Reduced { inner }  => walk(inner, vars, bgp, unsupported),
+        GraphPattern::Reduced { inner } => walk(inner, vars, bgp, unsupported),
         GraphPattern::Slice { inner, .. } => walk(inner, vars, bgp, unsupported),
         GraphPattern::OrderBy { inner, .. } => walk(inner, vars, bgp, unsupported),
         GraphPattern::Filter { inner, .. } => walk(inner, vars, bgp, unsupported),
@@ -123,7 +123,6 @@ fn walk(
             walk(left, vars, bgp, unsupported);
             walk(right, vars, bgp, unsupported);
         }
-
 
         GraphPattern::Union { left, right } => {
             // UNION — supported. Each branch contributes its own
@@ -138,8 +137,8 @@ fn walk(
             walk(left, vars, bgp, unsupported);
             walk(right, vars, bgp, unsupported);
         }
-        GraphPattern::Join { .. }      => unsupported.push("Join (non-BGP)"),
-        GraphPattern::Graph { .. }     => unsupported.push("Graph (named graph clause)"),
+        GraphPattern::Join { .. } => unsupported.push("Join (non-BGP)"),
+        GraphPattern::Graph { .. } => unsupported.push("Graph (named graph clause)"),
         GraphPattern::Group { inner, .. } => {
             // Aggregates — supported by the executor. Walk the inner
             // BGP so the parser still reports its shape.
@@ -151,9 +150,9 @@ fn walk(
             // the inner so the underlying BGP is still visible.
             walk(inner, vars, bgp, unsupported);
         }
-        GraphPattern::Path { .. }      => unsupported.push("Path (property path)"),
-        GraphPattern::Values { .. }    => unsupported.push("Values (inline VALUES)"),
-        GraphPattern::Service { .. }   => unsupported.push("Service (federation)"),
+        GraphPattern::Path { .. } => unsupported.push("Path (property path)"),
+        GraphPattern::Values { .. } => unsupported.push("Values (inline VALUES)"),
+        GraphPattern::Service { .. } => unsupported.push("Service (federation)"),
 
         _ => unsupported.push("other"),
     }
@@ -162,15 +161,21 @@ fn walk(
 fn collect_vars(tp: &TriplePattern, out: &mut Vec<String>) {
     if let TermPattern::Variable(v) = &tp.subject {
         let n = v.as_str().to_string();
-        if !out.contains(&n) { out.push(n); }
+        if !out.contains(&n) {
+            out.push(n);
+        }
     }
     if let NamedNodePattern::Variable(v) = &tp.predicate {
         let n = v.as_str().to_string();
-        if !out.contains(&n) { out.push(n); }
+        if !out.contains(&n) {
+            out.push(n);
+        }
     }
     if let TermPattern::Variable(v) = &tp.object {
         let n = v.as_str().to_string();
-        if !out.contains(&n) { out.push(n); }
+        if !out.contains(&n) {
+            out.push(n);
+        }
     }
 }
 
@@ -184,16 +189,19 @@ fn triple_to_json(tp: &TriplePattern) -> Value {
 
 fn term_pattern_to_json(t: &TermPattern) -> Value {
     match t {
-        TermPattern::Variable(v)  => json!({ "var":  v.as_str() }),
+        TermPattern::Variable(v) => json!({ "var":  v.as_str() }),
         TermPattern::NamedNode(n) => json!({ "iri":  n.as_str() }),
         TermPattern::BlankNode(b) => json!({ "bnode": b.as_str() }),
-        TermPattern::Literal(l)   => {
+        TermPattern::Literal(l) => {
             let mut obj = serde_json::Map::new();
             obj.insert("literal".into(), Value::String(l.value().to_string()));
             if let Some(lang) = l.language() {
                 obj.insert("lang".into(), Value::String(lang.to_string()));
             } else {
-                obj.insert("datatype".into(), Value::String(l.datatype().as_str().to_string()));
+                obj.insert(
+                    "datatype".into(),
+                    Value::String(l.datatype().as_str().to_string()),
+                );
             }
             Value::Object(obj)
         }
@@ -204,7 +212,7 @@ fn term_pattern_to_json(t: &TermPattern) -> Value {
 fn named_node_pattern_to_json(n: &NamedNodePattern) -> Value {
     match n {
         NamedNodePattern::NamedNode(nn) => json!({ "iri": nn.as_str() }),
-        NamedNodePattern::Variable(v)   => json!({ "var": v.as_str() }),
+        NamedNodePattern::Variable(v) => json!({ "var": v.as_str() }),
     }
 }
 
@@ -240,12 +248,9 @@ mod tests {
             SELECT ?person ?name
               WHERE { ?person foaf:name ?name }
         "#;
-        let j: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.sparql_parse($1)",
-            &[q.into()],
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
         let v = &j.0;
         assert_eq!(v["form"], "SELECT");
         assert_eq!(v["bgp_pattern_count"], 1);
@@ -265,12 +270,9 @@ mod tests {
                 ?p foaf:mbox ?m .
               }
         "#;
-        let j: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.sparql_parse($1)",
-            &[q.into()],
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
         let v = &j.0;
         assert_eq!(v["bgp_pattern_count"], 2);
     }
@@ -281,12 +283,9 @@ mod tests {
     #[pg_test]
     fn sparql_parse_filter_is_supported() {
         let q = "SELECT ?s WHERE { ?s ?p ?o FILTER(isIRI(?o)) }";
-        let j: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.sparql_parse($1)",
-            &[q.into()],
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
         let v = &j.0;
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(
@@ -301,16 +300,15 @@ mod tests {
     #[pg_test]
     fn sparql_parse_optional_is_supported() {
         let q = "SELECT ?s ?n WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }";
-        let j: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.sparql_parse($1)",
-            &[q.into()],
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
         let v = &j.0;
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(
-            !unsupported.iter().any(|x| x.as_str().is_some_and(|s| s.contains("OPTIONAL"))),
+            !unsupported
+                .iter()
+                .any(|x| x.as_str().is_some_and(|s| s.contains("OPTIONAL"))),
             "OPTIONAL should not be flagged anymore, got {unsupported:?}"
         );
         // Both BGP arms are now visible.
@@ -322,12 +320,9 @@ mod tests {
     #[pg_test]
     fn sparql_parse_union_is_supported() {
         let q = "SELECT ?s WHERE { { ?s <http://x/a> ?o } UNION { ?s <http://x/b> ?o } }";
-        let j: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.sparql_parse($1)",
-            &[q.into()],
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
         let v = &j.0;
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(
@@ -341,12 +336,9 @@ mod tests {
     #[pg_test]
     fn sparql_parse_minus_is_supported() {
         let q = "SELECT ?s WHERE { ?s ?p ?o MINUS { ?s <http://x/a> ?b } }";
-        let j: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.sparql_parse($1)",
-            &[q.into()],
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
         let v = &j.0;
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(
@@ -363,16 +355,15 @@ mod tests {
     #[pg_test]
     fn sparql_parse_flags_unsupported_path() {
         let q = "SELECT ?s ?o WHERE { ?s <http://x/a>* ?o }";
-        let j: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.sparql_parse($1)",
-            &[q.into()],
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
         let v = &j.0;
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(
-            unsupported.iter().any(|x| x.as_str().is_some_and(|s| s.contains("Path"))),
+            unsupported
+                .iter()
+                .any(|x| x.as_str().is_some_and(|s| s.contains("Path"))),
             "expected Path to be flagged, got {unsupported:?}"
         );
     }

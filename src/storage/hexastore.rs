@@ -124,6 +124,9 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(part_count, 1, "expected exactly one partition for graph 9001");
+        assert_eq!(
+            part_count, 1,
+            "expected exactly one partition for graph 9001"
+        );
     }
 }

@@ -27,7 +27,7 @@
 //! emulated by this UDF.
 
 use crate::storage::dict::{put_term_full, term_type};
-use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Subject, Term, Triple};
+use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use pgrx::prelude::*;
 use reasonable::reasoner::Reasoner;
 use serde_json::json;
@@ -69,12 +69,7 @@ fn materialize(graph_id: i64) -> pgrx::JsonB {
                 }],
             )
             .expect("materialize: delete-prior failed");
-        table
-            .first()
-            .get_one::<i64>()
-            .ok()
-            .flatten()
-            .unwrap_or(0)
+        table.first().get_one::<i64>().ok().flatten().unwrap_or(0)
     });
 
     // 2. Stream base triples out.
@@ -86,18 +81,11 @@ fn materialize(graph_id: i64) -> pgrx::JsonB {
     let mut reasoner = Reasoner::new();
     reasoner.load_triples(base);
     reasoner.reason();
-    let errors: Vec<String> = reasoner
-        .errors()
-        .iter()
-        .map(|e| format!("{e}"))
-        .collect();
+    let errors: Vec<String> = reasoner.errors().iter().map(|e| format!("{e}")).collect();
 
     // 4. Set-diff to find ONLY the inferred (entailed-but-not-asserted) triples.
     let derived = reasoner.get_triples();
-    let inferred: Vec<&Triple> = derived
-        .iter()
-        .filter(|t| !base_set.contains(t))
-        .collect();
+    let inferred: Vec<&Triple> = derived.iter().filter(|t| !base_set.contains(t)).collect();
 
     // 5. Write back. Each new triple's terms are interned via the
     //    shmem-aware `put_term_full`; existing IRIs / literals reuse
@@ -111,12 +99,7 @@ fn materialize(graph_id: i64) -> pgrx::JsonB {
             "INSERT INTO pgrdf._pgrdf_quads
                 (subject_id, predicate_id, object_id, graph_id, is_inferred)
              VALUES ($1, $2, $3, $4, TRUE)",
-            &[
-                s_id.into(),
-                p_id.into(),
-                o_id.into(),
-                graph_id.into(),
-            ],
+            &[s_id.into(), p_id.into(), o_id.into(), graph_id.into()],
         )
         .expect("materialize: insert inferred failed");
         written += 1;
@@ -185,15 +168,12 @@ fn load_base_triples(graph_id: i64) -> Vec<Triple> {
 
 fn build_subject(t_type: i16, value: &str) -> NamedOrBlankNode {
     match t_type {
-        term_type::URI => NamedOrBlankNode::NamedNode(
-            NamedNode::new(value).unwrap_or_else(|_| {
-                NamedNode::new("urn:pgrdf:invalid-iri")
-                    .expect("urn:pgrdf:invalid-iri is well-formed")
-            }),
+        term_type::URI => NamedOrBlankNode::NamedNode(NamedNode::new(value).unwrap_or_else(|_| {
+            NamedNode::new("urn:pgrdf:invalid-iri").expect("urn:pgrdf:invalid-iri is well-formed")
+        })),
+        term_type::BLANK_NODE => NamedOrBlankNode::BlankNode(
+            BlankNode::new(value).unwrap_or_else(|_| BlankNode::default()),
         ),
-        term_type::BLANK_NODE => {
-            NamedOrBlankNode::BlankNode(BlankNode::new(value).unwrap_or_else(|_| BlankNode::default()))
-        }
         // SPARQL disallows literal subjects; if we somehow saw one,
         // skip with a sentinel blank node (the row was malformed).
         _ => NamedOrBlankNode::BlankNode(BlankNode::default()),
@@ -211,9 +191,9 @@ fn build_object(
             NamedNode::new(value)
                 .unwrap_or_else(|_| NamedNode::new("urn:pgrdf:invalid-iri").unwrap()),
         ),
-        term_type::BLANK_NODE => Term::BlankNode(
-            BlankNode::new(value).unwrap_or_else(|_| BlankNode::default()),
-        ),
+        term_type::BLANK_NODE => {
+            Term::BlankNode(BlankNode::new(value).unwrap_or_else(|_| BlankNode::default()))
+        }
         _ => {
             // Literal
             if let Some(lang) = language {
@@ -223,9 +203,7 @@ fn build_object(
                 }
             } else if let Some(dt) = datatype_iri {
                 match NamedNode::new(dt) {
-                    Ok(dt_node) => {
-                        Term::Literal(Literal::new_typed_literal(value, dt_node))
-                    }
+                    Ok(dt_node) => Term::Literal(Literal::new_typed_literal(value, dt_node)),
                     Err(_) => Term::Literal(Literal::new_simple_literal(value)),
                 }
             } else {
@@ -237,9 +215,7 @@ fn build_object(
 
 fn subject_id(s: &NamedOrBlankNode) -> i64 {
     match s {
-        NamedOrBlankNode::NamedNode(n) => {
-            put_term_full(n.as_str(), term_type::URI, None, None)
-        }
+        NamedOrBlankNode::NamedNode(n) => put_term_full(n.as_str(), term_type::URI, None, None),
         NamedOrBlankNode::BlankNode(b) => {
             put_term_full(b.as_str(), term_type::BLANK_NODE, None, None)
         }
@@ -269,10 +245,6 @@ fn term_id(t: &Term) -> i64 {
     }
 }
 
-// Silence unused-import warnings if oxrdf re-exports change.
-#[allow(dead_code)]
-fn _unused_subject_marker(_: &Subject) {}
-
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
@@ -290,23 +262,12 @@ mod tests {
             ex:alice    rdf:type        ex:Engineer .
         "#;
         let g: i64 = 8400;
-        Spi::run_with_args(
-            "SELECT pgrdf.add_graph($1)",
-            &[g.into()],
-        )
-        .unwrap();
-        Spi::run_with_args(
-            "SELECT pgrdf.parse_turtle($1, $2)",
-            &[ttl.into(), g.into()],
-        )
-        .unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g.into()]).unwrap();
+        Spi::run_with_args("SELECT pgrdf.parse_turtle($1, $2)", &[ttl.into(), g.into()]).unwrap();
 
-        let j: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.materialize($1)",
-            &[g.into()],
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.materialize($1)", &[g.into()])
+            .unwrap()
+            .unwrap();
         let v = &j.0;
         assert_eq!(v["base_triples"], 2);
         // OWL 2 RL also adds rdfs:subClassOf reflexivity and other
@@ -351,8 +312,7 @@ mod tests {
         "#;
         let g: i64 = 8401;
         Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g.into()]).unwrap();
-        Spi::run_with_args("SELECT pgrdf.parse_turtle($1, $2)", &[ttl.into(), g.into()])
-            .unwrap();
+        Spi::run_with_args("SELECT pgrdf.parse_turtle($1, $2)", &[ttl.into(), g.into()]).unwrap();
 
         let first: pgrx::JsonB =
             Spi::get_one_with_args("SELECT pgrdf.materialize($1)", &[g.into()])
@@ -367,7 +327,10 @@ mod tests {
         let n2 = second.0["inferred_triples_written"].as_i64().unwrap();
         let dropped_2 = second.0["previous_inferred_dropped"].as_i64().unwrap();
         assert_eq!(n1, n2, "two materialize runs must produce same row count");
-        assert_eq!(dropped_2, n1, "second call must drop the first call's output");
+        assert_eq!(
+            dropped_2, n1,
+            "second call must drop the first call's output"
+        );
     }
 
     /// A graph with no application-level OWL/RDFS axioms still
@@ -386,13 +349,11 @@ mod tests {
         "#;
         let g: i64 = 8402;
         Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g.into()]).unwrap();
-        Spi::run_with_args("SELECT pgrdf.parse_turtle($1, $2)", &[ttl.into(), g.into()])
-            .unwrap();
+        Spi::run_with_args("SELECT pgrdf.parse_turtle($1, $2)", &[ttl.into(), g.into()]).unwrap();
 
-        let j: pgrx::JsonB =
-            Spi::get_one_with_args("SELECT pgrdf.materialize($1)", &[g.into()])
-                .unwrap()
-                .unwrap();
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.materialize($1)", &[g.into()])
+            .unwrap()
+            .unwrap();
         assert_eq!(j.0["base_triples"], 2);
         // No application-level entailment, but axiomatic OWL 2 RL
         // triples ARE expected. Just confirm the base + something
@@ -407,6 +368,9 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(base_still_there, 2, "base triples must remain after materialize");
+        assert_eq!(
+            base_still_there, 2,
+            "base triples must remain after materialize"
+        );
     }
 }

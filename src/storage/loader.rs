@@ -128,11 +128,7 @@ fn subject_to_id(
     }
 }
 
-fn object_to_id(
-    t: &Term,
-    cache: &mut HashMap<DictKey, i64>,
-    stats: &mut LoaderStats,
-) -> i64 {
+fn object_to_id(t: &Term, cache: &mut HashMap<DictKey, i64>, stats: &mut LoaderStats) -> i64 {
     match t {
         Term::NamedNode(n) => intern_term(cache, stats, n.as_str(), term_type::URI, None, None),
         Term::BlankNode(b) => {
@@ -152,7 +148,14 @@ fn object_to_id(
                     None,
                 ))
             };
-            intern_term(cache, stats, lit.value(), term_type::LITERAL, datatype_id, lang)
+            intern_term(
+                cache,
+                stats,
+                lit.value(),
+                term_type::LITERAL,
+                datatype_id,
+                lang,
+            )
         }
         #[allow(unreachable_patterns)]
         _ => panic!("load_turtle: unsupported object term (RDF-star not in v0.2 scope)"),
@@ -266,10 +269,22 @@ fn ingest_turtle_with_stats<R: Read>(
         batch_o.push(o);
         stats.triples += 1;
         if batch_s.len() >= BATCH_SIZE {
-            flush_batch(&mut batch_s, &mut batch_p, &mut batch_o, graph_id, &mut stats);
+            flush_batch(
+                &mut batch_s,
+                &mut batch_p,
+                &mut batch_o,
+                graph_id,
+                &mut stats,
+            );
         }
     }
-    flush_batch(&mut batch_s, &mut batch_p, &mut batch_o, graph_id, &mut stats);
+    flush_batch(
+        &mut batch_s,
+        &mut batch_p,
+        &mut batch_o,
+        graph_id,
+        &mut stats,
+    );
     stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     stats
 }
@@ -295,13 +310,9 @@ fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
 ///
 /// SQL: `pgrdf.load_turtle(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) -> BIGINT`.
 #[pg_extern]
-fn load_turtle(
-    path: &str,
-    graph_id: i64,
-    base_iri: default!(Option<&str>, "NULL"),
-) -> i64 {
-    let file = File::open(path)
-        .unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
+fn load_turtle(path: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL")) -> i64 {
+    let file =
+        File::open(path).unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
     let base = base_iri.filter(|s| !s.is_empty());
     ingest_turtle_with_stats(BufReader::new(file), graph_id, base).triples
 }
@@ -329,11 +340,7 @@ fn load_turtle_verbose(
 ///
 /// SQL: `pgrdf.parse_turtle(content TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) -> BIGINT`.
 #[pg_extern]
-fn parse_turtle(
-    content: &str,
-    graph_id: i64,
-    base_iri: default!(Option<&str>, "NULL"),
-) -> i64 {
+fn parse_turtle(content: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL")) -> i64 {
     let base = base_iri.filter(|s| !s.is_empty());
     ingest_turtle_with_stats(content.as_bytes(), graph_id, base).triples
 }

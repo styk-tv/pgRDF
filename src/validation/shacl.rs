@@ -124,11 +124,9 @@ mod tests {
     /// does NOT panic.
     #[pg_test]
     fn validate_stub_unknown_graphs() {
-        let j: pgrx::JsonB = Spi::get_one(
-            "SELECT pgrdf.validate(999990::bigint, 999991::bigint)",
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB = Spi::get_one("SELECT pgrdf.validate(999990::bigint, 999991::bigint)")
+            .unwrap()
+            .unwrap();
         let v = &j.0;
         assert_eq!(v["data_triples"], 0);
         assert_eq!(v["shapes_triples"], 0);

@@ -6,6 +6,24 @@
 //!   inference  — reasonable (OWL 2 RL) materialization
 //!   validation — SHACL validation reports
 
+// `oxrdf::Term` and `spargebra` enums are `#[non_exhaustive]` upstream so
+// our catch-all `other => panic!(...)` defensive arms are flagged by
+// rustc 1.83+ as unreachable for the variants we already match. Keep
+// the arms (they future-proof the translator against upstream variant
+// additions) and silence the lint at crate scope.
+#![allow(unreachable_patterns)]
+// The translator's module + function docs use vertically-aligned ASCII
+// continuation lines that clippy reads as malformed Markdown list
+// items. The rendered rustdoc output looks correct (continuation
+// paragraphs); reformatting under the lint would damage readability.
+#![allow(clippy::doc_lazy_continuation)]
+// `SetOfIterator::new(rows.into_iter())` is a deliberate readability
+// choice — the explicit `.into_iter()` makes the intent obvious at
+// the call-site even though `Vec<T>` already implements
+// `IntoIterator`. Allow the lint at crate scope so we don't have to
+// litter call sites with annotations.
+#![allow(clippy::useless_conversion)]
+
 use pgrx::prelude::*;
 
 ::pgrx::pg_module_magic!();

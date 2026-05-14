@@ -28,3 +28,4 @@ fixtures/ontologies/
 .idea/
 *.swp
 .DS_Store
+.claude/

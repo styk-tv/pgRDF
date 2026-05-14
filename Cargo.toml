@@ -32,6 +32,18 @@ pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
 pg_test = []
 
+# `pgrx::pg_shmem_init!` and the per-PG `#[pg_guard]` shims expand to
+# `#[cfg(feature = "pg13")]` and `#[cfg(feature = "pg18")]` branches
+# even when those features are not declared in our Cargo.toml. Rust
+# 1.91+'s strict check-cfg promotes those to `unexpected_cfgs` warnings,
+# which CI's `-D warnings` turns into hard errors. Explicitly declare
+# the values as known so the lint stays quiet without weakening the
+# overall warning level.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("pg13", "pg18"))',
+] }
+
 [dependencies]
 pgrx  = "0.16"
 # Pin to `0.3` to match what oxttl 0.2.3 transitively resolves to.
