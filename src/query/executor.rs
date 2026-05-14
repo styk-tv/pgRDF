@@ -2009,7 +2009,7 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
 
         let mut rows: Vec<pgrx::JsonB> = Vec::new();
         plan_cache::with_plan(&plan.sql, |maybe_owned| {
-            let owned = maybe_owned.expect("plan must be in cache after insert");
+            let owned = maybe_owned.expect("sparql: plan must be in cache after insert");
             let table = client
                 .update(owned, None, &datums)
                 .expect("sparql: prepared SELECT failed");

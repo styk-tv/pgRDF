@@ -221,7 +221,7 @@ fn flush_batch(
         };
 
         plan_cache::with_plan(QUAD_INSERT_SQL, |maybe_owned| {
-            let owned = maybe_owned.expect("plan must be in cache after insert");
+            let owned = maybe_owned.expect("load_turtle: plan must be in cache after insert");
             client
                 .update(owned, None, &datums)
                 .expect("flush_batch: prepared insert failed");

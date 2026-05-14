@@ -48,7 +48,7 @@ fn count_quads(g: default!(i64, 0)) -> i64 {
 #[pg_extern]
 fn add_graph(g: i64) -> bool {
     if g < 0 {
-        panic!("graph_id must be >= 0, got {}", g);
+        panic!("add_graph: graph_id must be >= 0, got {}", g);
     }
     let part_name = format!("_pgrdf_quads_g{}", g);
     let exists: bool = Spi::get_one_with_args(
