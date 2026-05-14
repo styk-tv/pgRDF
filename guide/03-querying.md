@@ -186,10 +186,11 @@ on `xsd:numeric` literals.
 #### `BOUND` in a BGP context
 
 `BOUND(?v)` is trivially `TRUE` for any variable `?v` that's used in
-the BGP (every BGP variable is bound on every result row) and
-`FALSE` for any variable that isn't. Useful once `OPTIONAL` lands;
-today it's a no-op marker you can leave in a query that previously
-relied on it.
+the mandatory BGP (every mandatory BGP variable is bound on every
+result row) and `FALSE` for any variable that isn't. It earns its
+keep against `OPTIONAL`-introduced variables — `BOUND(?v)` translates
+to `qN.col IS NOT NULL`, which correctly returns FALSE for OPTIONAL
+vars that didn't match (see the OPTIONAL section below).
 
 #### Combining FILTER with multi-pattern BGPs
 
@@ -485,10 +486,10 @@ cross product.
 
 #### Today's restrictions
 
-- **Each MINUS block holds exactly one triple pattern.** Same
-  restriction as OPTIONAL today. Multi-pattern MINUS lands in a
-  later slice.
 - **Nested MINUS inside MINUS** isn't supported — only flat chains.
+
+(Multi-triple MINUS sub-patterns are supported, keyed on shared
+variables with the outer query — see the surface table at the top.)
 
 ### Aggregates and GROUP BY
 
@@ -516,7 +517,7 @@ SELECT * FROM pgrdf.sparql(
      WHERE { ?s foaf:age ?age }'
 );
 
--- MIN/MAX lexicographically on the lexical value
+-- Type-aware MIN/MAX: numeric path on xsd:numeric, lex fallback otherwise
 SELECT * FROM pgrdf.sparql(
   'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
    SELECT (MIN(?n) AS ?lo) (MAX(?n) AS ?hi)
@@ -565,26 +566,36 @@ with proper numeric literals, only the latter contribute. Re-load
 with explicit XSD datatype annotations to fix this in the
 fixture rather than working around it in the query.
 
-#### MIN / MAX caveat
+#### MIN / MAX — type-aware
 
-`MIN(?v)` and `MAX(?v)` compare values **lexicographically on the
-term's string form** — not type-aware. For string-typed literals
-and IRIs this is the intuitive answer; for numeric data
-`MAX("10", "2") = "2"` because `"2" > "1"` in lex order. Use
-numeric `FILTER(?v >= …)` plus post-SQL `ORDER BY ... LIMIT 1` if
-you need numeric extremes today. Type-aware MIN/MAX is queued.
+`MIN(?v)` and `MAX(?v)` are type-aware: when `?v` resolves to an
+`xsd:numeric` literal (any of the XSD numeric IRIs, including the
+sized + unsigned + constraint subtypes) the aggregate runs on the
+`NUMERIC` cast, so `MAX("10", "2") = "10"`. Non-numeric values
+contribute NULL on the numeric path; the implementation falls back
+to lexicographic `MIN`/`MAX` on the term's string form when the
+numeric path yields no rows. For string-typed literals and IRIs
+the lex fallback is the intuitive answer.
+
+#### `HAVING`, `GROUP_CONCAT`, `SAMPLE`, `BIND`
+
+`HAVING` ships in both forms: the AS-alias form
+(`SELECT (COUNT(?o) AS ?n) … GROUP BY ?p HAVING(?n > 5)`) and the
+inline-aggregate form (`HAVING(SUM(?v) > 100)`). `GROUP_CONCAT(?v
+[; SEPARATOR = "…"])` lowers to Postgres `string_agg`; `SAMPLE(?v)`
+uses `MIN(...)` as a deterministic surrogate. `BIND(expr AS ?v)`
+is supported for projection — Literal / NamedNode / Variable,
+`STR` / `LANG` / `DATATYPE` / `UCASE` / `LCASE` / `STRLEN`,
+arithmetic, `CONCAT`.
 
 #### Today's restrictions
 
-- **`HAVING`** isn't translated yet. Filter the result with regular
-  SQL after `pgrdf.sparql` (`SELECT * FROM pgrdf.sparql(...) j
-  WHERE (j->>'n')::int > 5`).
-- **`GROUP_CONCAT` and `SAMPLE`** are queued.
-- **BIND** (`(EXPR AS ?v)` outside aggregates) isn't supported —
-  only the aggregate-aliasing case lands today.
 - **Aggregates on top of UNION** aren't supported. Aggregates over
   a UNION result require a derived-table refactor that lands in
-  a later slice.
+  a later slice (v0.4).
+- **Filtering on a BIND output** (referencing `?v` from
+  `BIND(expr AS ?v)` in a later FILTER or BGP) isn't supported yet
+  — queued for v0.4.
 
 ### Solution modifiers — DISTINCT / LIMIT / OFFSET / ORDER BY
 

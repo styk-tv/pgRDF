@@ -70,6 +70,7 @@ SELECT pgrdf.load_turtle_verbose(
 );
 --  →  {"triples": 1789,
 --      "dict_cache_hits": 4612,
+--      "shmem_cache_hits": 0,
 --      "dict_db_calls": 783,
 --      "quad_batches": 2,
 --      "elapsed_ms": 142.7}
@@ -81,6 +82,7 @@ Field meanings:
 |---|---|
 | `triples` | Same value `load_turtle` would have returned. |
 | `dict_cache_hits` | Term references resolved from the in-call HashMap. Higher = more repetition in the source. |
+| `shmem_cache_hits` | Term references served by the cross-backend shmem dict cache (LLD §4.1). Non-zero on a warm postmaster reload of the same vocabulary. |
 | `dict_db_calls` | Term references that went to the `_pgrdf_dictionary` (either a hit or an insert). Roughly = `distinct_terms_in_file`. |
 | `quad_batches` | Number of multi-row INSERT flushes (1 per ~1000 triples). |
 | `elapsed_ms` | Wall-clock time inside the function. |
