@@ -304,9 +304,15 @@ LLD v0.3 §5.4.
   (INSTALL §11 OQ1).
 - INSTALL §12 conformance test in CI against a fresh K8s cluster
   (kind or k3s).
-- SHA256SUMS.asc detached GPG signature attached to every release
-  (INSTALL OQ4; signing not yet wired in `release.yml` per slice
-  #36 audit — workflow stub present).
+- SHA256SUMS is wired in `release.yml` at both per-tarball and
+  aggregate levels (slice #28 audit; supersedes the older slice #36
+  "not yet wired" note). The detached GPG signature
+  `SHA256SUMS.asc` (INSTALL OQ4) is **deferred to v0.4** — no
+  `GPG_PRIVATE_KEY` secret or release-signing key is yet provisioned
+  for the workflow. v0.3 ships SHA256SUMS-only integrity; the `.asc`
+  follow-up requires sourcing a signing key, publishing the public
+  half, and wiring the secret. See `docs/09-release.md` "Aggregate
+  checksums" for the consumer-side verification recipe.
 - License attribution surface (Apache 2.0 / 2026) declared at
   repo root; NOTICE distribution in the release tarball flagged
   as workflow follow-up (slice #36 adjacent finding).

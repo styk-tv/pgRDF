@@ -6,6 +6,66 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release pre-flight — SHA256SUMS verify + GPG signing defer (slice #27)
+
+Follow-up to slice #28's `release.yml` audit. Slice #28 confirmed
+SHA256SUMS coverage is already wired at **both** levels (per-tarball
+internal manifest + aggregate top-level over all 8 tarballs). This
+slice surfaces the orthogonal piece — the detached GPG signature
+`SHA256SUMS.asc` mentioned in INSTALL §3 / LLD §5.4 step 3 — and
+decides scope for it.
+
+**SHA256SUMS state (confirmed):** the `Repack to INSTALL-spec layout`
+step in the `build` job emits per-tarball internal `SHA256SUMS`
+(line 51 of `release.yml`) covering `lib/pgrdf.so`,
+`share/extension/*`, `LICENSE`, `NOTICE`. The downstream `release`
+job's `Generate aggregate SHA256SUMS` step emits a top-level
+`SHA256SUMS` covering every `pgrdf-*.tar.gz` and attaches it as a
+release asset (lines 67-77). No release.yml change needed.
+
+**GPG signing decision: defer to v0.4.** Rationale:
+
+- No `GPG_PRIVATE_KEY` secret or release-signing key is provisioned
+  for the workflow today — `grep -rn "GPG_PRIVATE_KEY\|secrets\."
+  .github/` returns zero matches.
+- No public-half signing key is published anywhere visible
+  (keyserver, release page, repo).
+- SHA256SUMS itself is the primary integrity check most extension
+  consumers verify (`sha256sum -c SHA256SUMS`); the `.asc` signature
+  layer is a downstream supply-chain hardening, not a v0.3-cut
+  blocker.
+- Wiring `.asc` properly requires (a) sourcing a real signing key
+  (Peter Styk maintainer key — not in repo), (b) publishing the
+  public half on a keyserver or release page, (c) adding the GitHub
+  secret + a `gpg --detach-sign` step to the workflow's `release`
+  job. All out of scope for a verification-and-defer slice.
+
+**Docs edits applied:**
+
+- `docs/09-release.md` "Aggregate checksums" section: rewrote to
+  confirm SHA256SUMS is wired at both levels (per-tarball +
+  aggregate) and to flag `.asc` GPG signing as v0.4 follow-up
+  (previously said "not yet wired in `release.yml`" which conflated
+  SHA256SUMS itself with the `.asc` signing). Added a new
+  "Verification (consumer side)" subsection showing the `curl` →
+  `sha256sum -c SHA256SUMS --ignore-missing` recipe plus the
+  in-tarball verification path; closes with a one-liner pointing
+  at what changes when `.asc` lands in v0.4
+  (`gpg --verify SHA256SUMS.asc SHA256SUMS`).
+- `docs/10-roadmap.md` Phase 6 step 3 bullet: split the single
+  conflated bullet into a positive confirmation (SHA256SUMS wired
+  per slice #28) plus an explicit v0.4 defer for `.asc` listing
+  the three prerequisites (signing key, public-half publication,
+  secret wiring).
+
+**No `.github/workflows/release.yml` change.** This is a
+verify-and-document slice; the workflow already does what slice
+#27's original plan would have done. The actual `.asc` wiring lands
+in a v0.4 slice once a signing key is sourced.
+
+Test bar unchanged: still 93 pgrx + 39 pg_regress + 23 W3C-shape +
+3 LUBM-shape = 158 across all five layers.
+
 ### Release pre-flight — release.yml audit + NOTICE inclusion fix (slice #28)
 
 End-to-end audit of `.github/workflows/release.yml` ahead of v0.3 cut.

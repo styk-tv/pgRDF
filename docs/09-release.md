@@ -46,11 +46,48 @@ pgrdf-<ver>-pg${PG}-glibc-<arch>.tar.gz
 
 ## Aggregate checksums
 
-The `release` job downloads all per-arch tarballs and emits a top-level
-`SHA256SUMS` covering every artifact in the release. INSTALL spec
-§3 also calls for a detached GPG signature (`SHA256SUMS.asc`) —
-tracked under INSTALL OQ4 and LLD §5.4 Phase 6 step 3; **not yet
-wired in `release.yml`**.
+SHA256SUMS coverage is wired in `release.yml` at **both** levels (per
+slice #28 audit; supersedes the older slice #36 note that flagged this
+as outstanding):
+
+- **Per-tarball.** Each `pgrdf-<ver>-pg<PG>-glibc-<arch>.tar.gz` carries
+  its own internal `SHA256SUMS` covering every file inside the tarball
+  (`lib/pgrdf.so`, `share/extension/*`, `LICENSE`, `NOTICE`). Generated
+  by the `Repack to INSTALL-spec layout` step in the `build` job.
+- **Aggregate.** The `release` job downloads all per-arch tarballs and
+  emits a top-level `SHA256SUMS` covering every `pgrdf-*.tar.gz` in the
+  release, attached as a separate asset alongside the tarballs.
+
+INSTALL spec §3 also calls for a detached GPG signature
+(`SHA256SUMS.asc`). **This is deferred to v0.4** — no `GPG_PRIVATE_KEY`
+secret or signing key is yet provisioned for the workflow; v0.3 ships
+with SHA256SUMS-only integrity. The `.asc` follow-up requires (a)
+sourcing a release-signing key, (b) publishing the public half on a
+keyserver or release page, (c) wiring `GPG_PRIVATE_KEY` into the
+workflow's release job. Tracked under INSTALL OQ4 and roadmap Phase 6
+step 3 (`docs/10-roadmap.md`).
+
+### Verification (consumer side)
+
+To verify a downloaded release tarball matches the published checksum:
+
+```bash
+# Download the tarball + the aggregate SHA256SUMS from the GitHub release.
+curl -LO https://github.com/styk-tv/pgRDF/releases/download/v0.3.0/pgrdf-0.3.0-pg17-glibc-amd64.tar.gz
+curl -LO https://github.com/styk-tv/pgRDF/releases/download/v0.3.0/SHA256SUMS
+
+# Verify (filters to the line matching the downloaded file).
+sha256sum -c SHA256SUMS --ignore-missing
+# expected: pgrdf-0.3.0-pg17-glibc-amd64.tar.gz: OK
+```
+
+The internal per-tarball `SHA256SUMS` can be verified after extraction
+via `cd pgrdf-<ver>-pg<PG>-glibc-<arch> && sha256sum -c SHA256SUMS` —
+this catches in-flight corruption of individual files within the
+tarball, orthogonal to the aggregate-tarball check above. Once
+`SHA256SUMS.asc` lands in v0.4, the additional step is
+`gpg --verify SHA256SUMS.asc SHA256SUMS` against the published signing
+key.
 
 ## Trigger
 
