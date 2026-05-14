@@ -6,6 +6,45 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Docs — README audit (slice #45)
+
+Final pre-release pass over `README.md` — every badge, every link, every
+code block, every test-count claim, every status pill walked against
+current shipped reality.
+
+Audit scope and results:
+
+| Surface | Check | Result |
+| --- | --- | --- |
+| Top-of-file badges (12) | URL resolves, value matches reality | clean |
+| Status row pill | "v0.3 engine surface feature-complete", SPARQL feature list, Phase 3/4/5/6 labels, PG version list, deferred-to-v0.4 list | clean — Phase numbering matches `specs/SPEC.pgRDF.LLD.v0.3.md` §5; SPARQL feature list matches `docs/10-roadmap.md` §Phase 3 steps 1–12 plus the brought-forward HAVING-inline-aggregate and type-aware MIN/MAX |
+| Local-file link targets (~25) | Each path exists on disk | clean — every `LICENSE`, `NOTICE`, `docs/*`, `guide/*`, `specs/*`, `tests/perf/*`, `tests/w3c-sparql/`, `TEST.ONTOLOGY-SET.md` link resolves |
+| Code-block UDF signatures (`load_turtle`, `load_turtle_verbose`, `parse_turtle`, `add_graph`, `count_quads`, `materialize`, `sparql`, `sparql_parse`, `version`) | Signature in README matches `src/` | clean — every example matches current arity and return type |
+| `just` recipes referenced (`build-ext`, `compose-up`, `psql`, `test`, `test-regression`, `test-w3c`, `test-lubm`, `test-all`, `test-conformance`, `test-everything`, `smoke-cold`) | Recipe exists in `Justfile` | clean |
+| Test counts (93 pgrx + 39 pg_regress + 23 W3C-shape + 3 LUBM-shape = 158) | Match disk reality | clean — pgrx `#[pg_test]` grep returns 93; `tests/regression/sql/*.sql` count is 39; `tests/w3c-sparql/` has 23 test dirs; `tests/perf/lubm-shape/` has 3 query dirs |
+| Smoke claim (24 ontologies, 17,134 triples) | Matches `tests/perf/smoke-ontologies.expected.tsv` | clean — 24 rows, sum of triple-count column is 17,134 |
+| License section | Matches `LICENSE` + `NOTICE` (Copyright 2026 Peter Styk, Apache-2.0) | clean |
+| ERRATA E-006 re-check date (2026-05-14) | Matches `specs/ERRATA.v0.2.md` | clean |
+| `pgrdf.version()` return ("0.2.0") | Matches `Cargo.toml` `version` field | clean |
+| CI W3C-shape + LUBM-shape wiring | Workflow runs `tests/w3c-sparql/run.sh` and `tests/perf/lubm-shape/run.sh` | clean — `.github/workflows/ci.yml` lines 119 + 128 |
+
+**Result: zero drift.** No facts required correction; no links required
+re-targeting; no signatures required updating. README is consistent with
+the v0.3 LLD, the current Justfile, the current test fixtures, the
+current Cargo.toml, and the current ERRATA. The audit re-establishes the
+baseline before the v0.3 tag.
+
+One adjacent finding — out of scope for this audit but noted for the
+follow-on: `docs/10-roadmap.md` carries **two overlapping Phase 3
+labels** (a `### Phase 3 — Extended SPARQL surface` heading at line 130
+inside the `## Phase 2` section, AND a "Phase 3 storage performance" use
+at the intro line 5 and the §270 test-bar-over-time table). Both are
+internally consistent with the LLD §5 phase numbering (`Phase 3 =
+Storage Performance`), but the in-line heading creates a local
+ambiguity. Not corrected here — roadmap surgery is its own slice — and
+the README correctly tracks the LLD scheme. Filed mentally for the
+roadmap maintenance group.
+
 ### Hygiene — Cargo.lock freshness audit (slice #46)
 
 Final entry in the hygiene group (54 → 46, sixty-six → forty-six). Verified
