@@ -372,6 +372,22 @@ because they share the translator machinery §4 + §6 already require.
 See
 [v0.4-FUTURE §11](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#11-sparql-surface-backlog-deferred-from-v03-now-in-scope).
 
+### Performance work carried forward from v0.3
+Phase 3 step 3 phase B — `heap_multi_insert` / `COPY BINARY` ingest
+path — targets v0.4 (the 2× wall-clock target from v0.3 LLD §4.3
+acceptance is not met by phase A alone; the per-tuple executor walk
+dominates). Postgres custom-scan hooks for specific quad-shape access
+patterns are also flagged at v0.4 as the earliest target, may slip to
+v0.5 if the refactor cost exceeds the §4 / §6 wins. These do not gate
+the surface work in tracks 1-5; they ship in their own slices. See
+[v0.4-FUTURE §12](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#12-performance-work-carried-forward-from-v03).
+
+### Conformance runner wiring (v0.4)
+The W3C SPARQL 1.1 manifest runner (Phase 6 step 2, gated `if: false`
+in v0.3) is wired in v0.4 — it gates the §11 SPARQL backlog
+automatically as the deferred forms come online. See
+[v0.4-FUTURE §13](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#13-test-policy-continues-v03-6-unchanged-in-spirit).
+
 ### Excluded from v0.4 (planned v0.5)
 Real SHACL output (ERRATA E-009-gated), the reasoning profile
 selector (`pgrdf.materialize(graph_id, profile)` — RDFS vs OWL-RL),

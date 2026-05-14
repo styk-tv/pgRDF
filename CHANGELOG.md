@@ -6,6 +6,69 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Roadmap — v0.4 scope cohesion check (slice #29)
+
+Bi-directional cohesion audit between `specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`
+(the source of truth for v0.4 scope) and the
+`## v0.4 — next milestone (forward-looking)` section in
+`docs/10-roadmap.md` (added by slice #31). The LLD wins on disagreement;
+this slice fixes drift in the roadmap.
+
+Coverage table (LLD §2 + ancillary v0.4 items → roadmap section):
+
+| LLD item                                    | Roadmap before                | Roadmap after                              | Match? |
+|---|---|---|---|
+| §3 named-graph + IRI mapping                | Track 1                       | Track 1                                    | ✅ already |
+| §4 SPARQL UPDATE                            | Track 2                       | Track 2                                    | ✅ already |
+| §5 graph-level lifecycle UDFs               | Track 3                       | Track 3                                    | ✅ already |
+| §6 CONSTRUCT                                | Track 4                       | Track 4                                    | ✅ already |
+| §7 property paths                           | Track 5                       | Track 5                                    | ✅ already |
+| §11 SPARQL surface backlog                  | "Carried backlog"             | "Carried backlog"                          | ✅ already |
+| §12 perf work (heap_multi_insert + scans)   | absent                        | NEW: "Performance work carried forward"    | ✅ added |
+| §13 W3C SPARQL 1.1 manifest runner wired v0.4 | absent                      | NEW: "Conformance runner wiring (v0.4)"    | ✅ added |
+| §8 reasoning profile selector → v0.5        | "Excluded from v0.4"          | "Excluded from v0.4"                       | ✅ already |
+| §9 real SHACL → v0.5 (E-009)                | "Excluded from v0.4"          | "Excluded from v0.4"                       | ✅ already |
+| §10 TriG / N-Quads → v0.5                   | "Excluded from v0.4"          | "Excluded from v0.4"                       | ✅ already |
+
+Reverse direction (every roadmap v0.4 subsection → LLD anchor) — every
+existing subsection (Track 1-5, Carried backlog, Excluded) maps cleanly
+to a numbered LLD section. No orphans in the roadmap.
+
+Drift entries fixed:
+
+- **Missing-in-roadmap: LLD §12 (Performance work carried forward)** —
+  the LLD explicitly says "v0.4 targets shipping this" for Phase 3 step
+  3 phase B (`heap_multi_insert` / `COPY BINARY`) and "v0.4 is the
+  earliest target" for Postgres custom-scan hooks. Both were absent from
+  the roadmap's v0.4 milestone section even though the roadmap's
+  pre-existing Phase 3 narrative already refers to phase B as v0.4 work.
+  Added a "Performance work carried forward from v0.3" subsection
+  pointing at v0.4-FUTURE §12.
+- **Missing-in-roadmap: LLD §13 (W3C SPARQL 1.1 manifest runner wired
+  in v0.4)** — the LLD §13 test-policy paragraph says the manifest
+  runner "is wired in v0.4 — it gates §11's SPARQL backlog automatically
+  as the deferred forms come online". The roadmap's v0.4 milestone
+  section had no entry for this; the Phase 6 narrative covers the v0.3
+  state but the v0.4 wiring was unsurfaced in the forward-look. Added
+  a "Conformance runner wiring (v0.4)" subsection.
+
+Framing checks (LLD wording → roadmap wording):
+
+- LLD §2: "v0.4 ships five major tracks" → roadmap: "five major tracks
+  — the full contract lives in the spec". ✅ consistent.
+- LLD §11: "ship together for economy" (translator machinery shared
+  with §4 + §6) → roadmap: "Shipped in the same cut because they share
+  the translator machinery §4 + §6 already require". ✅ consistent.
+- LLD §8/§9/§10: framed as v0.5 work, "v0.4 keeps the v0.3 surface
+  unchanged" / "v0.4 does not attempt" / "v0.4 does not ship this; v0.5
+  does" → roadmap: "Excluded from v0.4 (planned v0.5)". ✅ consistent.
+
+Total fixes applied: 2 new subsections added to
+`docs/10-roadmap.md` v0.4 milestone section.
+
+Test bar unchanged: docs-only slice. The LLD was not edited — only the
+navigation aid.
+
 ### Roadmap — coverage ratchet table (slice #30)
 
 Added a `## Coverage ratchet — release-by-release targets` section to
