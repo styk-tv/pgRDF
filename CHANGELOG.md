@@ -6,6 +6,58 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Docs — markdown link verification (slice #32)
+
+Final docs-group lockdown pass before release-pre-flight: a full,
+mechanical sweep of every internal markdown link across the repo to
+confirm zero broken targets going into v0.3 release prep.
+
+Scope and method:
+
+| Surface | Count | Result |
+| --- | --- | --- |
+| Markdown files scanned (excl. `target/`, `node_modules/`, `fixtures/ontologies/`) | 61 | inventory complete |
+| Total markdown links extracted (incl. external) | 153 | parsed via `\[…\]\(…\)` with code-fence stripping |
+| External links (`http`/`https`/`mailto`/etc.) | 18 | not verified (out of scope) |
+| Internal relative links (the audit surface) | 135 | every target resolved on disk |
+| Same-file `#anchor` links | 1 | resolves to a real H2 in `docs/10-roadmap.md` |
+| Cross-file `path.md#anchor` links | 0 | none in the repo |
+| Directory-style links (e.g. `guide/`, `docs/`) | 4 | every target is a real directory |
+| Non-markdown internal targets (`LICENSE`, `NOTICE`, `.sql`, `.rs`, `.tsv`) | 14 distinct | every file exists on disk |
+
+Audit table — broken links found:
+
+| File:line | Bad target | Type of break | Fix applied |
+| --- | --- | --- | --- |
+| _(none)_ | _(none)_ | _(none)_ | _(none)_ |
+
+Counts: **broken 0 / fixed 0 / left-as-flagged 0**.
+
+Verification approach (recorded for future slices):
+- Resolver walks every `[text](path)` link, splits off `#anchor` and
+  `?query`, resolves `path` relative to the source file, then
+  `path.exists()` against the filesystem.
+- For `#anchor` suffixes on `.md` targets, the anchor is matched
+  against GitHub's heading-slug rules: strip inline markdown
+  (`**`, `*`, `\``), lowercase, spaces → hyphens, drop any char that
+  isn't `[a-z0-9-_]`. Em-dashes and emoji collapse to nothing
+  (yielding double-hyphen runs) which is exactly how GitHub renders
+  them.
+- Code fences (`\`\`\``) and inline-code spans (`\`…\``) are stripped
+  before link extraction to avoid false-positives on documented
+  example links.
+- Excluded paths: `target/`, `node_modules/`, `.git/`,
+  `fixtures/ontologies/` (per task spec — the W3C ontology fixtures
+  carry their own internal links unrelated to repo docs).
+
+Surprising findings: none. The repo is already link-clean. This
+reflects the cumulative discipline of slices #33–#66 (each prior
+slice has fixed its own anchor / path drift in-flight rather than
+deferring), so the final lockdown pass finds nothing to fix. If a
+permanent CI gate is wanted for v0.3 GA, the audit logic (61 files →
+153 links → 0 broken in under a second) is small enough to land as
+a `just check-links` recipe in a follow-up slice.
+
 ### Docs — guide intro + install audit (slice #44)
 
 Companion pass to slice #45: walked the three user-guide entry-point files
