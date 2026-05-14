@@ -121,8 +121,27 @@ project as booleans (`base_is_zero`, `inferred_nonneg`,
 stays `t` regardless of axiomatic-set churn from upstream
 `reasonable` releases.
 
-Test bar: **93 pgrx + 35 pg_regress + 23 W3C-shape + 3 LUBM-shape
-= 154 tests**, green locally.
+Locks #61 of the countdown: `pgrdf.shmem_reset()` MUST actually
+invalidate the process-wide shmem dict cache. The implementation
+in `src/storage/shmem_cache.rs::reset()` bumps a single
+`PgAtomic<AtomicU64>` `GENERATION` counter; `lookup()` reads slots
+as cold whenever `slot.generation != current`. A refactor that
+drops the generation bump would silently leave stale dict ids
+visible across a `DROP EXTENSION; CREATE EXTENSION` cycle (where
+the dict id space resets), so the regression must catch the
+omission. New `tests/regression/sql/63-shmem-reset-invalidation.sql`
+warms shmem with three terms, snapshots `(shmem_hits,
+shmem_inserts)` via `\gset`, re-parses the same Turtle and asserts
+hits went up (sanity — cache is hot), then calls `shmem_reset()`,
+re-parses one more time, and asserts (a) `shmem_hits` stayed flat
+across the post-reset parse and (b) `shmem_inserts` strictly
+increased. Counter VALUES are not pinned — each assertion projects
+a single boolean comparing deltas, so the expected output stays
+`t`-flat across cumulative-counter drift from prior tests in the
+same psql session.
+
+Test bar: **93 pgrx + 36 pg_regress + 23 W3C-shape + 3 LUBM-shape
+= 155 tests**, green locally.
 
 ### Translator fix — type-aware `MIN` / `MAX`
 
