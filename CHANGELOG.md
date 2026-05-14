@@ -6,6 +6,27 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Coverage — error-path regression signals
+
+New `tests/regression/sql/81-error-paths.sql` opens a sibling track
+to `80-unsupported-shapes.sql`: instead of locking the failure-mode
+of SPARQL translator gaps, it locks the stable error-prefix each
+UDF emits when given an invalid input. The helper `_check_error`
+generalises `80`'s `_check_gap` to run arbitrary SQL via `EXECUTE`
+inside a plpgsql try/catch, capturing the boolean signal (`t` =
+expected substring present in SQLERRM) without pinning the
+volatile tail (OS-level `os error N` numbers, path strings, etc.).
+
+This commit locks #66 of the 66 → 1 countdown toward v0.3.0:
+`pgrdf.load_turtle()` against a missing path must surface the
+prefix `load_turtle: failed to open` (from
+`src/storage/loader.rs:315`). Downstream tooling matches that
+prefix to decide retry-vs-escalate; a silent rename would break
+those callers without any pgRDF-side test firing.
+
+Test bar: **93 pgrx + 34 pg_regress + 23 W3C-shape + 3 LUBM-shape
+= 153 tests**, green locally.
+
 ### Translator fix — type-aware `MIN` / `MAX`
 
 `src/query/executor.rs::translate_aggregate` for `MIN` / `MAX`
