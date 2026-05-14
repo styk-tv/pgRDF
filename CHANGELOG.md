@@ -140,8 +140,34 @@ a single boolean comparing deltas, so the expected output stays
 `t`-flat across cumulative-counter drift from prior tests in the
 same psql session.
 
-Test bar: **93 pgrx + 36 pg_regress + 23 W3C-shape + 3 LUBM-shape
-= 155 tests**, green locally.
+Locks #60 of the countdown: `pgrdf.plan_cache_clear()` MUST return
+the literal count of prepared statements drained from THIS
+backend's `thread_local!` plan-cache HashMap — NOT zero, NOT a
+constant, NOT the cumulative shmem `plan_cache_inserts` counter.
+The implementation in `src/query/plan_cache.rs::plan_cache_clear`
+reads `m.len()` BEFORE calling `m.clear()` and returns that as
+`i64`; a refactor that swaps `m.len()` for a constant, or hoists
+the `len()` call to AFTER `m.clear()` (always returning 0), would
+corrupt operator-facing telemetry. New
+`tests/regression/sql/64-plan-cache-clear.sql` locks four
+invariants: (a) fresh backend → `clear()` returns 0 (nothing to
+drop); (b) after one `parse_turtle` + three structurally distinct
+SPARQL shapes, the drained count matches the pre-clear
+`plan_cache_local_size` snapshot; (c) `plan_cache_local_size = 0`
+immediately after the clear; (d) a second consecutive clear
+returns 0 (idempotent at zero). Empirically `size_before = 4` on
+the current pgrx 0.16 / PG 17 build (1 ingest-side `flush_batch`
+INSERT plan + 3 SELECT plans), but the test locks the RELATION
+`drained = size_before AND size_after = 0 AND idempotent_clear =
+0 AND size_before > 0` rather than the literal — an ingest-path
+refactor that takes `flush_batch` off the plan-cache path leaves
+the test still passing as long as the contract holds. Bare-row
+`SELECT count(*) FROM pgrdf.sparql(...)` calls are the cleanest
+way to drive distinct plans into the cache; `\gset` captures the
+snapshots without polluting the expected-output stream.
+
+Test bar: **93 pgrx + 37 pg_regress + 23 W3C-shape + 3 LUBM-shape
+= 156 tests**, green locally.
 
 ### Translator fix — type-aware `MIN` / `MAX`
 
