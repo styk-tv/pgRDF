@@ -6,6 +6,41 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 5 — SHACL `pgrdf.validate` ships as a STUB
+
+- `src/validation/shacl.rs`: `pgrdf.validate(data_graph_id,
+  shapes_graph_id) → JSONB` is wired with a stable response shape
+  but a `{"status": "stub", "reason": "...", …}` body. The UDF
+  echoes both graph IDs and reports the actual triple count in
+  each — enough for downstream tooling (CloudNativePG operators,
+  client libraries, CI jobs) to integrate the SQL surface today.
+- 2 new pgrx tests (`validate_stub_shape`,
+  `validate_stub_unknown_graphs`) lock the JSONB schema.
+- New regression `70-validate-stub.sql` asserts: status = "stub",
+  `data_graph_id` / `shapes_graph_id` echoed, triple counts
+  matched, `conforms` is `null`, `results` is an empty array,
+  `reason` field present. Hand-computed; never ACCEPT=1 baselined.
+- Test bar: **91 → 93 pgrx + 29 → 30 regression**, green.
+
+**Why a stub, not a real impl.** New ERRATA entry
+[`E-009`](specs/ERRATA.v0.2.md). Briefly:
+- `shacl_validation 0.2.x` (latest 0.2.12) ships an unfinished
+  `iri_s` → `rudof_iri` migration; `shacl_ast 0.2.9` fails to
+  compile against the resolved tree
+  (`expected rudof_iri::IriS, found iri_s::IriS`).
+- `shacl_validation 0.1.149` compiles in isolation but its
+  transitives turn on `oxrdf`'s `rdf-12` feature, which adds
+  `TermRef::Triple(_)` — a variant `reasonable 0.4.1`'s pattern
+  match doesn't handle. Cargo feature unification means we can't
+  have both crates in one workspace until either upstream catches
+  up.
+- We chose to ship Phase 4 (inference) first because it's
+  load-bearing; Phase 5's real implementation is a v0.4 follow-up
+  the moment upstream unblocks. The stub keeps the surface
+  available so nothing downstream gets blocked on a missing UDF.
+- `Cargo.toml` carries the `shacl_validation = "0.2"` line
+  commented out with the full reason inline.
+
 ### Phase 4 — OWL 2 RL materialization via `reasonable`
 
 - `Cargo.toml`: `reasonable = "0.4"` (0.4.1, 2026-05-10 publish).

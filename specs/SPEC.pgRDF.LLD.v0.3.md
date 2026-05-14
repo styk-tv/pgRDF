@@ -271,7 +271,7 @@ sub-SELECT per MINUS block.
 | 2 | Functional SPARQL Coverage | ✅ done — Phase 2.0-2.2 (storage CRUD, Turtle ingest, dict cache + batch, SPARQL parser + BGP-to-SQL) and v0.2's "Phase 3" merged into a single delivery track (§3) |
 | **3** | **Storage Performance** (NEW) | **⏳ next** |
 | 4 | Inference Engine (OWL 2 RL via `reasonable`) | ✅ done — `src/inference/reasonable.rs`, `60-materialize-owl-rl.sql` |
-| 5 | Validation Engine (SHACL via `shacl_validation`) | ⏳ |
+| 5 | Validation Engine (SHACL via `shacl_validation`) | 🚧 stub — surface only; real impl blocked by ERRATA E-009 |
 | 6 | W3C Conformance + LUBM Perf + Release | ⏳ |
 
 ### 5.1 Phase 3 — Storage Performance (PRIORITISED)
@@ -327,15 +327,42 @@ Test surface:
 - Regression `60-materialize-owl-rl.sql` covers two-hop
   subClassOf + idempotence + `owl:inverseOf`.
 
-### 5.3 Phase 5 — Validation Engine
+### 5.3 Phase 5 — Validation Engine — **STUB SHIPPED**
 
-`pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` returns a
-W3C-conformant `sh:ValidationReport` via `shacl_validation`.
+`pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` exists at the
+SQL boundary (`src/validation/shacl.rs`) but its body returns
+`{"status": "stub", …}`. The intended W3C `sh:ValidationReport`
+output is **blocked upstream**, captured in
+[`specs/ERRATA.v0.2.md`](ERRATA.v0.2.md) **E-009**:
 
-Scope:
-- SHACL Core node + property shapes.
-- Cardinality, value-type, value-range constraints.
-- SHACL-SPARQL constraints — Phase 5 stretch.
+- `shacl_validation 0.2.x` (latest 0.2.12) ships an unfinished
+  `iri_s → rudof_iri` migration; `shacl_ast 0.2.9` no longer
+  compiles against the resolved tree.
+- `shacl_validation 0.1.149` compiles in isolation but enables
+  `oxrdf`'s `rdf-12` feature, which adds `TermRef::Triple(_)` —
+  unhandled by `reasonable 0.4.1`. Feature unification makes the
+  two crates mutually exclusive in one workspace.
+
+We chose to ship Phase 4 (inference) first since it's load-bearing
+for the rest of the engine. Phase 5 ships as a stub with a stable
+JSONB schema so downstream tooling (CloudNativePG operators,
+client libraries, CI jobs) can wire against the UDF today.
+
+**Unblock path** — either:
+- `shacl_validation 0.2.x` lands a release that compiles cleanly
+  against a single `iri_s` major, OR
+- `reasonable` ships a version that handles RDF 1.2 triple terms.
+
+When unblocked, the v0.4 ticket is mechanical:
+1. Add `shacl_validation` back to `Cargo.toml`.
+2. Replace the stub body with N-Triples serialization of both
+   graphs + `GraphValidation::from_graph(...).validate(&schema_ir)`.
+3. Map `ValidationReport.results()` → JSONB `sh:ValidationReport`.
+
+Scope when wired:
+- ✅ SHACL Core node + property shapes.
+- ✅ Cardinality, value-type, value-range constraints.
+- ⚠️ SHACL-SPARQL constraints — Phase 5 stretch.
 
 ### 5.4 Phase 6 — W3C Conformance + Release
 

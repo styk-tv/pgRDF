@@ -49,13 +49,21 @@ serde_json = "1"     # Used by load_turtle_verbose and sparql_parse to emit JSON
 # roaring / rio_api. 0.4.1 (2026-05-10) supersedes the v0.2-LLD
 # reference to 0.2; see specs/ERRATA.v0.2.md for the rationale.
 reasonable = "0.4"
-
-# Stack-out per SPEC.pgRDF.LLD.v0.2 + ERRATA. Kept here as commented-out
-# pins so the dependency surface is reviewable without compiling them
-# until the relevant module work begins. Uncomment when work on that
-# module starts so reviewers see one dep enter the surface at a time.
-#
-# shacl_validation = "0.4"     # SHACL processor — replaces the v0.2 LLD reference to `shacl-rust` (see specs/ERRATA.v0.2.md)
+# Phase 5: W3C-conformant SHACL processor from the rudof project.
+# NOT YET ENABLED — see specs/ERRATA.v0.2.md E-009. The 0.2.x line
+# (latest 0.2.12, 2026-04-22) ships an unfinished `iri_s` → `rudof_iri`
+# migration: `shacl_ast 0.2.9` fails with `expected
+# rudof_iri::IriS, found iri_s::IriS`. The 0.1.x line builds in
+# isolation but its transitives enable oxrdf's `rdf-12` feature
+# which adds `TermRef::Triple`; that variant is unhandled by
+# `reasonable 0.4.1` so feature unification breaks the workspace.
+# The `pgrdf.validate(...)` SQL surface ships as a stub returning
+# `{"status": "stub"}`. Re-evaluate when either:
+#   - shacl_validation publishes a 0.2.x release that compiles
+#     against a single `iri_s` major, OR
+#   - reasonable publishes a version that handles rdf-star /
+#     RDF 1.2 triple terms.
+# shacl_validation = "0.2"
 
 [dev-dependencies]
 pgrx-tests = "0.16"

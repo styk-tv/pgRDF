@@ -5,12 +5,13 @@
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20phase%203%20perf-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-91%20pgrx%20%2B%2029%20regression-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-93%20pgrx%20%2B%2030%20regression-brightgreen)](#tests)
 [![SPARQL](https://img.shields.io/badge/SPARQL-FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![BulkIngest](https://img.shields.io/badge/bulk%20ingest-LLD%20%C2%A74.3%20phase%20A-yellow)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20via%20reasonable-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
+[![Validation](https://img.shields.io/badge/SHACL%20validate-stub%20%28ERRATA%20E--009%29-orange)](specs/ERRATA.v0.2.md)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
@@ -218,8 +219,9 @@ For people working on pgRDF itself.
 | Full bar | Both `just test` + `just test-regression` | `just test-all` |
 
 Phase 2.0–2.2 + Phase 3 SPARQL surface (steps 1–12) + Phase 3 steps
-1, 2, and 3 (phase A) storage perf + Phase 4 OWL 2 RL inference:
-**91 pgrx integration tests + 29 regression files passing.**
+1, 2, and 3 (phase A) storage perf + Phase 4 OWL 2 RL inference +
+Phase 5 SHACL validate (stub — see [ERRATA E-009](specs/ERRATA.v0.2.md)):
+**93 pgrx integration tests + 30 regression files passing.**
 External smoke covers 24
 well-known ontologies (W3C, Apache Jena, ValueFlows, ConceptKernel
 v3.7) for ~17,000 triples loaded. Workflow.ttl held out due to a

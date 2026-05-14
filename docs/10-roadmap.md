@@ -194,7 +194,25 @@ Gates:
 
 ---
 
-## Phase 5 — Release & Containerization ⏳
+## Phase 5 — Validation Engine 🚧 (stub)
+
+Outcome: SHACL validation works against real shapes graphs. Tracks
+LLD v0.3 §5.3.
+
+Gates:
+- 🚧 `pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` —
+      surface SHIPPED (`src/validation/shacl.rs`); body returns
+      `{"status": "stub", …}` blocked by ERRATA E-009 (upstream
+      `iri_s`/`rdf-12` dep conflict between `shacl_validation` and
+      `reasonable`). Verified by `70-validate-stub.sql`.
+- ⏳ Real `shacl_validation` integration once either upstream
+      catches up (see `docs/05-validation.md` for the unblock
+      conditions). When wired, this lands as a v0.4 follow-up.
+- ⏳ W3C SHACL conformance manifest runner — paired with Phase 6.
+
+---
+
+## Phase 6 — Release & Containerization ⏳
 
 Outcome: pgRDF is consumable by external operators (CloudNativePG,
 StackGres) following INSTALL spec methodology. Benchmarked.
@@ -239,4 +257,5 @@ phase 3 step table above.
 | v0.3 Phase 3 step 1 | 86 | 26 | + shmem dict cache (LLD §4.1), `pgrdf.stats()`, perf regression `50-shmem-dict-cache.sql` |
 | v0.3 Phase 3 step 2 | 88 | 27 | + prepared-plan cache (LLD §4.2), parameterised SQL, perf regression `51-plan-cache.sql` |
 | v0.3 Phase 3 step 3 phase A | 88 | 28 | + bulk-ingest prepared INSERT (LLD §4.3 phase A), `synth-10k.ttl`, perf regression `52-bulk-ingest-perf.sql`. 2× wall-clock target deferred to phase B / v0.4 |
-| v0.3 Phase 4 (current) | 91 | 29 | + `pgrdf.materialize` OWL 2 RL inference via `reasonable` 0.4, set-diff isolation, idempotent re-derivation, regression `60-materialize-owl-rl.sql` |
+| v0.3 Phase 4 | 91 | 29 | + `pgrdf.materialize` OWL 2 RL inference via `reasonable` 0.4, set-diff isolation, idempotent re-derivation, regression `60-materialize-owl-rl.sql` |
+| v0.3 Phase 5 stub (current) | 93 | 30 | + `pgrdf.validate(data, shapes)` JSONB stub. Real `shacl_validation` integration deferred — ERRATA E-009 (upstream iri_s/rdf-12 dep block). Regression `70-validate-stub.sql` |
