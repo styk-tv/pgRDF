@@ -1,4 +1,4 @@
-# **SPEC.pgRDF.LLD.v0.4**
+# **SPEC.pgRDF.LLD.v0.4-FUTURE**
 
 **pgRDF: A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL,
 and OWL 2 RL reasoning.**

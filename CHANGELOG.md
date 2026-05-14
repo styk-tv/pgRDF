@@ -6,9 +6,9 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-### Spec — SPEC.pgRDF.LLD.v0.4 draft landed (forward-looking)
+### Spec — SPEC.pgRDF.LLD.v0.4-FUTURE draft landed (forward-looking)
 
-New `specs/SPEC.pgRDF.LLD.v0.4.md` is a draft, forward-looking
+New `specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md` is a draft, forward-looking
 target spec for the next cut; v0.3 remains the authoritative
 shipped contract until v0.4 actually lands. The draft scopes five
 new substantive tracks — named-graph scoping with an IRI ↔ graph_id
