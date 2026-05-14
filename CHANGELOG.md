@@ -6,6 +6,109 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release pre-flight — smoke-install verification (slice #24)
+
+End-to-end install rehearsal of the slice #25 tarball
+(`pgrdf-0.2.0-pg17-glibc-arm64.tar.gz`, 872,067 B) against a clean
+`postgres:17.4-bookworm` container. This exercises the real consumer
+install path the GH Release will ask users to perform: extract tarball,
+drop artifacts into PG library paths, `CREATE EXTENSION pgrdf`, parse
+Turtle, run SPARQL. Goal: confirm the v0.3.0 release artifact is
+ship-ready.
+
+**Procedure (Option A from the slice brief — fresh container, no
+compose, bind-mount FROM staged tarball contents):**
+
+```bash
+STAGING=$PWD/.smoke-install-test                    # podman-visible
+rm -rf "${STAGING}" && mkdir -p "${STAGING}"
+tar -xzf /tmp/pgrdf-repack-test/pgrdf-0.2.0-pg17-glibc-arm64.tar.gz \
+        -C "${STAGING}"
+podman run -d --name pgrdf-smoke \
+  -e POSTGRES_USER=pgrdf -e POSTGRES_PASSWORD=pgrdf -e POSTGRES_DB=pgrdf \
+  -v "${STAGING}/pgrdf-0.2.0-pg17-glibc-arm64/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro" \
+  -v "${STAGING}/pgrdf-0.2.0-pg17-glibc-arm64/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro" \
+  -v "${STAGING}/pgrdf-0.2.0-pg17-glibc-arm64/share/extension/pgrdf--0.2.0.sql:/usr/share/postgresql/17/extension/pgrdf--0.2.0.sql:ro" \
+  -p 5433:5432 docker.io/library/postgres:17.4-bookworm \
+  -c shared_preload_libraries=pgrdf
+```
+
+Container `pgrdf-smoke` runs on port 5433 to avoid colliding with the
+regular compose container on 5432. Postgres `pg_isready` returned ok
+after 2s. Bind-mounts are read-only — exercises the real distribution
+shape (immutable artifact, mutated only at boot via Postgres config
+args).
+
+**Initial environment note (caught by the smoke):** the slice brief's
+`podman run` snippet omitted `-c shared_preload_libraries=pgrdf`. On
+first run, `CREATE EXTENSION` + `pgrdf.version()` succeeded but the
+first stateful call (`parse_turtle`) returned `ERROR: PgAtomic was
+not initialized` — the canonical signature of pgRDF not being loaded
+via `shared_preload_libraries`. This is documented in
+[`SPEC.pgRDF.INSTALL.v0.2 §6 + §7`](specs/SPEC.pgRDF.INSTALL.v0.2.md),
+[`guide/01-install.md §3`](guide/01-install.md), and
+[`docs/06-installation.md §1.2`](docs/06-installation.md), so the
+diagnostic chain held: error → check `SHOW shared_preload_libraries`
+(empty) → re-launch with `-c shared_preload_libraries=pgrdf` → SHOW
+returns `pgrdf` → everything works. **The tarball + install docs are
+both correct; only the smoke brief's `podman run` command was
+incomplete.**
+
+**Smoke test results (after relaunching with the preload arg):**
+
+| Step | Command | Output | Verdict |
+|---|---|---|---|
+| 1 | `CREATE EXTENSION pgrdf;` | `CREATE EXTENSION` | OK |
+| 2 | `SELECT pgrdf.version();` | `0.2.0` (1 row) | OK |
+| 3 | `SELECT pgrdf.add_graph(1);` | `t` (1 row) | OK |
+| 4 | `SELECT pgrdf.parse_turtle('@prefix ex: <http://example.org/> . ex:a ex:b ex:c .', 1);` | `1` (1 triple inserted) | OK |
+| 5 | `SELECT * FROM pgrdf.sparql('SELECT ?o WHERE { ?s ?p ?o }');` | `{"o": "http://example.org/c"}` (1 row) | OK |
+
+End-to-end round-trip: tarball → bind-mount → `CREATE EXTENSION` →
+parse Turtle → SPARQL SELECT, all on a stock upstream Postgres image
+with zero source build. The 872 KiB artifact is sufficient.
+
+**Total elapsed (stage → CREATE EXTENSION → final SPARQL → teardown):
+~50s** on M-series darwin, podman 4-ARM hypervisor.
+
+**Bind-mount caveats discovered:**
+
+- Podman on darwin runs in a VM (applehv) that does NOT auto-mount
+  `/tmp`. First attempt staged the tarball under `/tmp/pgrdf-install-test`
+  per the slice brief and `podman run` returned
+  `statfs /tmp/.../pgrdf.so: no such file or directory`. Restaging
+  under `$PWD/.smoke-install-test` (under `/Users`, auto-mounted by
+  podman's machine config) resolved it. **Implication for the public
+  install guide:** the existing guide already tells users to write
+  artifacts to PG's actual `pkglibdir` + `sharedir` (via
+  `pg_config --pkglibdir`), not to bind-mount from `/tmp`, so this
+  is a smoke-test infrastructure quirk only — not a documentation gap.
+
+- glibc version mismatch was a worry going in (tarball built on glibc
+  2.36 from the slice #26 manylinux container, smoke runs against
+  bookworm's glibc 2.36) — and it was a non-event, since the build +
+  smoke happen to use the same glibc minor. Cross-glibc verification
+  is still owed once aarch64 + amd64 release builds land on the real
+  GH runner.
+
+**Teardown:**
+
+```bash
+podman rm -f pgrdf-smoke
+rm -rf "${STAGING}"           # $PWD/.smoke-install-test
+```
+
+`pgrdf-smoke` is a one-shot container, never persisted; the regular
+`pgrdf-postgres` (from `just compose-up`) is unaffected — it was
+stopped at start of the smoke and can be restarted by the user with
+`just compose-up` at any time.
+
+**Slice outcome: PASS.** The v0.3.0 tarball-shaped release artifact
+installs cleanly into a stock Postgres image. The pre-flight group
+(slices #66 → #24, 43 entries) closes here. Remaining slices #23 → #1
+shift focus to feature work in the v0.3.0 / v0.4.0 scope (per the
+roadmap in slice #29).
+
 ### Release pre-flight — manual tarball repack verification (slice #25)
 
 Manually executed the `release.yml` repack step (lines 38-53) on the
