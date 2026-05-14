@@ -6,6 +6,42 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 9 — Expression richness in FILTER
+
+- `pgrdf.sparql` FILTER translator gains a much wider expression
+  surface:
+  - **Arithmetic**: `?a + ?b`, `?a - ?b`, `?a * ?b`, `?a / ?b`
+    (with NULLIF-guarded divide-by-zero), unary `-`, unary `+`.
+    All built on top of `expr_to_numeric_sql`'s CASE-cast so
+    non-numeric operands NULL-propagate instead of erroring.
+  - **String predicates**: `CONTAINS`, `STRSTARTS`, `STRENDS` —
+    Postgres `strpos`, `left`, `right` against `lexical_value`.
+  - **String-valued functions** usable inside other expressions:
+    `LANG(?v)`, `DATATYPE(?v)`, `UCASE(?v)`, `LCASE(?v)`,
+    `STR(?v)` (was passthrough, formalised). LANG / DATATYPE use
+    chained dict lookups (datatype IRI ids → IRI lexical).
+  - **`STRLEN(?v)`** is numeric-valued, plugged into
+    `expr_to_numeric_sql`.
+- Equality fallback: when either side of `=` / `sameTerm` is a
+  function call (or otherwise can't resolve to a dict id), the
+  translator falls back to lexical comparison. Lets `STR(?v) =
+  "x"`, `LANG(?v) = "en"`, `DATATYPE(?v) = xsd:integer` etc.
+  translate cleanly.
+- `expr_to_lexical_sql` learned to emit a SQL string for
+  `NamedNode` (the IRI's lexical form), making the fallback work
+  for IRI constants on the right of equality.
+- 6 new pg_tests: arithmetic add, mul/div, STRLEN, CONTAINS/
+  STRSTARTS/STRENDS, LANG/DATATYPE equality, UCASE/LCASE case
+  folding.
+- `tests/regression/sql/41-sparql-expressions.sql` covers 11
+  query shapes (4 arithmetic, STRLEN, 4 string predicates,
+  LANG, DATATYPE).
+- `README.md` pills: 67+21 → 73+22.
+
+Test bar:
+  pg_test:    73 passed; 0 failed  (was 67)
+  regression: 22 passed; 0 failed  (was 21)
+
 ### Phase 3 step 8 — HAVING + GROUP_CONCAT + SAMPLE
 
 - `pgrdf.sparql` now translates `HAVING (expr)` clauses on

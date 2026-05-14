@@ -1169,8 +1169,15 @@ fn translate_filter(
 ) -> Option<String> {
     match expr {
         Expression::Equal(a, b) | Expression::SameTerm(a, b) => {
-            let l = expr_to_id_sql(a, anchors)?;
-            let r = expr_to_id_sql(b, anchors)?;
+            // Prefer dict-id equality (sameTerm semantics, single
+            // BIGINT compare, hits the dictionary's PK index).
+            if let (Some(l), Some(r)) = (expr_to_id_sql(a, anchors), expr_to_id_sql(b, anchors)) {
+                return Some(format!("({l} = {r})"));
+            }
+            // Fall back to lexical comparison so STR(?v) = "x" and
+            // LANG(?v) = "en" etc. translate cleanly.
+            let l = expr_to_lexical_sql(a, anchors)?;
+            let r = expr_to_lexical_sql(b, anchors)?;
             Some(format!("({l} = {r})"))
         }
         Expression::Greater(a, b) => translate_numeric_cmp(a, b, anchors, ">"),
@@ -1220,12 +1227,39 @@ fn translate_function_call(
         Function::IsBlank => term_type_check(args, anchors, term_type::BLANK_NODE),
         Function::IsLiteral => term_type_check(args, anchors, term_type::LITERAL),
         Function::Regex => translate_regex(args, anchors),
-        // STR / LANG / DATATYPE etc. aren't callable as top-level
-        // FILTER predicates — they're string-yielding functions used
-        // inside other comparisons. Handled by the lexical-extraction
-        // path (expr_to_lexical_sql) when nested.
+        Function::Contains => translate_string_fn(args, anchors, |s, sub| {
+            format!("(strpos({s}, {sub}) > 0)")
+        }),
+        Function::StrStarts => translate_string_fn(args, anchors, |s, prefix| {
+            format!("(left({s}, length({prefix})) = {prefix})")
+        }),
+        Function::StrEnds => translate_string_fn(args, anchors, |s, suffix| {
+            format!("(right({s}, length({suffix})) = {suffix})")
+        }),
+        // STR / LANG / DATATYPE / UCASE / LCASE / STRLEN etc. aren't
+        // boolean — they're text- or numeric-valued and surface inside
+        // other comparisons via expr_to_lexical_sql / expr_to_numeric_sql.
         _ => None,
     }
+}
+
+/// 2-argument string predicate translator. Both args go through
+/// `expr_to_lexical_sql` so they accept variables, literals,
+/// `STR(?v)`, etc. The closure builds the SQL boolean expression.
+fn translate_string_fn<F>(
+    args: &[Expression],
+    anchors: &HashMap<String, (usize, &'static str)>,
+    builder: F,
+) -> Option<String>
+where
+    F: FnOnce(String, String) -> String,
+{
+    if args.len() != 2 {
+        return None;
+    }
+    let s = expr_to_lexical_sql(&args[0], anchors)?;
+    let needle = expr_to_lexical_sql(&args[1], anchors)?;
+    Some(builder(s, needle))
 }
 
 /// `isIRI(?v)` / `isBlank(?v)` / `isLiteral(?v)` → emit a correlated
@@ -1326,14 +1360,43 @@ fn expr_to_numeric_sql(
             if !is_xsd_numeric_iri(l.datatype().as_str()) {
                 return None;
             }
-            // Constant: emit the numeric value directly. Reject anything
-            // not actually parseable as a number (defensive — spargebra
-            // should have caught this).
             let v = l.value();
             if v.parse::<f64>().is_err() {
                 return None;
             }
             Some(format!("{v}::numeric"))
+        }
+        // Arithmetic — both sides cast to numeric. NULL propagation
+        // means a non-numeric operand drops the row (SPARQL "type
+        // error → unbound" semantics).
+        Expression::Add(a, b) => Some(format!(
+            "({} + {})",
+            expr_to_numeric_sql(a, anchors)?,
+            expr_to_numeric_sql(b, anchors)?
+        )),
+        Expression::Subtract(a, b) => Some(format!(
+            "({} - {})",
+            expr_to_numeric_sql(a, anchors)?,
+            expr_to_numeric_sql(b, anchors)?
+        )),
+        Expression::Multiply(a, b) => Some(format!(
+            "({} * {})",
+            expr_to_numeric_sql(a, anchors)?,
+            expr_to_numeric_sql(b, anchors)?
+        )),
+        Expression::Divide(a, b) => Some(format!(
+            "({} / NULLIF({}, 0))",
+            expr_to_numeric_sql(a, anchors)?,
+            expr_to_numeric_sql(b, anchors)?
+        )),
+        Expression::UnaryMinus(a) => {
+            Some(format!("(-{})", expr_to_numeric_sql(a, anchors)?))
+        }
+        Expression::UnaryPlus(a) => expr_to_numeric_sql(a, anchors),
+        // STRLEN(?v) → length of lexical_value
+        Expression::FunctionCall(Function::StrLen, args) if args.len() == 1 => {
+            let lex = expr_to_lexical_sql(&args[0], anchors)?;
+            Some(format!("length({lex})::numeric"))
         }
         _ => None,
     }
@@ -1396,10 +1459,53 @@ fn expr_to_lexical_sql(
             let escaped = l.value().replace('\'', "''");
             Some(format!("'{escaped}'"))
         }
-        // STR(?v) is identity for our purposes — every dict entry's
-        // lexical_value IS the string form. Pass through.
+        // A NamedNode lexical form is just its IRI. Needed so
+        // `DATATYPE(?v) = xsd:integer` and `?p = foaf:name` (when
+        // lexical-equality fallback fires) translate cleanly.
+        Expression::NamedNode(n) => {
+            let escaped = n.as_str().replace('\'', "''");
+            Some(format!("'{escaped}'"))
+        }
+        // STR(?v) is identity — every dict entry's lexical_value IS
+        // the string form.
         Expression::FunctionCall(Function::Str, inner) if inner.len() == 1 => {
             expr_to_lexical_sql(&inner[0], anchors)
+        }
+        // LANG(?v) → language_tag from the dict (empty string when NULL).
+        Expression::FunctionCall(Function::Lang, inner) if inner.len() == 1 => {
+            if let Expression::Variable(v) = &inner[0] {
+                let &(alias_idx, col) = anchors.get(v.as_str())?;
+                Some(format!(
+                    "COALESCE((SELECT language_tag FROM pgrdf._pgrdf_dictionary
+                                WHERE id = q{alias_idx}.{col}), '')"
+                ))
+            } else {
+                None
+            }
+        }
+        // DATATYPE(?v) → IRI of the literal's datatype, resolved via
+        // a chained dict lookup (datatype_iri_id → lexical_value).
+        Expression::FunctionCall(Function::Datatype, inner) if inner.len() == 1 => {
+            if let Expression::Variable(v) = &inner[0] {
+                let &(alias_idx, col) = anchors.get(v.as_str())?;
+                Some(format!(
+                    "(SELECT dt.lexical_value
+                        FROM pgrdf._pgrdf_dictionary d
+                        JOIN pgrdf._pgrdf_dictionary dt ON dt.id = d.datatype_iri_id
+                       WHERE d.id = q{alias_idx}.{col})"
+                ))
+            } else {
+                None
+            }
+        }
+        // UCASE / LCASE — case conversion on the lexical form.
+        Expression::FunctionCall(Function::UCase, inner) if inner.len() == 1 => {
+            let s = expr_to_lexical_sql(&inner[0], anchors)?;
+            Some(format!("upper({s})"))
+        }
+        Expression::FunctionCall(Function::LCase, inner) if inner.len() == 1 => {
+            let s = expr_to_lexical_sql(&inner[0], anchors)?;
+            Some(format!("lower({s})"))
         }
         _ => None,
     }
@@ -2040,6 +2146,183 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2);
+    }
+
+    /// Arithmetic in FILTER — `?a + ?b > N`.
+    #[pg_test]
+    fn sparql_filter_arithmetic_add() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:price 10 ; ex:tax 2 .
+                 ex:b ex:price 20 ; ex:tax 4 .
+                 ex:c ex:price 100 ; ex:tax 25 .',
+                8_090)",
+        )
+        .unwrap();
+
+        // price + tax > 15 → b (24), c (125). 2 rows.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE {
+                  ?s <http://example.com/price> ?p .
+                  ?s <http://example.com/tax>   ?t
+                  FILTER(?p + ?t > 15) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2);
+    }
+
+    /// Arithmetic — multiplication + division.
+    #[pg_test]
+    fn sparql_filter_arithmetic_mul_div() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:v 4 . ex:b ex:v 5 . ex:c ex:v 10 .',
+                8_091)",
+        )
+        .unwrap();
+
+        // ?v * 2 > 8 → b, c. ?v / 2 < 3 → a, b.
+        let mul: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/v> ?v FILTER(?v * 2 > 8) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let div: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/v> ?v FILTER(?v / 2 < 3) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(mul, 2);
+        assert_eq!(div, 2);
+    }
+
+    /// STRLEN in FILTER.
+    #[pg_test]
+    fn sparql_filter_strlen() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:n1 ex:label \"abc\" .
+                 ex:n2 ex:label \"abcdef\" .
+                 ex:n3 ex:label \"abcdefghi\" .',
+                8_092)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/label> ?l FILTER(STRLEN(?l) > 5) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2);
+    }
+
+    /// CONTAINS / STRSTARTS / STRENDS — string boundary predicates.
+    #[pg_test]
+    fn sparql_filter_string_predicates() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:n1 ex:label \"hello world\" .
+                 ex:n2 ex:label \"goodbye world\" .
+                 ex:n3 ex:label \"hello there\" .',
+                8_093)",
+        )
+        .unwrap();
+
+        let contains: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/label> ?l FILTER(CONTAINS(?l, \"hello\")) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let starts: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/label> ?l FILTER(STRSTARTS(?l, \"hello\")) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let ends: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/label> ?l FILTER(STRENDS(?l, \"world\")) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(contains, 2);
+        assert_eq!(starts, 2);
+        assert_eq!(ends, 2);
+    }
+
+    /// LANG / DATATYPE in FILTER equality.
+    #[pg_test]
+    fn sparql_filter_lang_and_datatype() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+                 ex:a ex:p \"plain\" .
+                 ex:b ex:p \"english\"@en .
+                 ex:c ex:p \"french\"@fr .
+                 ex:d ex:p \"42\"^^xsd:integer .',
+                8_094)",
+        )
+        .unwrap();
+
+        let en_only: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/p> ?v FILTER(LANG(?v) = \"en\") }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let integer: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+                SELECT ?s WHERE { ?s <http://example.com/p> ?v
+                                  FILTER(DATATYPE(?v) = xsd:integer) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(en_only, 1);
+        assert_eq!(integer, 1);
+    }
+
+    /// UCASE / LCASE — case folding for case-insensitive equality.
+    #[pg_test]
+    fn sparql_filter_case_fold() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p \"Alice\" .
+                 ex:b ex:p \"BOB\" .
+                 ex:c ex:p \"carol\" .',
+                8_095)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s WHERE { ?s <http://example.com/p> ?v FILTER(LCASE(?v) = \"bob\") }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 1);
     }
 
     /// HAVING — post-aggregate filter on COUNT(?o) > N.
