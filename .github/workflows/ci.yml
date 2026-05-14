@@ -44,8 +44,66 @@ jobs:
         with: { pg: "${{ matrix.pg }}" }
       - run: cargo pgrx test pg${{ matrix.pg }}
 
-  # PLACEHOLDER — wire up once tests/regression/ has a runner.
-  # regression:
-  #   runs-on: ubuntu-22.04
-  #   needs: test
-  #   steps: …
+  # Compose-based regression suite. Mirrors the local dev loop
+  # (`just build-ext && just test-regression`) byte-for-byte: builds the
+  # .so inside `compose/builder.Containerfile`, boots the
+  # `postgres:17.4-bookworm` runtime with the artifacts bind-mounted,
+  # then drives `tests/regression/sql/NN-*.sql` against it.
+  #
+  # Lives outside the per-PG matrix because the compose stack is
+  # pinned to PG 17 today (see specs/ERRATA.v0.2.md E-006 for the
+  # pgrx-vs-newer-PG block). Once PG 18 unblocks the matrix here
+  # widens.
+  regression:
+    runs-on: ubuntu-22.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build extension artifacts
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          set -euo pipefail
+          docker build --target builder \
+            -t pgrdf-builder-rust:pg17 \
+            --build-arg PG_MAJOR=17 \
+            -f compose/builder.Containerfile .
+          docker build \
+            -t pgrdf-builder:pg17 \
+            --build-arg PG_MAJOR=17 \
+            -f compose/builder.Containerfile .
+          rm -rf compose/extensions/lib compose/extensions/share
+          mkdir -p compose/extensions/lib compose/extensions/share/extension
+          docker run --rm \
+            -v "$PWD/compose/extensions:/export" \
+            pgrdf-builder:pg17
+          ls -la compose/extensions/lib compose/extensions/share/extension
+      - name: Boot compose Postgres
+        run: |
+          set -euo pipefail
+          cd compose && docker compose up -d
+          # The compose service includes a healthcheck; wait on it.
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' pgrdf-postgres 2>/dev/null || echo "starting")
+            echo "postgres health: $status"
+            [ "$status" = "healthy" ] && break
+            sleep 2
+          done
+          docker exec pgrdf-postgres pg_isready -U pgrdf -d pgrdf
+      - name: Run regression suite
+        env:
+          PGRDF_RUNTIME: docker
+        run: bash tests/regression/run.sh
+      - name: Postgres logs (on failure)
+        if: failure()
+        run: docker logs pgrdf-postgres | tail -100
+      - name: Tear down compose
+        if: always()
+        run: cd compose && docker compose down -v
+
+  # PLACEHOLDER — W3C SPARQL 1.1 + SHACL conformance runners + LUBM
+  # benchmarks. Lives in `.github/workflows/regression-w3c.yml` with
+  # `if: false` job gates until the runners exist. Tracked in
+  # `docs/10-roadmap.md` Phase 6.

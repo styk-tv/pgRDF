@@ -212,21 +212,36 @@ Gates:
 
 ---
 
-## Phase 6 — Release & Containerization ⏳
+## Phase 6 — CI + Conformance + Release 🚧 (step 1 shipped)
 
 Outcome: pgRDF is consumable by external operators (CloudNativePG,
-StackGres) following INSTALL spec methodology. Benchmarked.
-Tracks LLD §7 Phase 4.
+StackGres) following INSTALL spec methodology. Benchmarked. Tracks
+LLD v0.3 §5.4.
 
-Gates:
-- ⏳ LUBM-100 results in `target/perf-report.json` compared against
-      Apache Jena TDB and Apache AGE.
-- ⏳ OCI artifact published at `ghcr.io/styk-tv/pgrdf-bundle:<ver>`
-      (INSTALL §11 OQ1).
-- ⏳ INSTALL §12 conformance test in CI against a fresh K8s cluster
-      (kind or k3s).
-- ⏳ SHA256SUMS.asc detached GPG signature attached to every release.
-- ⏳ W3C SPARQL 1.1: ≥ 95 % pass. SHACL: ≥ 90 % pass.
+**Step 1 — Regression in CI** ✅
+- `.github/workflows/ci.yml` `regression` job runs the
+  compose-based pg_regress suite on every PR + push to main.
+  Pinned to PG 17 today (compose pin per ERRATA E-006).
+
+**Step 2 — W3C conformance runners** ⏳
+- `.github/workflows/regression-w3c.yml` placeholders (sparql11,
+  shacl, lubm) wait for the runner binaries to ship. Need a
+  manifest-TTL-driven harness in Rust that loads each test's
+  fixture, executes the SPARQL / SHACL operation, and diffs
+  against the expected result.
+
+**Step 3 — Release artifacts** ⏳
+- `.github/workflows/release.yml` already builds and packages on
+  `v*` tags; fires the first official release once step 2 lands.
+- LUBM-100 results in `target/perf-report.json` compared against
+  Apache Jena TDB and Apache AGE.
+- OCI artifact published at `ghcr.io/styk-tv/pgrdf-bundle:<ver>`
+  (INSTALL §11 OQ1).
+- INSTALL §12 conformance test in CI against a fresh K8s cluster
+  (kind or k3s).
+- SHA256SUMS.asc detached GPG signature attached to every release.
+- Target gates: W3C SPARQL 1.1 ≥ 95 % pass; SHACL ≥ 90 % pass
+  (the SHACL gate moves with ERRATA E-009 resolution).
 
 ---
 
@@ -258,4 +273,5 @@ phase 3 step table above.
 | v0.3 Phase 3 step 2 | 88 | 27 | + prepared-plan cache (LLD §4.2), parameterised SQL, perf regression `51-plan-cache.sql` |
 | v0.3 Phase 3 step 3 phase A | 88 | 28 | + bulk-ingest prepared INSERT (LLD §4.3 phase A), `synth-10k.ttl`, perf regression `52-bulk-ingest-perf.sql`. 2× wall-clock target deferred to phase B / v0.4 |
 | v0.3 Phase 4 | 91 | 29 | + `pgrdf.materialize` OWL 2 RL inference via `reasonable` 0.4, set-diff isolation, idempotent re-derivation, regression `60-materialize-owl-rl.sql` |
-| v0.3 Phase 5 stub (current) | 93 | 30 | + `pgrdf.validate(data, shapes)` JSONB stub. Real `shacl_validation` integration deferred — ERRATA E-009 (upstream iri_s/rdf-12 dep block). Regression `70-validate-stub.sql` |
+| v0.3 Phase 5 stub | 93 | 30 | + `pgrdf.validate(data, shapes)` JSONB stub. Real `shacl_validation` integration deferred — ERRATA E-009 (upstream iri_s/rdf-12 dep block). Regression `70-validate-stub.sql` |
+| v0.3 Phase 6 step 1 (current) | 93 | 30 | + regression suite wired into CI (`.github/workflows/ci.yml` `regression` job); compose builder + runtime on every PR. W3C runners + LUBM benchmarks remain deferred |

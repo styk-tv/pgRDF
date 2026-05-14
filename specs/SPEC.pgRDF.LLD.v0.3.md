@@ -272,7 +272,7 @@ sub-SELECT per MINUS block.
 | **3** | **Storage Performance** (NEW) | **⏳ next** |
 | 4 | Inference Engine (OWL 2 RL via `reasonable`) | ✅ done — `src/inference/reasonable.rs`, `60-materialize-owl-rl.sql` |
 | 5 | Validation Engine (SHACL via `shacl_validation`) | 🚧 stub — surface only; real impl blocked by ERRATA E-009 |
-| 6 | W3C Conformance + LUBM Perf + Release | ⏳ |
+| 6 | CI + W3C Conformance + LUBM + Release | 🚧 step 1 done (`.github/workflows/ci.yml::regression`); steps 2-3 deferred |
 
 ### 5.1 Phase 3 — Storage Performance (PRIORITISED)
 
@@ -364,16 +364,33 @@ Scope when wired:
 - ✅ Cardinality, value-type, value-range constraints.
 - ⚠️ SHACL-SPARQL constraints — Phase 5 stretch.
 
-### 5.4 Phase 6 — W3C Conformance + Release
+### 5.4 Phase 6 — CI + Conformance + Release — **step 1 SHIPPED**
 
-- W3C SPARQL 1.1 manifest runner wired into CI; coverage targets
-  ratchet per release: ≥ 30 % → ≥ 70 % → ≥ 95 %.
-- W3C SHACL manifest runner; ≥ 50 % → ≥ 90 %.
+**Step 1 — Regression in CI** ✅
+`.github/workflows/ci.yml` `regression` job runs the compose-based
+pg_regress suite on every PR + push to main. Builds via
+`compose/builder.Containerfile`, boots `postgres:17.4-bookworm`,
+drives `tests/regression/sql/NN-*.sql` via
+`PGRDF_RUNTIME=docker tests/regression/run.sh`. Pinned to PG 17
+(ERRATA E-006) until pgrx supports newer majors.
+
+**Step 2 — W3C conformance runners** ⏳
+- W3C SPARQL 1.1 manifest runner; coverage targets ratchet per
+  release: ≥ 30 % → ≥ 70 % → ≥ 95 %.
+- W3C SHACL manifest runner; ≥ 50 % → ≥ 90 %. Gated on ERRATA
+  E-009 — until the real `shacl_validation` integration lands,
+  SHACL is at 0 %.
 - LUBM-10 / LUBM-100 against Apache Jena TDB + Apache AGE.
-- CI matrix green on tag: pg14–17 × {amd64, arm64}.
+- `regression-w3c.yml` placeholders gated `if: false` await the
+  runner binaries.
+
+**Step 3 — Release artifacts** ⏳
+- CI matrix green on tag: pg14–17 × {amd64, arm64} (workflow
+  shipped in `release.yml`; fires on `v*` tags).
 - Pre-built tarballs published on GitHub releases per
   INSTALL §3 layout.
 - SHA256SUMS.asc detached GPG signature attached to every release.
+- OCI artifact at `ghcr.io/styk-tv/pgrdf-bundle:<ver>`.
 
 ## 6. Test & coverage policy
 

@@ -6,6 +6,38 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 6 step 1 — regression suite in CI
+
+- `.github/workflows/ci.yml`: new `regression` job runs the
+  compose-based pg_regress suite on every PR + push to main. The
+  job:
+  - Builds `pgrdf.so` via `compose/builder.Containerfile`
+    (BuildKit, same path as the local dev loop).
+  - Boots `postgres:17.4-bookworm` via `docker compose up -d` with
+    the artifacts bind-mounted at the canonical paths.
+  - Waits on the compose healthcheck, then drives
+    `tests/regression/sql/NN-*.sql` via
+    `PGRDF_RUNTIME=docker bash tests/regression/run.sh`.
+  - Captures `docker logs pgrdf-postgres` on failure for triage.
+  - Tears the stack down with `compose down -v` on `always()`.
+- Pinned to PG 17 today (compose pin per ERRATA E-006). Widens to
+  the full matrix when the PG-18 / pgrx issue clears.
+- `tests/regression/run.sh` already honoured `PGRDF_RUNTIME` so no
+  runner changes needed.
+
+**Deferred (still placeholders):**
+- W3C SPARQL 1.1 + SHACL conformance runners live in
+  `.github/workflows/regression-w3c.yml` gated `if: false`. Need a
+  Rust runner binary that reads the manifest TTL, materialises each
+  test's data graph, runs the query, and diffs against the expected
+  result. v0.4 work item.
+- LUBM-10 / LUBM-100 perf comparison vs Jena TDB and Apache AGE.
+  Needs `tests/perf/run-lubm.sh` + a normalised reporting layer.
+  v0.4 work item.
+- Release workflow (`release.yml`) is wired but only fires on
+  `v*` tags. Tag the first release once Phase 6 step 2 (the
+  conformance runners) lands.
+
 ### Phase 5 — SHACL `pgrdf.validate` ships as a STUB
 
 - `src/validation/shacl.rs`: `pgrdf.validate(data_graph_id,

@@ -12,6 +12,7 @@
 [![BulkIngest](https://img.shields.io/badge/bulk%20ingest-LLD%20%C2%A74.3%20phase%20A-yellow)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20via%20reasonable-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Validation](https://img.shields.io/badge/SHACL%20validate-stub%20%28ERRATA%20E--009%29-orange)](specs/ERRATA.v0.2.md)
+[![CI](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml/badge.svg)](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
