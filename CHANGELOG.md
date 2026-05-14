@@ -6,6 +6,134 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release pre-flight — manual tarball repack verification (slice #25)
+
+Manually executed the `release.yml` repack step (lines 38-53) on the
+slice #26 build artifacts to confirm the staging → tarball pipeline
+produces the exact INSTALL §3 layout the GH Release would publish.
+Goal: catch any tar/find/sha256sum corner case *before* the tagged
+release runs across 4 PG majors x 2 arches.
+
+**Procedure (aarch64 darwin, slice #26 artifacts re-used — no rebuild):**
+
+```bash
+VER=0.2.0; PG=17; ARCH=arm64
+STAGING=/tmp/pgrdf-repack-test
+OUT="${STAGING}/pgrdf-${VER}-pg${PG}-glibc-${ARCH}"
+rm -rf "${STAGING}"
+mkdir -p "${OUT}/lib" "${OUT}/share/extension"
+cp compose/extensions/lib/pgrdf.so                       "${OUT}/lib/"
+cp compose/extensions/share/extension/pgrdf.control       "${OUT}/share/extension/"
+cp compose/extensions/share/extension/pgrdf--${VER}.sql   "${OUT}/share/extension/"
+cp LICENSE NOTICE                                          "${OUT}/"
+( cd "${OUT}" && find . -type f ! -name SHA256SUMS -print0 \
+    | xargs -0 sha256sum > SHA256SUMS )
+tar -czf "${STAGING}/$(basename ${OUT}).tar.gz" -C "${STAGING}" "$(basename ${OUT})"
+```
+
+Mirrors `release.yml` L41-52 byte-for-byte (substituting
+`compose/extensions/{lib,share}` for `target/release/pgrdf-pg17/usr/{lib,share}/postgresql/17/`,
+since slice #26 already copied those out — same files, different path
+prefix). GNU `sha256sum` from coreutils 9.7 is installed on darwin via
+brew so the `sha256sum > SHA256SUMS && sha256sum -c SHA256SUMS` flow
+matches Ubuntu runner behaviour exactly.
+
+**Tarball produced:**
+
+| Field | Value |
+|---|---|
+| Name | `pgrdf-0.2.0-pg17-glibc-arm64.tar.gz` |
+| Size | 872,067 B (852 KiB) |
+| Contents | 6 files + 4 dirs |
+| Compression ratio | ~2.6:1 vs `pgrdf.so` (2.2 MB → 870 KB) |
+
+**`tar -tzf | sort` (every entry, in lexicographic order):**
+
+```
+pgrdf-0.2.0-pg17-glibc-arm64/
+pgrdf-0.2.0-pg17-glibc-arm64/LICENSE
+pgrdf-0.2.0-pg17-glibc-arm64/NOTICE
+pgrdf-0.2.0-pg17-glibc-arm64/SHA256SUMS
+pgrdf-0.2.0-pg17-glibc-arm64/lib/
+pgrdf-0.2.0-pg17-glibc-arm64/lib/pgrdf.so
+pgrdf-0.2.0-pg17-glibc-arm64/share/
+pgrdf-0.2.0-pg17-glibc-arm64/share/extension/
+pgrdf-0.2.0-pg17-glibc-arm64/share/extension/pgrdf--0.2.0.sql
+pgrdf-0.2.0-pg17-glibc-arm64/share/extension/pgrdf.control
+```
+
+**SHA256SUMS contents (5 lines, SHA256SUMS itself absent — self-exclude OK):**
+
+```
+a6dc47dea368e1cb479f456538144939060fa72bb2a96c4eabf23477d1a5ece8  ./LICENSE
+7ee0daa51a51f29729f80e96192b6df4874b02a39f131c34f486c5365b3726c8  ./NOTICE
+c8c661eada2255fa85e441a50240c3eaad4e1c12197a2102a1554bf5574ab90c  ./lib/pgrdf.so
+7584c499464333b53dc7bd106aafd37ffa5071cb33980bd5214e6da8c72284b4  ./share/extension/pgrdf.control
+3a785b2b483bd510ecf810af029bb47cd8dab032071c548f3735e759564e7f69  ./share/extension/pgrdf--0.2.0.sql
+```
+
+`pgrdf.so` SHA matches slice #26's recorded `c8c661ea…ab90c` — same
+binary, no rebuild, by construction.
+
+**Round-trip verify (extract fresh, `sha256sum -c`):**
+
+```
+./LICENSE: OK
+./NOTICE: OK
+./lib/pgrdf.so: OK
+./share/extension/pgrdf.control: OK
+./share/extension/pgrdf--0.2.0.sql: OK
+```
+
+5 of 5 OK. SHA256SUMS does not appear in its own manifest — the
+`find -type f ! -name SHA256SUMS` predicate works as intended.
+
+**INSTALL §3 layout conformance:**
+
+| INSTALL §3 entry | tarball entry | match |
+|---|---|---|
+| `lib/pgrdf.so` | `lib/pgrdf.so` | exact |
+| `share/extension/pgrdf.control` | `share/extension/pgrdf.control` | exact |
+| `share/extension/pgrdf--<version>.sql` | `share/extension/pgrdf--0.2.0.sql` | exact |
+| `share/extension/pgrdf--<prev>--<version>.sql` (zero or more) | (none — 0.2.0 is the first cut) | n/a |
+| `LICENSE` | `LICENSE` | exact |
+| `SHA256SUMS` | `SHA256SUMS` | exact |
+| (none) | `NOTICE` | **spec gap — see below** |
+
+Byte-for-byte conformant with INSTALL §3 except for `NOTICE`, which
+landed in the tarball via slice #28 (Apache 2.0 §4(d) compliance) but
+the corresponding INSTALL §3 file list was not updated then. Adding
+`NOTICE` to the spec's enumerated layout is a one-line surface edit
+deferred to a separate spec-grooming slice — the tarball mechanics
+themselves are correct.
+
+**Aggregate SHA256SUMS (release.yml L67-72) — not verified this slice:**
+
+The aggregate step runs over `pgrdf-*.tar.gz` produced by all
+`(pg, arch)` matrix legs and lives in the `release` job. With only
+one local tarball it'd be a single-line file; the multi-leg
+aggregation is fundamentally a GH Actions concern (artifact upload +
+`download-artifact merge-multiple: true`). Single-tarball spot check
+mirrors the same `sha256sum pgrdf-*.tar.gz > SHA256SUMS` invocation —
+no behavioural surprise expected.
+
+**Why this matters:**
+
+`release.yml` is a single-shot, tag-triggered workflow. A failure
+inside the `Repack to INSTALL-spec layout` step would leave a
+half-published release on GitHub with no artifacts attached. Dry-running
+the repack locally on the same artifact tree the workflow consumes
+catches `cp` glob mismatches, `find -print0` portability surprises,
+and tar layout regressions before they cost a re-tag + force-push.
+Combined with slice #26 (path mapping verified) and slice #27 (verify
+docs + GPG defer): the v0.2.0 cut is end-to-end traced.
+
+Status: repack mechanics verified end-to-end on aarch64 darwin. The
+GH Actions runner uses identical GNU coreutils + GNU tar, so the
+behaviour transfers. The lone surface gap is `NOTICE` missing from
+INSTALL §3's file list — flagged for a follow-up spec edit, no
+runtime impact.
+
 ### Release pre-flight — cargo pgrx package dry-run (slice #26)
 
 Verified `cargo pgrx package` produces the artifact tree the
