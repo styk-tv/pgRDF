@@ -1,0 +1,3 @@
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+SELECT (UCASE(?n) AS ?upper)
+WHERE { ?s foaf:name ?n }

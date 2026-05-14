@@ -1,0 +1,6 @@
+PREFIX dc: <http://purl.org/dc/terms/>
+SELECT ?s ?t
+WHERE {
+  ?s dc:type ?t
+  FILTER(?t IN ("report", "draft"))
+}

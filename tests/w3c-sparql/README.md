@@ -69,6 +69,11 @@ against the W3C spec is the load-bearing part.
 | `BIND(CONCAT(...) AS ?v)` | §10.1 + §17.4.3.2 | ✅ 11 |
 | `ASK` → true | §16.2 | ✅ 12 |
 | `ASK` → false | §16.2 | ✅ 13 |
+| `REGEX(?v, "pat")` | §17.4.3.14 | ✅ 14 |
+| `FILTER(?v IN (a, b, c))` | §17.4.1.9 | ✅ 15 |
+| `STRLEN(?v)` | §17.4.3.3 | ✅ 16 |
+| `LANG(?v)` | §17.4.2.4 | ✅ 17 |
+| `UCASE(?v)` | §17.4.3.8 | ✅ 18 |
 | Inline `HAVING(SUM(?v) > c)` | §11.5 | ❌ deferred — see v0.4 |
 | Property paths beyond `:a/:b` sequence | §9 | ❌ deferred — see v0.4 |
 | GRAPH `{ … }` named-graph clause | §13 | ❌ deferred — needs storage schema work |

@@ -27,6 +27,11 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   - `11-bind-concat` — §10.1 `BIND` + §17.4.3.2 `CONCAT(...)`.
   - `12-ask-true` — §16.2 `ASK` returning `true`.
   - `13-ask-false` — §16.2 `ASK` returning `false`.
+  - `14-filter-regex` — §17.4.3.14 `REGEX(?v, "^A")`.
+  - `15-filter-in` — §17.4.1.9 `FILTER(?v IN (...))`.
+  - `16-strlen` — §17.4.3.3 `STRLEN(?v)`.
+  - `17-lang-tag` — §17.4.2.4 `LANG(?v)` over language-tagged literals.
+  - `18-ucase` — §17.4.3.8 `UCASE(?v)`.
 - `tests/w3c-sparql/run.sh` is a bash runner: for each test it
   drops + recreates the extension, loads `data.ttl`, runs
   `query.rq` via `pgrdf.sparql`, sorts both sides

@@ -1,0 +1,8 @@
+@prefix ex:  <http://example.com/> .
+@prefix dc:  <http://purl.org/dc/terms/> .
+
+ex:doc1 dc:type "report" .
+ex:doc2 dc:type "memo"   .
+ex:doc3 dc:type "report" .
+ex:doc4 dc:type "draft"  .
+ex:doc5 dc:type "memo"   .

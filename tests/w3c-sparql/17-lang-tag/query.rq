@@ -1,0 +1,3 @@
+PREFIX dc: <http://purl.org/dc/terms/>
+SELECT ?t (LANG(?t) AS ?lang)
+WHERE { ?s dc:title ?t }

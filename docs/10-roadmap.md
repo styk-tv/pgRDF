@@ -283,4 +283,5 @@ phase 3 step table above.
 | v0.3 Phase 5 stub | 93 | 30 | + `pgrdf.validate(data, shapes)` JSONB stub. Real `shacl_validation` integration deferred — ERRATA E-009 (upstream iri_s/rdf-12 dep block). Regression `70-validate-stub.sql` |
 | v0.3 Phase 6 step 1 | 93 | 30 | + regression suite wired into CI (`.github/workflows/ci.yml` `regression` job); compose builder + runtime on every PR. W3C runners + LUBM benchmarks remain deferred |
 | v0.3 Phase 6 step 2 starter | 93 | 30+5 | + W3C-shape SPARQL harness — 5 starter tests in `tests/w3c-sparql/` wired into the CI regression job. Full W3C TTL-manifest runner deferred to v0.4 |
-| v0.3 Phase 6 step 2 expanded (current) | 93 | 30+13 | + 8 more W3C-shape tests covering FILTER, COUNT/HAVING, ORDER BY DESC, LIMIT/OFFSET, BIND/CONCAT, ASK true/false |
+| v0.3 Phase 6 step 2 expanded | 93 | 30+13 | + 8 more W3C-shape tests covering FILTER, COUNT/HAVING, ORDER BY DESC, LIMIT/OFFSET, BIND/CONCAT, ASK true/false |
+| v0.3 Phase 6 step 2 expanded II (current) | 93 | 30+18 | + 5 more W3C-shape tests covering REGEX, IN, STRLEN, LANG, UCASE |

@@ -1,0 +1,7 @@
+@prefix ex:   <http://example.com/> .
+@prefix dc:   <http://purl.org/dc/terms/> .
+
+# Three titles with different language tags.
+ex:book1 dc:title "Hello"@en .
+ex:book2 dc:title "Bonjour"@fr .
+ex:book3 dc:title "Hola"@es .
