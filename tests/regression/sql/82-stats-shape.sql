@@ -64,6 +64,51 @@ SELECT
 -- ranges. Adding behavioural assertions here would duplicate
 -- coverage and inflate the baseline diff without new signal.
 
+-- ─── (added in slice #56) Schema-drift tripwire ────────────────────
+-- The assertions above lock fields-that-SHOULD-be-there are there
+-- (right keys, right types, plausible ranges). The block below
+-- locks fields-that-SHOULDN'T-be-there ARE NOT there: pin the
+-- exact key count, pin the canonical key list verbatim, and pin
+-- that no key carries a JSON `null`. A silent new field added to
+-- `src/storage/stats.rs::stats()` without a corresponding update
+-- here trips on the exact-count assertion — forces a deliberate
+-- test update rather than a silent shape extension that breaks
+-- downstream consumers locked to the documented set.
+--
+-- Current canonical set (10 keys) per `src/storage/stats.rs::stats()`:
+--   shmem_ready, shmem_slots, shmem_hits, shmem_misses,
+--   shmem_inserts, shmem_evictions, plan_cache_hits,
+--   plan_cache_misses, plan_cache_inserts, plan_cache_local_size.
+
+-- (a) Exact field count — the bullseye tripwire.
+SELECT (SELECT count(*) FROM jsonb_object_keys((SELECT pgrdf.stats())))
+       = 10 AS exact_ten_keys;
+
+-- (b) No extra / no missing keys — array equality against the
+--     canonical sorted list. Catches both additions and renames.
+SELECT array_agg(k ORDER BY k)
+       = ARRAY[
+           'plan_cache_hits',
+           'plan_cache_inserts',
+           'plan_cache_local_size',
+           'plan_cache_misses',
+           'shmem_evictions',
+           'shmem_hits',
+           'shmem_inserts',
+           'shmem_misses',
+           'shmem_ready',
+           'shmem_slots'
+         ]::text[] AS keys_match_canonical
+  FROM jsonb_object_keys((SELECT pgrdf.stats())) AS t(k);
+
+-- (c) No JSON `null` values — every field carries a real value.
+--     A refactor that defaults an uninitialised counter to `null`
+--     instead of `0` would slip past the type-contract block above
+--     (since `jsonb_typeof` of a real number is not 'null'), so
+--     this assertion projects a single boolean across all keys.
+SELECT bool_and(jsonb_typeof(value) != 'null') AS no_null_fields
+  FROM jsonb_each((SELECT pgrdf.stats())) AS e(key, value);
+
 -- Cleanup
 DROP EXTENSION pgrdf CASCADE;
 CREATE EXTENSION pgrdf;

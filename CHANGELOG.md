@@ -266,12 +266,42 @@ the lang-tag contract by `22-lang-tags.sql`. Guards against a
 refactor that loses a triple from the dict→quads write path
 for any one of these five term kinds.
 
+Locks #56 of the countdown: the `pgrdf.stats()` JSONB shape MUST
+NOT silently gain, lose, rename, or `null` a field — the canonical
+key set is closed at the 10 keys emitted by
+`src/storage/stats.rs::stats()` today (`shmem_ready`, `shmem_slots`,
+`shmem_hits`, `shmem_misses`, `shmem_inserts`, `shmem_evictions`,
+`plan_cache_hits`, `plan_cache_misses`, `plan_cache_inserts`,
+`plan_cache_local_size`). Extends the existing `82-stats-shape.sql`
+in-place (no new pg_regress file — the file is explicitly scoped to
+schema-shape contract and these three new invariants are schema
+shape too) with three appended assertion blocks: (a) exact field
+count — `count(*) FROM jsonb_object_keys(stats()) = 10`, the
+deliberate-update tripwire that fires the moment any new field
+lands without a corresponding test update; (b) keys-match-canonical
+— `array_agg(k ORDER BY k) = ARRAY[…literal 10-element list…]`,
+catches both silent additions and silent renames in one assertion
+(an addition makes the array longer; a rename swaps an element);
+(c) no-null-fields — `bool_and(jsonb_typeof(value) != 'null')`,
+catches a refactor that defaults an uninitialised counter to JSON
+`null` rather than `0` (the type-contract block above would not
+fire on a null since `jsonb_typeof(null) = 'null'` is checked
+positively only on the seven existing-key assertions, not on
+unknown keys). The existing "fields-that-should-be-there are
+there" assertions are sibling to these "fields-that-shouldn't-be-
+there ARE NOT there" assertions; together they pin the closed-set
+shape contract that downstream operator tooling (CloudNativePG
+operators, CI dashboards, client telemetry parsers) wires against.
+
 Test bar: **93 pgrx + 39 pg_regress + 23 W3C-shape + 3 LUBM-shape
 = 158 tests**, green locally. Slice #58 doesn't add a pg_regress
 file — the smoke is a separate harness, so its lock-file (24
 rows / 17,134 triples) lives alongside the script and is
 enforced by `tests/perf/smoke-ontologies.sh --check`. Slice #57
 adds the 39th pg_regress file (`66-parse-sparql-roundtrip.sql`).
+Slice #56 extends `82-stats-shape.sql` in-place — three new
+assertion blocks, three new rows in the expected baseline — no
+test count bump (still 39 pg_regress files).
 
 ### Translator fix — type-aware `MIN` / `MAX`
 
