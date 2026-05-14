@@ -6,6 +6,29 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release notes — docs/09-release v0.3.0 section drafted (slice #23)
+
+Replaces the "No release cut yet" preamble in `docs/09-release.md`
+with a `## v0.3.0 — 2026-05-14 (planned)` section: engine surface
+recap (storage / SPARQL / Phase 3 perf / Phase 4 inference / Phase 5
+stub / Phase 6 CI), the consolidated test bar (93 pgrx + 39 pg_regress
++ 23 W3C-shape + 3 LUBM-shape + 24 ontology smoke / 17 134 triples),
+performance characteristics (sub-µs dict cache hit, prepared-plan
+reuse, phase A bulk ingest with the 2× wall-clock target carried to
+v0.4 phase B), the {pg14..pg17}×{amd64, arm64} matrix with PG 18
+deferred per E-006, license + attribution (Apache 2.0, Copyright 2026
+Peter Styk, LICENSE + NOTICE inside every tarball per §4(d)), MSRV
+1.91, tarball layout per INSTALL §3, known issues (E-006 / E-007 /
+E-009 / E-010), and the v0.4 deferral list. Content sourced from
+CHANGELOG `[Unreleased]` and LLD v0.3 §2–§7; no new claims, no
+fabricated numbers.
+
+The CHANGELOG `[Unreleased]` block is **not yet cut** to a
+`[0.3.0] — YYYY-MM-DD` block — that move lands in a later slice
+(group 4-1, the actual tag commit). This slice only drafts the
+engineering-side narrative inside `docs/09-release.md`; the
+GitHub Release body itself is a separate slice (#22).
+
 ### Release pre-flight — smoke-install verification (slice #24)
 
 End-to-end install rehearsal of the slice #25 tarball

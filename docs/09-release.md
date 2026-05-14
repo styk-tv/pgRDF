@@ -4,10 +4,169 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-No release has been cut yet — the first cut is `v0.3.0` (in progress).
-Cargo.toml still reads `version = "0.2.0"`; bump-to-`0.3.0` happens as
-part of the cut. See `CHANGELOG.md` for the running set of `[Unreleased]`
-entries that will land in that release.
+The first cut is `v0.3.0`. Cargo.toml still reads `version = "0.2.0"`;
+bump-to-`0.3.0` happens as part of the cut. See `CHANGELOG.md` for the
+running set of `[Unreleased]` entries that move into the `[0.3.0]` block
+at tag time.
+
+## v0.3.0 — 2026-05-14 (planned)
+
+The first official pgRDF release. Ships the v0.3 engine surface
+feature-complete state: dictionary-encoded quad storage, the SELECT /
+ASK SPARQL surface, OWL 2 RL inference, a SHACL validation stub, the
+regression + W3C-shape + LUBM-shape harnesses in CI, and the
+{pg14..pg17}×{amd64, arm64} release tarball pipeline. The actual tag
+date stamps when the release commit lands and the matrix turns green.
+
+### Engine surface
+
+- **Storage (Phase 1, Phase 2.0, Phase 2.1, Phase 2.2)** —
+  dictionary-encoded terms (`_pgrdf_dictionary`, HASH index on
+  `lexical_value`), LIST-partitioned quads keyed by `graph_id`, the
+  SPO / POS / OSP hexastore covering indexes, and Turtle ingest.
+  Surface UDFs: `pgrdf.parse_turtle`, `pgrdf.load_turtle`,
+  `pgrdf.load_turtle_verbose`, `pgrdf.put_term`, `pgrdf.get_term`,
+  `pgrdf.put_quad`, `pgrdf.count_quads`, `pgrdf.add_graph`,
+  `pgrdf.version`, `pgrdf.stats`, `pgrdf.shmem_reset`. See LLD §2.
+- **SPARQL (Phase 2.2 + Phase 3 SPARQL steps 1–12)** — `pgrdf.sparql`
+  answers `SELECT` and `ASK` with N-pattern BGP shared-variable inner
+  joins; `FILTER` over identity / boolean / term-type / numeric
+  ordering / arithmetic / `REGEX` / `CONTAINS` / `STR*` / `IN`;
+  `DISTINCT` / `REDUCED` / `LIMIT` / `OFFSET` / `ORDER BY` with
+  `ASC` / `DESC`; single-triple `OPTIONAL` with chained blocks; n-way
+  `UNION`; multi-triple `MINUS`; aggregates `COUNT` / `SUM` / `AVG` /
+  type-aware `MIN` / `MAX` / `GROUP_CONCAT` (with `SEPARATOR`) /
+  `SAMPLE` over `GROUP BY` with `HAVING` (alias form and the inline
+  `HAVING(SUM(?v) > c)` shape); `BIND(expr AS ?v)` in projection
+  position. `pgrdf.sparql_parse` surfaces the spargebra AST and an
+  `unsupported_algebra` array so callers can preview translatability
+  without execution. See LLD §3 for the full capability matrix.
+- **Storage performance (Phase 3 steps 1–3 phase A)** — shmem
+  dictionary cache (LLD §4.1), prepared-plan cache (LLD §4.2), and
+  the prepared bulk-INSERT path (LLD §4.3 phase A). The §4.3
+  acceptance criterion of a 2× ingest wall-clock improvement is NOT
+  met by phase A alone; phase B (`heap_multi_insert` / `COPY BINARY`)
+  is deferred to v0.4 per LLD §4.3.
+- **Inference (Phase 4)** — `pgrdf.materialize` runs forward-chaining
+  OWL 2 RL via `reasonable 0.4`. See LLD §5.2.
+- **Validation (Phase 5)** — `pgrdf.validate` ships as a stub
+  (`{"status": "stub", …}`) with the stable SQL surface in place.
+  Real SHACL execution is blocked upstream per ERRATA E-009; clients
+  and tooling can wire against the surface now and pick up real
+  validation when the upstream crate set re-aligns. See LLD §5.3.
+- **CI + release (Phase 6 steps 1–3, partial)** — the regression
+  suite runs in CI (`.github/workflows/ci.yml::regression`), the
+  W3C-shape and LUBM-shape harnesses run alongside, and the release
+  workflow (`.github/workflows/release.yml`) builds the
+  {pg14..pg17}×{amd64, arm64} matrix on tag push. The
+  `SHA256SUMS.asc` GPG-signing follow-up is deferred to v0.4
+  (no signing key provisioned yet — see §Aggregate checksums above).
+
+### Test bar
+
+- 93 pgrx integration tests (`cargo pgrx test`)
+- 39 pg_regress golden tests
+- 23 W3C-shape SPARQL conformance tests (hand-authored harness)
+- 3 LUBM-shape correctness gates
+- Plus manual smoke: 24 ontologies, 17 134 triples (W3C / Apache
+  Jena / ValueFlows / ConceptKernel), totals locked in
+  `tests/perf/smoke-ontologies.expected.tsv` with `--check` mode
+
+**Total: 158 automated + 24 manual smoke.** All green at cut time.
+Expected outputs are hand-computed — no autobaselining of new query
+coverage (LLD §6.2).
+
+### Performance characteristics
+
+- **Shmem dict cache** — lookup latency on cache hit < 1 µs (LWLock
+  share + ≤ 8 slot probes, ~120 ns on commodity hardware).
+  Cross-backend hit rate verified empirically by
+  `tests/regression/sql/50-shmem-dict-cache.sql`.
+- **Prepared-plan cache** — identical algebra reuses the cached plan
+  on its second and subsequent executions; per-backend, keyed by the
+  canonical algebra SQL string. Bypasses Postgres parse + plan.
+- **Bulk ingest (phase A)** — `flush_batch` routes through the same
+  prepared-plan path as SPARQL. The 2× wall-clock target is NOT met
+  by phase A alone — observed `synth-10k.ttl` load time is ~85 ms
+  steady-state both before and after, dominated by the per-batch
+  executor walk. Hitting the bar requires phase B's
+  `heap_multi_insert` / `COPY BINARY` work, deferred to v0.4.
+
+### Supported Postgres
+
+PG 14, 15, 16, 17 across `{amd64, arm64}` — **8 prebuilt tarballs
+per release.** PG 18 is held out of the matrix pending ERRATA E-006
+(pgrx upstream now supports PG 18 at 0.18.0, but local-compile
+blockers and a breaking migration — `pgrx_embed` removal,
+`crate-type` change — keep us on 0.16.1 for v0.3; the pgrx-0.18
+bump is a planned v0.4 work item).
+
+### License + attribution
+
+Apache License 2.0. Copyright 2026 Peter Styk
+&lt;peter@styk.tv&gt;. The `LICENSE` file carries the resolved
+copyright notice (project URL in place of the upstream `[yyyy]
+[name of copyright owner]` placeholders) and a `NOTICE` file at
+the repo root carries the Apache convention header. Both files
+are distributed inside every per-arch tarball per Apache 2.0
+§4(d). `Cargo.toml` declares `authors = ["Peter Styk
+<peter@styk.tv>"]` and a `homepage` URL alongside `repository`.
+
+### MSRV
+
+`rust-version = "1.91"` (Cargo.toml). The Linux builder pins
+`rust:1.91-bookworm`.
+
+### Tarball layout (INSTALL §3)
+
+`pgrdf-0.3.0-pg<N>-glibc-<arch>.tar.gz`:
+
+```
+pgrdf-0.3.0-pg<N>-glibc-<arch>/
+├── lib/pgrdf.so
+├── share/extension/pgrdf.control
+├── share/extension/pgrdf--0.3.0.sql
+├── LICENSE
+├── NOTICE
+└── SHA256SUMS   (per-tarball, covers every file above)
+```
+
+Plus an aggregate `SHA256SUMS` attached to the GitHub Release that
+covers every `pgrdf-*.tar.gz` asset. Internal layout verified
+end-to-end by slice #25 (manual repack) and slice #24 (clean-container
+smoke-install round-trip).
+
+### Known issues
+
+See [`specs/ERRATA.v0.2.md`](../specs/ERRATA.v0.2.md):
+
+- **E-006** — pgrx held at 0.16.1; PG 18 deferred to v0.4.
+- **E-007** — INSTALL §7's `extension_control_path` forward path
+  blocked by E-006; per-file bind mounts retain the same observable
+  end-state.
+- **E-009** — `pgrdf.validate` ships as a stub; real SHACL execution
+  blocked by upstream `shacl_validation` / `reasonable` feature
+  unification.
+- **E-010** — 4 informational `cargo audit` advisories accepted for
+  v0.3 (all in subtrees of pgrx 0.16.1 / `reasonable 0.4.1` and clear
+  automatically when E-006 / E-009 resolve).
+
+### Deferred to v0.4
+
+See
+[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).
+Highlights:
+
+- Named-graph scoping (`GRAPH { … }`) with an IRI ↔ `graph_id`
+  mapping table.
+- SPARQL UPDATE including graph-scoped variants.
+- Graph-level lifecycle UDFs over the LIST-partitioned quads table.
+- `CONSTRUCT` returning triple-shaped JSONB rows.
+- Property paths (`*` / `+` / `?` / `^`) beyond simple sequences.
+- `heap_multi_insert` / `COPY BINARY` ingestion (LLD §4.3 phase B,
+  to meet the 2× wall-clock bar).
+- `SHA256SUMS.asc` GPG signature for release artifacts.
+- pgrx 0.18 migration + PG 18 in the build matrix.
 
 ## The matrix
 
