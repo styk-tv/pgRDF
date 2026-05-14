@@ -237,11 +237,41 @@ and the new count is intentional, regenerate the TSV from a
 fresh smoke run and commit the delta as one explicit move; no
 `--accept`-style automatic refresh.
 
-Test bar: **93 pgrx + 38 pg_regress + 23 W3C-shape + 3 LUBM-shape
-= 157 tests**, green locally. Slice #58 doesn't add a pg_regress
+Locks #57 of the countdown: the end-to-end round-trip from
+`pgrdf.parse_turtle` ingest through `pgrdf.sparql` query MUST
+preserve every triple the parser saw, across all four
+object-term kinds AND the blank-node-subject case. New
+`tests/regression/sql/66-parse-sparql-roundtrip.sql` parses a
+single 5-shape Turtle fragment and asserts five
+`bool_and(EXISTS (SELECT 1 FROM pgrdf.sparql(…) WHERE …))`
+booleans, one per shape: (1) IRI object —
+`ex:alice foaf:knows ex:bob` resolves with the bob IRI as the
+lexical projection of `?o`; (2) plain literal —
+`foaf:name "Alice"`; (3) typed literal —
+`ex:age "30"^^xsd:integer` projects `"30"`; (4) lang-tagged
+literal — `ex:bio "Engineer"@en` projects `"Engineer"`; (5)
+blank-node subject — the anonymous `[ a foaf:Person ;
+foaf:name "Anon" ]` is keyed via a sibling-property join
+`?s foaf:name "Anon" . ?s foaf:name ?n` so the
+parser-allocated bnode id stays out of the assertion and the
+contract is "queryable via sibling property", not "this
+specific bnode id". Sibling to `61-materialize-then-sparql.sql`
+which locks the materialize→sparql edge; together they pin
+both ends of the storage layer's visibility contract to the
+SPARQL surface. Datatype URI and lang-tag echo policy are
+NOT pinned by this slice — the `pgrdf.sparql` projection
+emits the lexical value only; the storage-side datatype-URI
+contract is locked separately by `21-typed-literals.sql` and
+the lang-tag contract by `22-lang-tags.sql`. Guards against a
+refactor that loses a triple from the dict→quads write path
+for any one of these five term kinds.
+
+Test bar: **93 pgrx + 39 pg_regress + 23 W3C-shape + 3 LUBM-shape
+= 158 tests**, green locally. Slice #58 doesn't add a pg_regress
 file — the smoke is a separate harness, so its lock-file (24
 rows / 17,134 triples) lives alongside the script and is
-enforced by `tests/perf/smoke-ontologies.sh --check`.
+enforced by `tests/perf/smoke-ontologies.sh --check`. Slice #57
+adds the 39th pg_regress file (`66-parse-sparql-roundtrip.sql`).
 
 ### Translator fix — type-aware `MIN` / `MAX`
 
