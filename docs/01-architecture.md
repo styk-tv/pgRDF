@@ -20,7 +20,8 @@ process). It provides four engines, each a Rust module under `src/`:
                            │                  │                 │
                            │                  ▼                 │
                            │   shared memory  ◀── shmem dict    │
-                           │   (cross-backend, see §02)         │
+                           │   (planned — Phase 2.x; current    │
+                           │    cache is per-call HashMap)      │
                            └───────────────────────────────────┘
                                             │
                                             ▼
@@ -31,12 +32,12 @@ process). It provides four engines, each a Rust module under `src/`:
 
 ## The four engines (mapping to source modules)
 
-| Engine | Module | Authoritative spec |
-|---|---|---|
-| Storage | `src/storage/{dict,hexastore,loader}.rs` | LLD §3, §4.1, §4.3 |
-| Query | `src/query/{parser,executor,plan_cache}.rs` | LLD §4.2 |
-| Inference | `src/inference/reasonable.rs` | LLD §2; ERRATA E-002 |
-| Validation | `src/validation/shacl.rs` | LLD §2; ERRATA E-001 |
+| Engine | Module | Authoritative spec | Status |
+|---|---|---|---|
+| Storage | `src/storage/{dict,hexastore,loader}.rs` | LLD §3, §4.1, §4.3 | ✅ schema + CRUD + Turtle ingest; ⏳ shmem dict cache (§4.1) + COPY BINARY (§4.3) deferred — see [10-roadmap.md](10-roadmap.md) Phase 2.x |
+| Query | `src/query/{parser,executor}.rs` | LLD §4.2 | ✅ SPARQL SELECT with BGP + FILTER + OPTIONAL + UNION + MINUS + modifiers (Phase 3 step 6); ⏳ prepared-plan cache (§4.2) deferred |
+| Inference | `src/inference/reasonable.rs` (not yet created) | LLD §2; ERRATA E-002 | ⏳ Phase 4 |
+| Validation | `src/validation/shacl.rs` (not yet created) | LLD §2; ERRATA E-001 | ⏳ Phase 4 |
 
 ## Key invariants
 
@@ -56,5 +57,7 @@ process). It provides four engines, each a Rust module under `src/`:
 
 ## Deployment shape
 
-For local dev: `compose/` brings up stock postgres:18-bookworm with
-bind-mounted extension files. See `docs/06-installation.md` for K8s.
+For local dev: `compose/` brings up stock `postgres:17.4-bookworm`
+with bind-mounted extension files (PG 18 deferred pending pgrx
+upstream — ERRATA E-006). See [`docs/06-installation.md`](06-installation.md)
+for K8s.

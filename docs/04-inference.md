@@ -1,5 +1,10 @@
 # 04 — Inference
 
+> **Status: planned — not yet implemented.** This doc describes the
+> Phase 4 design. No `pgrdf.materialize` UDF exists today; the
+> `is_inferred` column on `_pgrdf_quads` is wired but never written
+> to. Tracked in [`docs/10-roadmap.md`](10-roadmap.md) Phase 4.
+
 Triggered by `SELECT pgrdf.materialize(<graph_id>)`. Reads quads from
 the named graph, runs them through `reasonable` (OWL 2 RL), and
 materializes inferred triples back into the same partition with

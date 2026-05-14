@@ -5,10 +5,10 @@ Order is meaningful — read top-down if you're new to the project.
 | # | Doc | Scope |
 |---|---|---|
 | 01 | [architecture.md](01-architecture.md) | What pgRDF is, the four engines (storage, query, inference, validation), how they connect. |
-| 02 | [storage.md](02-storage.md) | Shmem dictionary, partitioned hexastore, hexastore indexes, COPY-BINARY ingestion. |
-| 03 | [query.md](03-query.md) | SPARQL → algebra → prepared SQL; plan cache. |
-| 04 | [inference.md](04-inference.md) | OWL 2 RL materialization via `reasonable`. |
-| 05 | [validation.md](05-validation.md) | SHACL validation reports as JSONB. |
+| 02 | [storage.md](02-storage.md) | Dictionary, partitioned hexastore, hexastore indexes, ingest path (today batched INSERT; shmem + COPY BINARY queued). |
+| 03 | [query.md](03-query.md) | SPARQL → algebra → dynamic SQL; current SELECT surface; prepared plans queued. |
+| 04 | [inference.md](04-inference.md) | OWL 2 RL materialization via `reasonable` (planned, Phase 4). |
+| 05 | [validation.md](05-validation.md) | SHACL validation reports as JSONB (planned, Phase 4). |
 | 06 | [installation.md](06-installation.md) | INSTALL spec walk-through: K8s init container + entrypoint copy (PG ≤ 17) vs GUC drop-in (PG 18+). |
 | 07 | [development.md](07-development.md) | Local dev with `cargo pgrx` + the compose path. |
 | 08 | [testing.md](08-testing.md) | Five test layers + coverage gates by phase. |

@@ -1,5 +1,9 @@
 # 05 — Validation
 
+> **Status: planned — not yet implemented.** This doc describes the
+> Phase 4 design. No `pgrdf.validate` UDF exists today. Tracked in
+> [`docs/10-roadmap.md`](10-roadmap.md) Phase 4.
+
 `SELECT pgrdf.validate(data_graph BIGINT, shapes_graph BIGINT) → JSONB`
 validates `data_graph` against the SHACL shape graph in `shapes_graph`
 and returns a W3C `sh:ValidationReport` as JSONB.
