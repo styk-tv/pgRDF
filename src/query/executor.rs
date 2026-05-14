@@ -142,6 +142,12 @@ struct ParsedSelect {
     /// that holds the value (after the `Extend` rename); each entry
     /// becomes a column in the generated SELECT clause.
     aggregates: Vec<AggregateSpec>,
+    /// FILTER expressions that reference aggregate output vars —
+    /// these become a SQL `HAVING` clause rather than `WHERE`.
+    /// Populated by `parse_select` after the walk completes, by
+    /// migrating any filter that names an aggregate alias out of
+    /// `ps.filters`.
+    having_filters: Vec<Expression>,
     /// When non-empty, this is a UNION query — each entry is a
     /// self-contained branch with its own BGP / filters / optionals.
     /// Single-branch fields (`bgp`, `filters`, `optionals`) remain
@@ -175,13 +181,20 @@ struct AggregateSpec {
     arg_var: Option<String>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum AggregateFn {
     Count,
     Sum,
     Avg,
     Min,
     Max,
+    /// GROUP_CONCAT(?v [; SEPARATOR = "…"]) — Postgres `string_agg`.
+    /// Separator defaults to a single space per SPARQL spec.
+    GroupConcat { separator: String },
+    /// SAMPLE(?v) — "any value from the group". Postgres has no
+    /// SAMPLE; we use `MIN(...)` as a deterministic surrogate which
+    /// is spec-conformant ("an implementation-defined element").
+    Sample,
 }
 
 #[derive(Default)]
@@ -211,6 +224,18 @@ fn translate(q: &Query) -> ExecPlan {
 fn parse_select(p: &GraphPattern) -> ParsedSelect {
     let mut ps = ParsedSelect::default();
     walk_select(p, &mut ps);
+    // For aggregate queries, any filter that names an aggregate
+    // output variable is HAVING (the outer SQL ran the GROUP BY
+    // by the time it evaluates the predicate). Split now so
+    // build_aggregate_sql can route each filter correctly.
+    if !ps.aggregates.is_empty() {
+        let agg_names: Vec<String> = ps.aggregates.iter().map(|a| a.output_var.clone()).collect();
+        let (having, where_): (Vec<_>, Vec<_>) = std::mem::take(&mut ps.filters)
+            .into_iter()
+            .partition(|f| expression_references_any(f, &agg_names));
+        ps.filters = where_;
+        ps.having_filters = having;
+    }
     if ps.projected.is_empty() {
         // SELECT * — collect variables in the order they appear in
         // the BGP (or across all UNION branches). This branch fires
@@ -244,6 +269,37 @@ fn parse_select(p: &GraphPattern) -> ParsedSelect {
     ps
 }
 
+/// Does any sub-expression of `e` reference a variable in `names`?
+/// Used to migrate filters into a HAVING clause when they name an
+/// aggregate output variable.
+fn expression_references_any(e: &Expression, names: &[String]) -> bool {
+    let any = |inner: &Expression| expression_references_any(inner, names);
+    let any_list = |list: &[Expression]| list.iter().any(|x| expression_references_any(x, names));
+    match e {
+        Expression::Variable(v) => names.iter().any(|n| n == v.as_str()),
+        Expression::Bound(v) => names.iter().any(|n| n == v.as_str()),
+        Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => any(a) || any(b),
+        Expression::UnaryPlus(a) | Expression::UnaryMinus(a) | Expression::Not(a) => any(a),
+        Expression::If(a, b, c) => any(a) || any(b) || any(c),
+        Expression::In(op, list) => any(op) || any_list(list),
+        Expression::Coalesce(list) => any_list(list),
+        Expression::FunctionCall(_, args) => any_list(args),
+        Expression::Exists(_) => false,
+        Expression::NamedNode(_) | Expression::Literal(_) => false,
+    }
+}
+
 /// Lower a spargebra `AggregateExpression` into our AggregateSpec.
 /// Supported: COUNT(*), COUNT(?v) [DISTINCT], SUM(?v) [DISTINCT],
 /// AVG(?v), MIN(?v), MAX(?v). Anything else panics.
@@ -268,12 +324,10 @@ fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec 
                 AggregateFunction::Avg => AggregateFn::Avg,
                 AggregateFunction::Min => AggregateFn::Min,
                 AggregateFunction::Max => AggregateFn::Max,
-                AggregateFunction::GroupConcat { .. } => {
-                    panic!("sparql: GROUP_CONCAT is Phase 3 backlog")
-                }
-                AggregateFunction::Sample => {
-                    panic!("sparql: SAMPLE is Phase 3 backlog")
-                }
+                AggregateFunction::GroupConcat { separator } => AggregateFn::GroupConcat {
+                    separator: separator.clone().unwrap_or_else(|| " ".to_string()),
+                },
+                AggregateFunction::Sample => AggregateFn::Sample,
                 AggregateFunction::Custom(iri) => {
                     panic!("sparql: custom aggregate {iri:?} not supported")
                 }
@@ -677,6 +731,27 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
         sql.push_str(&group_by_parts.join(", "));
     }
 
+    // HAVING — filters that name aggregate output vars. Variable refs
+    // in the filter expand to the underlying SQL aggregate function;
+    // group-var refs expand to the group expression.
+    if !ps.having_filters.is_empty() {
+        let mut having_parts: Vec<String> = Vec::new();
+        for expr in &ps.having_filters {
+            let sql_pred = translate_filter_with_aggregates(
+                expr,
+                &anchors,
+                &ps.aggregates,
+                &group_exprs,
+            )
+            .unwrap_or_else(|| {
+                panic!("sparql: HAVING expression not translatable: {expr:?}")
+            });
+            having_parts.push(sql_pred);
+        }
+        sql.push_str(" HAVING ");
+        sql.push_str(&having_parts.join(" AND "));
+    }
+
     // ORDER BY / LIMIT / OFFSET on aggregate output: only group vars
     // and aggregate outputs are in scope.
     if !ps.order_by.is_empty() {
@@ -711,7 +786,15 @@ fn translate_aggregate(
     anchors: &HashMap<String, (usize, &'static str)>,
 ) -> String {
     let distinct = if agg.distinct { "DISTINCT " } else { "" };
-    match (agg.func, &agg.arg_var) {
+    let lex_subselect = |var: &str| {
+        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+            panic!("sparql: aggregate over ?{var} but variable not bound in any BGP pattern")
+        });
+        format!(
+            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
+        )
+    };
+    match (&agg.func, &agg.arg_var) {
         (AggregateFn::Count, None) => "COUNT(*)".to_string(),
         (AggregateFn::Count, Some(var)) => {
             let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
@@ -727,23 +810,104 @@ fn translate_aggregate(
             let numeric_expr = numeric_cast_subselect(var, anchors);
             format!("AVG({distinct}{numeric_expr})")
         }
-        (AggregateFn::Min, Some(var)) => {
-            let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-                panic!("sparql: aggregate MIN(?{var}) but variable not bound in any BGP pattern")
-            });
+        (AggregateFn::Min, Some(var)) => format!("MIN({distinct}{})", lex_subselect(var)),
+        (AggregateFn::Max, Some(var)) => format!("MAX({distinct}{})", lex_subselect(var)),
+        (AggregateFn::GroupConcat { separator }, Some(var)) => {
+            let escaped = separator.replace('\'', "''");
             format!(
-                "MIN({distinct}(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col}))"
+                "STRING_AGG({distinct}{}, '{escaped}')",
+                lex_subselect(var)
             )
         }
-        (AggregateFn::Max, Some(var)) => {
-            let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-                panic!("sparql: aggregate MAX(?{var}) but variable not bound in any BGP pattern")
-            });
-            format!(
-                "MAX({distinct}(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col}))"
-            )
-        }
+        (AggregateFn::Sample, Some(var)) => format!("MIN({})", lex_subselect(var)),
         (_, None) => panic!("sparql: aggregate over `*` only supported for COUNT"),
+    }
+}
+
+/// Translate a HAVING filter where some variable references resolve
+/// to aggregate output expressions rather than dict-id columns.
+/// Supported predicates: identity (`=`, `!=`, `sameTerm`), numeric
+/// ordering (`<`, `>`, `<=`, `>=`), boolean composition (`&&`,
+/// `||`, `!`). Variable refs may name (1) an aggregate output —
+/// expands to the raw SQL aggregate, no `::TEXT`; (2) a group var —
+/// expands to its dict-lookup expression cast to numeric / text as
+/// the comparison demands.
+fn translate_filter_with_aggregates(
+    expr: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+    aggs: &[AggregateSpec],
+    group_exprs: &[(String, String)],
+) -> Option<String> {
+    let numeric_side = |e: &Expression| -> Option<String> {
+        match e {
+            Expression::Variable(v) => {
+                let name = v.as_str();
+                if let Some(agg) = aggs.iter().find(|a| a.output_var == name) {
+                    Some(translate_aggregate(agg, anchors))
+                } else if let Some((_, gexpr)) = group_exprs.iter().find(|(n, _)| n == name) {
+                    Some(format!("({gexpr})::numeric"))
+                } else {
+                    None
+                }
+            }
+            Expression::Literal(l) => {
+                if !is_xsd_numeric_iri(l.datatype().as_str()) {
+                    return None;
+                }
+                if l.value().parse::<f64>().is_err() {
+                    return None;
+                }
+                Some(format!("{}::numeric", l.value()))
+            }
+            _ => None,
+        }
+    };
+    let text_side = |e: &Expression| -> Option<String> {
+        match e {
+            Expression::Variable(v) => {
+                let name = v.as_str();
+                if let Some(agg) = aggs.iter().find(|a| a.output_var == name) {
+                    Some(format!("({})::text", translate_aggregate(agg, anchors)))
+                } else if let Some((_, gexpr)) = group_exprs.iter().find(|(n, _)| n == name) {
+                    Some(gexpr.clone())
+                } else {
+                    None
+                }
+            }
+            Expression::Literal(l) => {
+                let escaped = l.value().replace('\'', "''");
+                Some(format!("'{escaped}'"))
+            }
+            _ => None,
+        }
+    };
+    match expr {
+        Expression::Greater(a, b) => Some(format!("({} > {})", numeric_side(a)?, numeric_side(b)?)),
+        Expression::GreaterOrEqual(a, b) => {
+            Some(format!("({} >= {})", numeric_side(a)?, numeric_side(b)?))
+        }
+        Expression::Less(a, b) => Some(format!("({} < {})", numeric_side(a)?, numeric_side(b)?)),
+        Expression::LessOrEqual(a, b) => {
+            Some(format!("({} <= {})", numeric_side(a)?, numeric_side(b)?))
+        }
+        Expression::Equal(a, b) | Expression::SameTerm(a, b) => {
+            Some(format!("({} = {})", text_side(a)?, text_side(b)?))
+        }
+        Expression::And(a, b) => {
+            let l = translate_filter_with_aggregates(a, anchors, aggs, group_exprs)?;
+            let r = translate_filter_with_aggregates(b, anchors, aggs, group_exprs)?;
+            Some(format!("({l} AND {r})"))
+        }
+        Expression::Or(a, b) => {
+            let l = translate_filter_with_aggregates(a, anchors, aggs, group_exprs)?;
+            let r = translate_filter_with_aggregates(b, anchors, aggs, group_exprs)?;
+            Some(format!("({l} OR {r})"))
+        }
+        Expression::Not(inner) => {
+            let l = translate_filter_with_aggregates(inner, anchors, aggs, group_exprs)?;
+            Some(format!("(NOT ({l}))"))
+        }
+        _ => None,
     }
 }
 
@@ -1876,6 +2040,106 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2);
+    }
+
+    /// HAVING — post-aggregate filter on COUNT(?o) > N.
+    #[pg_test]
+    fn sparql_aggregate_having_count() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:1 . ex:a ex:p ex:2 . ex:a ex:p ex:3 . ex:a ex:p ex:4 .
+                 ex:x ex:q ex:y .',
+                8_080)",
+        )
+        .unwrap();
+
+        // Per-predicate COUNT: ex:p → 4, ex:q → 1. HAVING ?n > 2 keeps ex:p.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?p (COUNT(?o) AS ?n)
+                  WHERE { ?s ?p ?o }
+                GROUP BY ?p HAVING (?n > 2)'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 1);
+    }
+
+    /// HAVING with SUM threshold.
+    #[pg_test]
+    fn sparql_aggregate_having_sum() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:age 30 . ex:b ex:age 25 . ex:c ex:age 40 . ex:d ex:age 20 .',
+                8_081)",
+        )
+        .unwrap();
+
+        // Only ?p with SUM > 50 survives. ex:age sum = 115, passes.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?p (SUM(?v) AS ?t)
+                  WHERE { ?s ?p ?v }
+                GROUP BY ?p HAVING (?t > 50)'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 1);
+    }
+
+    /// GROUP_CONCAT — string aggregation with separator.
+    #[pg_test]
+    fn sparql_aggregate_group_concat() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p \"x\" . ex:a ex:p \"y\" . ex:a ex:p \"z\" .',
+                8_082)",
+        )
+        .unwrap();
+
+        let row: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'SELECT (GROUP_CONCAT(?o; SEPARATOR=\",\") AS ?vals)
+                  WHERE { ?s ?p ?o }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        // Order isn't specified by SPARQL but our STRING_AGG with no
+        // ORDER BY returns Postgres' encounter order. Sort assertion
+        // to keep the test deterministic across runs.
+        let mut parts: Vec<&str> = row.0["vals"].as_str().unwrap().split(',').collect();
+        parts.sort();
+        assert_eq!(parts, vec!["x", "y", "z"]);
+    }
+
+    /// SAMPLE returns one of the values from the group (we implement
+    /// as `MIN(lexical_value)` — spec says "implementation-defined
+    /// element", and MIN is a deterministic choice).
+    #[pg_test]
+    fn sparql_aggregate_sample() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p \"b\" . ex:a ex:p \"c\" . ex:a ex:p \"d\" .',
+                8_083)",
+        )
+        .unwrap();
+
+        let row: pgrx::JsonB = Spi::get_one(
+            "SELECT sparql FROM pgrdf.sparql(
+               'SELECT (SAMPLE(?o) AS ?one) WHERE { ?s ?p ?o }'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        let s = row.0["one"].as_str().unwrap().to_string();
+        assert!(["b", "c", "d"].contains(&s.as_str()), "got {s}");
     }
 
     /// COUNT(*) — total solutions for the BGP.

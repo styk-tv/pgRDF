@@ -6,6 +6,35 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 8 — HAVING + GROUP_CONCAT + SAMPLE
+
+- `pgrdf.sparql` now translates `HAVING (expr)` clauses on
+  aggregate queries. `parse_select` post-processes the collected
+  filters: any filter referencing an aggregate output variable
+  becomes a HAVING predicate (the rest stay as WHERE).
+- `translate_filter_with_aggregates` is the HAVING-aware translator:
+  variable references resolve to (a) the underlying SQL aggregate
+  function for aggregate-output vars, (b) the group-by expression
+  for group vars, (c) literals are used directly. Supports
+  identity, numeric ordering (`<`/`>`/`<=`/`>=`), boolean composition.
+- `GROUP_CONCAT(?v [; SEPARATOR = "…"])` → Postgres `STRING_AGG`,
+  default separator a single space per SPARQL spec.
+- `SAMPLE(?v)` → `MIN(lexical_value)` as a deterministic surrogate
+  (SPARQL spec says "implementation-defined element"; MIN is one
+  conformant choice).
+- 4 new pg_tests: HAVING with COUNT, HAVING with SUM, GROUP_CONCAT
+  with custom separator, SAMPLE.
+- `tests/regression/sql/40-sparql-having.sql` covers 9 query
+  shapes (HAVING > N, HAVING = 1, HAVING composite, GROUP_CONCAT
+  custom + default separator, SAMPLE, SUM-HAVING on non-numeric
+  strings — demonstrates the numeric-awareness rule — and
+  SUM-HAVING on real numeric data across two graphs).
+- `README.md` pills: 63+20 → 67+21.
+
+Test bar:
+  pg_test:    67 passed; 0 failed  (was 63)
+  regression: 21 passed; 0 failed  (was 20)
+
 ### Phase 3 step 7 — Aggregates + GROUP BY
 
 - `pgrdf.sparql` handles SPARQL aggregates with or without
