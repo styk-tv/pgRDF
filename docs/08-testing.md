@@ -7,21 +7,26 @@ layers as a forward-looking signal.
 
 ## Layer matrix
 
-Phase numbering matches the (revised) [`10-roadmap.md`](10-roadmap.md):
-Phase 1 = core storage + build automation; Phase 2 = query engine
-+ storage performance; Phase 3 = extended SPARQL surface
-(current — through step 6 / MINUS); Phase 4 = inference + validation;
-Phase 5 = release + LUBM.
+Phase numbering matches v0.3 LLD [`10-roadmap.md`](10-roadmap.md):
+Phase 1 = core storage + build automation; Phase 2 = SPARQL
+functional coverage; Phase 3 = storage performance; Phase 4 =
+inference (OWL 2 RL); Phase 5 = validation (SHACL); Phase 6 =
+CI + W3C conformance + release. v0.3 engine surface is
+**feature-complete** modulo the explicitly deferred Phase 3
+step 3b (heap_multi_insert) and Phase 5's blocked SHACL
+integration (ERRATA E-009).
 
-| Layer | Runtime | Phase 1 | Phase 2 | Phase 3 (current) | Phase 4 | Phase 5 |
-|---|---|---|---|---|---|---|
-| Rust unit (`cargo test`) | sec | smoke only | parser AST coverage | filter/op coverage | reasoner correctness | full storage coverage |
-| pgrx integration (`cargo pgrx test`) | ~30s | CREATE EXTENSION + drop ✅ | ingest + basic SPARQL ✅ | **56 ✅** | inference materialization | SHACL validation |
-| pg_regress golden | ~1min | basic schema ✅ | core SPARQL ✅ | **19 ✅** | inference + query | full SHACL conformance |
-| Ontology smoke | sec each, manual | — | 24 ontologies, 17 134 triples ✅ | (same set) | (same set) | (same set) |
-| W3C SPARQL 1.1 | min | scaffolded | ≥ 30 % pass | runner not wired ⏳ | ≥ 70 % pass | ≥ 95 % pass |
-| W3C SHACL | min | scaffolded | runner runs | not wired ⏳ | ≥ 50 % pass | ≥ 90 % pass |
-| LUBM perf | min | — | LUBM-1 smoke | LUBM-10 baseline | LUBM-10 (carry) | LUBM-100 vs Jena/AGE |
+| Layer | Runtime | Pre-v0.3 | v0.3 (current) | v0.4 target |
+|---|---|---|---|---|
+| Rust unit (`cargo test`) | sec | smoke | parser + executor + cache primitives | full storage coverage |
+| pgrx integration (`cargo pgrx test`) | ~30 s | 79 ✅ | **93 ✅** | + heap_multi_insert tests |
+| pg_regress golden | ~1 min | 25 ✅ | **33 ✅** | + W3C TTL-manifest runner outputs |
+| W3C-shape harness | ~5 s on top of regression | — | **23 ✅** | superseded by the TTL-manifest runner |
+| LUBM-shape harness | ~3 s on top of regression | — | **3 ✅** | superseded by LUBM-1/10/100 real benchmarks |
+| Ontology smoke | sec each, manual | 24 ontologies, 17 134 triples ✅ | (same set) | (same set) |
+| W3C SPARQL 1.1 conformance (full manifest) | min | scaffolded | runner not wired ⏳ | ≥ 30 % pass |
+| W3C SHACL conformance | min | scaffolded | not wired ⏳ (blocked, ERRATA E-009) | ≥ 50 % pass once E-009 clears |
+| LUBM perf (real LUBM gen + cross-engine) | min | — | scaffold only | LUBM-10 vs Jena TDB / Apache AGE |
 
 Test counts are absolute (cumulative, not per-phase). The number
 ratchets with every commit on `main`; a green build is required to

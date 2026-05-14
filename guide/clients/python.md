@@ -113,7 +113,7 @@ with engine.begin() as conn:
     print(f"loaded {n} triples")
 ```
 
-## rdflib bridge (sketch — Phase 2.2 step 5)
+## rdflib bridge (sketch)
 
 `rdflib` is the dominant Python RDF library. Today, its default
 `Memory` and `BerkeleyDB` stores keep triples client-side. A natural

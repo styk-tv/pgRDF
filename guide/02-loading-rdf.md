@@ -1,7 +1,9 @@
 # 02 — Loading RDF
 
-pgRDF supports Turtle today (other syntaxes are queued for Phase 3).
-There are two entry points: file-based and string-based.
+pgRDF supports Turtle today (other syntaxes — N-Triples, TriG,
+N-Quads — are queued for v0.4 alongside the SPARQL-side
+serialisation surface). There are two entry points: file-based
+and string-based.
 
 ## `pgrdf.load_turtle(path, graph_id, base_iri = NULL) → BIGINT`
 
@@ -129,15 +131,24 @@ SELECT id FROM pgrdf._pgrdf_dictionary
 
 ## Performance posture (today)
 
-- Per-triple SPI calls drop from ~7 to ~1 after the dict cache warms
-  up (Phase 2.2). Empirically: a 100-triple synthetic fixture hits
+- Per-triple SPI calls drop from ~7 to ~1 after the per-call HashMap
+  dict cache warms. Empirically: a 100-triple synthetic fixture hits
   185 cache references vs 115 DB references — see
   [`tests/regression/sql/25-bulk-ingest.sql`](../tests/regression/sql/25-bulk-ingest.sql)
   for the empirical assertions.
+- A second load of the same Turtle (within the postmaster's
+  lifetime) hits the **cross-backend shmem dict cache** (LLD §4.1):
+  0 dictionary-table touches for already-seen terms. Counters in
+  `load_turtle_verbose.shmem_cache_hits` and cumulative
+  `pgrdf.stats()` (`shmem_hits` / `shmem_inserts`).
+- Every flush of the batched `INSERT … unnest(…)` reuses a
+  per-backend prepared plan (LLD §4.2 + §4.3 phase A); first flush
+  primes the cache, every subsequent flush reuses it.
 - The full `tests/perf/smoke-ontologies.sh` set (~17K triples across
   24 ontologies) currently completes in a few seconds total.
-- True `COPY ... FROM STDIN (FORMAT BINARY)` is the Phase 3 fast path
-  for millions-of-triples-per-second instance loads.
+- True `COPY … FROM STDIN (FORMAT BINARY)` /
+  `heap_multi_insert` for millions-of-triples-per-second instance
+  loads is the v0.4 fast path (LLD §4.3 phase B).
 
 ## What still doesn't work
 
@@ -145,7 +156,7 @@ SELECT id FROM pgrdf._pgrdf_dictionary
 |---|---|
 | `load_turtle: turtle parse error: Syntax(TurtleSyntaxError ... "No scheme found in an absolute IRI")` | Document uses relative IRIs. Pass `base_iri`. |
 | `load_turtle: turtle parse error: Syntax(...) "Invalid character …"` | Genuinely off-spec IRI (e.g. colon in path segment). Fix the source — pgRDF is strict by design. |
-| `load_turtle: unsupported object term (RDF-star not in v0.2 scope)` | Document uses RDF-star quoted triples. Not supported in v0.x. |
+| `load_turtle: unsupported object term (RDF-star not in v0.2 scope)` | Document uses RDF-star quoted triples. Not supported in the v0.x series. |
 | `load_turtle: failed to open …` | Path isn't reachable from the postgres process. Check your container/bind-mount config. |
 
 ## Next

@@ -26,8 +26,18 @@ SELECT pgrdf.load_turtle('/data/foaf.ttl', 1);
 -- Inspect what you got
 SELECT pgrdf.count_quads(1);
 
--- (Soon, Phase 2.2 step 5)
-SELECT * FROM pgrdf.sparql('SELECT ?s ?n WHERE { ?s foaf:name ?n }');
+-- Query it with SPARQL
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?n WHERE { ?s foaf:name ?n }'
+);
+
+-- Materialize OWL 2 RL entailments + query the closure
+SELECT pgrdf.materialize(1);
+SELECT * FROM pgrdf.sparql(
+  'PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+   SELECT ?c WHERE { <http://example.com/alice> rdf:type ?c }'
+);
 ```
 
 ## Who pgRDF is for
@@ -41,7 +51,7 @@ SELECT * FROM pgrdf.sparql('SELECT ?s ?n WHERE { ?s foaf:name ?n }');
 - **Researchers + tool authors** who need a strict-by-default,
   well-isolated triple store with cheap per-graph partition drops.
 
-## What's in pgRDF today (Alpha, Phase 2.2)
+## What's in pgRDF today (Alpha, v0.3 engine feature-complete)
 
 | Feature | Status |
 |---|---|
@@ -49,11 +59,18 @@ SELECT * FROM pgrdf.sparql('SELECT ?s ?n WHERE { ?s foaf:name ?n }');
 | Per-graph LIST partitions with O(seconds) whole-graph drop | ✅ |
 | Turtle ingest with `oxttl` (strict RFC 3987 IRIs) | ✅ |
 | Literal datatypes, language tags, blank nodes, `rdf:List` | ✅ |
-| Per-call ingest dict cache + batched INSERTs | ✅ |
-| SPARQL 1.1 query (BGP-only first cut) | ⏳ next step |
-| OWL 2 RL materialization | ⏳ Phase 3 |
-| SHACL validation → JSONB report | ⏳ Phase 3 |
-| W3C SPARQL 1.1 conformance ≥ 95% | ⏳ Phase 4 |
+| Cross-backend shmem dict cache (LLD §4.1) | ✅ |
+| Per-backend prepared-plan cache (LLD §4.2) | ✅ |
+| Bulk-INSERT plan reuse (LLD §4.3 phase A) | ✅ |
+| SPARQL SELECT / ASK with BGP + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias **and** inline aggregate) + BIND | ✅ |
+| OWL 2 RL materialization via `reasonable` (`pgrdf.materialize`) | ✅ |
+| Operator surface — `pgrdf.stats()`, `pgrdf.shmem_reset()`, `pgrdf.plan_cache_clear()` | ✅ |
+| Regression suite + W3C-shape harness in CI (PR-gate + nightly) | ✅ |
+| SHACL validation — surface stub; real impl blocked by [ERRATA E-009](../specs/ERRATA.v0.2.md) | 🚧 |
+| 2× ingest target (true COPY BINARY / heap_multi_insert) | ⏳ v0.4 |
+| Full W3C SPARQL 1.1 TTL-manifest runner against `w3c/rdf-tests` | ⏳ v0.4 |
+| LUBM-10 / LUBM-100 cross-engine benchmarks (Jena TDB, Apache AGE) | ⏳ v0.4 |
+| SPARQL surface — GRAPH, VALUES, property paths beyond simple seq, multi-triple OPTIONAL, CONSTRUCT, DESCRIBE, aggregates over UNION, BIND-in-FILTER | ⏳ v0.4 |
 
 For the long-form plan see
 [`docs/10-roadmap.md`](../docs/10-roadmap.md).
@@ -65,7 +82,7 @@ For the long-form plan see
 - **Not a full OWL 2 reasoner.** The OWL 2 RL profile is supported via
   the `reasonable` crate; EL/QL profiles aren't.
 - **Not RDF-star.** Quoted triples in subject / object position are
-  rejected at load time; pgRDF v0.2 treats them as out-of-scope per
+  rejected at load time; pgRDF v0.3 treats them as out-of-scope per
   SPEC.pgRDF.LLD §2.
 - **Not a replacement for a graph database when you don't already
   have Postgres.** If you're starting from zero with a 100M-edge

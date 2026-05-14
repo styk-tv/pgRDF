@@ -20,8 +20,9 @@ process). It provides four engines, each a Rust module under `src/`:
                            │                  │                 │
                            │                  ▼                 │
                            │   shared memory  ◀── shmem dict    │
-                           │   (planned — Phase 2.x; current    │
-                           │    cache is per-call HashMap)      │
+                           │     cache (LLD §4.1, shipped       │
+                           │     Phase 3 step 1) + plan-cache    │
+                           │     counters (§4.2)                 │
                            └───────────────────────────────────┘
                                             │
                                             ▼
@@ -34,10 +35,10 @@ process). It provides four engines, each a Rust module under `src/`:
 
 | Engine | Module | Authoritative spec | Status |
 |---|---|---|---|
-| Storage | `src/storage/{dict,hexastore,loader}.rs` | LLD §3, §4.1, §4.3 | ✅ schema + CRUD + Turtle ingest; ⏳ shmem dict cache (§4.1) + COPY BINARY (§4.3) deferred — see [10-roadmap.md](10-roadmap.md) Phase 2.x |
-| Query | `src/query/{parser,executor}.rs` | LLD §4.2 | ✅ SPARQL SELECT with BGP + FILTER + OPTIONAL + UNION + MINUS + modifiers (Phase 3 step 6); ⏳ prepared-plan cache (§4.2) deferred |
-| Inference | `src/inference/reasonable.rs` (not yet created) | LLD §2; ERRATA E-002 | ⏳ Phase 4 |
-| Validation | `src/validation/shacl.rs` (not yet created) | LLD §2; ERRATA E-001 | ⏳ Phase 4 |
+| Storage | `src/storage/{dict,hexastore,loader,shmem_cache,stats}.rs` | LLD §3, §4.1, §4.3 | ✅ schema + CRUD + Turtle ingest; ✅ shmem dict cache (§4.1); ✅ bulk-INSERT plan reuse (§4.3 phase A); ⏳ heap_multi_insert / true COPY BINARY (§4.3 phase B) v0.4 |
+| Query | `src/query/{parser,executor,plan_cache}.rs` | LLD §4.2 | ✅ SPARQL SELECT/ASK with BGP + FILTER + OPTIONAL + UNION + MINUS + aggregates (incl. type-aware MIN/MAX) + HAVING (alias + inline) + BIND + solution modifiers; ✅ prepared-plan cache (§4.2) — fully parameterised SQL, per-backend `OwnedPreparedStatement` cache |
+| Inference | `src/inference/reasonable.rs` | LLD §2; ERRATA E-002 | ✅ `pgrdf.materialize` via `reasonable` (OWL 2 RL forward chain, idempotent re-derivation) |
+| Validation | `src/validation/shacl.rs` | LLD §2; ERRATA E-001 / E-009 | 🚧 surface stub — real `shacl_validation` integration blocked by upstream dep conflict (E-009); v0.4 |
 
 ## Key invariants
 

@@ -27,18 +27,24 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `DISTINCT`, `REDUCED` → `SELECT DISTINCT` | ✅ |
 | `LIMIT N`, `OFFSET N` | ✅ |
 | `ORDER BY ?var`, `ORDER BY ASC(?var)`, `ORDER BY DESC(?var)` — lexicographic on `lexical_value` | ✅ |
-| `ORDER BY <complex expression>` | ⏳ Phase 3 (next slice) |
+| `ORDER BY <complex expression>` | ⏳ v0.4 |
 | `FILTER` — identity (`=`, `!=`, `sameTerm`), boolean (`&&`, `\|\|`, `!`), term-type (`isIRI`, `isLiteral`, `isBlank`), `BOUND` | ✅ |
 | `FILTER` — numeric ordering (`<`/`>`/`<=`/`>=`), `REGEX`, `IN`, `STR` passthrough | ✅ |
-| `FILTER` — arithmetic, `lang`, `datatype`, `STRLEN`, `CONTAINS`, full string-fn surface | ⏳ Phase 3 (next slice) |
+| `FILTER` — arithmetic (`+`/`-`/`*`/`/`), `LANG`, `DATATYPE`, `STRLEN`, `UCASE`, `LCASE`, `CONTAINS`, `STRSTARTS`, `STRENDS` | ✅ |
 | `OPTIONAL { single-triple BGP }` → LEFT JOIN (with inner FILTER honoured) | ✅ |
-| `OPTIONAL { multi-pattern BGP }`, nested OPTIONALs | ⏳ Phase 3 (next slice) |
+| `OPTIONAL { multi-pattern BGP }`, nested OPTIONALs | ⏳ v0.4 |
 | `UNION` (n-way, branches may bind different vars) | ✅ |
-| `MINUS { single-triple }` keyed by shared vars (no-op when no shared vars per spec) | ✅ |
-| Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`, `SUM`, `AVG`, `MIN`, `MAX` with `GROUP BY` | ✅ |
-| `MINUS { multi-pattern }`, property paths, `VALUES`, `BIND`, HAVING, `GROUP_CONCAT`, `SAMPLE` | ⏳ Phase 3 |
-| `CONSTRUCT`, `ASK`, `DESCRIBE` | ⏳ Phase 3 |
-| Named-graph `GRAPH { … }` clauses | ⏳ Phase 3 |
+| `MINUS { multi-pattern }` keyed by shared vars (no-op when no shared vars per spec) | ✅ |
+| Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`, `SUM`, `AVG`, type-aware `MIN`/`MAX`, `GROUP_CONCAT`, `SAMPLE` with `GROUP BY` | ✅ |
+| `HAVING(?alias > c)` (after AS-alias) **and** `HAVING(SUM(?v) > c)` (inline aggregate) | ✅ |
+| `BIND(expr AS ?v)` for projection (Literal / NamedNode / Variable, STR / LANG / DATATYPE / UCASE / LCASE / STRLEN, arithmetic, CONCAT) | ✅ |
+| `ASK { … }` query form | ✅ |
+| `CONSTRUCT`, `DESCRIBE` | ⏳ v0.4 |
+| Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) | ⏳ v0.4 |
+| `VALUES (?x) { … }` inline data | ⏳ v0.4 |
+| Named-graph `GRAPH { … }` clauses | ⏳ v0.4 |
+| Aggregates over `UNION` | ⏳ v0.4 |
+| BIND output referenced in later FILTER / BGP | ⏳ v0.4 |
 | `SERVICE` (federated SPARQL) | Out of scope for v0.x |
 
 `pgrdf.sparql_parse(q)` reports the parsed shape as JSONB and flags
@@ -172,8 +178,10 @@ blank nodes, and matches `=` for strings of the same datatype.
 
 The XSD-value-equality cases (`"1"^^xsd:integer = "01"^^xsd:integer`,
 `"a" = "a"^^xsd:string`) currently compare as *not equal* because
-the lexical forms differ. Numeric / lexical / value comparison lands
-with the rest of the ordering operators in the next Phase 3 slice.
+the lexical forms differ — a single-term-equality is by dict-id,
+which preserves datatype + language. Use the numeric ordering
+operators (`<`/`>`/`<=`/`>=`) for value-aware numeric comparison
+on `xsd:numeric` literals.
 
 #### `BOUND` in a BGP context
 
@@ -226,8 +234,9 @@ NULL and is dropped from the result, matching SPARQL's "type
 error → unbound" semantics. Comparing two strings as if they were
 numbers does not raise an error; it just yields no rows.
 
-If you need string ordering (lexicographic), wait for the
-`STR` + `<`/`>` overload in Phase 3 step 3, or post-process in SQL:
+If you need string ordering (lexicographic), post-process in SQL —
+the SPARQL surface only does numeric `<`/`>` on `xsd:numeric`
+typed literals; for strings, sort outside the SPARQL UDF:
 
 ```sql
 SELECT j ->> 's' AS s, j ->> 'n' AS n
@@ -647,7 +656,9 @@ IRIs that's the same answer; for numeric literals it sorts as
 strings (`"10"` < `"2"`), which is wrong. Use numeric FILTER plus
 a Postgres `ORDER BY (sparql->>'n')::numeric` wrapping the
 `pgrdf.sparql` call when you need numeric ordering today. Full
-type-aware ORDER BY lands in a subsequent Phase 3 slice.
+type-aware `ORDER BY ?n` over `xsd:numeric` literals lands in
+v0.4. (Note: aggregate `MIN`/`MAX` already use the type-aware
+path — see the aggregates section above.)
 
 #### DISTINCT + ORDER BY interaction
 
@@ -722,10 +733,12 @@ SELECT pgrdf.sparql_parse(
 --  → {…, "unsupported_algebra": ["LeftJoin (OPTIONAL)"]}
 ```
 
-FILTER is supported as of the Phase 3 first slice — the parser
-walks through it without flagging. If the executor encounters a
-FILTER expression shape it doesn't yet translate (e.g. numeric
-ordering, `regex`), it errors with a clear message rather than
+The FILTER surface is broad — identity, boolean, term-type,
+`BOUND`, numeric ordering, `REGEX`, `IN`, `STR`, `LANG`,
+`DATATYPE`, `UCASE`, `LCASE`, `STRLEN`, `CONTAINS`, `STRSTARTS`,
+`STRENDS`, and arithmetic — but if the executor encounters a
+shape it doesn't yet translate, it errors with a clear message
+rather than
 silently dropping the predicate.
 
 ## How the translation works
@@ -788,21 +801,30 @@ SELECT count(*) FROM pgrdf.sparql(
 For typical "100s of rows out" queries this is sub-millisecond on
 local data. For "millions of rows out" the dict round-trips become
 the dominant cost — a future optimisation is to hash-join the
-dictionary upfront instead of per-row scalar subqueries; Phase 3.
+dictionary upfront instead of per-row scalar subqueries; tracked
+as a v0.4 candidate.
 
-The Postgres prepared-statement cache (LLD §4.2) is a Phase 2.3
-delivery — once it lands, repeated `pgrdf.sparql` calls with the
-same BGP shape skip the SQL parse + plan.
+The Postgres prepared-statement cache (LLD §4.2) **shipped in
+Phase 3 step 2**: dict-id constants in the dynamic SQL are now
+`$N` parameters and a per-backend
+`thread_local!<RefCell<HashMap<String, OwnedPreparedStatement>>>`
+keeps the prepared plan around — so repeated `pgrdf.sparql`
+calls with the same BGP shape (including parametric variations
+on IRI / literal constants) reuse the same SPI plan. Counters
+live in `pgrdf.stats()` (`plan_cache_hits` / `misses` /
+`inserts` / `local_size`). The cross-backend shmem dict cache
+from LLD §4.1 also lives in `pgrdf.stats()`
+(`shmem_hits` / `misses` / `inserts` / `evictions`).
 
 ## Limits / gotchas
 
 - **Blank nodes in queries are rejected.** SPARQL semantics treat
-  `?b` and `_:b` as variables of different scoping rules; v0.2
+  `?b` and `_:b` as variables of different scoping rules; pgRDF
   refuses blank-node terms in patterns to keep semantics unambiguous.
 - **RDF-star quoted triples** are out of scope (LLD §2).
 - **Cross-graph queries**: today every `pgrdf.sparql` call searches
   ALL graphs. Per-graph scoping (`GRAPH <g> { … }` and the dataset
-  clause) arrives in Phase 3.
+  clause) lands in v0.4 — see the deferral list above.
 - **No SPARQL 1.2** anything yet — base SPARQL 1.1 only.
 
 ## Next
@@ -811,4 +833,5 @@ same BGP shape skip the SQL parse + plan.
   from Python.
 - [clients/rust.md](clients/rust.md) — same from Rust.
 - The engineering side: [`docs/03-query.md`](../docs/03-query.md)
-  for the planner posture + Phase 3 roadmap.
+  for the translator's algebra walk, the prepared-plan cache, and
+  the v0.4 deferred-surface notes.

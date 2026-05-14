@@ -5,7 +5,7 @@ SPARQL 1.1 string. User-facing documentation for the full surface
 lives in [`guide/03-querying.md`](../guide/03-querying.md); this
 page is the engineering-side view of how it's wired.
 
-## Pipeline (as shipped, Phase 3 step 6)
+## Pipeline (v0.3 — full Phase 3 SPARQL surface + steps 1-2 storage perf)
 
 ```
 SPARQL string
@@ -120,24 +120,31 @@ Concrete shape:
   same shape but different IRI constants → 1 miss + 1 hit; a
   structurally distinct query → 1 miss + 0 hits.
 
-## Surface today (Phase 3 step 6)
+## Surface today (v0.3 SPARQL surface complete)
 
 - ✅ Basic Graph Patterns (1..N triples)
-- ✅ `SELECT` with explicit projection or `SELECT *`
-- ✅ FILTER (identity, boolean, term-type, BOUND, numeric ordering,
-      REGEX, IN, STR)
-- ✅ Solution modifiers (DISTINCT, REDUCED, LIMIT, OFFSET, ORDER BY)
+- ✅ `SELECT` (explicit projection or `SELECT *`); `ASK`
+- ✅ FILTER — identity, boolean, term-type, BOUND, numeric
+      ordering, REGEX, IN, STR, LANG, DATATYPE, UCASE, LCASE,
+      STRLEN, CONTAINS, STRSTARTS, STRENDS, arithmetic
+- ✅ Solution modifiers — DISTINCT, REDUCED, LIMIT, OFFSET, ORDER BY
 - ✅ OPTIONAL (single triple per block, chained)
 - ✅ UNION (n-way; per-branch FILTERs / OPTIONALs / MINUSes)
-- ✅ MINUS (single triple, shared-var keyed; no-op without shared)
-- ✅ Aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` + `GROUP BY`).
-      Output values come back as JSON strings; SUM/AVG numeric-aware;
-      MIN/MAX lexicographic.
-- ⏳ HAVING, GROUP_CONCAT, SAMPLE, BIND, aggregates over UNION
-      — Phase 3 backlog
-- ⏳ Property paths beyond simple sequence — Phase 3 backlog
-- ⏳ Named-graph `GRAPH { … }` — needs graph-IRI→graph_id mapping
-- ⏳ `BIND`, `VALUES`, `CONSTRUCT`, `ASK`, `DESCRIBE` — Phase 3 backlog
+- ✅ MINUS — single AND multi-triple sub-pattern, shared-var keyed
+- ✅ Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`,
+      `SUM`, `AVG`, type-aware `MIN` / `MAX` (numeric path on
+      `xsd:numeric`, lex fallback), `GROUP_CONCAT`, `SAMPLE` with
+      `GROUP BY`
+- ✅ `HAVING` — both by aggregate alias (`HAVING(?total > c)`)
+      AND inline (`HAVING(SUM(?v) > c)`)
+- ✅ `BIND(expr AS ?v)` for projection — Literal / NamedNode /
+      Variable, STR / LANG / DATATYPE / UCASE / LCASE / STRLEN,
+      arithmetic, CONCAT
+- ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
+- ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
+- ⏳ Named-graph `GRAPH { … }` — needs graph-IRI→graph_id mapping; v0.4
+- ⏳ `VALUES` inline data — needs derived-table refactor; v0.4
+- ⏳ Aggregates over UNION; multi-triple OPTIONAL; BIND-in-FILTER — v0.4
 - ❌ Federated `SERVICE` — out of scope for v0.x
 
 ## Postgres custom scan hooks

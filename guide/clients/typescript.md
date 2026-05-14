@@ -177,8 +177,8 @@ upfront via `pgrdf.sparql_parse`).
 - pgRDF parses Turtle strictly through `oxttl`. Any TTL that fails
   to load is genuinely off-spec — don't silently retry with a
   "lenient" client; fix the source.
-- `pgrdf.sparql` searches every graph today (no `GRAPH { … }` scope
-  in v0.2). Phase 3.
+- `pgrdf.sparql` searches every graph today (no `GRAPH { … }`
+  scope yet). v0.4 work.
 - Set `search_path = pgrdf, public;` per connection if you want to
   drop the `pgrdf.` prefix on every call.
 - Heavy `load_turtle` calls hold the SPI connection for the duration
