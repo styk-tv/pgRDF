@@ -257,4 +257,9 @@ due to a non-RFC IRI in the source — see
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Copyright 2026 Peter Styk &lt;peter@styk.tv&gt;.
+
+Licensed under the Apache License, Version 2.0 — see
+[LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Project home: <https://github.com/styk-tv/pgRDF>.

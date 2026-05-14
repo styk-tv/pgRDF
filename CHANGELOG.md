@@ -6,6 +6,19 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Licensing — explicit attribution surface
+
+`LICENSE` carries the resolved Apache 2.0 copyright notice
+("Copyright 2026 Peter Styk &lt;peter@styk.tv&gt;" + project URL) in
+place of the upstream `[yyyy] [name of copyright owner]`
+placeholders. A new `NOTICE` file at the repo root carries the
+Apache convention header — distributions that bundle pgRDF
+should preserve it per Apache 2.0 §4(d). `Cargo.toml` gains an
+`authors = ["Peter Styk &lt;peter@styk.tv&gt;"]` field and a
+`homepage` mirror of the `repository` URL. `README.md`'s License
+section is fleshed out to name the copyright holder and link
+both `LICENSE` and `NOTICE`. No code or test changes.
+
 ### Spec — SPEC.pgRDF.LLD.v0.4-FUTURE draft landed (forward-looking)
 
 New `specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md` is a draft, forward-looking

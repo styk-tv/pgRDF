@@ -3,8 +3,10 @@ name = "pgrdf"
 version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
+authors = ["Peter Styk <peter@styk.tv>"]
 description = "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning"
 repository = "https://github.com/styk-tv/pgRDF"
+homepage = "https://github.com/styk-tv/pgRDF"
 readme = "README.md"
 
 [lib]
