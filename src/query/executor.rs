@@ -1979,7 +1979,7 @@ mod tests {
                  ex:a ex:p ex:b .
                  ex:a ex:p ex:c .
                  ex:a ex:q ex:b .',
-                8_001)",
+                8001)",
         )
         .unwrap();
 
@@ -2008,7 +2008,7 @@ mod tests {
                  ex:alice foaf:name \"Alice\" .
                  ex:bob   foaf:name \"Bob\" .
                  ex:alice foaf:age 30 .',
-                8_002)",
+                8002)",
         )
         .unwrap();
 
@@ -2035,7 +2035,7 @@ mod tests {
                  ex:k ex:p1 ex:v1 .
                  ex:k ex:p2 ex:v2 .
                  ex:other ex:p1 ex:v3 .',
-                8_003)",
+                8003)",
         )
         .unwrap();
 
@@ -2075,7 +2075,7 @@ mod tests {
                  ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> .
                  ex:bob   foaf:name \"Bob\"                            .
                  ex:carol foaf:name \"Carol\" ; foaf:mbox <mailto:c@x> .',
-                8_004)",
+                8004)",
         )
         .unwrap();
 
@@ -2103,7 +2103,7 @@ mod tests {
                  ex:alice foaf:name \"Alice\" .
                  ex:bob   foaf:name \"Bob\"   .
                  ex:carol foaf:name \"Carol\" .',
-                8_010)",
+                8010)",
         )
         .unwrap();
 
@@ -2130,7 +2130,7 @@ mod tests {
                  ex:a ex:p \"A\" .
                  ex:b ex:p \"B\" .
                  ex:c ex:p \"C\" .',
-                8_011)",
+                8011)",
         )
         .unwrap();
 
@@ -2153,7 +2153,7 @@ mod tests {
                  ex:s1 ex:p ex:o1 .
                  ex:s2 ex:p \"literal2\" .
                  ex:s3 ex:p ex:o3 .',
-                8_012)",
+                8012)",
         )
         .unwrap();
 
@@ -2179,7 +2179,7 @@ mod tests {
                  ex:a foaf:knows ex:b        .
                  ex:b foaf:name  \"Bob\"     .
                  ex:b foaf:knows ex:c        .',
-                8_013)",
+                8013)",
         )
         .unwrap();
 
@@ -2207,7 +2207,7 @@ mod tests {
                  ex:x ex:p ex:x .
                  ex:x ex:p ex:y .
                  ex:z ex:p ex:y .',
-                8_014)",
+                8014)",
         )
         .unwrap();
 
@@ -2235,7 +2235,7 @@ mod tests {
                  ex:b ex:age 35 .
                  ex:c ex:age 45 .
                  ex:d ex:age 55 .',
-                8_020)",
+                8020)",
         )
         .unwrap();
 
@@ -2259,7 +2259,7 @@ mod tests {
                  ex:b ex:age 35 .
                  ex:c ex:age 45 .
                  ex:d ex:age 55 .',
-                8_021)",
+                8021)",
         )
         .unwrap();
 
@@ -2283,7 +2283,7 @@ mod tests {
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:val 99 .
                  ex:b ex:val \"hello\" .',
-                8_022)",
+                8022)",
         )
         .unwrap();
 
@@ -2309,7 +2309,7 @@ mod tests {
                  ex:adam  foaf:name \"Adam\"  .
                  ex:bob   foaf:name \"Bob\"   .
                  ex:carol foaf:name \"Carol\" .',
-                8_023)",
+                8023)",
         )
         .unwrap();
 
@@ -2335,7 +2335,7 @@ mod tests {
                  ex:carol foaf:name \"Carol\" .
                  ex:mark  foaf:name \"Mark\"  .
                  ex:alice foaf:name \"Alice\" .',
-                8_024)",
+                8024)",
         )
         .unwrap();
 
@@ -2360,7 +2360,7 @@ mod tests {
                  ex:b ex:p 2 .
                  ex:c ex:p 3 .
                  ex:d ex:p 4 .',
-                8_025)",
+                8025)",
         )
         .unwrap();
 
@@ -2382,7 +2382,7 @@ mod tests {
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:n \"Alice\" .
                  ex:b ex:n \"Bob\"   .',
-                8_100)",
+                8100)",
         )
         .unwrap();
 
@@ -2405,7 +2405,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:age 30 .',
-                8_101)",
+                8101)",
         )
         .unwrap();
 
@@ -2428,7 +2428,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:n \"Alice\" .',
-                8_102)",
+                8102)",
         )
         .unwrap();
 
@@ -2453,7 +2453,7 @@ mod tests {
                  ex:a ex:price 10 ; ex:tax 2 .
                  ex:b ex:price 20 ; ex:tax 4 .
                  ex:c ex:price 100 ; ex:tax 25 .',
-                8_090)",
+                8090)",
         )
         .unwrap();
 
@@ -2478,7 +2478,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:v 4 . ex:b ex:v 5 . ex:c ex:v 10 .',
-                8_091)",
+                8091)",
         )
         .unwrap();
 
@@ -2510,7 +2510,7 @@ mod tests {
                  ex:n1 ex:label \"abc\" .
                  ex:n2 ex:label \"abcdef\" .
                  ex:n3 ex:label \"abcdefghi\" .',
-                8_092)",
+                8092)",
         )
         .unwrap();
 
@@ -2533,7 +2533,7 @@ mod tests {
                  ex:n1 ex:label \"hello world\" .
                  ex:n2 ex:label \"goodbye world\" .
                  ex:n3 ex:label \"hello there\" .',
-                8_093)",
+                8093)",
         )
         .unwrap();
 
@@ -2574,7 +2574,7 @@ mod tests {
                  ex:b ex:p \"english\"@en .
                  ex:c ex:p \"french\"@fr .
                  ex:d ex:p \"42\"^^xsd:integer .',
-                8_094)",
+                8094)",
         )
         .unwrap();
 
@@ -2607,7 +2607,7 @@ mod tests {
                  ex:a ex:p \"Alice\" .
                  ex:b ex:p \"BOB\" .
                  ex:c ex:p \"carol\" .',
-                8_095)",
+                8095)",
         )
         .unwrap();
 
@@ -2629,7 +2629,7 @@ mod tests {
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p ex:1 . ex:a ex:p ex:2 . ex:a ex:p ex:3 . ex:a ex:p ex:4 .
                  ex:x ex:q ex:y .',
-                8_080)",
+                8080)",
         )
         .unwrap();
 
@@ -2653,7 +2653,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:age 30 . ex:b ex:age 25 . ex:c ex:age 40 . ex:d ex:age 20 .',
-                8_081)",
+                8081)",
         )
         .unwrap();
 
@@ -2677,7 +2677,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p \"x\" . ex:a ex:p \"y\" . ex:a ex:p \"z\" .',
-                8_082)",
+                8082)",
         )
         .unwrap();
 
@@ -2706,7 +2706,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p \"b\" . ex:a ex:p \"c\" . ex:a ex:p \"d\" .',
-                8_083)",
+                8083)",
         )
         .unwrap();
 
@@ -2730,7 +2730,7 @@ mod tests {
                  ex:a ex:p ex:b .
                  ex:a ex:p ex:c .
                  ex:a ex:q ex:b .',
-                8_070)",
+                8070)",
         )
         .unwrap();
 
@@ -2753,7 +2753,7 @@ mod tests {
                  ex:a ex:p ex:x .
                  ex:b ex:p ex:x .
                  ex:c ex:p ex:y .',
-                8_071)",
+                8071)",
         )
         .unwrap();
 
@@ -2776,7 +2776,7 @@ mod tests {
                  ex:a ex:p ex:x .
                  ex:b ex:p ex:y .
                  ex:c ex:q ex:z .',
-                8_072)",
+                8072)",
         )
         .unwrap();
 
@@ -2801,7 +2801,7 @@ mod tests {
                  ex:b ex:p 20 .
                  ex:c ex:p 30 .
                  ex:d ex:p \"text\" .',
-                8_073)",
+                8073)",
         )
         .unwrap();
 
@@ -2824,7 +2824,7 @@ mod tests {
                  ex:a ex:p 10 .
                  ex:b ex:p 20 .
                  ex:c ex:p 30 .',
-                8_074)",
+                8074)",
         )
         .unwrap();
 
@@ -2852,7 +2852,7 @@ mod tests {
                  ex:a foaf:name \"Charlie\" .
                  ex:b foaf:name \"Alice\"   .
                  ex:c foaf:name \"Bob\"     .',
-                8_075)",
+                8075)",
         )
         .unwrap();
 
@@ -2884,7 +2884,7 @@ mod tests {
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p 10 . ex:b ex:p 20 . ex:c ex:p 30 .
                  ex:d ex:q 5  . ex:e ex:q 15 .',
-                8_076)",
+                8076)",
         )
         .unwrap();
 
@@ -2906,7 +2906,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p ex:b .',
-                8_120)",
+                8120)",
         )
         .unwrap();
 
@@ -2932,7 +2932,7 @@ mod tests {
                 '@prefix ex: <http://example.com/> .
                  @prefix foaf: <http://xmlns.com/foaf/0.1/> .
                  ex:alice foaf:age 30 .',
-                8_121)",
+                8121)",
         )
         .unwrap();
 
@@ -2968,7 +2968,7 @@ mod tests {
                  ex:bob   foaf:name \"Bob\"   ; foaf:mbox <mailto:b@x> .
                  ex:carol foaf:name \"Carol\" ; foaf:age 25 .
                  ex:dave  foaf:name \"Dave\"  .',
-                8_110)",
+                8110)",
         )
         .unwrap();
 
@@ -2999,7 +2999,7 @@ mod tests {
                  ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> .
                  ex:bob   foaf:name \"Bob\"   .
                  ex:carol foaf:name \"Carol\" ; foaf:mbox <mailto:c@x> .',
-                8_060)",
+                8060)",
         )
         .unwrap();
 
@@ -3027,7 +3027,7 @@ mod tests {
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p ex:b .
                  ex:c ex:p ex:d .',
-                8_061)",
+                8061)",
         )
         .unwrap();
 
@@ -3060,7 +3060,7 @@ mod tests {
                  ex:bob   foaf:name \"Bob\"   ; foaf:age 25 .
                  ex:carol foaf:name \"Carol\" ; foaf:mbox <mailto:c@x> .
                  ex:dave  foaf:name \"Dave\"  .',
-                8_062)",
+                8062)",
         )
         .unwrap();
 
@@ -3091,7 +3091,7 @@ mod tests {
                  ex:bob   foaf:name \"Bob\"   ; foaf:mbox <mailto:b@x> .
                  ex:carol foaf:name \"Carol\" .
                  ex:dave  foaf:name \"Dave\"  .',
-                8_063)",
+                8063)",
         )
         .unwrap();
 
@@ -3124,7 +3124,7 @@ mod tests {
                  ex:alice foaf:name \"Alice\" .
                  ex:bob   foaf:nick \"Bobby\" .
                  ex:carol foaf:name \"Carol\" ; foaf:nick \"C\" .',
-                8_050)",
+                8050)",
         )
         .unwrap();
 
@@ -3155,7 +3155,7 @@ mod tests {
                  @prefix foaf: <http://xmlns.com/foaf/0.1/> .
                  ex:alice foaf:name \"Alice\" .
                  ex:bob   foaf:mbox <mailto:b@x> .',
-                8_051)",
+                8051)",
         )
         .unwrap();
 
@@ -3197,7 +3197,7 @@ mod tests {
                  ex:a ex:p ex:x .
                  ex:b ex:q ex:y .
                  ex:c ex:r ex:z .',
-                8_052)",
+                8052)",
         )
         .unwrap();
 
@@ -3225,7 +3225,7 @@ mod tests {
                 '@prefix ex: <http://example.com/> .
                  @prefix foaf: <http://xmlns.com/foaf/0.1/> .
                  ex:alice foaf:name \"Alice\" ; foaf:nick \"Alice\" .',
-                8_053)",
+                8053)",
         )
         .unwrap();
 
@@ -3264,7 +3264,7 @@ mod tests {
                  ex:alice foaf:name \"Alice\" .
                  ex:carol foaf:nick \"Carol\" .
                  ex:bob   foaf:nick \"Bobby\" .',
-                8_054)",
+                8054)",
         )
         .unwrap();
 
@@ -3294,7 +3294,7 @@ mod tests {
                  ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> .
                  ex:bob   foaf:name \"Bob\"                            .
                  ex:carol foaf:name \"Carol\" ; foaf:mbox <mailto:c@x> .',
-                8_040)",
+                8040)",
         )
         .unwrap();
 
@@ -3335,7 +3335,7 @@ mod tests {
                  ex:a ex:p ex:x . ex:a ex:age 25 .
                  ex:b ex:p ex:y . ex:b ex:age 35 .
                  ex:c ex:p ex:z .',
-                8_041)",
+                8041)",
         )
         .unwrap();
 
@@ -3376,7 +3376,7 @@ mod tests {
                  @prefix foaf: <http://xmlns.com/foaf/0.1/> .
                  ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> ; foaf:age 30 .
                  ex:bob   foaf:name \"Bob\"   .',
-                8_042)",
+                8042)",
         )
         .unwrap();
 
@@ -3403,7 +3403,7 @@ mod tests {
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p ex:x . ex:a ex:q ex:y .
                  ex:b ex:p ex:x .',
-                8_043)",
+                8043)",
         )
         .unwrap();
 
@@ -3432,7 +3432,7 @@ mod tests {
                  ex:a ex:p ex:x .
                  ex:b ex:p ex:x .
                  ex:c ex:p ex:y .',
-                8_030)",
+                8030)",
         )
         .unwrap();
 
@@ -3464,7 +3464,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p 1 . ex:b ex:p 2 . ex:c ex:p 3 . ex:d ex:p 4 . ex:e ex:p 5 .',
-                8_031)",
+                8031)",
         )
         .unwrap();
 
@@ -3485,7 +3485,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p 1 . ex:b ex:p 2 . ex:c ex:p 3 . ex:d ex:p 4 . ex:e ex:p 5 .',
-                8_032)",
+                8032)",
         )
         .unwrap();
 
@@ -3509,7 +3509,7 @@ mod tests {
                  ex:carol foaf:name \"Carol\" .
                  ex:alice foaf:name \"Alice\" .
                  ex:bob   foaf:name \"Bob\"   .',
-                8_033)",
+                8033)",
         )
         .unwrap();
 
@@ -3534,7 +3534,7 @@ mod tests {
                  ex:carol foaf:name \"Carol\" .
                  ex:alice foaf:name \"Alice\" .
                  ex:bob   foaf:name \"Bob\"   .',
-                8_034)",
+                8034)",
         )
         .unwrap();
 
@@ -3556,7 +3556,7 @@ mod tests {
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p \"x\" . ex:b ex:p \"x\" . ex:c ex:p \"y\" . ex:d ex:p \"z\" .',
-                8_035)",
+                8035)",
         )
         .unwrap();
 
@@ -3579,7 +3579,7 @@ mod tests {
                 '@prefix ex: <http://example.com/> .
                  ex:a ex:p ex:b .
                  ex:a ex:p ex:c .',
-                8_015)",
+                8015)",
         )
         .unwrap();
 
@@ -3610,7 +3610,7 @@ mod tests {
                  @prefix foaf: <http://xmlns.com/foaf/0.1/> .
                  ex:alice  a foaf:Person ; foaf:name \"Alice\" ; foaf:knows ex:bob .
                  ex:bob    a foaf:Person ; foaf:name \"Bob\"   .',
-                8_005)",
+                8005)",
         )
         .unwrap();
 

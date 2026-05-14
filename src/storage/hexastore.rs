@@ -113,7 +113,7 @@ mod tests {
     #[pg_test]
     fn add_graph_creates_partition_idempotently() {
         // Use a graph id unlikely to clash with other tests.
-        let g: i64 = 9_001;
+        let g: i64 = 9001;
         Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g.into()]).unwrap();
         Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g.into()]).unwrap();
         let part_count: i64 = Spi::get_one_with_args(
