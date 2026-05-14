@@ -33,7 +33,8 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `FILTER` — arithmetic, `lang`, `datatype`, `STRLEN`, `CONTAINS`, full string-fn surface | ⏳ Phase 3 (next slice) |
 | `OPTIONAL { single-triple BGP }` → LEFT JOIN (with inner FILTER honoured) | ✅ |
 | `OPTIONAL { multi-pattern BGP }`, nested OPTIONALs | ⏳ Phase 3 (next slice) |
-| `UNION`, `MINUS`, property paths, aggregates, `VALUES`, `BIND` | ⏳ Phase 3 |
+| `UNION` (n-way, branches may bind different vars) | ✅ |
+| `MINUS`, property paths, aggregates, `VALUES`, `BIND` | ⏳ Phase 3 |
 | `CONSTRUCT`, `ASK`, `DESCRIBE` | ⏳ Phase 3 |
 | Named-graph `GRAPH { … }` clauses | ⏳ Phase 3 |
 | `SERVICE` (federated SPARQL) | Out of scope for v0.x |
@@ -370,6 +371,66 @@ vars it's always TRUE since INNER joins guarantee non-null.)
   flat chains at the same level.
 - **OPTIONAL's inner FILTER** sees only that OPTIONAL's variables
   and the mandatory anchors, not other OPTIONAL groups' variables.
+
+### UNION
+
+`{ A } UNION { B }` combines two branches with SQL `UNION ALL`.
+Each branch is a complete sub-SELECT — its own BGP, FILTERs, and
+OPTIONALs. Variables only bound in one branch come back as
+`null` in the JSONB rows from the other branch.
+
+```sql
+-- Same projected var across branches (names from either property)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?n
+     WHERE { { ?s foaf:name ?n }
+             UNION
+             { ?s foaf:nick ?n } }'
+);
+
+-- Different vars per branch
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?n ?m
+     WHERE { { ?s foaf:name ?n }
+             UNION
+             { ?s foaf:mbox ?m } }'
+);
+--  → {"s": "...alice", "n": "Alice", "m": null}
+--  → {"s": "...bob",   "n": null,    "m": "mailto:b@x"}
+
+-- N-way chain: A UNION B UNION C flattens to 3 branches
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?s ?o
+     WHERE { { ?s foaf:name ?o }
+             UNION
+             { ?s foaf:nick ?o }
+             UNION
+             { ?s foaf:mbox ?o } }'
+);
+```
+
+#### How UNION composes with the rest
+
+- **FILTER inside a branch** is branch-local — it only prunes that
+  branch's rows.
+- **OPTIONAL inside a branch** works the same as in a non-UNION
+  query, scoped to that branch.
+- **DISTINCT / ORDER BY / LIMIT / OFFSET** apply to the union
+  result as a whole. ORDER BY on UNION may only reference
+  **projected** variables (the outer SELECT can't see a branch's
+  internal alias columns); the executor panics with a clear
+  message if you try.
+- Each branch is translated independently with its own `q1, q2, …`
+  alias namespace — there's no cross-branch join.
+
+#### Today's restriction
+
+- Each UNION branch is one of: BGP, FILTERed BGP, BGP with
+  OPTIONALs. Nested UNION inside a branch, or UNION inside an
+  OPTIONAL, isn't supported in this slice.
 
 ### Solution modifiers — DISTINCT / LIMIT / OFFSET / ORDER BY
 

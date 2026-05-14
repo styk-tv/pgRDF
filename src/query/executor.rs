@@ -46,8 +46,13 @@
 //!     (the SPARQL `OPTIONAL { … FILTER(...) }` form) lands in the
 //!     ON clause, so the row survives with the optional vars NULL
 //!     when the filter rejects.
-//!   * UNION / aggregates / paths / VALUES / SERVICE remain
-//!     unsupported.
+//!   * `UNION` — each branch becomes its own sub-SELECT with its
+//!     own BGP / filters / optionals; the union of all
+//!     branch-bound variables is the projection, with unbound vars
+//!     emitted as `NULL::TEXT`. Branches are combined with
+//!     `UNION ALL`; outer `DISTINCT` / `ORDER BY` / `LIMIT` /
+//!     `OFFSET` wrap the union via a derived table.
+//!   * Aggregates / paths / VALUES / SERVICE remain unsupported.
 //!
 //! Output shape:
 //!   `SETOF JSONB` — one row per solution, keys = projected variable
@@ -103,8 +108,18 @@ struct ExecPlan {
 #[derive(Default)]
 struct ParsedSelect {
     projected: Vec<String>,
+    // Single-branch state. Empty when union_branches is populated.
     bgp: Vec<TriplePattern>,
     filters: Vec<Expression>,
+    /// Each OPTIONAL block — a single triple pattern plus its
+    /// optional FILTER. Multiple chained OPTIONALs land here in
+    /// left-to-right order; build_bgp_sql emits one LEFT JOIN per.
+    optionals: Vec<OptionalBlock>,
+    /// When non-empty, this is a UNION query — each entry is a
+    /// self-contained branch with its own BGP / filters / optionals.
+    /// Single-branch fields (`bgp`, `filters`, `optionals`) remain
+    /// empty in that case; build_bgp_sql dispatches on which is set.
+    union_branches: Vec<UnionBranch>,
     distinct: bool,
     /// (variable_name, ascending). Each entry orders by the term's
     /// lexical_value in the given direction. Variables that aren't
@@ -112,10 +127,6 @@ struct ParsedSelect {
     order_by: Vec<(String, bool)>,
     limit: Option<usize>,
     offset: usize,
-    /// Each OPTIONAL block — a single triple pattern plus its
-    /// optional FILTER. Multiple chained OPTIONALs land here in
-    /// left-to-right order; build_bgp_sql emits one LEFT JOIN per.
-    optionals: Vec<OptionalBlock>,
 }
 
 struct OptionalBlock {
@@ -126,13 +137,20 @@ struct OptionalBlock {
     filter: Option<Expression>,
 }
 
+#[derive(Default)]
+struct UnionBranch {
+    bgp: Vec<TriplePattern>,
+    filters: Vec<Expression>,
+    optionals: Vec<OptionalBlock>,
+}
+
 fn translate(q: &Query) -> ExecPlan {
     let pattern = match q {
         Query::Select { pattern, .. } => pattern,
         other => panic!("sparql: only SELECT supported in v0.2 (got {other:?})"),
     };
     let ps = parse_select(pattern);
-    if ps.bgp.is_empty() {
+    if ps.bgp.is_empty() && ps.union_branches.is_empty() {
         panic!("sparql: empty BGP");
     }
     let sql = build_bgp_sql(&ps);
@@ -147,15 +165,86 @@ fn parse_select(p: &GraphPattern) -> ParsedSelect {
     walk_select(p, &mut ps);
     if ps.projected.is_empty() {
         // SELECT * — collect variables in the order they appear in
-        // the BGP. This branch fires when no `Project` wrapper sets
-        // an explicit projection.
-        for tp in &ps.bgp {
-            push_unique(&mut ps.projected, tp_subject_var(tp));
-            push_unique(&mut ps.projected, tp_predicate_var(tp));
-            push_unique(&mut ps.projected, tp_object_var(tp));
+        // the BGP (or across all UNION branches). This branch fires
+        // when no `Project` wrapper sets an explicit projection.
+        if !ps.union_branches.is_empty() {
+            for branch in &ps.union_branches {
+                for tp in &branch.bgp {
+                    push_unique(&mut ps.projected, tp_subject_var(tp));
+                    push_unique(&mut ps.projected, tp_predicate_var(tp));
+                    push_unique(&mut ps.projected, tp_object_var(tp));
+                }
+                for opt in &branch.optionals {
+                    push_unique(&mut ps.projected, tp_subject_var(&opt.triple));
+                    push_unique(&mut ps.projected, tp_predicate_var(&opt.triple));
+                    push_unique(&mut ps.projected, tp_object_var(&opt.triple));
+                }
+            }
+        } else {
+            for tp in &ps.bgp {
+                push_unique(&mut ps.projected, tp_subject_var(tp));
+                push_unique(&mut ps.projected, tp_predicate_var(tp));
+                push_unique(&mut ps.projected, tp_object_var(tp));
+            }
+            for opt in &ps.optionals {
+                push_unique(&mut ps.projected, tp_subject_var(&opt.triple));
+                push_unique(&mut ps.projected, tp_predicate_var(&opt.triple));
+                push_unique(&mut ps.projected, tp_object_var(&opt.triple));
+            }
         }
     }
     ps
+}
+
+/// Walk a left-leaning Union tree, pushing each leaf branch.
+fn collect_union_branches(p: &GraphPattern, out: &mut Vec<UnionBranch>) {
+    match p {
+        GraphPattern::Union { left, right } => {
+            collect_union_branches(left, out);
+            collect_union_branches(right, out);
+        }
+        _ => out.push(walk_union_branch(p)),
+    }
+}
+
+/// Walk a single UNION branch, capturing its BGP, filters, and
+/// OPTIONALs. Solution modifiers (DISTINCT, ORDER BY, LIMIT, OFFSET)
+/// belong on the outer SELECT, not inside a branch — so they aren't
+/// expected here.
+fn walk_union_branch(p: &GraphPattern) -> UnionBranch {
+    let mut ub = UnionBranch::default();
+    walk_branch(p, &mut ub);
+    ub
+}
+
+fn walk_branch(p: &GraphPattern, ub: &mut UnionBranch) {
+    match p {
+        GraphPattern::Bgp { patterns } => {
+            ub.bgp = patterns.clone();
+        }
+        GraphPattern::Filter { expr, inner } => {
+            ub.filters.push(expr.clone());
+            walk_branch(inner, ub);
+        }
+        GraphPattern::LeftJoin { left, right, expression } => {
+            walk_branch(left, ub);
+            let triple = match right.as_ref() {
+                GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns[0].clone(),
+                GraphPattern::Bgp { patterns } => panic!(
+                    "sparql: OPTIONAL today only supports a single triple pattern (got {} triples)",
+                    patterns.len()
+                ),
+                other => panic!(
+                    "sparql: OPTIONAL today only supports a single triple pattern (got {other:?})"
+                ),
+            };
+            ub.optionals.push(OptionalBlock {
+                triple,
+                filter: expression.clone(),
+            });
+        }
+        other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
+    }
 }
 
 fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
@@ -221,6 +310,12 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
                 filter: expression.clone(),
             });
         }
+        GraphPattern::Union { left, right } => {
+            // Chained `A UNION B UNION C` arrives as a left-leaning
+            // Union tree; flatten so every leaf becomes its own branch.
+            collect_union_branches(left, &mut ps.union_branches);
+            collect_union_branches(right, &mut ps.union_branches);
+        }
         GraphPattern::Bgp { patterns } => {
             ps.bgp = patterns.clone();
         }
@@ -262,81 +357,38 @@ fn tp_object_var(tp: &TriplePattern) -> Option<String> {
 // Translation
 // ─────────────────────────────────────────────────────────────────────
 
-/// Build a dynamic SQL SELECT for an N-pattern BGP. Each pattern
-/// becomes a `_pgrdf_quads qN` clause; shared variables become
-/// equality predicates that fold into INNER joins; constants become
-/// `qN.col = <resolved_dict_id>` predicates; FILTER expressions
-/// become SQL WHERE predicates appended after the join clauses;
-/// DISTINCT / ORDER BY / LIMIT / OFFSET land on the outer SELECT.
+/// Build a dynamic SQL SELECT.
+///
+/// Single-branch path: builds the BGP + filters + optionals directly
+/// via `build_branch_sql`, then layers the solution modifiers
+/// (DISTINCT/ORDER BY/LIMIT/OFFSET) onto the same statement so
+/// ORDER BY can reference unprojected anchored variables via hidden
+/// SELECT-list columns.
+///
+/// UNION path: builds each branch independently via
+/// `build_branch_sql`, combines them with `UNION ALL`, then wraps
+/// the union in an outer SELECT for DISTINCT/ORDER BY/LIMIT/OFFSET.
+/// ORDER BY on UNION may only reference projected variables (the
+/// outer SELECT has no access to a branch's per-alias columns).
 fn build_bgp_sql(ps: &ParsedSelect) -> String {
-    /// First-occurrence anchor for each variable: which alias +
-    /// which column. Subsequent occurrences emit equality predicates
-    /// against this anchor.
+    if !ps.union_branches.is_empty() {
+        return build_union_sql(ps);
+    }
+    build_single_branch_outer(ps)
+}
+
+/// Single-branch SELECT — emits FROM + WHERE + SELECT + solution
+/// modifiers in one shot, since ORDER BY may use anchored vars
+/// even when they aren't projected (via hidden trailing columns).
+fn build_single_branch_outer(ps: &ParsedSelect) -> String {
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-    let mut where_clauses: Vec<String> = Vec::new();
-
-    // ── Mandatory BGP ─────────────────────────────────────────────
-    // Pattern 1 → base FROM. Its predicates land in WHERE.
-    // Patterns 2..N → INNER JOIN qN ON (predicates).
-    let mut from_sql = String::new();
-    for (i, tp) in ps.bgp.iter().enumerate() {
-        let qi = i + 1;
-        let mut clauses = pattern_clauses(tp, qi, &mut anchors);
-        if i == 0 {
-            from_sql.push_str(&format!("pgrdf._pgrdf_quads q{qi}"));
-            where_clauses.append(&mut clauses);
-        } else {
-            let on = if clauses.is_empty() {
-                "TRUE".to_string()
-            } else {
-                clauses.join(" AND ")
-            };
-            from_sql.push_str(&format!(
-                " INNER JOIN pgrdf._pgrdf_quads q{qi} ON ({on})"
-            ));
-        }
-    }
-
-    // ── OPTIONAL blocks ───────────────────────────────────────────
-    // Each becomes a LEFT JOIN. Anchors collected here are nullable
-    // (when the optional doesn't match); the dict-lookup subselect in
-    // the projection returns NULL → JSONB::Null in the output row.
-    let mut next_qi = ps.bgp.len() + 1;
-    for opt in &ps.optionals {
-        let opt_qi = next_qi;
-        next_qi += 1;
-        let mut clauses = pattern_clauses(&opt.triple, opt_qi, &mut anchors);
-        if let Some(filter_expr) = &opt.filter {
-            let sql = translate_filter(filter_expr, &anchors).unwrap_or_else(|| {
-                panic!("sparql: OPTIONAL FILTER not translatable: {filter_expr:?}")
-            });
-            clauses.push(sql);
-        }
-        let on = if clauses.is_empty() {
-            "TRUE".to_string()
-        } else {
-            clauses.join(" AND ")
-        };
-        from_sql.push_str(&format!(
-            " LEFT JOIN pgrdf._pgrdf_quads q{opt_qi} ON ({on})"
-        ));
-    }
-
-    // ── Outer FILTERs ─────────────────────────────────────────────
-    // FILTER predicates outside any OPTIONAL land in WHERE — they
-    // prune the full join result, including OPTIONAL rows where the
-    // referenced variable might be NULL (NULL comparisons drop).
-    for expr in &ps.filters {
-        let sql = translate_filter(expr, &anchors).unwrap_or_else(|| {
-            panic!("sparql: FILTER expression not translatable: {expr:?}")
-        });
-        where_clauses.push(sql);
-    }
+    let (from_sql, where_clauses) =
+        build_from_and_where(&ps.bgp, &ps.filters, &ps.optionals, &mut anchors, 0);
 
     // Project: each projected var → its anchor alias.column → dict
     // lookup → aliased to the variable name (so SETOF JSONB emission
-    // pulls the right column by ordinal). Hidden trailing columns are
-    // appended for ORDER BY variables that aren't in the projection.
+    // pulls the right column by ordinal). Hidden trailing columns
+    // are appended for ORDER BY variables that aren't projected.
     let mut select_clauses: Vec<String> = Vec::new();
     for var in &ps.projected {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
@@ -349,15 +401,9 @@ fn build_bgp_sql(ps: &ParsedSelect) -> String {
         ));
     }
 
-    // ORDER BY: each entry maps to an ordinal SELECT-list position.
-    // For projected vars: reuse the existing column position. For
-    // unprojected vars: append a hidden column and reference it.
     let mut order_clauses: Vec<String> = Vec::new();
     for (idx, (var, ascending)) in ps.order_by.iter().enumerate() {
         let dir = if *ascending { "ASC" } else { "DESC" };
-        // NULLS LAST makes ASC + missing-dict-entry behave intuitively
-        // (the row with the smallest lexical_value comes first, missing
-        // entries sink to the bottom regardless of direction).
         let position = if let Some(pos) = ps.projected.iter().position(|p| p == var) {
             pos + 1
         } else {
@@ -399,6 +445,153 @@ fn build_bgp_sql(ps: &ParsedSelect) -> String {
         sql.push_str(&format!(" OFFSET {}", ps.offset));
     }
     sql
+}
+
+/// UNION SELECT — each branch is a complete sub-SELECT that
+/// projects the common variable list (NULL for vars it doesn't
+/// bind). Outer SELECT layers DISTINCT/ORDER BY/LIMIT/OFFSET.
+fn build_union_sql(ps: &ParsedSelect) -> String {
+    let branch_sqls: Vec<String> = ps
+        .union_branches
+        .iter()
+        .map(|b| build_branch_sql(b, &ps.projected))
+        .collect();
+    let union_inner = branch_sqls.join(" UNION ALL ");
+
+    let distinct_kw = if ps.distinct { "DISTINCT " } else { "" };
+    let outer_cols = ps
+        .projected
+        .iter()
+        .map(|v| quote_identifier(v))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut sql = format!(
+        "SELECT {distinct_kw}{outer_cols} FROM ({union_inner}) AS _pgrdf_union"
+    );
+
+    if !ps.order_by.is_empty() {
+        let mut order_parts: Vec<String> = Vec::new();
+        for (var, ascending) in &ps.order_by {
+            let dir = if *ascending { "ASC" } else { "DESC" };
+            if !ps.projected.contains(var) {
+                panic!(
+                    "sparql: ORDER BY ?{var} on UNION must reference a projected \
+                     variable (the outer SELECT can't see branch-local columns)"
+                );
+            }
+            order_parts.push(format!("{} {dir} NULLS LAST", quote_identifier(var)));
+        }
+        sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
+    }
+    if let Some(limit) = ps.limit {
+        sql.push_str(&format!(" LIMIT {limit}"));
+    }
+    if ps.offset > 0 {
+        sql.push_str(&format!(" OFFSET {}", ps.offset));
+    }
+    sql
+}
+
+/// Build one branch of a UNION as a standalone SELECT statement.
+/// Variables not bound by this branch are emitted as `NULL::TEXT`
+/// in the SELECT list so the resulting row shape matches every
+/// other branch's row shape (required for `UNION ALL`).
+fn build_branch_sql(branch: &UnionBranch, projected: &[String]) -> String {
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    let (from_sql, where_clauses) =
+        build_from_and_where(&branch.bgp, &branch.filters, &branch.optionals, &mut anchors, 0);
+
+    let mut select_clauses: Vec<String> = Vec::new();
+    for var in projected {
+        let part = if let Some(&(alias_idx, col)) = anchors.get(var) {
+            format!(
+                "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary
+                   WHERE id = q{alias_idx}.{col}) AS {alias_v}",
+                alias_v = quote_identifier(var),
+            )
+        } else {
+            format!("NULL::TEXT AS {}", quote_identifier(var))
+        };
+        select_clauses.push(part);
+    }
+
+    let mut sql = format!(
+        "SELECT {sel} FROM {from_sql}",
+        sel = select_clauses.join(", "),
+    );
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+    sql
+}
+
+/// Shared FROM/WHERE builder used by both the single-branch and
+/// per-UNION-branch paths. Emits explicit `INNER JOIN`s for
+/// mandatory patterns after the first, `LEFT JOIN`s for each
+/// OPTIONAL block, and ANDs every filter into the returned
+/// `where_clauses` vec. The caller layers SELECT + modifiers.
+fn build_from_and_where(
+    bgp: &[TriplePattern],
+    filters: &[Expression],
+    optionals: &[OptionalBlock],
+    anchors: &mut HashMap<String, (usize, &'static str)>,
+    alias_offset: usize,
+) -> (String, Vec<String>) {
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut from_sql = String::new();
+    // Mandatory BGP — pattern 1 in FROM (predicates → WHERE),
+    // pattern 2..N as INNER JOIN qN ON (predicates).
+    for (i, tp) in bgp.iter().enumerate() {
+        let qi = alias_offset + i + 1;
+        let mut clauses = pattern_clauses(tp, qi, anchors);
+        if i == 0 {
+            from_sql.push_str(&format!("pgrdf._pgrdf_quads q{qi}"));
+            where_clauses.append(&mut clauses);
+        } else {
+            let on = if clauses.is_empty() {
+                "TRUE".to_string()
+            } else {
+                clauses.join(" AND ")
+            };
+            from_sql.push_str(&format!(
+                " INNER JOIN pgrdf._pgrdf_quads q{qi} ON ({on})"
+            ));
+        }
+    }
+    // OPTIONAL blocks — each becomes a LEFT JOIN whose ON includes
+    // the OPTIONAL's inner FILTER (if any). Vars only bound in the
+    // OPTIONAL come back NULL when the LEFT JOIN doesn't match.
+    let mut next_qi = alias_offset + bgp.len() + 1;
+    for opt in optionals {
+        let opt_qi = next_qi;
+        next_qi += 1;
+        let mut clauses = pattern_clauses(&opt.triple, opt_qi, anchors);
+        if let Some(filter_expr) = &opt.filter {
+            let sql = translate_filter(filter_expr, anchors).unwrap_or_else(|| {
+                panic!("sparql: OPTIONAL FILTER not translatable: {filter_expr:?}")
+            });
+            clauses.push(sql);
+        }
+        let on = if clauses.is_empty() {
+            "TRUE".to_string()
+        } else {
+            clauses.join(" AND ")
+        };
+        from_sql.push_str(&format!(
+            " LEFT JOIN pgrdf._pgrdf_quads q{opt_qi} ON ({on})"
+        ));
+    }
+    // Top-level / branch-level FILTERs — applied to the joined
+    // result. NULL comparisons drop the row (SPARQL "type error →
+    // unbound" semantics).
+    for expr in filters {
+        let sql = translate_filter(expr, anchors).unwrap_or_else(|| {
+            panic!("sparql: FILTER expression not translatable: {expr:?}")
+        });
+        where_clauses.push(sql);
+    }
+    (from_sql, where_clauses)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1302,6 +1495,176 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2);
+    }
+
+    /// UNION combines two BGPs over the same subject column.
+    /// Both `foaf:name` and `foaf:nick` are name-shaped; UNION
+    /// gives back any subject that has at least one.
+    #[pg_test]
+    fn sparql_union_basic() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" .
+                 ex:bob   foaf:nick \"Bobby\" .
+                 ex:carol foaf:name \"Carol\" ; foaf:nick \"C\" .',
+                8_050)",
+        )
+        .unwrap();
+
+        // Alice: name only. Bob: nick only. Carol: both (so 2 union rows).
+        // Total: 4.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?n
+                  WHERE { { ?s foaf:name ?n }
+                          UNION
+                          { ?s foaf:nick ?n } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 4);
+    }
+
+    /// UNION where branches bind DIFFERENT variables. ?n only in
+    /// the left branch, ?m only in the right. The other branch
+    /// emits NULL for the missing var.
+    #[pg_test]
+    fn sparql_union_different_vars() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" .
+                 ex:bob   foaf:mbox <mailto:b@x> .',
+                8_051)",
+        )
+        .unwrap();
+
+        // 1 row from each branch. The ?m column is NULL on row 1,
+        // the ?n column is NULL on row 2.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?n ?m
+                  WHERE { { ?s foaf:name ?n }
+                          UNION
+                          { ?s foaf:mbox ?m } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2);
+
+        // One row has ?n NULL (Bob's mbox), one has ?m NULL (Alice's name).
+        let n_null: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?n ?m
+                  WHERE { { ?s foaf:name ?n } UNION { ?s foaf:mbox ?m } }'
+             ) WHERE sparql->'n' = 'null'::jsonb",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(n_null, 1);
+    }
+
+    /// Three-way UNION — chained `A UNION B UNION C` flattens to
+    /// three branches via collect_union_branches.
+    #[pg_test]
+    fn sparql_union_three_branches() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:x .
+                 ex:b ex:q ex:y .
+                 ex:c ex:r ex:z .',
+                8_052)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'SELECT ?s
+                  WHERE { { ?s <http://example.com/p> ?o }
+                          UNION
+                          { ?s <http://example.com/q> ?o }
+                          UNION
+                          { ?s <http://example.com/r> ?o } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 3);
+    }
+
+    /// UNION + DISTINCT — branch 1 and branch 2 both emit Alice;
+    /// DISTINCT dedups.
+    #[pg_test]
+    fn sparql_union_with_distinct() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" ; foaf:nick \"Alice\" .',
+                8_053)",
+        )
+        .unwrap();
+
+        // Without DISTINCT: 2 rows (?s=alice from each branch).
+        // With DISTINCT on ?s,?n: 1 row.
+        let raw: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s ?n
+                  WHERE { { ?s foaf:name ?n } UNION { ?s foaf:nick ?n } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let dedup: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT DISTINCT ?s ?n
+                  WHERE { { ?s foaf:name ?n } UNION { ?s foaf:nick ?n } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(raw, 2);
+        assert_eq!(dedup, 1);
+    }
+
+    /// UNION + ORDER BY + LIMIT on the outer wrapper. Must
+    /// reference a projected variable.
+    #[pg_test]
+    fn sparql_union_with_order_limit() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" .
+                 ex:carol foaf:nick \"Carol\" .
+                 ex:bob   foaf:nick \"Bobby\" .',
+                8_054)",
+        )
+        .unwrap();
+
+        // 3 rows total from UNION; ORDER BY ?n ASC, LIMIT 1 → Alice.
+        let first: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?n
+                  WHERE { { ?s foaf:name ?n } UNION { ?s foaf:nick ?n } }
+                ORDER BY ?n LIMIT 1'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.0["n"], "Alice");
     }
 
     /// OPTIONAL — bind ?mbox when present, NULL otherwise. Bob has

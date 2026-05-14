@@ -117,7 +117,12 @@ fn walk(
         }
 
 
-        GraphPattern::Union { .. }     => unsupported.push("Union"),
+        GraphPattern::Union { left, right } => {
+            // UNION — supported. Each branch contributes its own
+            // BGP triples; the parser counts them in aggregate.
+            walk(left, vars, bgp, unsupported);
+            walk(right, vars, bgp, unsupported);
+        }
         GraphPattern::Minus { .. }     => unsupported.push("Minus"),
         GraphPattern::Join { .. }      => unsupported.push("Join (non-BGP)"),
         GraphPattern::Graph { .. }     => unsupported.push("Graph (named graph clause)"),
@@ -289,9 +294,10 @@ mod tests {
         assert_eq!(v["bgp_pattern_count"], 2);
     }
 
-    /// UNION is still unsupported — the parser flags it.
+    /// UNION is supported by the executor — the parser walks both
+    /// branches' BGPs and tallies their triples.
     #[pg_test]
-    fn sparql_parse_flags_unsupported_union() {
+    fn sparql_parse_union_is_supported() {
         let q = "SELECT ?s WHERE { { ?s <http://x/a> ?o } UNION { ?s <http://x/b> ?o } }";
         let j: pgrx::JsonB = Spi::get_one_with_args(
             "SELECT pgrdf.sparql_parse($1)",
@@ -302,8 +308,27 @@ mod tests {
         let v = &j.0;
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(
-            unsupported.iter().any(|x| x.as_str() == Some("Union")),
-            "expected Union to be flagged, got {unsupported:?}"
+            !unsupported.iter().any(|x| x.as_str() == Some("Union")),
+            "UNION should not be flagged anymore, got {unsupported:?}"
+        );
+        assert_eq!(v["bgp_pattern_count"], 2);
+    }
+
+    /// MINUS is still unsupported.
+    #[pg_test]
+    fn sparql_parse_flags_unsupported_minus() {
+        let q = "SELECT ?s WHERE { ?s ?p ?o MINUS { ?s <http://x/a> ?b } }";
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.sparql_parse($1)",
+            &[q.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        let unsupported = v["unsupported_algebra"].as_array().unwrap();
+        assert!(
+            unsupported.iter().any(|x| x.as_str() == Some("Minus")),
+            "expected Minus to be flagged, got {unsupported:?}"
         );
     }
 

@@ -44,12 +44,19 @@ SELECT (
   )->>'bgp_pattern_count'
 )::int AS bgp_count_with_optional;
 
--- 4c. UNION is still unsupported.
+-- 4c. UNION is now supported. Both branches' BGPs are visible.
 SELECT (
   pgrdf.sparql_parse(
     'SELECT ?s WHERE { { ?s <http://x/a> ?o } UNION { ?s <http://x/b> ?o } }'
+  )->>'bgp_pattern_count'
+)::int AS bgp_count_union;
+
+-- 4d. MINUS is still unsupported.
+SELECT (
+  pgrdf.sparql_parse(
+    'SELECT ?s WHERE { ?s ?p ?o MINUS { ?s <http://x/a> ?b } }'
   )->'unsupported_algebra'
-)::text AS unsupported_union;
+)::text AS unsupported_minus;
 
 -- 5. CONSTRUCT recognised but flagged out-of-scope.
 SELECT (

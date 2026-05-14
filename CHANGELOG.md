@@ -6,6 +6,43 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 5 — UNION
+
+- `pgrdf.sparql` handles `{ A } UNION { B }` and chained
+  `A UNION B UNION C`. Each branch is its own complete sub-SELECT
+  (own BGP / FILTERs / OPTIONALs / per-branch dict-id anchors).
+  Branches are combined with SQL `UNION ALL`; the outer SELECT
+  layers `DISTINCT` / `ORDER BY` / `LIMIT` / `OFFSET`.
+- Variables bound in only some branches come back as `null` from
+  the other branches (each branch SELECTs `NULL::TEXT` for vars
+  it doesn't bind, so row shapes line up across `UNION ALL`).
+- ORDER BY on UNION may only reference projected variables — the
+  outer SELECT can't see branch-local alias columns. Executor
+  panics with a clear message otherwise.
+- Refactor: extracted `build_from_and_where` (shared by both the
+  single-branch and per-UNION-branch paths) + `build_branch_sql`
+  + `build_union_sql`. The original `build_bgp_sql` is now a
+  dispatcher over `ps.union_branches.is_empty()`.
+- 5 new pg_tests: basic UNION over same var, different-var
+  UNION with NULL pad, three-way chain, UNION + DISTINCT,
+  UNION + ORDER BY + LIMIT.
+- Parser walks `GraphPattern::Union` rather than flagging it.
+  New parser pg_test for the new state + a new MINUS-still-flagged
+  test taking its place.
+- `tests/regression/sql/37-sparql-union.sql` covers 9 query shapes
+  (basic, DISTINCT, different-var, two NULL-discriminator checks,
+  three-way chain, ORDER BY first, LIMIT, branch-local FILTER).
+- `30-sparql-parse.sql` baseline refreshed: UNION supported,
+  MINUS now the unsupported representative.
+- `README.md` pills: 45+17 → 51+18, SPARQL pill adds UNION.
+- `guide/03-querying.md` gains a full UNION section covering
+  the cross-branch null padding, ORDER-BY-must-be-projected
+  rule, and the no-nesting restriction for this slice.
+
+Test bar:
+  pg_test:    51 passed; 0 failed  (was 45)
+  regression: 18 passed; 0 failed  (was 17)
+
 ### Phase 3 step 4 — OPTIONAL (LeftJoin) translation
 
 - `pgrdf.sparql` now handles `OPTIONAL { ?s :p ?o }`. Each OPTIONAL
