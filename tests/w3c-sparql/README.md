@@ -74,6 +74,9 @@ against the W3C spec is the load-bearing part.
 | `STRLEN(?v)` | §17.4.3.3 | ✅ 16 |
 | `LANG(?v)` | §17.4.2.4 | ✅ 17 |
 | `UCASE(?v)` | §17.4.3.8 | ✅ 18 |
+| `!BOUND(?v)` over OPTIONAL | §17.4.1.7 | ✅ 19 |
+| `STR(?iri)` then string equality | §17.4.2.5 | ✅ 20 |
+| Numeric FILTER on `xsd:integer` | §17.3 | ✅ 21 |
 | Inline `HAVING(SUM(?v) > c)` | §11.5 | ❌ deferred — see v0.4 |
 | Property paths beyond `:a/:b` sequence | §9 | ❌ deferred — see v0.4 |
 | GRAPH `{ … }` named-graph clause | §13 | ❌ deferred — needs storage schema work |

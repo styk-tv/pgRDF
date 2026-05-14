@@ -1,0 +1,8 @@
+@prefix ex:   <http://example.com/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+
+# Alice has both name + mbox; Bob has only name (mbox-less).
+ex:alice foaf:name "Alice" ;
+         foaf:mbox <mailto:alice@example.com> .
+
+ex:bob   foaf:name "Bob" .
