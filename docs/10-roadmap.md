@@ -286,4 +286,5 @@ phase 3 step table above.
 | v0.3 Phase 6 step 2 expanded | 93 | 30+13 | + 8 more W3C-shape tests covering FILTER, COUNT/HAVING, ORDER BY DESC, LIMIT/OFFSET, BIND/CONCAT, ASK true/false |
 | v0.3 Phase 6 step 2 expanded II | 93 | 30+18 | + 5 more W3C-shape tests covering REGEX, IN, STRLEN, LANG, UCASE |
 | v0.3 translator-gap signals + step 3 scaffold | 93 | 31+18+3 | + 8 negative regression signals (`80-unsupported-shapes.sql`) locking the error-message contract for unsupported SPARQL shapes; + 3 LUBM-shape correctness gates (`tests/perf/lubm-shape/`) against a hand-authored fixture |
-| v0.3 +3 W3C essentials + integration (current) | 93 | 32+21+3 | + 3 more W3C-shape tests (BOUND, STR(?iri), numeric FILTER); + `61-materialize-then-sparql.sql` integration test verifying inferred triples flow back through `pgrdf.sparql` |
+| v0.3 +3 W3C essentials + integration | 93 | 32+21+3 | + 3 more W3C-shape tests (BOUND, STR(?iri), numeric FILTER); + `61-materialize-then-sparql.sql` integration test verifying inferred triples flow back through `pgrdf.sparql` |
+| v0.3 stats shape contract (current) | 93 | 33+21+3 | + `82-stats-shape.sql` locks the `pgrdf.stats()` JSONB field set, types, and value-range invariants — schema contract for downstream operator tooling |
