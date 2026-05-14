@@ -6,6 +6,43 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Hygiene — cargo tree duplicate-version audit (slice #50)
+
+Ran `cargo tree --duplicates --no-default-features --features pg17`
+against `Cargo.lock`. Workspace currently resolves to **182 crates**
+(normal + build edges); first-order direct deps are seven: `oxrdf`,
+`oxttl`, `pgrx`, `reasonable`, `serde_json`, `spargebra` (normal)
+plus `pgrx-tests` (dev). Nine crates appear at two distinct versions:
+
+| Crate | Versions | Sources | Fix attempted |
+| --- | --- | --- | --- |
+| `byteorder` | 0.5.3 / 1.5.0 | `reasonable → roaring 0.5.2` (0.5) vs `pgrx-tests → tokio-postgres → postgres-protocol` (1.5) | No. `reasonable` is pinned (E-009); `roaring 0.5.2`'s old `byteorder 0.5` is structural until `reasonable` bumps. |
+| `getrandom` | 0.3.4 / 0.4.2 | `oxrdf/oxttl/spargebra → rand 0.9 → rand_core 0.9 → getrandom 0.3` vs `pgrx → uuid + tempfile + rand 0.10 → getrandom 0.4` | No. Both roots pinned (oxrdf/oxttl/spargebra semantic-stability; pgrx 0.16 E-006). |
+| `hashbrown` | 0.15.5 / 0.17.1 | `pgrx-sql-entity-graph → petgraph 0.8.3 → hashbrown 0.15` AND same `petgraph 0.8.3 → indexmap 2.14 → hashbrown 0.17`. `petgraph 0.8.3` itself pulls two hashbrowns. | No. Internal to `petgraph 0.8.3`; not fixable downstream. |
+| `itertools` | 0.8.2 / 0.13.0 | `reasonable` (0.8) vs `pgrx-bindgen → bindgen 0.71.1` (0.13) | No. Both roots pinned. |
+| `rand` | 0.9.4 / 0.10.1 | `oxrdf/oxttl/spargebra` (0.9) vs `pgrx-tests → tokio-postgres → postgres-protocol` + `pgrx → uuid + tempfile` (0.10) | No. Both roots pinned. |
+| `rand_core` | 0.9.5 / 0.10.1 | Follows the `rand` split. | No. Same as `rand`. |
+| `thiserror` | 1.0.69 / 2.0.18 | `reasonable` + `cargo_metadata 0.18.1 (via clap-cargo via pgrx-tests)` (1.x) vs `oxrdf/oxttl/spargebra/pgrx/pgrx-pg-config/pgrx-sql-entity-graph/pgrx-tests` (2.x) | No. `thiserror` 1↔2 is an intentional major; reasonable+cargo_metadata cannot move to 2 without their own bumps. |
+| `thiserror-impl` | 1.0.69 / 2.0.18 | Mirrors `thiserror`. | No. Same as `thiserror`. |
+| `winnow` | 0.7.15 / 1.0.2 | `pgrx-pg-config → cargo_toml → toml 0.9.12+spec-1.1.0` — same `toml` crate uses `winnow 0.7` (top-level parser) AND `winnow 1.0` (via the inner `toml_parser` 1.1.2 helper crate). | No. Internal to `toml 0.9.12`; not fixable downstream. |
+
+Plus six crates that `cargo tree --duplicates` flags but Cargo.lock
+shows at exactly one version (`bitflags 2.11.1`, `memchr 2.8.0`,
+`peg-runtime 0.8.6`, `percent-encoding 2.3.2`, `serde_core 1.0.228`,
+`serde_json 1.0.149`) — these are single-version crates pulled in
+through multiple distinct dep chains, which the `--duplicates` view
+also surfaces. Nothing to fix on those.
+
+**Disposition:** zero code or `Cargo.lock` changes. Every actual
+duplicate roots in a pinned dep (`reasonable` 0.4.1 / `pgrx` 0.16 /
+`oxttl`+`oxrdf`+`spargebra` semantic-stability) or in a transitive
+internal split (`petgraph` 0.8.3, `toml` 0.9.12). No SemVer-safe
+`cargo update --precise` collapse exists today. The duplicate budget
+is in line with what a Rust workspace of this composition produces
+and is purely informational — recorded so a future audit can diff
+against the same picture once `reasonable` and `pgrx 0.16` are
+unpinned (E-006, E-009).
+
 ### Hygiene — cargo audit (slice #51)
 
 Ran `cargo audit` (v0.22.1, advisory-db 1088 advisories loaded
