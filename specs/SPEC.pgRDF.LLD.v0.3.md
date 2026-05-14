@@ -97,7 +97,7 @@ The capability matrix is the contract for v0.3:
 | **`BIND` output referenced in later `FILTER` / BGP** | ⏳ v0.4 (needs AST substitution) |
 | **Aggregates over `UNION`** | ⏳ v0.4 (needs derived-table refactor) |
 | **Property paths** (`*`, `+`, `?`, `^`, alternation) beyond simple sequence | ⏳ v0.4 |
-| **Type-aware `ORDER BY` / `MIN` / `MAX`** (sort numerics numerically) | ⏳ v0.4 |
+| **Type-aware `ORDER BY`** (sort numerics numerically) | ⏳ v0.4 |
 | **`CONSTRUCT`** | ⏳ v0.4 (different return shape — emits triples) |
 | **`DESCRIBE`** | ⏳ v0.4 (same) |
 | **`SERVICE`** (federated SPARQL) | ❌ out of scope for v0.x |
