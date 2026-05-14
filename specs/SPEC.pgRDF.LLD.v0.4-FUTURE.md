@@ -703,7 +703,10 @@ own slices.
   in v0.3) is wired in v0.4 — it gates §11's SPARQL backlog
   automatically as the deferred forms come online.
 - New surface for v0.4: pg_regress files project to grow from
-  ~34 (v0.3 cut) to roughly 60-something across §3-§7 and §11.
+  the v0.3 baseline (25 at the v0.3 cut per
+  [`v0.3 §2`](SPEC.pgRDF.LLD.v0.3.md); ~39 today including
+  post-cut hygiene fixtures) to roughly 60-something across
+  §3-§7 and §11.
   Approximate breakdown:
   - §3 named-graph + IRI mapping: 6-8 files
     (`70-graph-iri-map.sql`, `71-graph-scoped-select.sql`,
