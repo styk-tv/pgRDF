@@ -2,6 +2,14 @@
 name = "pgrdf"
 version = "0.2.0"
 edition = "2021"
+# MSRV. Matches the CI build container (compose/builder.Containerfile
+# `FROM rust:1.91-bookworm`) — the only Rust version pgRDF artifacts
+# are actually produced against. The check-cfg lint block below also
+# assumes Rust 1.91+'s strict check-cfg behavior, so going lower would
+# misadvertise support. pgrx 0.16.1's `resolver = "3"` independently
+# imposes a 1.84 floor; this declaration tightens that to the value CI
+# verifies. Bump together with the Containerfile when upgrading.
+rust-version = "1.91"
 license = "Apache-2.0"
 authors = ["Peter Styk <peter@styk.tv>"]
 description = "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning"

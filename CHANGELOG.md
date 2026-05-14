@@ -6,6 +6,27 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Hygiene — MSRV declared (slice #49)
+
+Added `rust-version = "1.91"` to `[package]` in `Cargo.toml`. The value
+matches the CI build container (`compose/builder.Containerfile` →
+`FROM rust:1.91-bookworm`), which is the only Rust version pgRDF
+artifacts are actually produced against. The existing `[lints.rust]`
+block already assumes Rust 1.91+'s strict `check-cfg` behavior (see
+the inline comment introduced in an earlier slice), so declaring a
+lower MSRV would misadvertise support. pgrx 0.16.1's
+`resolver = "3"` independently imposes a 1.84 floor; this declaration
+tightens that to the value CI verifies. `rust-toolchain.toml` stays
+on `channel = "stable"` — pinning a specific minor for an active
+project trades health for false stability.
+
+Verification: `cargo check --no-default-features --features pg17
+--ignore-rust-version` clean on the dev workstation (rustc 1.88.0
+Homebrew); the `--ignore-rust-version` is required only because the
+workstation toolchain is older than the declared MSRV — CI's 1.91
+container is unaffected. Bump the `rust-version` in lockstep with
+the Containerfile when upgrading the build floor.
+
 ### Hygiene — cargo tree duplicate-version audit (slice #50)
 
 Ran `cargo tree --duplicates --no-default-features --features pg17`
