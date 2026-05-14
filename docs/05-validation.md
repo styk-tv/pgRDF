@@ -63,7 +63,9 @@ Either of:
   RDF 1.2 triple-term operands (or otherwise tolerates the
   `rdf-12` feature being on).
 
-When that happens the v0.4 ticket is straightforward:
+When that happens the unblock ticket is straightforward (per
+[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §9,
+the real integration is gated to v0.5 — v0.4 keeps the stub):
 1. Uncomment the `shacl_validation` line in `Cargo.toml`.
 2. Replace the stub body of `pgrdf.validate` with serialization of
    both graphs to N-Triples + a `GraphValidation::from_graph(…)
@@ -89,3 +91,5 @@ Per LLD v0.3 §5.3:
 - ERRATA: [`E-001`](../specs/ERRATA.v0.2.md) — original
   `shacl-rust` → `shacl_validation` supersession.
 - ERRATA: [`E-009`](../specs/ERRATA.v0.2.md) — current dep-block.
+- Forward-looking: [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §9 —
+  real SHACL integration (v0.5, gated on E-009 resolution).

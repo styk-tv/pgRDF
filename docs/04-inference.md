@@ -27,7 +27,13 @@ entailed-but-not-asserted triples back into the same partition with
 
 If a TBox needs EL (SNOMED-style) or QL, the slice would need a
 different reasoner (e.g. ELK or a custom DL engine). Tracked in
-[`docs/10-roadmap.md`](10-roadmap.md) v0.4+.
+[`docs/10-roadmap.md`](10-roadmap.md) v0.4+. A per-call **reasoning
+profile selector** (`'rdfs'` / `'owl-rl'` / future `'owl-rl-ext'`)
+is flagged for v0.5 in
+[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §8 —
+the v0.3 surface (`pgrdf.materialize(graph_id) → JSONB`) is
+preserved; v0.5 adds an optional `profile TEXT DEFAULT 'owl-rl'`
+argument.
 
 ## Flow
 
@@ -109,6 +115,11 @@ Fast under partition-pruning. The base graph is preserved. The next
 ## See also
 
 - Implementation: [`src/inference/reasonable.rs`](../src/inference/reasonable.rs)
-- Regression: [`tests/regression/sql/60-materialize-owl-rl.sql`](../tests/regression/sql/60-materialize-owl-rl.sql)
+- Regressions:
+  [`60-materialize-owl-rl.sql`](../tests/regression/sql/60-materialize-owl-rl.sql) (core OWL 2 RL entailments + idempotence + inverseOf),
+  [`61-materialize-then-sparql.sql`](../tests/regression/sql/61-materialize-then-sparql.sql) (inferred triples flow through `pgrdf.sparql`),
+  [`62-materialize-empty.sql`](../tests/regression/sql/62-materialize-empty.sql) (zero-triple edge case).
 - ERRATA: [`E-002`](../specs/ERRATA.v0.2.md) — narrows the LLD §2
   reference from "Datalog reasoner" to "OWL 2 RL".
+- Forward-looking: [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §8 —
+  reasoning profile selector (v0.5).
