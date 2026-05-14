@@ -383,6 +383,40 @@ the W3C SHACL manifest runner. See
 
 ---
 
+## Coverage ratchet — release-by-release targets
+
+Per-release floor for every CI-enforced test layer plus the two
+external-standard pass-rate gates (W3C SPARQL 1.1, W3C SHACL) and the
+LUBM cross-engine benchmark. Cells anchor to
+[`specs/SPEC.pgRDF.LLD.v0.3.md` §6.1](../specs/SPEC.pgRDF.LLD.v0.3.md)
+(test-layer matrix),
+[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md` §13](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#13-test-policy-continues-v03-6-unchanged-in-spirit)
+(v0.4 test policy), and
+[`docs/08-testing.md`](08-testing.md) (test strategy doc); nothing
+here is new contract, only a consolidated view of the targets already
+declared in those sources.
+
+| Layer                                 | v0.3 (current) | v0.4 target                                 | v0.5 target                              | v1.0 target                                            |
+|---|---|---|---|---|
+| pgrx integration (`cargo pgrx test`)  | 93 ✅           | + `heap_multi_insert` tests                 | TBD                                      | TBD                                                    |
+| pg_regress golden                     | 39 ✅           | ~60 (§3 + §4 + §5 + §6 + §7 + §11)          | TBD                                      | TBD                                                    |
+| W3C-shape SPARQL harness              | 23 ✅           | superseded by TTL-manifest runner outputs   | superseded by TTL-manifest runner        | superseded by TTL-manifest runner                      |
+| LUBM-shape correctness harness        | 3 ✅            | superseded by LUBM-1 real benchmark         | superseded by LUBM-10 real benchmark     | superseded by LUBM-100 real benchmark                  |
+| W3C SPARQL 1.1 conformance (manifest) | not wired ⏳   | runner wired + ≥ 30 % pass                  | ≥ 70 % pass                              | ≥ 95 % pass                                            |
+| W3C SHACL conformance (manifest)      | not wired ⏳ (E-009) | not wired (still E-009)               | ≥ 50 % pass (E-009 cleared, real output) | ≥ 90 % pass                                            |
+| LUBM cross-engine benchmark           | scaffold only ⏳ | LUBM-1 smoke                                | LUBM-10 baseline vs Apache Jena TDB / Apache AGE | LUBM-100 vs Apache Jena TDB / Apache AGE       |
+
+**Ratchet enforcement.** Each release's CI must hit at least its
+column's targets; once a target is met it becomes a floor and can
+never regress (`docs/08-testing.md` "Regression discipline":
+"Coverage gates ratchet but never lower."). A green build on `main`
+that drops below a previously-met floor is a CI failure. Cells
+marked **TBD** have no published target in the LLD or FUTURE specs
+yet — they'll get filled in as v0.5 / v1.0 LLDs draft, not
+fabricated here.
+
+---
+
 ## Out of scope (v0.x)
 
 (Carries forward unchanged from

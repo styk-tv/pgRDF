@@ -6,6 +6,96 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Roadmap — coverage ratchet table (slice #30)
+
+Added a `## Coverage ratchet — release-by-release targets` section to
+`docs/10-roadmap.md`, placed between the new
+`## v0.4 — next milestone (forward-looking)` H2 (slice #31) and the
+pre-existing `## Out of scope (v0.x)` H2 so the reader's eye flows
+shipped-phases → next-milestone → ratchet-trajectory →
+out-of-scope.
+
+The new section consolidates targets already declared in scattered
+prose across `specs/SPEC.pgRDF.LLD.v0.3.md` §5.4 + §6.1,
+`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md` §13, and `docs/08-testing.md`
+("What we don't test (yet)") into a single 7-row × 5-column table:
+
+- Rows: pgrx integration, pg_regress golden, W3C-shape SPARQL
+  harness, LUBM-shape correctness harness, W3C SPARQL 1.1
+  conformance manifest, W3C SHACL conformance manifest, LUBM
+  cross-engine benchmark.
+- Columns: v0.3 (current) shipped baselines, v0.4 target, v0.5
+  target, v1.0 target.
+
+Every cell anchors to a documented source — none are fabricated.
+Cells without a published target carry `TBD` rather than a guess
+(the pgrx and pg_regress columns for v0.5 / v1.0 are TBD because
+the v0.5 / v1.0 LLDs aren't drafted yet; `v0.4-FUTURE` §13 only
+gives counts for v0.4).
+
+A one-paragraph explainer below the table pins the ratchet
+enforcement rule: each release's CI must hit at least that
+release's column, once a target is met it becomes a floor and can
+never regress, citing `docs/08-testing.md`'s "Coverage gates
+ratchet but never lower" line.
+
+Sub-edits:
+
+- `docs/10-roadmap.md` — new H2 + table + enforcement paragraph,
+  inserted between `## v0.4 — next milestone` and
+  `## Out of scope (v0.x)`. Caption cross-links
+  `specs/SPEC.pgRDF.LLD.v0.3.md` §6.1, `v0.4-FUTURE` §13, and
+  `docs/08-testing.md`.
+
+Test bar unchanged: no new pg_regress or pgrx fixtures, this is a
+docs-only slice.
+
+Source-citation per cell (so future contributors can verify before
+ratchet'ing a column):
+
+- pgrx v0.3 = `93` from `docs/08-testing.md` line 25 +
+  `docs/10-roadmap.md` v0.3 cut row.
+- pgrx v0.4 = `+ heap_multi_insert tests` from
+  `docs/08-testing.md` line 25.
+- pg_regress v0.3 = `39` from `docs/08-testing.md` line 26 +
+  v0.3 cut row.
+- pg_regress v0.4 = `~60` from `v0.4-FUTURE` §13 breakdown
+  (§3 6-8 + §4 8-10 + §5 4 + §6 3-4 + §7 5-6 + §11 5-6).
+- W3C-shape harness v0.3 = `23` from `docs/08-testing.md` line 27.
+- W3C-shape harness v0.4+ = "superseded by TTL-manifest runner"
+  from `docs/08-testing.md` line 27.
+- LUBM-shape v0.3 = `3` from `docs/08-testing.md` line 28.
+- LUBM-shape v0.4+ = "superseded by LUBM-1/10/100 real benchmarks"
+  from `docs/08-testing.md` line 28.
+- SPARQL conformance v0.3 = `not wired` from
+  `docs/08-testing.md` line 30 + `LLD v0.3` §5.4.
+- SPARQL conformance v0.4 = `runner wired + ≥ 30 %` from
+  `LLD v0.3` §5.4 line 389 + `docs/08-testing.md` line 30, 182 +
+  `v0.4-FUTURE` §13 (runner wired in v0.4).
+- SPARQL conformance v0.5 = `≥ 70 %` from `LLD v0.3` §6.1
+  Phase 4 column line 415.
+- SPARQL conformance v1.0 = `≥ 95 %` from `LLD v0.3` §5.4
+  line 389 + §6.1 Phase 6 column line 415.
+- SHACL conformance v0.3 = `not wired (E-009)` from
+  `LLD v0.3` §5.4 line 392-394 + `docs/08-testing.md` line 31.
+- SHACL conformance v0.4 = `not wired (still E-009)` from
+  `v0.4-FUTURE` §9 (E-009 still gates SHACL real integration to
+  v0.5).
+- SHACL conformance v0.5 = `≥ 50 %` from `LLD v0.3` §6.1
+  Phase 4 column line 415 + `docs/08-testing.md` line 184.
+- SHACL conformance v1.0 = `≥ 90 %` from `LLD v0.3` §5.4
+  line 392 + §6.1 Phase 6 column line 415.
+- LUBM benchmark v0.3 = `scaffold only` from
+  `docs/08-testing.md` line 32.
+- LUBM benchmark v0.4 = `LUBM-1 smoke` from `LLD v0.3` §6.1
+  Phase 3 column line 416.
+- LUBM benchmark v0.5 = `LUBM-10 baseline vs Apache Jena TDB /
+  Apache AGE` from `LLD v0.3` §6.1 Phase 4 column line 416 +
+  §5.4 line 395 + `docs/08-testing.md` line 32.
+- LUBM benchmark v1.0 = `LUBM-100 vs Apache Jena TDB /
+  Apache AGE` from `LLD v0.3` §6.1 Phase 6 column line 416 +
+  `docs/10-roadmap.md` Phase 6 step 3 line 301.
+
 ### Roadmap — v0.4 milestone section (slice #31)
 
 Added an explicit `## v0.4 — next milestone (forward-looking)` section
