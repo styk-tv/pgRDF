@@ -6,6 +6,29 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Hygiene — cargo audit (slice #51)
+
+Ran `cargo audit` (v0.22.1, advisory-db 1088 advisories loaded
+2026-05-14) against `Cargo.lock` (287 crate deps). **Zero security
+vulnerabilities.** Four informational warnings, all in pinned-dep
+subtrees (`pgrx 0.16` / `reasonable 0.4.1`) — none has a
+SemVer-compatible fix without violating the pinned-core-dep
+constraint (E-006 / pgrx 0.16, `reasonable` 0.4.1 RDF 1.2 saga in
+E-009). Deferred to the cuts that bump those upstreams.
+
+| ID | Kind | Crate | Source | Disposition |
+| --- | --- | --- | --- | --- |
+| RUSTSEC-2024-0375 | unmaintained | `atty 0.2.14` | `reasonable 0.4.1 → env_logger 0.7.1 → atty` | Defer. Fix requires `reasonable` to bump `env_logger` past 0.7; `reasonable` is pinned (see ERRATA E-009). |
+| RUSTSEC-2021-0145 | unsound | `atty 0.2.14` | same path as above | Defer. Same root cause; unaligned-read CVE in `atty`'s Windows path. Unreachable on the Linux/macOS targets pgRDF builds for, but the advisory still trips on `Cargo.lock`. |
+| RUSTSEC-2024-0436 | unmaintained | `paste 1.0.15` | `pgrx-tests 0.16.1 → paste` (dev-dep only) | Defer. Test-only proc-macro dep of pgrx-tests. Resolves when pgrx is unpinned (E-006). |
+| RUSTSEC-2021-0127 | unmaintained | `serde_cbor 0.11.2` | `pgrx 0.16.1 → serde_cbor` | Defer. Hard transitive of pgrx 0.16. Resolves when pgrx is unpinned (E-006). |
+
+Counts: Critical 0 / High 0 / Medium 0 / Low 0 / Yanked 0 /
+Informational 4. No code or `Cargo.lock` changes — the advisories
+are real but structurally unfixable in v0.3 without breaking the
+pinned-dep contract. New ERRATA entry **E-010** records the
+pinned-dep advisory ledger so future audits can diff cleanly.
+
 ### Hygiene — stale-docstring sweep
 
 Audited every public `#[pg_extern]` and module-level docstring under
