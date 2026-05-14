@@ -145,11 +145,31 @@ fn load_base_triples(graph_id: i64) -> Vec<Triple> {
             )
             .expect("materialize: base select failed");
         for row in table {
-            let s_type: i16 = row.get(1).ok().flatten().expect("materialize: subject term_type");
-            let s_val: String = row.get(2).ok().flatten().expect("materialize: subject value");
-            let p_iri: String = row.get(3).ok().flatten().expect("materialize: predicate iri");
-            let o_type: i16 = row.get(4).ok().flatten().expect("materialize: object term_type");
-            let o_val: String = row.get(5).ok().flatten().expect("materialize: object value");
+            let s_type: i16 = row
+                .get(1)
+                .ok()
+                .flatten()
+                .expect("materialize: subject term_type");
+            let s_val: String = row
+                .get(2)
+                .ok()
+                .flatten()
+                .expect("materialize: subject value");
+            let p_iri: String = row
+                .get(3)
+                .ok()
+                .flatten()
+                .expect("materialize: predicate iri");
+            let o_type: i16 = row
+                .get(4)
+                .ok()
+                .flatten()
+                .expect("materialize: object term_type");
+            let o_val: String = row
+                .get(5)
+                .ok()
+                .flatten()
+                .expect("materialize: object value");
             let o_dt: Option<String> = row.get(6).ok().flatten();
             let o_lang: Option<String> = row.get(7).ok().flatten();
 
@@ -188,12 +208,10 @@ fn build_object(
     language: Option<&str>,
 ) -> Term {
     match t_type {
-        term_type::URI => Term::NamedNode(
-            NamedNode::new(value).unwrap_or_else(|_| {
-                NamedNode::new("urn:pgrdf:invalid-iri")
-                    .expect("materialize: urn:pgrdf:invalid-iri sentinel is well-formed")
-            }),
-        ),
+        term_type::URI => Term::NamedNode(NamedNode::new(value).unwrap_or_else(|_| {
+            NamedNode::new("urn:pgrdf:invalid-iri")
+                .expect("materialize: urn:pgrdf:invalid-iri sentinel is well-formed")
+        })),
         term_type::BLANK_NODE => {
             Term::BlankNode(BlankNode::new(value).unwrap_or_else(|_| BlankNode::default()))
         }
