@@ -126,7 +126,8 @@ each shipping with pgrx + regression coverage.
 | 7 | Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT)`, `SUM`, `AVG`, `MIN`, `MAX` + `GROUP BY` | `fd40845` | 63 | 20 |
 | 8 | `HAVING` (post-aggregate filter) + `GROUP_CONCAT` + `SAMPLE` | `066ce53` | 67 | 21 |
 | 9 | Expression richness — arithmetic (`+`/`-`/`*`/`/`), `STRLEN`, `CONTAINS`/`STRSTARTS`/`STRENDS`, `LANG`/`DATATYPE`/`UCASE`/`LCASE` | `78df3a6` | 73 | 22 |
-| 10 | `BIND(expr AS ?v)` for projection (Literal/NamedNode/Variable, STR/LANG/DATATYPE/UCASE/LCASE/STRLEN, arithmetic, CONCAT) | (pending) | 76 | 23 |
+| 10 | `BIND(expr AS ?v)` for projection (Literal/NamedNode/Variable, STR/LANG/DATATYPE/UCASE/LCASE/STRLEN, arithmetic, CONCAT) | `99069a6` | 76 | 23 |
+| 11 | Multi-triple MINUS (sub-pattern with N triples joined inside the NOT EXISTS) | (pending) | 77 | 24 |
 
 Phase 3 backlog (each its own slice):
 

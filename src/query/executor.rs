@@ -130,10 +130,11 @@ struct ParsedSelect {
     /// optional FILTER. Multiple chained OPTIONALs land here in
     /// left-to-right order; build_bgp_sql emits one LEFT JOIN per.
     optionals: Vec<OptionalBlock>,
-    /// Each MINUS block — single triple pattern. Translates to
-    /// `WHERE NOT EXISTS (…)` keyed on shared variables. Elided
-    /// if there are no shared vars (SPARQL no-op).
-    minuses: Vec<TriplePattern>,
+    /// Each MINUS block — a list of triple patterns. Translates
+    /// to `WHERE NOT EXISTS (SELECT 1 FROM q_min_1, q_min_2, …
+    /// WHERE join-shared-vars AND inner-pattern-predicates)`.
+    /// Elided if there are no shared vars (SPARQL no-op).
+    minuses: Vec<Vec<TriplePattern>>,
     /// GROUP BY variables. Empty when the query has aggregates but
     /// no GROUP BY (the entire result is a single aggregate row),
     /// or when there are no aggregates at all.
@@ -212,7 +213,7 @@ struct UnionBranch {
     bgp: Vec<TriplePattern>,
     filters: Vec<Expression>,
     optionals: Vec<OptionalBlock>,
-    minuses: Vec<TriplePattern>,
+    minuses: Vec<Vec<TriplePattern>>,
 }
 
 fn translate(q: &Query) -> ExecPlan {
@@ -437,13 +438,11 @@ fn walk_branch(p: &GraphPattern, ub: &mut UnionBranch) {
         }
         GraphPattern::Minus { left, right } => {
             walk_branch(left, ub);
-            let triple = match right.as_ref() {
-                GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns[0].clone(),
-                _ => panic!(
-                    "sparql: MINUS today only supports a single triple pattern"
-                ),
+            let triples = match right.as_ref() {
+                GraphPattern::Bgp { patterns } => patterns.clone(),
+                _ => panic!("sparql: MINUS right side must be a BGP"),
             };
-            ub.minuses.push(triple);
+            ub.minuses.push(triples);
         }
         other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
     }
@@ -520,17 +519,13 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
         }
         GraphPattern::Minus { left, right } => {
             walk_select(left, ps);
-            let triple = match right.as_ref() {
-                GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns[0].clone(),
-                GraphPattern::Bgp { patterns } => panic!(
-                    "sparql: MINUS today only supports a single triple pattern (got {} triples)",
-                    patterns.len()
-                ),
+            let triples = match right.as_ref() {
+                GraphPattern::Bgp { patterns } => patterns.clone(),
                 other => panic!(
-                    "sparql: MINUS today only supports a single triple pattern (got {other:?})"
+                    "sparql: MINUS right side must be a BGP (got {other:?})"
                 ),
             };
-            ps.minuses.push(triple);
+            ps.minuses.push(triples);
         }
         GraphPattern::Group { inner, variables, aggregates } => {
             for v in variables {
@@ -1078,7 +1073,7 @@ fn build_from_and_where(
     bgp: &[TriplePattern],
     filters: &[Expression],
     optionals: &[OptionalBlock],
-    minuses: &[TriplePattern],
+    minuses: &[Vec<TriplePattern>],
     anchors: &mut HashMap<String, (usize, &'static str)>,
     alias_offset: usize,
 ) -> (String, Vec<String>) {
@@ -1138,57 +1133,69 @@ fn build_from_and_where(
     // MINUS blocks → `NOT EXISTS (SELECT 1 FROM … WHERE shared_vars)`.
     // Per SPARQL spec, MINUS with no shared variables is a no-op and
     // is elided here.
-    for minus_triple in minuses {
-        if let Some(sql) = translate_minus(minus_triple, anchors, &mut next_qi) {
+    for minus_triples in minuses {
+        if let Some(sql) = translate_minus(minus_triples, anchors, &mut next_qi) {
             where_clauses.push(sql);
         }
     }
     (from_sql, where_clauses)
 }
 
-/// Translate a MINUS triple against the outer anchors. Returns
-/// `None` if the MINUS shares no variables with the outer query
-/// (which makes it a no-op per SPARQL spec). Otherwise allocates
-/// a fresh alias for the MINUS pattern, emits a `NOT EXISTS`
-/// sub-SELECT whose WHERE clause ties shared variables back to
-/// the outer aliases.
+/// Translate a MINUS sub-pattern (N triples) against the outer
+/// anchors. Returns `None` if the sub-pattern shares no variables
+/// with the outer query (SPARQL spec: MINUS with no shared
+/// variables is the identity). Otherwise emits a
+/// `NOT EXISTS (SELECT 1 FROM <quads aliases> WHERE …)` sub-SELECT
+/// where the WHERE clause carries every triple's predicates +
+/// equality predicates joining shared variables back to the outer
+/// aliases.
 fn translate_minus(
-    triple: &TriplePattern,
+    triples: &[TriplePattern],
     outer_anchors: &HashMap<String, (usize, &'static str)>,
     next_qi: &mut usize,
 ) -> Option<String> {
-    // First pass: discover which variables in this MINUS triple are
-    // shared with the outer query. If none, MINUS is a no-op.
-    let triple_vars: Vec<String> = [
-        tp_subject_var(triple),
-        tp_predicate_var(triple),
-        tp_object_var(triple),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if !triple_vars.iter().any(|v| outer_anchors.contains_key(v)) {
+    if triples.is_empty() {
         return None;
     }
-
-    // Second pass: clone outer anchors so already-bound vars in the
-    // MINUS triple emit equality predicates against the outer aliases.
-    // New vars introduced inside the MINUS pick up the local alias.
-    let qi = *next_qi;
-    *next_qi += 1;
+    // Collect all variables across the MINUS sub-pattern; if none
+    // are shared with the outer query, MINUS is a no-op.
+    let mut all_vars: Vec<String> = Vec::new();
+    for tp in triples {
+        if let Some(v) = tp_subject_var(tp) {
+            all_vars.push(v);
+        }
+        if let Some(v) = tp_predicate_var(tp) {
+            all_vars.push(v);
+        }
+        if let Some(v) = tp_object_var(tp) {
+            all_vars.push(v);
+        }
+    }
+    if !all_vars.iter().any(|v| outer_anchors.contains_key(v)) {
+        return None;
+    }
+    // Clone outer anchors so shared vars in the sub-pattern emit
+    // equality predicates against outer aliases on first occurrence.
+    // New vars introduced inside the MINUS get fresh local aliases;
+    // shared vars internal to the sub-pattern also tie together.
     let mut local_anchors = outer_anchors.clone();
-    let clauses = pattern_clauses(triple, qi, &mut local_anchors);
-    let where_inside = if clauses.is_empty() {
-        // Defensive: shared vars discovered above means we should
-        // have at least one equality clause; if not, drop a literal
-        // FALSE so the row survives (matching the no-shared-vars
-        // semantics).
-        "FALSE".to_string()
+    let mut all_clauses: Vec<String> = Vec::new();
+    let mut from_aliases: Vec<String> = Vec::with_capacity(triples.len());
+    for tp in triples {
+        let qi = *next_qi;
+        *next_qi += 1;
+        from_aliases.push(format!("pgrdf._pgrdf_quads q{qi}"));
+        let mut clauses = pattern_clauses(tp, qi, &mut local_anchors);
+        all_clauses.append(&mut clauses);
+    }
+    let where_inside = if all_clauses.is_empty() {
+        "TRUE".to_string()
     } else {
-        clauses.join(" AND ")
+        all_clauses.join(" AND ")
     };
+    let from = from_aliases.join(", ");
     Some(format!(
-        "NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_quads q{qi} WHERE {where_inside})"
+        "NOT EXISTS (SELECT 1 FROM {from} WHERE {where_inside})"
     ))
 }
 
@@ -2724,6 +2731,37 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 2, "ex:p (3 rows, sum 60) and ex:q (2 rows, sum 20)");
+    }
+
+    /// Multi-triple MINUS — subtract subjects that match BOTH
+    /// inner triples (not either separately).
+    #[pg_test]
+    fn sparql_minus_multi_triple() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice foaf:name \"Alice\" ; foaf:mbox <mailto:a@x> ; foaf:age 30 .
+                 ex:bob   foaf:name \"Bob\"   ; foaf:mbox <mailto:b@x> .
+                 ex:carol foaf:name \"Carol\" ; foaf:age 25 .
+                 ex:dave  foaf:name \"Dave\"  .',
+                8_110)",
+        )
+        .unwrap();
+
+        // MINUS { ?s foaf:mbox _ . ?s foaf:age _ } subtracts subjects
+        // that have BOTH. Only alice has both → 3 survive.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+                SELECT ?s
+                  WHERE { ?s foaf:name ?n
+                          MINUS { ?s foaf:mbox ?m . ?s foaf:age ?a } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 3);
     }
 
     /// MINUS — subtracts solutions of the right pattern from the

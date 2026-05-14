@@ -6,6 +6,39 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 3 step 11 — Multi-triple MINUS
+
+- `MINUS { ?s :p ?o . ?s :q ?r . … }` now accepts arbitrary
+  N-triple sub-patterns. `ParsedSelect.minuses` changed from
+  `Vec<TriplePattern>` to `Vec<Vec<TriplePattern>>`; same for
+  `UnionBranch.minuses`.
+- `translate_minus` rewrites to emit one `NOT EXISTS (SELECT 1
+  FROM q_min_1, q_min_2, … WHERE …)` per MINUS block. Each
+  triple in the sub-pattern gets its own quad alias; shared
+  variables with the outer query AND shared-inside-the-MINUS
+  emit equality predicates automatically via `pattern_clauses`.
+- SPARQL spec's "no shared variables → MINUS is identity" rule
+  still applies: the translator unions all variables in the
+  sub-pattern, checks intersection with outer anchors, and
+  elides the block if empty.
+- Single-triple MINUS continues to work (it's the
+  `triples.len() == 1` case of the multi-triple path).
+- 1 new pg_test: `sparql_minus_multi_triple` (alice+eve have
+  both mbox+age → dropped, bob/carol/dave survive).
+- `tests/regression/sql/43-sparql-minus-multi.sql` covers 4
+  query shapes: 2-triple AND, 3-triple AND, chained multi-triple
+  MINUSes, single-triple back-compat.
+- `README.md` pills: 76+23 → 77+24.
+- Multi-triple OPTIONAL is **deferred to v0.4** — the LATERAL
+  refactor it needs is bigger than the MINUS rewrite (OPTIONAL
+  has to EXPOSE its new bindings to the outer query, while MINUS
+  is just a boolean check). Workaround: chain single-triple
+  OPTIONALs.
+
+Test bar:
+  pg_test:    77 passed; 0 failed  (was 76)
+  regression: 24 passed; 0 failed  (was 23)
+
 ### Phase 3 step 10 — BIND (non-aggregate)
 
 - `BIND(expr AS ?v)` (and the equivalent `SELECT (expr AS ?v)` form
