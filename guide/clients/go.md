@@ -182,8 +182,8 @@ You unmarshal the per-row JSON into a struct in application code.
 
 - pgRDF's strict Turtle parser will reject off-spec TTL. Don't
   swallow parse errors in your client; the source is the bug.
-- `pgrdf.sparql` searches every graph today. Per-graph scope arrives
-  in Phase 3.
+- `pgrdf.sparql` searches every graph today (no `GRAPH { … }`
+  scope yet). v0.4 work.
 - Set `SET search_path = pgrdf, public;` per connection to drop the
   schema prefix on every call.
 - `pgrdf.load_turtle` holds the SPI connection for the duration of

@@ -9,7 +9,7 @@ in that ecosystem.
 ## psycopg 3
 
 ```bash
-pip install "psycopg[binary]" >= 3.2
+pip install "psycopg[binary]>=3.2"
 ```
 
 ```python
@@ -58,7 +58,7 @@ that to a Python `dict` by default.
 ## asyncpg
 
 ```bash
-pip install asyncpg >= 0.30
+pip install "asyncpg>=0.30"
 ```
 
 ```python
@@ -121,10 +121,12 @@ position for pgRDF is as an `rdflib.store.Store` implementation that
 delegates `add` / `remove` / `triples` to pgRDF UDFs over a regular
 psycopg connection.
 
-The shape (once `pgrdf.sparql(q)` lands):
+The shape (`pgrdf.sparql` ships in v0.3; the rdflib adapter
+package itself is not yet released):
 
 ```python
-# Conceptual — full implementation arrives with the SPARQL surface.
+# Conceptual — pgrdf.sparql is live, but the adapter package below
+# is a to-be-shipped sibling project.
 from rdflib import Graph
 from pgrdf_rdflib import PgRDFStore     # to-be-shipped sibling project
 
@@ -135,9 +137,9 @@ g.parse("foaf.ttl", format="turtle")    # delegates to pgrdf.parse_turtle
 list(g.triples((None, RDF.type, FOAF.Person)))   # delegates to a server-side BGP query
 ```
 
-Until then, you can use rdflib client-side to parse + manipulate
-graphs and pgRDF server-side for storage + bulk ops — they don't
-collide.
+Until the adapter ships, you can use rdflib client-side to parse +
+manipulate graphs and pgRDF server-side for storage + bulk ops —
+they don't collide.
 
 ## Caveats
 
