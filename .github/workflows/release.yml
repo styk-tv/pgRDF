@@ -33,6 +33,7 @@ jobs:
       #     ├── share/extension/pgrdf.control
       #     ├── share/extension/pgrdf--<ver>.sql
       #     ├── LICENSE
+      #     ├── NOTICE
       #     └── SHA256SUMS
       - name: Repack to INSTALL-spec layout
         id: pack
@@ -46,6 +47,7 @@ jobs:
           cp "${PKG}/usr/share/postgresql/${{ matrix.pg }}/extension/"*.control   "${OUT}/share/extension/"
           cp "${PKG}/usr/share/postgresql/${{ matrix.pg }}/extension/"*.sql       "${OUT}/share/extension/"
           cp LICENSE "${OUT}/"
+          cp NOTICE  "${OUT}/"
           ( cd "${OUT}" && find . -type f ! -name SHA256SUMS -print0 | xargs -0 sha256sum > SHA256SUMS )
           tar czf "${OUT}.tar.gz" "${OUT}"
           echo "tarball=${OUT}.tar.gz" >> "$GITHUB_OUTPUT"

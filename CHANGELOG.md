@@ -6,6 +6,41 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release pre-flight — release.yml audit + NOTICE inclusion fix (slice #28)
+
+End-to-end audit of `.github/workflows/release.yml` ahead of v0.3 cut.
+Verified workflow shape:
+
+- Trigger `on: push: tags: ["v*"]`, matrix `pg14/15/16/17 × {amd64, arm64}`
+  (8 tarballs), GH Release job gated on `needs: build`.
+- Action pins: `actions/checkout@v4`, `dtolnay/rust-toolchain@stable`,
+  `actions/upload-artifact@v4`, `actions/download-artifact@v4`,
+  `softprops/action-gh-release@v2` (major-pin policy preserved).
+- Auth: relies on default `GITHUB_TOKEN` with top-level
+  `permissions: contents: write`. No third-party secrets referenced.
+- Pre-release detection: implicit via `softprops/action-gh-release@v2`'s
+  SemVer pre-release tag heuristic (e.g. `v1.0.0-rc1`); no explicit
+  `prerelease:` flag — relying on action default.
+- SHA256SUMS: already wired in **both** per-tarball form (inside each
+  `pgrdf-<ver>-pg<PG>-glibc-<arch>.tar.gz`) and aggregate form (top-level
+  `SHA256SUMS` over all 8 tarballs, attached to the GH Release).
+  Supersedes the slice #36 audit note that flagged this as "not yet
+  wired"; no TODO needed.
+
+**Bug fixed (Apache 2.0 §4(d) compliance):** the `Repack to INSTALL-spec
+layout` step previously copied only `LICENSE` into the staging directory.
+Apache 2.0 §4(d) requires that where a `NOTICE` file exists, its
+attribution notices MUST be included in distributed derivative works.
+Added `cp NOTICE "${OUT}/"` directly after the existing `cp LICENSE`
+line, mirroring the LICENSE pattern exactly. Also updated the layout
+comment block to list `NOTICE` between `LICENSE` and `SHA256SUMS`.
+
+Net effect: each of the 8 published tarballs now ships `LICENSE` +
+`NOTICE` + `SHA256SUMS` alongside the extension binaries, satisfying
+the upstream license terms inherited from `oxigraph`, `spargebra`,
+`sophia`, and other Apache-2.0 dependencies whose attribution flows
+through pgRDF's own `NOTICE`.
+
 ### Roadmap — v0.4 scope cohesion check (slice #29)
 
 Bi-directional cohesion audit between `specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`
