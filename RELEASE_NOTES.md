@@ -63,6 +63,10 @@ See [`specs/ERRATA.v0.2.md`](specs/ERRATA.v0.2.md) for the full text.
 
 Named-graph `GRAPH { … }`, SPARQL UPDATE, graph lifecycle UDFs, CONSTRUCT, property paths, multi-triple OPTIONAL, VALUES, BIND-downstream, aggregates over UNION, DESCRIBE, `heap_multi_insert` (2× ingest target). See [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).
 
+## Upgrading
+
+pgRDF v0.x reserves the right to break schema between minor releases. There is no in-place upgrade path; `ALTER EXTENSION pgrdf UPDATE` is not supported in v0.x. The supported flow is: dump your data via SQL (decode `_pgrdf_quads` against `_pgrdf_dictionary` per graph and serialise to Turtle externally), `DROP EXTENSION pgrdf CASCADE`, install the new version, then `CREATE EXTENSION pgrdf` and re-load. v1.0 will introduce proper `ALTER EXTENSION pgrdf UPDATE` migrations alongside a frozen on-disk schema. See [`docs/06-installation.md` § Upgrade between v0.x versions](docs/06-installation.md#upgrade-between-v0x-versions) for the full procedure.
+
 ## License
 
 Apache 2.0. Copyright 2026 Peter Styk &lt;peter@styk.tv&gt;.

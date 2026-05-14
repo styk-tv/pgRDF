@@ -136,6 +136,20 @@ covers every `pgrdf-*.tar.gz` asset. Internal layout verified
 end-to-end by slice #25 (manual repack) and slice #24 (clean-container
 smoke-install round-trip).
 
+### Upgrade policy
+
+pgRDF v0.x reserves the right to break schema and UDF signatures
+between minor releases. There is no in-place upgrade path:
+`ALTER EXTENSION pgrdf UPDATE` is not supported and is deferred
+until v1.0. The supported v0.x → v0.x procedure is dump-via-SQL
+(decode `_pgrdf_quads` against `_pgrdf_dictionary` per graph,
+serialise to Turtle externally), `DROP EXTENSION pgrdf CASCADE`,
+install the new version, then `CREATE EXTENSION` + re-load. See
+[`docs/06-installation.md` § Upgrade between v0.x versions](06-installation.md#upgrade-between-v0x-versions)
+for the full procedure, the rationale, and the cluster-managed
+guidance. v1.0 will introduce proper `ALTER EXTENSION pgrdf UPDATE`
+migrations alongside a frozen on-disk schema.
+
 ### Known issues
 
 See [`specs/ERRATA.v0.2.md`](../specs/ERRATA.v0.2.md):

@@ -6,6 +6,34 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release notes — upgrade policy documented (slice #21)
+
+The v0.x upgrade discipline written down as consumer-facing contract.
+Headline: pgRDF v0.x reserves the right to break schema and UDF
+signatures between minor releases, `ALTER EXTENSION pgrdf UPDATE` is
+not supported until v1.0, and the supported upgrade path is dump-via-SQL
+(decode `pgrdf._pgrdf_quads` against `pgrdf._pgrdf_dictionary` per
+graph, serialise to Turtle externally), `DROP EXTENSION pgrdf CASCADE`,
+install the new version, then `CREATE EXTENSION` + re-load. v1.0 is
+flagged as the boundary where proper `ALTER EXTENSION pgrdf UPDATE`
+migrations land alongside a frozen on-disk schema; no date committed.
+
+The detailed policy lives in `docs/06-installation.md` as a new
+`## Upgrade between v0.x versions` section (procedure with SQL dump
+template, "why no in-place upgrade?" rationale calling out fluid
+pre-1.0 schema / non-stable dict id space / `is_inferred` flux, and
+cluster-managed-installation guidance pointing CloudNativePG /
+StackGres / Apache AGE operators at planned maintenance windows +
+volume snapshots + staging verification). Two short cross-link
+summaries land alongside: `docs/09-release.md` v0.3.0 section gets a
+new `### Upgrade policy` subsection above `### Known issues`, and
+`RELEASE_NOTES.md` gets a new `## Upgrading` section above
+`## License`. Both summaries point back at the canonical
+`docs/06-installation.md` anchor. SQL examples schema-qualify the
+internal tables (`pgrdf._pgrdf_quads` / `pgrdf._pgrdf_dictionary`)
+matching the actual extension schema. No fabricated dates for v0.4 /
+v1.0.
+
 ### Release notes — RELEASE_NOTES.md drafted + release.yml body_path wired (slice #22)
 
 The GitHub Release body for v0.3.0 — the marketing-style summary that
