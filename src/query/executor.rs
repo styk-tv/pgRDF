@@ -225,9 +225,19 @@ struct BindSpec {
 
 struct AggregateSpec {
     /// The user-facing SPARQL variable that holds this aggregate's
-    /// output (post-Extend rename). Empty SetCompare = `$agg_N`
-    /// from the algebra synthesis layer until Extend renames it.
+    /// output (post-Extend rename). Starts as the synthetic
+    /// `$agg_N` / hex-blob name spargebra emits in the algebra
+    /// synthesis layer; `Extend` rewrites it to the AS-alias.
     output_var: String,
+    /// Every variable name spargebra used internally to reference
+    /// this aggregate, including the original synthetic name (kept
+    /// even after `Extend` renames `output_var`). Inline aggregates
+    /// in HAVING (`HAVING(SUM(?v) > c)`) reference the synthetic
+    /// name rather than the user alias — without this list the
+    /// HAVING filter wouldn't find its aggregate and would fall
+    /// through to the non-aggregate-aware FILTER translator,
+    /// producing "FILTER expression not translatable".
+    synth_aliases: Vec<String>,
     func: AggregateFn,
     distinct: bool,
     /// The aggregate's argument variable. `None` only for `COUNT(*)`.
@@ -367,7 +377,17 @@ fn parse_select(p: &GraphPattern) -> ParsedSelect {
     // by the time it evaluates the predicate). Split now so
     // build_aggregate_sql can route each filter correctly.
     if !ps.aggregates.is_empty() {
-        let agg_names: Vec<String> = ps.aggregates.iter().map(|a| a.output_var.clone()).collect();
+        // An aggregate is "referenced" by either its user-facing
+        // output_var (post-Extend rename) OR any of the synthetic
+        // names spargebra used internally — inline aggregates in
+        // HAVING fall into the latter case.
+        let agg_names: Vec<String> = ps
+            .aggregates
+            .iter()
+            .flat_map(|a| {
+                std::iter::once(a.output_var.clone()).chain(a.synth_aliases.iter().cloned())
+            })
+            .collect();
         let (having, where_): (Vec<_>, Vec<_>) = std::mem::take(&mut ps.filters)
             .into_iter()
             .partition(|f| expression_references_any(f, &agg_names));
@@ -481,6 +501,7 @@ fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec 
     match agg {
         AggregateExpression::CountSolutions { distinct } => AggregateSpec {
             output_var: synth_var.to_string(),
+            synth_aliases: vec![synth_var.to_string()],
             func: AggregateFn::Count,
             distinct: *distinct,
             arg_var: None,
@@ -512,6 +533,7 @@ fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec 
             };
             AggregateSpec {
                 output_var: synth_var.to_string(),
+                synth_aliases: vec![synth_var.to_string()],
                 func,
                 distinct: *distinct,
                 arg_var: Some(arg_var),
@@ -1027,11 +1049,18 @@ fn translate_filter_with_aggregates(
     aggs: &[AggregateSpec],
     group_exprs: &[(String, String)],
 ) -> Option<String> {
+    // Look up an aggregate by either its current output_var or any
+    // of the synthetic names spargebra used internally.
+    let find_agg = |name: &str| -> Option<&AggregateSpec> {
+        aggs.iter().find(|a| {
+            a.output_var == name || a.synth_aliases.iter().any(|s| s == name)
+        })
+    };
     let numeric_side = |e: &Expression| -> Option<String> {
         match e {
             Expression::Variable(v) => {
                 let name = v.as_str();
-                if let Some(agg) = aggs.iter().find(|a| a.output_var == name) {
+                if let Some(agg) = find_agg(name) {
                     Some(translate_aggregate(agg, anchors))
                 } else if let Some((_, gexpr)) = group_exprs.iter().find(|(n, _)| n == name) {
                     Some(format!("({gexpr})::numeric"))
@@ -1055,7 +1084,7 @@ fn translate_filter_with_aggregates(
         match e {
             Expression::Variable(v) => {
                 let name = v.as_str();
-                if let Some(agg) = aggs.iter().find(|a| a.output_var == name) {
+                if let Some(agg) = find_agg(name) {
                     Some(format!("({})::text", translate_aggregate(agg, anchors)))
                 } else if let Some((_, gexpr)) = group_exprs.iter().find(|(n, _)| n == name) {
                     Some(gexpr.clone())

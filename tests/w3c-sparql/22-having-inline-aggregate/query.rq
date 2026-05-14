@@ -1,0 +1,9 @@
+PREFIX ex: <http://example.com/>
+SELECT ?cat (SUM(?p) AS ?total)
+WHERE {
+  ?i ex:cat ?cat ;
+     ex:price ?p .
+}
+GROUP BY ?cat
+HAVING (SUM(?p) > 15)
+ORDER BY ?cat

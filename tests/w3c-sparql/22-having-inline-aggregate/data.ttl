@@ -1,0 +1,9 @@
+@prefix ex: <http://example.com/> .
+
+# Three items per category; per-cat SUM = books=40, food=10, tools=25.
+ex:i1 ex:cat "books" ; ex:price 10 .
+ex:i2 ex:cat "books" ; ex:price 12 .
+ex:i3 ex:cat "books" ; ex:price 18 .
+ex:i4 ex:cat "food"  ; ex:price 3 .
+ex:i5 ex:cat "food"  ; ex:price 7 .
+ex:i6 ex:cat "tools" ; ex:price 25 .

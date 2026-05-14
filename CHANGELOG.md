@@ -6,6 +6,48 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Translator fix — inline `HAVING(SUM(?v) > c)` now supported
+
+`src/query/executor.rs::AggregateSpec` gains a `synth_aliases:
+Vec<String>` field that preserves spargebra's synthetic
+intermediate-variable name even after `Extend` renames
+`output_var` to the user's AS-alias.
+
+Why: spargebra emits algebra of the form
+```
+Project { Filter(HAVING) { Extend(?total = $synth) {
+  Group(aggregates=[($synth, SUM(?p))]) } } }
+```
+The `Extend` visitor previously rewrote `output_var` from `$synth`
+to `?total` and dropped the `$synth` mapping. The HAVING filter
+`Filter(Greater(Variable($synth), Literal(15)))` then couldn't
+find its aggregate during the filter-migration step and fell
+through to the non-aggregate-aware FILTER translator, producing
+`sparql: FILTER expression not translatable`.
+
+The fix:
+- `AggregateSpec.synth_aliases` is initialised by
+  `parse_aggregate` with the original `$synth` name and never
+  modified by `Extend`.
+- The filter-migration step's `agg_names` is now the union of
+  every aggregate's `output_var` AND its `synth_aliases`.
+- `translate_filter_with_aggregates`'s lookup helper (`find_agg`)
+  consults both fields.
+
+Effects:
+- `tests/regression/sql/80-unsupported-shapes.sql::gap-1` removed
+  (was negative-locked; no longer a gap).
+- New positive coverage:
+  `tests/w3c-sparql/22-having-inline-aggregate/` — same shape as
+  `08-aggregates-having` but with the inline `HAVING(SUM(?p)>15)`
+  form. Hand-computed expected output verified.
+- Both forms are now first-class. `08`'s description.md updated
+  to note the companion test.
+- v0.4 SPARQL-surface deferred list shrinks by one entry.
+
+Test bar: **93 pgrx + 33 pg_regress + 22 W3C-shape + 3 LUBM-shape
+= 151 tests**, green locally.
+
 ### Translator-gap regression signals + Phase 6 step 3 scaffolding
 
 Two adjacent additions, motivated by a real translator gap I hit

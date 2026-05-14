@@ -66,20 +66,14 @@ BEGIN
 END
 $$;
 
--- ─── Gap 1: HAVING with inline aggregate ─────────────────────────
--- W3C SPARQL 1.1 §11.5 allows HAVING to embed a fresh aggregate
--- expression (`HAVING(SUM(?v) > c)`). pgRDF's translator handles
--- HAVING by output alias (`HAVING(?total > c)`); the inline form
--- where spargebra synthesises an intermediate variable name fails
--- with `sparql: FILTER expression not translatable`.
-SELECT _check_gap(
-  'gap-1 HAVING inline aggregate',
-  'PREFIX ex: <http://example.com/>
-   SELECT ?cat (SUM(?p) AS ?total)
-   WHERE { ?i ex:cat ?cat ; ex:price ?p . }
-   GROUP BY ?cat HAVING(SUM(?p) > 15)',
-  'sparql: FILTER expression not translatable'
-);
+-- Gap 1 (inline `HAVING(SUM(?v) > c)`) was originally locked here
+-- as a known translator failure. The fix landed alongside this file
+-- update: AggregateSpec now carries a `synth_aliases` vec that
+-- preserves spargebra's internal synthetic variable name even after
+-- Extend renames `output_var` to the user-facing AS-alias. The
+-- HAVING-filter migration + translator both consult both names.
+-- Positive coverage now lives at
+-- `tests/w3c-sparql/22-having-inline-aggregate/`.
 
 -- ─── Gap 2: multi-triple OPTIONAL ────────────────────────────────
 -- W3C §6 allows OPTIONAL blocks with N>=1 triples. pgRDF handles
