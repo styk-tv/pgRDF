@@ -5,7 +5,7 @@
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20v0.3%20engine%20feature--complete-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-93%20pgrx%20%2B%2034%20regression%20%2B%2023%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-93%20pgrx%20%2B%2035%20regression%20%2B%2023%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
 [![SPARQL](https://img.shields.io/badge/SPARQL-FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
@@ -225,8 +225,8 @@ For people working on pgRDF itself.
 | Ontology smoke | Real-world Turtle parses cleanly | `tests/perf/smoke-ontologies.sh` |
 | Full bar | Both `just test` + `just test-regression` | `just test-all` |
 
-Current bar — **93 pgrx + 34 pg_regress + 23 W3C-shape + 3
-LUBM-shape = 153 tests** green across the full pgrx PG 14-17
+Current bar — **93 pgrx + 35 pg_regress + 23 W3C-shape + 3
+LUBM-shape = 154 tests** green across the full pgrx PG 14-17
 matrix and the compose-based regression runtime (PG 17). Covers:
 - Storage CRUD + Turtle ingest (Phase 2.0-2.2).
 - SPARQL SELECT/ASK surface (Phase 3 steps 1-12, plus inline
@@ -244,6 +244,10 @@ matrix and the compose-based regression runtime (PG 17). Covers:
 - Error-path signals locking the stable error-prefix UDFs emit
   on invalid input (`81-error-paths.sql`); first lock-in:
   `load_turtle: failed to open` on a missing path.
+- Edge-case correctness signals (`62-materialize-empty.sql` →
+  forward): `pgrdf.materialize()` on an empty graph returns
+  `base_triples = 0`, non-negative inferred-count, and stays
+  idempotent across two calls.
 
 External smoke covers 24 well-known ontologies (W3C, Apache Jena,
 ValueFlows, ConceptKernel v3.7) for ~17,000 triples loaded;

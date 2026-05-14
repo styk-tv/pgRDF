@@ -80,6 +80,34 @@ and is not pinned by this regression slice.
 Test bar: **93 pgrx + 34 pg_regress + 23 W3C-shape + 3 LUBM-shape
 = 153 tests**, green locally.
 
+### Coverage — edge-case correctness regression signals
+
+New `tests/regression/sql/62-materialize-empty.sql` opens a sibling
+track to the error-path file (`81-error-paths.sql`): instead of
+locking the prefix a UDF emits when given an *invalid* input, it
+locks the *correctness contract* on **edge-case but valid** inputs
+the engine must handle without surprise. The countdown shifts from
+66→63 (error-path locks) into 62→onward (edge-case locks).
+
+Locks #62 of the 66→1 countdown: `pgrdf.materialize(N)` on a graph
+with zero base triples MUST NOT panic and MUST return a JSONB stats
+object with `base_triples = 0`. The UDF still emits OWL 2 RL
+**axiomatic triples** (per `reasonable 0.4`, four self-statements
+over `owl:Thing` / `rdfs:Class` / etc. on the empty input) — that
+count is upstream-defined and NOT pinned by this slice; only
+`inferred_triples_written ≥ 0` is part of the locked contract.
+Idempotency carries across the empty case: a second
+`materialize(N)` call wipes its own prior `is_inferred=TRUE` rows
+before re-deriving, so run 2's `previous_inferred_dropped` equals
+run 1's `inferred_triples_written` exactly. Both invariants
+project as booleans (`base_is_zero`, `inferred_nonneg`,
+`first_run_dropped_zero`, `idempotent`) so the expected output
+stays `t` regardless of axiomatic-set churn from upstream
+`reasonable` releases.
+
+Test bar: **93 pgrx + 35 pg_regress + 23 W3C-shape + 3 LUBM-shape
+= 154 tests**, green locally.
+
 ### Translator fix — type-aware `MIN` / `MAX`
 
 `src/query/executor.rs::translate_aggregate` for `MIN` / `MAX`
