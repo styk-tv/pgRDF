@@ -25,3 +25,12 @@ CREATE TABLE IF NOT EXISTS _pgrdf_graphs (
 INSERT INTO _pgrdf_graphs (graph_id, iri)
      VALUES (0, 'urn:pgrdf:graph:0')
 ON CONFLICT (graph_id) DO NOTHING;
+
+-- Register `_pgrdf_graphs` as a user-data table so `pg_dump` includes
+-- its rows in the dump (rather than treating it as extension-managed
+-- DDL and re-running this install SQL on restore, which would drop
+-- every user-bound IRI mapping). LLD v0.4 §3.1 acceptance criterion
+-- "pg_dump round-trips the mapping verbatim" depends on this call.
+-- The empty filter string includes all rows. Slice 110 verifies the
+-- end-to-end round trip via tests/regression/scripts/pg-dump-roundtrip.sh.
+SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', '');
