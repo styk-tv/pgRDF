@@ -1,12 +1,18 @@
 //! Named-graph IRI ↔ graph_id mapping.
 //!
 //! Phase A slice 120 lands the `_pgrdf_graphs` system table (LLD
-//! v0.4 §3.1) via `sql/schema_v0_4_0_graphs.sql`. UDF surface
-//! (`pgrdf.add_graph(iri)`, `pgrdf.graph_id(iri)`, `pgrdf.graph_iri(id)`,
-//! plus the dual-arg `pgrdf.add_graph(id, iri)` overload) lands in
-//! slices 118-115; the existing integer-keyed
-//! [`super::hexastore::add_graph`] retains its v0.3 signature until
-//! slice 117 wires the synthetic-IRI binding.
+//! v0.4 §3.1) via `sql/schema_v0_4_0_graphs.sql`. The IRI-keyed UDF
+//! surface (`pgrdf.add_graph(iri)`, `pgrdf.graph_id(iri)`,
+//! `pgrdf.graph_iri(id)`, plus the dual-arg `pgrdf.add_graph(id, iri)`
+//! overload) lands in slices 118-115.
+//!
+//! Slice 119 — the existing integer-keyed
+//! [`super::hexastore::add_graph`] now binds a synthetic IRI
+//! `urn:pgrdf:graph:{id}` in `_pgrdf_graphs` on each successful
+//! partition creation, so v0.3 callers get a queryable IRI mapping
+//! for every graph they create through the integer surface. Same
+//! signature, same return value, same idempotency — the new INSERT
+//! is wrapped in `ON CONFLICT (graph_id) DO NOTHING`.
 //!
 //! Reference: SPEC.pgRDF.LLD.v0.4 §3.1.
 
@@ -39,5 +45,35 @@ mod tests {
                 .expect("iri lookup failed")
                 .expect("iri returned NULL");
         assert_eq!(iri, "urn:pgrdf:graph:0");
+    }
+
+    /// Slice 119 — `pgrdf.add_graph(id BIGINT)` populates
+    /// `_pgrdf_graphs` with the synthetic IRI `urn:pgrdf:graph:{id}`
+    /// on each successful partition creation. Idempotent re-call
+    /// produces no extra row and no error.
+    #[pg_test]
+    fn add_graph_populates_synthetic_iri() {
+        // First call binds the IRI.
+        Spi::run("SELECT pgrdf.add_graph(42)").expect("add_graph(42) failed");
+        let iri: Option<String> =
+            Spi::get_one("SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = 42")
+                .expect("iri lookup failed");
+        assert_eq!(iri.as_deref(), Some("urn:pgrdf:graph:42"));
+
+        // Re-calling is idempotent — partition exists, IRI row stays
+        // single, no error from the ON CONFLICT clause.
+        Spi::run("SELECT pgrdf.add_graph(42)").expect("idempotent add_graph(42) failed");
+        let count: i64 =
+            Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_graphs WHERE graph_id = 42")
+                .expect("count query failed")
+                .expect("count returned NULL");
+        assert_eq!(count, 1, "expected exactly one row for graph_id = 42, got {count}");
+
+        // A second distinct id gets its own row.
+        Spi::run("SELECT pgrdf.add_graph(100)").expect("add_graph(100) failed");
+        let iri100: Option<String> =
+            Spi::get_one("SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = 100")
+                .expect("iri lookup failed");
+        assert_eq!(iri100.as_deref(), Some("urn:pgrdf:graph:100"));
     }
 }

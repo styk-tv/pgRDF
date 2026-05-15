@@ -122,12 +122,17 @@ The default partition (`graph_id = 0`) is seeded with the synthetic
 IRI `urn:pgrdf:graph:0`, so the catch-all bucket has a queryable
 name from `CREATE EXTENSION` onwards.
 
-This slice (countdown 120) lands the table only — UDF surface
-(`pgrdf.add_graph(iri)`, `pgrdf.graph_id(iri)`,
-`pgrdf.graph_iri(id)`, plus a dual-arg `pgrdf.add_graph(id, iri)`
-overload) lands in subsequent Phase A slices; SPARQL
-`GRAPH { … }` translation lands later in Phase A. The existing
-`pgrdf.add_graph(id BIGINT)` retains its v0.3 signature for now.
+Slice 120 lands the table; **slice 119** wires the existing
+integer-keyed `pgrdf.add_graph(id BIGINT)` UDF to populate
+`_pgrdf_graphs` automatically — every successful partition
+creation also inserts `(id, 'urn:pgrdf:graph:' || id::text)`
+under an `ON CONFLICT (graph_id) DO NOTHING` clause, so v0.3
+callers gain a queryable IRI mapping for every graph they create
+through the integer surface without any signature change. The
+IRI-keyed UDF surface (`pgrdf.add_graph(iri)`,
+`pgrdf.graph_id(iri)`, `pgrdf.graph_iri(id)`, plus a dual-arg
+`pgrdf.add_graph(id, iri)` overload) lands in subsequent Phase A
+slices; SPARQL `GRAPH { … }` translation lands later in Phase A.
 Spec: SPEC.pgRDF.LLD.v0.4 §3.
 
 ## 2.3 Bulk loader (`src/storage/loader.rs`)

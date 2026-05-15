@@ -355,12 +355,21 @@ not the integer. See
   [`src/storage/graphs.rs`](../src/storage/graphs.rs). No UDF
   surface change; existing `pgrdf.add_graph(id BIGINT)` retains
   its v0.3 signature.
+- ✅ **Slice 119 — synthetic-IRI binding for the existing integer
+  `pgrdf.add_graph(id)`.** The v0.3 UDF in
+  [`src/storage/hexastore.rs`](../src/storage/hexastore.rs) now
+  inserts `(id, 'urn:pgrdf:graph:' || id::text)` into
+  `_pgrdf_graphs` after creating the partition, wrapped in
+  `ON CONFLICT (graph_id) DO NOTHING` so re-calls stay idempotent.
+  No signature or return-value change; v0.3 callers automatically
+  populate the IRI mapping for every graph they create. Regression
+  coverage:
+  [`tests/regression/sql/73-add-graph-populates-iri.sql`](../tests/regression/sql/73-add-graph-populates-iri.sql)
+  + `#[pg_test] add_graph_populates_synthetic_iri` in
+  [`src/storage/graphs.rs`](../src/storage/graphs.rs).
 - ⏳ Slices 118-115 — UDF surface (`pgrdf.add_graph(iri)`,
   `pgrdf.graph_id(iri)`, `pgrdf.graph_iri(id)`, dual-arg
   overload).
-- ⏳ Slice 117 — synthetic-IRI binding for the existing integer
-  `pgrdf.add_graph(id)` so v0.3 callers automatically populate
-  `_pgrdf_graphs`.
 - ⏳ Slices 111-110 — SPARQL `GRAPH { … }` translation
   (resolution against `_pgrdf_graphs.iri`, projection of `?g` as
   IRI).

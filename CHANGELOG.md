@@ -6,6 +6,19 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 119 — `add_graph(id BIGINT)` populates `_pgrdf_graphs`
+
+The existing integer-keyed `pgrdf.add_graph(id BIGINT)` UDF now
+inserts `(id, 'urn:pgrdf:graph:' || id::text)` into `_pgrdf_graphs`
+on each successful partition creation. Idempotent via
+`ON CONFLICT (graph_id) DO NOTHING`. No signature change; downstream
+callers gain a queryable IRI mapping for every graph they create
+through the integer surface.
+
+Regression: `tests/regression/sql/73-add-graph-populates-iri.sql` +
+pgrx test `src/storage/graphs.rs::add_graph_populates_synthetic_iri`.
+Test bar: 96 pgrx + 42 pg_regress + 23 W3C + 3 LUBM = 164 green.
+
 ### Phase A slice 120 — `_pgrdf_graphs` schema lands (LLD v0.4 §3.1)
 
 New `pgrdf._pgrdf_graphs(graph_id BIGINT PRIMARY KEY, iri TEXT NOT

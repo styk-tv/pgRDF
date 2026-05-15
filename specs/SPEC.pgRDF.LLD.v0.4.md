@@ -167,7 +167,7 @@ CREATE TABLE _pgrdf_graphs (
 |---|---|---|---|
 | `pgrdf.add_graph(iri TEXT)` | overload | `BIGINT` | Idempotent on the IRI: insert if absent (auto-allocated id), return existing id otherwise. |
 | `pgrdf.add_graph(id BIGINT, iri TEXT)` | overload | `BIGINT` | Explicit id binding; errors if id or IRI is already bound to a different counterpart. |
-| `pgrdf.add_graph(id BIGINT)` | retained | `BIGINT` | Back-compat with v0.3; assigns synthetic IRI `urn:pgrdf:graph:{id}` automatically. |
+| `pgrdf.add_graph(id BIGINT)` | retained | `BIGINT` | Back-compat with v0.3; assigns synthetic IRI `urn:pgrdf:graph:{id}` automatically as of slice 119 (`ON CONFLICT (graph_id) DO NOTHING` keeps idempotency intact). |
 | `pgrdf.graph_id(iri TEXT)` | new | `BIGINT` | Returns `NULL` if the IRI is not bound. |
 | `pgrdf.graph_iri(id BIGINT)` | new | `TEXT` | Returns `NULL` if the id is not bound. |
 

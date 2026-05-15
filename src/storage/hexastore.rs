@@ -44,6 +44,14 @@ fn count_quads(g: default!(i64, 0)) -> i64 {
 /// route to `_pgrdf_quads_default`). Returns TRUE if the partition
 /// was created on this call, FALSE if it already existed.
 ///
+/// Phase A slice 119 — on the partition-creating path, also inserts
+/// `(g, 'urn:pgrdf:graph:' || g::text)` into `_pgrdf_graphs` so v0.3
+/// callers automatically populate the IRI ↔ graph_id mapping landed
+/// in slice 120. `ON CONFLICT (graph_id) DO NOTHING` preserves
+/// idempotency of the UDF as a whole (the seed row + repeat calls
+/// never error). Synthetic IRI shape `urn:pgrdf:graph:{id}` matches
+/// the seed row from slice 120 and the LLD v0.4 §3.1 contract.
+///
 /// SQL surface: `pgrdf.add_graph(g BIGINT) → BOOLEAN`.
 #[pg_extern]
 fn add_graph(g: i64) -> bool {
@@ -72,6 +80,18 @@ fn add_graph(g: i64) -> bool {
         part_name, g
     );
     Spi::run(&sql).expect("add_graph: CREATE TABLE failed");
+    // Slice 119 — bind the synthetic IRI for this graph_id in
+    // `_pgrdf_graphs`. `ON CONFLICT (graph_id) DO NOTHING` keeps the
+    // UDF re-entrant: if a prior writer (or a future explicit
+    // `add_graph(id, iri)` overload) already bound `g`, we leave that
+    // binding intact rather than clobber it.
+    Spi::run_with_args(
+        "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+         VALUES ($1, 'urn:pgrdf:graph:' || $1::text) \
+         ON CONFLICT (graph_id) DO NOTHING",
+        &[g.into()],
+    )
+    .unwrap_or_else(|e| panic!("add_graph: failed to insert synthetic IRI for graph_id {g}: {e}"));
     true
 }
 
