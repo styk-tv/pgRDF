@@ -41,6 +41,28 @@
 //! SPI errors propagate with the stable `graph_iri:` prefix.
 //! Together with slice 116 this closes the §3.2 UDF surface.
 //!
+//! Slice 97 (Phase B) — `pgrdf.copy_graph(src BIGINT, dst BIGINT) →
+//! BIGINT` ([`copy_graph`]). Per LLD v0.4 §5.1 the function copies
+//! every row in `_pgrdf_quads_g<src>` into `_pgrdf_quads_g<dst>`
+//! via an `INSERT INTO … SELECT` against the per-graph LIST
+//! partitions, returning the count copied. Both `is_inferred =
+//! FALSE` and `is_inferred = TRUE` rows carry forward verbatim
+//! (the function is not `is_inferred`-discriminating per LLD §5.2
+//! `copy_graph copies both` clause). If `_pgrdf_quads_g<dst>`
+//! does not exist the function auto-creates it via
+//! `pgrdf.add_graph(dst::bigint)`, which also binds the synthetic
+//! `urn:pgrdf:graph:{dst}` IRI in `_pgrdf_graphs` per slice 119.
+//! Idempotent on an absent source partition — returns 0 without
+//! erroring; re-calling against the same `(src, dst)` would
+//! duplicate rows, so callers are expected to `clear_graph(dst)`
+//! first if they need re-call idempotency. `src == dst` panics
+//! with `copy_graph: src and dst must differ`; negative ids panic
+//! with `copy_graph: graph_id must be >= 0, got src=<S>,
+//! dst=<D>`. Sibling of slice 96's `move_graph` (metadata-only
+//! re-association) — `copy_graph` is the only lifecycle UDF that
+//! touches every row, so it scales with the source row count
+//! while the other three are partition-DDL-bounded.
+//!
 //! Slice 99 (Phase B) — `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN
 //! DEFAULT TRUE) → BIGINT` ([`drop_graph`]). Removes the LIST partition
 //! `_pgrdf_quads_g<id>` from the parent `_pgrdf_quads` (`DETACH
@@ -324,6 +346,140 @@ fn clear_graph(id: i64) -> i64 {
         .unwrap_or_else(|e| panic!("clear_graph: TRUNCATE failed: {e}"));
 
     total
+}
+
+/// Copy every row from graph `src`'s LIST partition into graph
+/// `dst`'s LIST partition. Returns the count copied (the row count
+/// of `src` captured immediately before the INSERT).
+///
+/// Per LLD v0.4 §5.1 / §5.2: `copy_graph` is the only graph-level
+/// lifecycle UDF that touches every row — the partition-DDL siblings
+/// (`drop_graph`, `move_graph`, and `clear_graph`'s `TRUNCATE`) are
+/// all metadata-bounded. The work is a single
+/// `INSERT INTO pgrdf._pgrdf_quads_g<dst> (subject_id, predicate_id,
+/// object_id, graph_id, is_inferred) SELECT subject_id, predicate_id,
+/// object_id, <dst>::bigint, is_inferred FROM pgrdf._pgrdf_quads_g<src>`
+/// — the `graph_id` projection rebinds to the destination id so the
+/// partition router lands the rows in `dst`'s partition without
+/// touching `_pgrdf_quads_default`. Both `is_inferred = FALSE` and
+/// `is_inferred = TRUE` rows are copied verbatim — entailment state
+/// carries forward.
+///
+/// **Destination auto-creation.** If `_pgrdf_quads_g<dst>` does not
+/// exist, the function calls `pgrdf.add_graph(dst::bigint)` to
+/// create it. That call also binds a synthetic
+/// `urn:pgrdf:graph:{dst}` IRI in `_pgrdf_graphs` per slice 119, so
+/// `pgrdf.graph_iri(dst)` resolves post-copy even if the caller
+/// hadn't pre-registered the destination. If `dst` was already
+/// bound to a different IRI, that binding is preserved unchanged
+/// (the partition existence check short-circuits before
+/// `add_graph` runs).
+///
+/// **Source absence is idempotent.** If `_pgrdf_quads_g<src>` does
+/// not exist (no `add_graph(src)` has ever run), the function
+/// returns 0 without erroring. This matches the §5.2 idempotency
+/// invariant: every lifecycle UDF returns 0 (no-op) on inputs
+/// naming an empty or absent graph.
+///
+/// **Re-call duplicates.** Calling `copy_graph(src, dst)` twice
+/// against the same `(src, dst)` pair would duplicate every source
+/// row in `dst` — the function does NOT clear `dst` before
+/// inserting. Callers needing strict idempotency should invoke
+/// `pgrdf.clear_graph(dst)` before the second copy. This is the
+/// `ADD` (W3C SPARQL 1.1 Update §3.2.6) vs `COPY` distinction
+/// pushed into the caller's responsibility.
+///
+/// Guards (stable error prefixes per the error-message contract):
+///
+/// - `src < 0 || dst < 0` panics with
+///   `copy_graph: graph_id must be >= 0, got src=<S>, dst=<D>`.
+/// - `src == dst` panics with
+///   `copy_graph: src and dst must differ (both = <id>)` — the
+///   self-copy degenerate case has no defined semantics (a single
+///   `INSERT … SELECT` from a table into itself would scan + insert
+///   in unpredictable interleavings on a partitioned table) and is
+///   rejected outright.
+///
+/// SQL surface: `pgrdf.copy_graph(src BIGINT, dst BIGINT) → BIGINT`.
+/// Per LLD v0.4 §5.1. Sibling slice-96 `move_graph` provides the
+/// constant-time metadata-only association swap; `copy_graph` is the
+/// row-touching counterpart that leaves `src` intact.
+#[pg_extern]
+fn copy_graph(src: i64, dst: i64) -> i64 {
+    if src < 0 || dst < 0 {
+        panic!("copy_graph: graph_id must be >= 0, got src={src}, dst={dst}");
+    }
+    if src == dst {
+        panic!("copy_graph: src and dst must differ (both = {src})");
+    }
+
+    // Source partition existence check — idempotent miss path
+    // returns 0 without erroring per LLD v0.4 §5.2.
+    let src_name = format!("_pgrdf_quads_g{src}");
+    let src_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                       WHERE c.relname = $1 AND n.nspname = 'pgrdf')",
+        &[src_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("copy_graph: src existence check failed: {e}"))
+    .unwrap_or(false);
+
+    if !src_exists {
+        return 0;
+    }
+
+    // Destination partition auto-create — `add_graph(dst)` is
+    // idempotent (slice 119 wraps the synthetic-IRI insert in
+    // ON CONFLICT DO NOTHING + CREATE TABLE IF NOT EXISTS), but
+    // we still gate on existence so we don't pay the round-trip
+    // when the partition is already there.
+    let dst_name = format!("_pgrdf_quads_g{dst}");
+    let dst_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                       WHERE c.relname = $1 AND n.nspname = 'pgrdf')",
+        &[dst_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("copy_graph: dst existence check failed: {e}"))
+    .unwrap_or(false);
+
+    if !dst_exists {
+        Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[dst.into()])
+            .unwrap_or_else(|e| panic!("copy_graph: dst partition creation failed: {e}"));
+    }
+
+    // Capture the source row count up-front — the return value of
+    // the UDF. `count(*)::bigint` always yields exactly one row,
+    // no scalar-subquery wrapper needed. The format!-built SQL is
+    // safe: the partition name is constructed from a validated
+    // non-negative BIGINT (no user input in identifier position).
+    let count: i64 = Spi::get_one(&format!(
+        "SELECT count(*)::bigint FROM pgrdf.{src_name}"
+    ))
+    .unwrap_or_else(|e| panic!("copy_graph: count failed: {e}"))
+    .unwrap_or(0);
+
+    if count == 0 {
+        return 0;
+    }
+
+    // The copy itself — `INSERT INTO <dst> SELECT … FROM <src>`
+    // with the `graph_id` projection rebound to `dst`. Both
+    // `is_inferred = FALSE` and `is_inferred = TRUE` rows carry
+    // forward (no WHERE-clause discrimination). The explicit
+    // column list on the INSERT side keeps the projection
+    // order-independent of any future `_pgrdf_quads` column
+    // additions.
+    Spi::run(&format!(
+        "INSERT INTO pgrdf.{dst_name} \
+            (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+         SELECT subject_id, predicate_id, object_id, {dst}::bigint, is_inferred \
+           FROM pgrdf.{src_name}"
+    ))
+    .unwrap_or_else(|e| panic!("copy_graph: INSERT INTO ... SELECT failed: {e}"));
+
+    count
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -884,5 +1040,116 @@ mod tests {
         let second: Option<i64> = Spi::get_one("SELECT pgrdf.clear_graph(9890::bigint)")
             .expect("second clear_graph(9890) failed");
         assert_eq!(second, Some(0), "second clear on empty partition must return 0");
+    }
+
+    /// Slice 97 — happy path: build a source partition, seed N rows
+    /// (mix of base + inferred), call `copy_graph(src, dst)` against
+    /// a fresh `dst`. Verify return value matches the source row
+    /// count, the destination partition exists, and the rows show
+    /// up with `graph_id = dst` and the `is_inferred` flag preserved.
+    ///
+    /// Direct partition CREATE + direct INSERT into `_pgrdf_quads`
+    /// bypasses the `add_graph(src)` partition-DDL parallelism flake
+    /// (same mitigation as `drop_graph_happy_path` above). For the
+    /// destination side we deliberately *don't* pre-create the
+    /// partition — the function's auto-create path is the
+    /// interesting code under test. Ids `971100` (src) and `971200`
+    /// (dst) are unique to this slice so concurrent pg_test workers
+    /// can't collide on the partition LIST value or the rows.
+    #[pg_test]
+    fn copy_graph_happy_path() {
+        Spi::run(
+            "CREATE TABLE pgrdf._pgrdf_quads_g971100 \
+             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (971100)",
+        )
+        .expect("manual src partition creation failed");
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_quads \
+                (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+             VALUES (1, 2, 3, 971100, false), \
+                    (4, 5, 6, 971100, false), \
+                    (7, 8, 9, 971100, true)",
+        )
+        .expect("seed src quads failed");
+
+        let copied: i64 = Spi::get_one("SELECT pgrdf.copy_graph(971100::bigint, 971200::bigint)")
+            .expect("copy_graph happy path failed")
+            .expect("copy_graph happy path returned NULL");
+        assert_eq!(copied, 3, "must return the source row count");
+
+        // Destination partition was auto-created (we did NOT
+        // pre-create it).
+        let dst_exists: bool = Spi::get_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_class \
+                           WHERE relnamespace = 'pgrdf'::regnamespace \
+                             AND relname = '_pgrdf_quads_g971200')",
+        )
+        .expect("pg_class probe failed")
+        .unwrap_or(false);
+        assert!(dst_exists, "dst partition must exist post-copy");
+
+        // Destination has all 3 rows with the rebound graph_id.
+        let dst_count: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 971200",
+        )
+        .expect("dst count failed")
+        .expect("dst count returned NULL");
+        assert_eq!(dst_count, 3, "dst must hold every copied row");
+
+        // is_inferred flag preserved across the copy: one inferred
+        // row in src → one inferred row in dst.
+        let inferred_count: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads \
+              WHERE graph_id = 971200 AND is_inferred = true",
+        )
+        .expect("inferred count failed")
+        .expect("inferred count returned NULL");
+        assert_eq!(inferred_count, 1, "is_inferred must carry forward");
+
+        // Source partition still intact — copy is non-destructive.
+        let src_count: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 971100",
+        )
+        .expect("src count failed")
+        .expect("src count returned NULL");
+        assert_eq!(src_count, 3, "src must be untouched by copy");
+    }
+
+    /// Slice 97 — idempotent absent-src path. Copying from a
+    /// `graph_id` whose partition does not exist returns 0 and does
+    /// NOT error. The destination partition is NOT auto-created in
+    /// this path: we short-circuit on the src-existence check before
+    /// reaching the dst-auto-create branch, so a follow-up
+    /// `pg_class` probe for the dst partition returns false. This
+    /// matches the LLD §5.2 idempotency contract: callers can
+    /// `copy_graph` blindly without first probing partition
+    /// existence on the source side.
+    #[pg_test]
+    fn copy_graph_absent_src_returns_zero() {
+        let copied: Option<i64> = Spi::get_one("SELECT pgrdf.copy_graph(972100::bigint, 972200::bigint)")
+            .expect("copy_graph absent src failed");
+        assert_eq!(copied, Some(0), "absent src must return 0");
+
+        // Short-circuit semantics: dst partition not auto-created
+        // when src is absent.
+        let dst_exists: bool = Spi::get_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_class \
+                           WHERE relnamespace = 'pgrdf'::regnamespace \
+                             AND relname = '_pgrdf_quads_g972200')",
+        )
+        .expect("pg_class probe failed")
+        .unwrap_or(false);
+        assert!(!dst_exists, "dst must NOT be auto-created when src is absent");
+    }
+
+    /// Slice 97 — `src == dst` is rejected with the stable
+    /// `copy_graph: src and dst must differ` prefix. The self-copy
+    /// degenerate case has no defined semantics (an INSERT … SELECT
+    /// from a table into itself on a partitioned table would
+    /// interleave scan + insert unpredictably) and we surface that
+    /// up to the caller rather than silently double-write.
+    #[pg_test(error = "copy_graph: src and dst must differ (both = 5)")]
+    fn copy_graph_src_eq_dst_rejected() {
+        Spi::run("SELECT pgrdf.copy_graph(5::bigint, 5::bigint)").unwrap();
     }
 }

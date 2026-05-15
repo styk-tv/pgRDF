@@ -6,6 +6,86 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase B slice 97 — pgrdf.copy_graph lifecycle UDF
+
+Continues the LLD v0.4 §5 graph-level lifecycle UDF surface.
+`pgrdf.copy_graph(src BIGINT, dst BIGINT) → BIGINT` copies every
+row from `pgrdf._pgrdf_quads_g<src>` into `pgrdf._pgrdf_quads_g<dst>`
+via a single `INSERT INTO … SELECT` against the per-graph LIST
+partitions, returning the count copied (== source row count at
+INSERT time). `copy_graph` is the only lifecycle UDF that touches
+every row — the siblings (`drop_graph`, `move_graph`,
+`clear_graph`'s `TRUNCATE`) are all partition-DDL-bounded — so its
+cost scales linearly with the source row count.
+
+Contract details:
+
+- **`is_inferred` carries forward.** Both `is_inferred = FALSE`
+  and `is_inferred = TRUE` rows are copied verbatim; the
+  function is not `is_inferred`-discriminating per LLD §5.2's
+  "`copy_graph` copies both — `is_inferred = TRUE` rows carry
+  forward as `is_inferred = TRUE` in the destination" clause.
+  Materialised entailments in the source survive into the
+  destination as inferred, so callers don't have to re-run
+  `pgrdf.materialize_owl_rl(dst)` to recover them.
+- **Destination auto-create.** If `_pgrdf_quads_g<dst>` does not
+  exist, the function calls `pgrdf.add_graph(dst::bigint)` to
+  create it. That call also binds a synthetic
+  `urn:pgrdf:graph:{dst}` IRI in `_pgrdf_graphs` per slice 119,
+  so `pgrdf.graph_iri(dst)` resolves post-copy even if the
+  caller hadn't pre-registered the destination. A pre-existing
+  IRI binding on `dst` is preserved unchanged.
+- **Source absence is idempotent.** Copying from a `graph_id`
+  whose partition does not exist returns 0 without erroring; the
+  destination partition is NOT auto-created on this short-circuit
+  path. Matches the LLD §5.2 idempotency invariant.
+- **Re-call duplicates.** Calling `copy_graph(src, dst)` twice
+  against the same pair appends another copy of `src`'s rows
+  into `dst` — the function does NOT clear `dst` first. Callers
+  needing strict re-call idempotency invoke
+  `pgrdf.clear_graph(dst)` between calls. This is the W3C SPARQL
+  1.1 Update §3.2.6 `ADD` vs `COPY` distinction pushed into the
+  caller's responsibility.
+- **`src == dst` rejected** with the stable `copy_graph: src and
+  dst must differ` prefix — the self-copy degenerate case has no
+  defined semantics on a partitioned table (`INSERT … SELECT`
+  from a table into itself interleaves scan + insert
+  unpredictably) and is surfaced rather than silently
+  double-written.
+- **Negative ids rejected** with the stable `copy_graph:
+  graph_id must be >= 0, got src=<S>, dst=<D>` prefix — matches
+  the error-shape contract `add_graph(id BIGINT)` (slice 119)
+  and the other lifecycle UDFs already established.
+
+Implementation lands in `src/storage/graphs.rs` alongside the
+slice 99 / slice 98 siblings. The single-statement `INSERT INTO
+… SELECT` runs in the calling statement's transaction; standard
+MVCC snapshot semantics govern the visibility of concurrent
+INSERTs on `src` (no partition-DDL lock is involved on this row-
+touching path).
+
+Regression: `tests/regression/sql/90-copy-graph.sql` locks seven
+invariants (absent-src no-op + no dst auto-create, load + copy
+returns count + dst auto-created + `graph_iri` resolves,
+`is_inferred` preserved, src untouched, re-call duplicates +
+clear-then-copy round-trip, `src == dst` rejected, negative ids
+rejected). Expected output hand-authored; never ACCEPT=1
+baselined. Three `#[pg_test]`s in `src/storage/graphs.rs` cover
+the happy path, absent-src short-circuit, and `src == dst`
+rejection paths under the `pg_test` harness, bypassing
+`add_graph(src)` via manual partition + direct `_pgrdf_quads`
+INSERT to avoid the documented pgrx-parallelism flake on
+partition DDL (and deliberately leaving the dst-auto-create path
+exercised by the function itself — that's the interesting code
+under test on the destination side).
+
+LLD v0.4 §5.1 row marked `✅ slice 97`; §2 status row updated to
+reflect the `copy_graph` partial-completion of the
+lifecycle-UDFs track. `docs/02-storage.md` §2.2 gains a
+`#### copy_graph` subsection alongside the slice-98 `clear_graph`
+entry; `docs/10-roadmap.md` Track 3 picks up the slice 97 ✅
+entry alongside slices 98 + 99.
+
 ### Phase B slice 98 — `pgrdf.clear_graph` lifecycle UDF
 
 First landing of the LLD v0.4 §5 graph-level lifecycle UDF

@@ -287,6 +287,101 @@ Three `#[pg_test]`s in `src/storage/graphs.rs` exercise the
 happy path + idempotent-absent + clear-twice shapes against a
 live in-process Postgres.
 
+#### copy_graph
+
+**`pgrdf.copy_graph(src BIGINT, dst BIGINT) → BIGINT`** (slice 97)
+issues `INSERT INTO pgrdf._pgrdf_quads_g<dst> (subject_id,
+predicate_id, object_id, graph_id, is_inferred) SELECT subject_id,
+predicate_id, object_id, <dst>::bigint, is_inferred FROM
+pgrdf._pgrdf_quads_g<src>` and returns the count copied. The
+`graph_id` projection rebinds to the destination id so the
+partition router lands the rows in `dst`'s partition without
+touching `_pgrdf_quads_default`. `copy_graph` is the only
+lifecycle UDF that touches every row — the siblings (`drop_graph`,
+`move_graph`, `clear_graph`) are all metadata-DDL-bounded.
+
+Key invariants:
+
+- **`is_inferred` carries forward.** Both `is_inferred = FALSE`
+  and `is_inferred = TRUE` rows are copied verbatim — the
+  function is not `is_inferred`-discriminating per LLD v0.4 §5.2.
+  Materialised inferred content in the source survives into the
+  destination as inferred, so callers don't have to re-run
+  `pgrdf.materialize_owl_rl(dst)` to recover the entailments.
+- **Destination auto-create.** If `_pgrdf_quads_g<dst>` does not
+  exist, the function calls `pgrdf.add_graph(dst::bigint)` to
+  create it. That call also binds a synthetic
+  `urn:pgrdf:graph:{dst}` IRI in `_pgrdf_graphs` per slice 119,
+  so `pgrdf.graph_iri(dst)` resolves post-copy even if the caller
+  hadn't pre-registered the destination. A pre-existing IRI
+  binding on `dst` is preserved unchanged (the partition
+  existence check short-circuits before `add_graph` runs).
+- **Source absence is idempotent.** Copying from a `graph_id` whose
+  partition does not exist returns 0 without erroring. The
+  destination partition is NOT auto-created on this short-circuit
+  path — `copy_graph(absent_src, fresh_dst)` is a clean no-op.
+  Matches the §5.2 idempotency contract.
+- **Re-call duplicates.** Calling `copy_graph(src, dst)` twice
+  against the same pair appends another copy of `src`'s rows into
+  `dst` — the function does NOT clear `dst` before inserting.
+  Callers needing strict re-call idempotency should invoke
+  `pgrdf.clear_graph(dst)` before the second copy. This is the
+  `ADD` (W3C SPARQL 1.1 Update §3.2.6) vs `COPY` distinction
+  pushed into the caller's responsibility.
+- **`src == dst` is rejected** with the stable prefix
+  `copy_graph: src and dst must differ` — the self-copy
+  degenerate case has no defined semantics on a partitioned table
+  (an `INSERT … SELECT` from a table into itself would interleave
+  scan + insert unpredictably) and is surfaced rather than
+  silently double-written.
+- **Negative ids panic** with the stable prefix
+  `copy_graph: graph_id must be >= 0, got src=<S>, dst=<D>` —
+  matches the error-shape contract `add_graph(id BIGINT)` (slice
+  119) and the other lifecycle UDFs already established.
+
+The single-statement `INSERT INTO … SELECT` runs in the calling
+statement's transaction, so a concurrent INSERT on `src` arriving
+mid-copy is either visible (and copied) or not (and missed) per
+the snapshot the calling SELECT pinned — standard MVCC semantics,
+no partition-DDL lock involved on this path. Cost scales linearly
+with `src`'s row count (the partition-DDL siblings are O(1) in row
+count by contrast); plan a long-running maintenance window for
+copies on a large source.
+
+```sql
+-- Copy graph 42's content into a fresh graph 100. The dst
+-- partition is auto-created.
+SELECT pgrdf.add_graph(42);
+INSERT INTO pgrdf._pgrdf_quads
+  (subject_id, predicate_id, object_id, graph_id, is_inferred)
+VALUES (1, 1, 1, 42, false),
+       (2, 2, 2, 42, true);
+
+SELECT pgrdf.copy_graph(42::bigint, 100::bigint);
+--  → 2  (rows copied — both base and inferred carry forward)
+SELECT pgrdf.graph_iri(100::bigint);
+--  → urn:pgrdf:graph:100  (synthetic IRI bound by auto-create)
+
+-- Re-call duplicates without an intervening clear.
+SELECT pgrdf.copy_graph(42::bigint, 100::bigint);
+--  → 2  (the function returns the src count; dst now holds 4 rows)
+
+-- Strict idempotency: clear first, then copy.
+SELECT pgrdf.clear_graph(100::bigint);  --  → 4
+SELECT pgrdf.copy_graph(42::bigint, 100::bigint);  --  → 2
+```
+
+Regression coverage:
+[`tests/regression/sql/90-copy-graph.sql`](../tests/regression/sql/90-copy-graph.sql)
+locks the seven invariants (absent-src idempotency with no dst
+auto-create, load + copy returns count + dst auto-created +
+graph_iri resolves, `is_inferred` preserved, src untouched,
+re-call duplicates + clear-then-copy round-trip, `src == dst`
+rejected, negative ids rejected). Three `#[pg_test]`s in
+`src/storage/graphs.rs` cover the happy path, absent-src
+short-circuit, and `src == dst` rejection paths against a live
+in-process Postgres.
+
 ## 2.3 Bulk loader (`src/storage/loader.rs`)
 
 ### Prepared batched INSERT (LLD §4.3 phase A, **shipped — Phase 3 step 3**)
@@ -423,10 +518,15 @@ paths under the pgrx `pg_test` harness.
 
 Spec: [LLD v0.4 §5.1 / §5.2](../specs/SPEC.pgRDF.LLD.v0.4.md#5-graph-level-lifecycle-udfs-new).
 
-### `pgrdf.clear_graph` / `copy_graph` / `move_graph` (🚧 slices 98 → 96)
+### `pgrdf.clear_graph` / `copy_graph` (✅ slices 98 + 97) / `move_graph` (🚧 slice 96)
 
-Carry forward in the Phase B countdown — see LLD v0.4 §5.1 for the
-signatures and §5.2 for the partition-DDL idioms each one uses.
+`clear_graph` (slice 98) and `copy_graph` (slice 97) both ship; see
+the `#### clear_graph` and `#### copy_graph` subsections under §2.2
+above for the row-touching pair. `move_graph` (slice 96, the
+constant-time metadata-only re-association swap via DETACH/ATTACH
+on the partition's `FOR VALUES IN (…)` clause) carries forward —
+see LLD v0.4 §5.1 for the signature and §5.2 for the partition-DDL
+idiom.
 
 ## 2.5 What's NOT in storage
 
