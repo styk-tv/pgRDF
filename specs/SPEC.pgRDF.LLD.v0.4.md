@@ -165,7 +165,7 @@ CREATE TABLE _pgrdf_graphs (
 
 | UDF | Signature | Returns | Semantics |
 |---|---|---|---|
-| `pgrdf.add_graph(iri TEXT)` | overload | `BIGINT` | Idempotent on the IRI: insert if absent (auto-allocated id), return existing id otherwise. |
+| `pgrdf.add_graph(iri TEXT)` | overload ✅ slice 118 | `BIGINT` | Idempotent on the IRI: insert if absent (auto-allocated id via `COALESCE(MAX(graph_id), 0) + 1` under `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE`), return existing id otherwise. Empty / whitespace-only IRI panics with the stable `add_graph: iri must be non-empty` prefix; IRI syntax (RFC 3987) is not validated in v0.4.1. |
 | `pgrdf.add_graph(id BIGINT, iri TEXT)` | overload | `BIGINT` | Explicit id binding; errors if id or IRI is already bound to a different counterpart. |
 | `pgrdf.add_graph(id BIGINT)` | retained | `BIGINT` | Back-compat with v0.3; assigns synthetic IRI `urn:pgrdf:graph:{id}` automatically as of slice 119 (`ON CONFLICT (graph_id) DO NOTHING` keeps idempotency intact). |
 | `pgrdf.graph_id(iri TEXT)` | new | `BIGINT` | Returns `NULL` if the IRI is not bound. |

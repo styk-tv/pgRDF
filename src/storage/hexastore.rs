@@ -95,6 +95,101 @@ fn add_graph(g: i64) -> bool {
     true
 }
 
+/// Create or look up a named graph identified by an IRI; auto-allocates
+/// a fresh integer `graph_id`, inserts the binding into
+/// `_pgrdf_graphs`, and creates the matching LIST partition of
+/// `_pgrdf_quads`.
+///
+/// Idempotent on the IRI: if `iri` is already bound, returns the
+/// existing `graph_id` without creating a second partition or
+/// duplicating the binding.
+///
+/// Allocation strategy: the smallest unused positive integer, computed
+/// via `COALESCE(MAX(graph_id), 0) + 1`. Concurrent allocate-and-insert
+/// sequences are serialised by a `LOCK TABLE _pgrdf_graphs IN SHARE
+/// ROW EXCLUSIVE MODE` taken before the SELECT-MAX so two simultaneous
+/// callers can't both compute the same id and race the INSERT (the
+/// `UNIQUE(iri)` constraint would catch one of them, but the lock
+/// makes it impossible to lose). The lock releases at transaction end
+/// per Postgres semantics. For v0.4.1 we accept this simple approach;
+/// a sequence-based allocator is a future option if contention proves
+/// real on the wire.
+///
+/// IRI is bound to the `_pgrdf_graphs` row *before* `add_graph(id)`
+/// runs so the slice-119 synthetic-IRI insert path inside the integer
+/// overload no-ops via `ON CONFLICT (graph_id) DO NOTHING`, leaving
+/// the user-supplied IRI intact.
+///
+/// IRI syntax is **not** validated against RFC 3987 here — we have no
+/// oxiri dependency in v0.4.1. Empty / whitespace-only strings panic
+/// with the stable `add_graph:` prefix; everything else is accepted
+/// verbatim. Tighter validation is a future slice.
+///
+/// SQL surface: `pgrdf.add_graph(iri TEXT) → BIGINT` (overload of the
+/// integer-keyed `pgrdf.add_graph(g BIGINT) → BOOLEAN` above; pgrx
+/// surfaces both Rust functions under the same SQL name via the
+/// `name = "add_graph"` attribute, and Postgres dispatches on the
+/// argument types).
+#[pg_extern(name = "add_graph")]
+fn add_graph_iri(iri: &str) -> i64 {
+    if iri.trim().is_empty() {
+        panic!("add_graph: iri must be non-empty");
+    }
+
+    // Serialise concurrent allocate-and-insert. SHARE ROW EXCLUSIVE
+    // blocks other writers (including itself) but not readers; the
+    // lock releases at transaction end. This is the v0.4.1 mitigation
+    // for the `MAX(graph_id) + 1 → INSERT` race.
+    Spi::run("LOCK TABLE pgrdf._pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE")
+        .unwrap_or_else(|e| panic!("add_graph: lock _pgrdf_graphs failed: {e}"));
+
+    // Idempotent path: if the IRI is already bound, return its id
+    // without touching the partition or the table. The inner SELECT
+    // is wrapped in a scalar subquery so SPI always sees exactly one
+    // row back (NULL when the IRI is not yet bound). Without the
+    // wrapper, an empty result trips SPI with a
+    // "SpiTupleTable positioned before the start or after the end"
+    // error rather than yielding `None`. Same idiom as `put_term` in
+    // `dict.rs`.
+    let existing: Option<i64> = Spi::get_one_with_args(
+        "SELECT (SELECT graph_id FROM pgrdf._pgrdf_graphs WHERE iri = $1 LIMIT 1)",
+        &[iri.into()],
+    )
+    .unwrap_or_else(|e| panic!("add_graph: lookup existing iri failed: {e}"));
+    if let Some(id) = existing {
+        return id;
+    }
+
+    // Allocate the next id — smallest positive integer not yet in
+    // use. Seed row `(0, 'urn:pgrdf:graph:0')` makes MAX always >= 0
+    // post-CREATE-EXTENSION, so this branch always yields >= 1.
+    let next: i64 = Spi::get_one("SELECT COALESCE(MAX(graph_id), 0) + 1 FROM pgrdf._pgrdf_graphs")
+        .unwrap_or_else(|e| panic!("add_graph: allocate next id failed: {e}"))
+        .expect("add_graph: COALESCE returned NULL (impossible)");
+
+    // Bind the IRI *before* the integer overload runs. The integer
+    // overload's slice-119 synthetic-IRI INSERT carries
+    // `ON CONFLICT (graph_id) DO NOTHING`, so it sees this row and
+    // no-ops — preserving the user-supplied IRI verbatim.
+    Spi::run_with_args(
+        "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) VALUES ($1, $2)",
+        &[next.into(), iri.into()],
+    )
+    .unwrap_or_else(|e| panic!("add_graph: insert iri binding failed: {e}"));
+
+    // Create the partition via the existing integer overload. We
+    // re-enter through the SQL surface so any future change to the
+    // partition-creation idiom stays single-sourced in
+    // `add_graph(g BIGINT)` above.
+    Spi::run_with_args(
+        "SELECT pgrdf.add_graph($1::bigint)",
+        &[next.into()],
+    )
+    .unwrap_or_else(|e| panic!("add_graph: partition creation failed: {e}"));
+
+    next
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {

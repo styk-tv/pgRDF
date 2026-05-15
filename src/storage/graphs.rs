@@ -76,4 +76,43 @@ mod tests {
                 .expect("iri lookup failed");
         assert_eq!(iri100.as_deref(), Some("urn:pgrdf:graph:100"));
     }
+
+    /// Slice 118 — `pgrdf.add_graph(iri TEXT) → BIGINT` overload is
+    /// idempotent on the IRI: a repeat call with the same IRI returns
+    /// the same auto-allocated id, and a distinct IRI gets a distinct
+    /// id. Bound row carries the user-supplied IRI verbatim — the
+    /// slice-119 synthetic-IRI insert path on the integer overload is
+    /// pre-empted by the pre-INSERT inside the IRI overload, so the
+    /// `ON CONFLICT (graph_id) DO NOTHING` clause keeps it intact.
+    #[pg_test]
+    fn add_graph_iri_idempotent() {
+        let id1: i64 = Spi::get_one("SELECT pgrdf.add_graph('http://example.org/g1')")
+            .expect("first add_graph(iri) failed")
+            .expect("first add_graph(iri) returned NULL");
+        let id2: i64 = Spi::get_one("SELECT pgrdf.add_graph('http://example.org/g1')")
+            .expect("repeat add_graph(iri) failed")
+            .expect("repeat add_graph(iri) returned NULL");
+        assert_eq!(id1, id2, "second call with same IRI must return same id");
+
+        let id3: i64 = Spi::get_one("SELECT pgrdf.add_graph('http://example.org/g2')")
+            .expect("distinct add_graph(iri) failed")
+            .expect("distinct add_graph(iri) returned NULL");
+        assert_ne!(id3, id1, "distinct IRI must get distinct id");
+
+        // User-supplied IRI persists verbatim — synthetic IRI must
+        // NOT clobber the binding.
+        let iri1: Option<String> = Spi::get_one_with_args(
+            "SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
+            &[id1.into()],
+        )
+        .expect("iri lookup failed");
+        assert_eq!(iri1.as_deref(), Some("http://example.org/g1"));
+    }
+
+    /// Slice 118 — empty IRI panics with the stable `add_graph:`
+    /// prefix per the regression error-message contract.
+    #[pg_test(error = "add_graph: iri must be non-empty")]
+    fn add_graph_iri_empty_rejected() {
+        Spi::run("SELECT pgrdf.add_graph('')").unwrap();
+    }
 }

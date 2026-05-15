@@ -1,0 +1,16 @@
+
+0
+1
+1
+1
+2
+0|urn:pgrdf:graph:0
+1|http://example.org/g1
+2|http://example.org/g2
+t
+urn:pgrdf:graph:100
+101
+add_graph empty iri: t
+add_graph whitespace-only iri: t
+
+0

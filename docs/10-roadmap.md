@@ -367,8 +367,29 @@ not the integer. See
   [`tests/regression/sql/73-add-graph-populates-iri.sql`](../tests/regression/sql/73-add-graph-populates-iri.sql)
   + `#[pg_test] add_graph_populates_synthetic_iri` in
   [`src/storage/graphs.rs`](../src/storage/graphs.rs).
-- ⏳ Slices 118-115 — UDF surface (`pgrdf.add_graph(iri)`,
-  `pgrdf.graph_id(iri)`, `pgrdf.graph_iri(id)`, dual-arg
+- ✅ **Slice 118 — `pgrdf.add_graph(iri TEXT) → BIGINT` overload.**
+  Idempotent on the IRI: a repeat call returns the existing
+  `graph_id` without creating a second partition. On a fresh IRI
+  the overload auto-allocates the next id (smallest unused positive
+  integer via `COALESCE(MAX(graph_id), 0) + 1` under a
+  `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` to
+  serialise concurrent callers), pre-INSERTs the user-supplied IRI
+  into `_pgrdf_graphs` (which the slice-119 synthetic-IRI insert
+  inside the integer overload then no-ops on via
+  `ON CONFLICT (graph_id) DO NOTHING`, preserving the user IRI),
+  and re-enters through the integer overload to create the LIST
+  partition. Empty / whitespace-only IRI panics with the stable
+  `add_graph: iri must be non-empty` prefix. RFC-3987 syntax
+  validation deferred to a later slice. Pgrx surfaces both Rust
+  functions under the SQL name `add_graph` via
+  `#[pg_extern(name = "add_graph")]`; Postgres dispatches on the
+  argument types. Regression coverage:
+  [`tests/regression/sql/74-add-graph-iri.sql`](../tests/regression/sql/74-add-graph-iri.sql)
+  + two `#[pg_test]`s in
+  [`src/storage/graphs.rs`](../src/storage/graphs.rs)
+  (`add_graph_iri_idempotent` + `add_graph_iri_empty_rejected`).
+- ⏳ Slices 117-115 — remaining UDF surface (`pgrdf.graph_id(iri)`,
+  `pgrdf.graph_iri(id)`, dual-arg `pgrdf.add_graph(id, iri)`
   overload).
 - ⏳ Slices 111-110 — SPARQL `GRAPH { … }` translation
   (resolution against `_pgrdf_graphs.iri`, projection of `?g` as

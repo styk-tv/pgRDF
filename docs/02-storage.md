@@ -128,12 +128,30 @@ integer-keyed `pgrdf.add_graph(id BIGINT)` UDF to populate
 creation also inserts `(id, 'urn:pgrdf:graph:' || id::text)`
 under an `ON CONFLICT (graph_id) DO NOTHING` clause, so v0.3
 callers gain a queryable IRI mapping for every graph they create
-through the integer surface without any signature change. The
-IRI-keyed UDF surface (`pgrdf.add_graph(iri)`,
-`pgrdf.graph_id(iri)`, `pgrdf.graph_iri(id)`, plus a dual-arg
-`pgrdf.add_graph(id, iri)` overload) lands in subsequent Phase A
-slices; SPARQL `GRAPH { … }` translation lands later in Phase A.
-Spec: SPEC.pgRDF.LLD.v0.4 §3.
+through the integer surface without any signature change.
+
+**Slice 118** adds the IRI-keyed overload
+`pgrdf.add_graph(iri TEXT) → BIGINT`. Idempotent on the IRI: a
+repeat call against the same IRI returns the existing `graph_id`
+without creating a second partition or duplicating the binding.
+On a fresh IRI it allocates the next id (smallest unused positive
+integer via `COALESCE(MAX(graph_id), 0) + 1`), inserts the
+user-supplied IRI into `_pgrdf_graphs` *before* re-entering
+through the integer overload (so slice 119's synthetic-IRI insert
+no-ops via `ON CONFLICT (graph_id) DO NOTHING` and the
+user-supplied IRI is preserved verbatim), and creates the LIST
+partition. Concurrent `add_graph(iri)` callers are serialised by
+a `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` taken
+before the SELECT-MAX, so two callers can't both compute the same
+id and race the INSERT. Empty / whitespace-only IRI panics with
+the stable `add_graph: iri must be non-empty` prefix; RFC-3987
+syntax validation is deferred to a later slice (we don't carry an
+`oxiri` dependency in v0.4.1).
+
+The remaining IRI-keyed UDF surface (`pgrdf.graph_id(iri)`,
+`pgrdf.graph_iri(id)`, plus a dual-arg `pgrdf.add_graph(id, iri)`
+overload) lands in subsequent Phase A slices; SPARQL `GRAPH { … }`
+translation lands later in Phase A. Spec: SPEC.pgRDF.LLD.v0.4 §3.
 
 ## 2.3 Bulk loader (`src/storage/loader.rs`)
 

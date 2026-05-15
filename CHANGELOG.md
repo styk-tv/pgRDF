@@ -6,6 +6,31 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 118 — `pgrdf.add_graph(iri TEXT)` overload (LLD v0.4 §3.2)
+
+New `#[pg_extern]` overload `pgrdf.add_graph(iri TEXT) → BIGINT`.
+Idempotent on the IRI: if the IRI is already bound in `_pgrdf_graphs`,
+returns the existing `graph_id` without creating a new partition.
+Otherwise auto-allocates the next `graph_id` (smallest unused
+positive integer) and creates both the partition and the IRI
+binding atomically.
+
+Uses `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` to
+serialise concurrent allocate-and-insert sequences. The IRI is
+pre-INSERTed before re-entering through the integer overload, so
+slice 119's synthetic-IRI insert no-ops on `ON CONFLICT (graph_id)
+DO NOTHING` and the user-supplied IRI persists verbatim. Pgrx
+surfaces both Rust functions under the SQL name `add_graph` via
+`#[pg_extern(name = "add_graph")]`; Postgres dispatches on the
+argument types (BIGINT vs TEXT). Empty / whitespace-only IRIs
+panic with the stable `add_graph: iri must be non-empty` prefix.
+RFC-3987 syntax validation deferred to a later slice (no oxiri
+dependency in v0.4.1).
+
+Regression: `tests/regression/sql/74-add-graph-iri.sql` + pgrx
+tests `add_graph_iri_idempotent` and `add_graph_iri_empty_rejected`.
+Test bar: 98 pgrx + 43 pg_regress + 23 W3C + 3 LUBM = 167 green.
+
 ### Phase A slice 119 — `add_graph(id BIGINT)` populates `_pgrdf_graphs`
 
 The existing integer-keyed `pgrdf.add_graph(id BIGINT)` UDF now
