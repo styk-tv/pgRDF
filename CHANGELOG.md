@@ -6,6 +6,21 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 120 — `_pgrdf_graphs` schema lands (LLD v0.4 §3.1)
+
+New `pgrdf._pgrdf_graphs(graph_id BIGINT PRIMARY KEY, iri TEXT NOT
+NULL UNIQUE)` table establishes the IRI ↔ graph_id mapping that
+SPARQL `GRAPH { … }` (slices 111-110), the IRI-keyed UDF overloads
+(slices 118-115), and §4/§5/§6/§7 graph-scoped surfaces all depend
+on. The seed row `(0, 'urn:pgrdf:graph:0')` covers the existing
+default-partition catch-all bucket.
+
+Schema-only this slice — no UDF surface change, no behaviour change
+to existing `pgrdf.add_graph(id BIGINT)`. Regression coverage:
+`tests/regression/sql/72-graphs-table-shape.sql` + one `#[pg_test]`
+in `src/storage/graphs.rs`. Test bar: 95 pgrx + 41 pg_regress + 23
+W3C + 3 LUBM = 162 green.
+
 ### Release — v0.4.0 shipped
 
 v0.4.0 tagged and released 2026-05-15

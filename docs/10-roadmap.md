@@ -338,12 +338,32 @@ lives in the spec. Acceptance criteria, schema deltas, and
 translator-level wiring are NOT duplicated here; this section is a
 navigation aid only.
 
-### Track 1 — Named-graph scoping + IRI mapping
+### Track 1 — Named-graph scoping + IRI mapping 🚧 (Phase A in flight)
 `GRAPH { … }` SPARQL surface plus a new `_pgrdf_graphs` system table
 mapping graph IRIs to the existing integer `graph_id` (LIST-partition
 key of `_pgrdf_quads`). `GRAPH ?g { … }` projects `?g` as the IRI,
 not the integer. See
 [LLD v0.4 §3](../specs/SPEC.pgRDF.LLD.v0.4.md#3-named-graph-scoping-and-iri-mapping-new).
+
+- ✅ **Slice 120 — `_pgrdf_graphs` table lands.** Schema in
+  [`sql/schema_v0_4_0_graphs.sql`](../sql/schema_v0_4_0_graphs.sql),
+  wired via the second `extension_sql_file!` in
+  [`src/lib.rs`](../src/lib.rs), seed row `(0, 'urn:pgrdf:graph:0')`
+  for the default partition. Regression coverage:
+  [`tests/regression/sql/72-graphs-table-shape.sql`](../tests/regression/sql/72-graphs-table-shape.sql)
+  + `#[pg_test]` in
+  [`src/storage/graphs.rs`](../src/storage/graphs.rs). No UDF
+  surface change; existing `pgrdf.add_graph(id BIGINT)` retains
+  its v0.3 signature.
+- ⏳ Slices 118-115 — UDF surface (`pgrdf.add_graph(iri)`,
+  `pgrdf.graph_id(iri)`, `pgrdf.graph_iri(id)`, dual-arg
+  overload).
+- ⏳ Slice 117 — synthetic-IRI binding for the existing integer
+  `pgrdf.add_graph(id)` so v0.3 callers automatically populate
+  `_pgrdf_graphs`.
+- ⏳ Slices 111-110 — SPARQL `GRAPH { … }` translation
+  (resolution against `_pgrdf_graphs.iri`, projection of `?g` as
+  IRI).
 
 ### Track 2 — SPARQL UPDATE
 `INSERT DATA`, `DELETE DATA`, pattern-driven `INSERT/DELETE … WHERE`,

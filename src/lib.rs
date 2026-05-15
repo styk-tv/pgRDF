@@ -56,6 +56,14 @@ fn version() -> &'static str {
 }
 
 extension_sql_file!("../sql/schema_v0_2_0.sql", name = "schema_v0_2_0");
+// v0.4 — adds `_pgrdf_graphs` IRI ↔ graph_id mapping (LLD v0.4 §3.1).
+// `requires` enforces ordering: the v0.2 baseline lands first; the
+// graphs table appends after.
+extension_sql_file!(
+    "../sql/schema_v0_4_0_graphs.sql",
+    name = "schema_v0_4_0_graphs",
+    requires = ["schema_v0_2_0"],
+);
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]

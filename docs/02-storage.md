@@ -104,6 +104,32 @@ idempotently. `pgrdf.count_quads(g)` is a partition-pruning count.
 Dropping a whole graph is `DROP TABLE _pgrdf_quads_<g>` —
 seconds, not rows-times-vacuum.
 
+### Named-graph IRI mapping (`_pgrdf_graphs`, **shipped — Phase A slice 120**)
+
+The integer `graph_id` LIST key is a storage detail; SPARQL
+users name graphs by **IRI**. The v0.4 schema extension
+[`sql/schema_v0_4_0_graphs.sql`](../sql/schema_v0_4_0_graphs.sql)
+adds a second system table that closes the IRI ↔ graph_id binding:
+
+```sql
+CREATE TABLE _pgrdf_graphs (
+    graph_id BIGINT PRIMARY KEY,
+    iri      TEXT NOT NULL UNIQUE
+);
+```
+
+The default partition (`graph_id = 0`) is seeded with the synthetic
+IRI `urn:pgrdf:graph:0`, so the catch-all bucket has a queryable
+name from `CREATE EXTENSION` onwards.
+
+This slice (countdown 120) lands the table only — UDF surface
+(`pgrdf.add_graph(iri)`, `pgrdf.graph_id(iri)`,
+`pgrdf.graph_iri(id)`, plus a dual-arg `pgrdf.add_graph(id, iri)`
+overload) lands in subsequent Phase A slices; SPARQL
+`GRAPH { … }` translation lands later in Phase A. The existing
+`pgrdf.add_graph(id BIGINT)` retains its v0.3 signature for now.
+Spec: SPEC.pgRDF.LLD.v0.4 §3.
+
 ## 2.3 Bulk loader (`src/storage/loader.rs`)
 
 ### Prepared batched INSERT (LLD §4.3 phase A, **shipped — Phase 3 step 3**)

@@ -131,6 +131,15 @@ out-of-band.
 
 ### 3.1 Storage extension — `_pgrdf_graphs`
 
+**Status: landed (Phase A countdown slice 120).** Schema lives in
+[`sql/schema_v0_4_0_graphs.sql`](../sql/schema_v0_4_0_graphs.sql),
+wired into `CREATE EXTENSION pgrdf` via the second
+`extension_sql_file!` call in
+[`src/lib.rs`](../src/lib.rs). Regression coverage:
+[`tests/regression/sql/72-graphs-table-shape.sql`](../tests/regression/sql/72-graphs-table-shape.sql)
++ `#[pg_test]` in
+[`src/storage/graphs.rs`](../src/storage/graphs.rs).
+
 ```sql
 CREATE TABLE _pgrdf_graphs (
     graph_id BIGINT PRIMARY KEY,
