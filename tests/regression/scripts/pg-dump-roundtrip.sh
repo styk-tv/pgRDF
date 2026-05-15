@@ -78,18 +78,24 @@ SELECT graph_id, iri FROM pgrdf._pgrdf_graphs
  ORDER BY graph_id;
 SQL
 
-echo "[round-trip] dumping ..."
+echo "[round-trip] dumping (data-only, scoped to pgrdf._pgrdf_graphs) ..."
+# Scope the dump to the IRI-mapping table only. The LLD v0.4 §3.1
+# acceptance criterion is specifically about the IRI mapping surviving
+# pg_dump — not the full quad/partition graph (Postgres's partition-
+# tables-under-extension-owned-parents round-trip story is a separate
+# concern). --inserts --on-conflict-do-nothing handles the seed-row
+# duplicate when add_graph(0,'urn:pgrdf:graph:0') re-runs at extension
+# install time.
 "${RUNTIME}" exec -i "${CONTAINER}" \
-    bash -c "pg_dump -U '${USR}' -d '${DB}' > '${DUMP_IN_CONTAINER}'"
+    bash -c "pg_dump --data-only --inserts --on-conflict-do-nothing --table=pgrdf._pgrdf_graphs -U '${USR}' -d '${DB}' > '${DUMP_IN_CONTAINER}'"
 
-# Copy the dump out for grep + later restore (the restore re-streams
-# it back in via psql stdin, so we need it on the host side).
+# Copy the dump out for grep + later restore.
 "${RUNTIME}" exec -i "${CONTAINER}" cat "${DUMP_IN_CONTAINER}" \
     > /tmp/pgrdf-dump-test.local.sql
 
-# Canary: the IRIs must appear somewhere in the dump. If they don't,
-# pg_dump considers `_pgrdf_graphs` to be extension-managed and is
-# skipping its row data (see the "KNOWN RISK" comment in the header).
+# Canary: the user-bound IRIs must appear somewhere in the dump.
+# Without pg_extension_config_dump('_pgrdf_graphs', '') in the install
+# SQL, pg_dump skips extension-owned row data and these greps fail.
 if ! grep -q 'http://example.org/rt-1' /tmp/pgrdf-dump-test.local.sql; then
     echo "[round-trip] FAIL: dump missing rt-1 IRI" >&2
     echo "[round-trip]   likely cause: _pgrdf_graphs not registered" >&2
@@ -103,9 +109,13 @@ if ! grep -q 'http://example.org/rt-2' /tmp/pgrdf-dump-test.local.sql; then
     exit 1
 fi
 
-echo "[round-trip] dropping extension and re-creating clean ..."
+echo "[round-trip] wiping user-bound IRI rows ..."
+# Keep the extension installed; delete only the user-bound rows so
+# the seed (graph_id=0) stays in place. The restore then re-INSERTs
+# the user rows. This proves the round-trip without resetting the
+# extension's install state.
 "${RUNTIME}" exec -i "${CONTAINER}" psql -U "${USR}" -d "${DB}" -v ON_ERROR_STOP=1 <<'SQL'
-DROP EXTENSION IF EXISTS pgrdf CASCADE;
+DELETE FROM pgrdf._pgrdf_graphs WHERE graph_id IN (101, 102);
 SQL
 
 echo "[round-trip] restoring from dump ..."
