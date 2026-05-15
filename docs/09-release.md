@@ -4,10 +4,113 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The first cut is `v0.3.0`. Cargo.toml now reads `version = "0.3.0"`
-(bumped from `0.2.0` during release pre-flight). See `CHANGELOG.md`
-for the running set of `[Unreleased]` entries that move into the
-`[0.3.0]` block at tag time.
+The current cut is `v0.4.0`. Cargo.toml reads `version = "0.4.0"`
+(bumped from `0.3.0` during the v0.4 release pre-flight). See
+`CHANGELOG.md` for the running set of `[Unreleased]` entries that
+move into the next `[N.M.P]` block at tag time.
+
+## v0.4.0 — 2026-05-15
+
+The first pgRDF release with the full four-engine mission shipping
+in earnest: storage, SPARQL, OWL 2 RL inference, and now W3C SHACL
+Core validation. The validation engine stops being a stub — the
+v0.3.0 `pgrdf.validate(data, shapes)` returned
+`{"status": "stub", …}`; v0.4.0 returns a real W3C
+`sh:ValidationReport`-shape JSONB via `shacl 0.3.1`.
+
+### Engine surface delta vs v0.3.0
+
+- **Storage / SPARQL / OWL 2 RL inference** — unchanged from v0.3.0.
+- **SHACL Validation (Phase 5)** — **real impl shipped** (commit
+  `ac40bc2`). `pgrdf.validate(data_graph_id, shapes_graph_id)`
+  rehydrates shapes from the dictionary-encoded graph, builds the
+  `shacl 0.3.1` validator, runs validation, and serialises the
+  W3C `sh:ValidationReport` to JSONB. Covers `sh:NodeShape` +
+  `sh:property` + `sh:class` / `sh:datatype` + cardinality,
+  value-type, value-range, node-kind, pattern, and `sh:in`
+  constraints — whatever `shacl 0.3.1`'s SHACL Core
+  implementation covers. New regression `71-shacl-real.sql`
+  exercises `sh:datatype` violations; the existing
+  `70-validate-stub.sql` was repurposed to lock the real-impl
+  basic shape (vacuously-conforming + unknown-graph degenerate
+  cases). Three new `#[pg_test]` integration tests
+  (`validation::shacl::tests`).
+
+### The fork-patch caveat
+
+`Cargo.toml` carries a `[patch.crates-io]` block overriding
+`reasonable` to the
+[`styk-tv/reasonable@rdf12-passthrough`](https://github.com/styk-tv/reasonable/tree/rdf12-passthrough)
+fork. The patch adds a `TermRef::Triple(_)` arm needed for
+coexistence with `shacl 0.3.x` under `oxrdf`'s `rdf-12` feature
+(workspace-wide enablement via `rudof_rdf`). Strictly additive
+when the feature is off; panics with a clear message when on.
+
+Upstream PR: [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50).
+Once that merges, **v0.4.1** drops the `[patch.crates-io]` block
+and pins the released `reasonable` version. Tracked at
+[`specs/ERRATA.v0.4.md`](../specs/ERRATA.v0.4.md) E-011.
+
+Users `cargo build`ing from source pull the fork transparently
+via Cargo's `[patch.crates-io]` resolution — no manual git pull
+required.
+
+### Test bar
+
+- 94 pgrx integration tests (`cargo pgrx test`, +1 vs v0.3.0)
+- 40 pg_regress golden tests (+1 vs v0.3.0 — `71-shacl-real.sql`)
+- 23 W3C-shape SPARQL conformance tests (unchanged)
+- 3 LUBM-shape correctness gates (unchanged)
+- Plus manual smoke: 24 ontologies, 17,134 triples
+  (totals locked in `tests/perf/smoke-ontologies.expected.tsv`
+  with `--check` mode)
+
+**Total: 160 automated + 24-ontology manual smoke.** All green
+at cut time.
+
+### Supported Postgres
+
+PG 14, 15, 16, 17 × {amd64, arm64} = 8 prebuilt tarballs.
+PG 18 still deferred per ERRATA E-006 (carried).
+
+### Tarball layout
+
+`pgrdf-0.4.0-pg<N>-glibc-<arch>.tar.gz`:
+
+```
+pgrdf-0.4.0-pg<N>-glibc-<arch>/
+├── lib/pgrdf.so
+├── share/extension/pgrdf.control
+├── share/extension/pgrdf--0.4.0.sql
+├── LICENSE
+├── NOTICE
+└── SHA256SUMS   (per-tarball, covers every file above)
+```
+
+Plus an aggregate `SHA256SUMS` attached to the GitHub Release
+covering every `pgrdf-*.tar.gz` asset.
+
+### Known issues
+
+Carried from v0.3.0 plus the new E-011 entry. See
+[`specs/ERRATA.v0.4.md`](../specs/ERRATA.v0.4.md):
+
+- **E-011** — `[patch.crates-io]` to the `styk-tv/reasonable`
+  fork in place. Drops in v0.4.1 once
+  [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+  merges.
+- **E-006** / **E-007** / **E-009** / **E-010** — carried, see
+  v0.3.0 entry below.
+
+### What's deferred from the v0.4 LLD
+
+Still 🚧 in
+[`SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md):
+named-graph + SPARQL UPDATE + lifecycle UDFs + CONSTRUCT +
+property paths (§3-§7), the SPARQL backlog from v0.3 (§11),
+heap_multi_insert phase B (§12), and the W3C SPARQL 1.1
+manifest runner (§13). These land in subsequent v0.4.x point
+releases or in a refreshed v0.5.0 cut.
 
 ## v0.3.0 — 2026-05-14 (planned)
 

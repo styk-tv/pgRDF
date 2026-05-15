@@ -6,6 +6,28 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-15
+
+The first pgRDF release with the full four-engine mission shipping
+in earnest. **SHACL Core validation is real** —
+`pgrdf.validate(data, shapes)` returns a W3C
+`sh:ValidationReport`-shape JSONB via `shacl 0.3.1`, replacing the
+v0.3.0 stub. Unblocked via a `[patch.crates-io]` override pointing
+at the `styk-tv/reasonable@rdf12-passthrough` fork (upstream
+[gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+awaiting maintainer review/merge; v0.4.1 will drop the patch once
+the upstream merges). All four engines (storage, SPARQL, OWL 2 RL
+inference, SHACL Core validation) are now real implementations.
+Test bar: 94 pgrx + 40 pg_regress + 23 W3C-shape + 3 LUBM-shape =
+160 automated tests green, plus the 24-ontology / 17,134-triple
+manual smoke. PG 14-17 × {amd64, arm64} = 8 prebuilt tarballs.
+Apache 2.0.
+
+The v0.4 LLD's named-graph + SPARQL UPDATE + lifecycle UDFs +
+CONSTRUCT + property paths + heap_multi_insert phase B + W3C
+manifest runner tracks stay 🚧 — they land in subsequent v0.4.x
+points or in a refreshed v0.5.0 cut.
+
 ### Upstream — `reasonable` PR filed (E-011 step 4)
 
 Filed the upstream patch as
