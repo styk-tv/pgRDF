@@ -6,6 +6,17 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-05-15
+
+Phase B closes with five countdown slices (99 → 95) shipping LLD v0.4
+§5 (graph-level lifecycle UDFs) end-to-end, plus a release preflight
+countdown (95 → 85) that cuts v0.4.2. The marquee surface lands four
+partition-level primitives — `pgrdf.drop_graph`, `clear_graph`,
+`copy_graph`, `move_graph` — and an end-to-end integration regression
+wiring the four together against a load → mutate → verify flow. Test
+bar at cut: 216 automated (133 pgrx + 54 pg_regress + 26 W3C-shape + 3
+LUBM) plus the `pg_dump` round-trip gate.
+
 ### Phase B slice 99 — pgrdf.drop_graph lifecycle UDF
 
 Opens Phase B (lifecycle UDFs §5) toward v0.4.2.

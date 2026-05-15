@@ -4,11 +4,119 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is `v0.4.1`. Cargo.toml reads `version = "0.4.1"`
-(bumped from `0.4.0` during the v0.4.1 release pre-flight, Phase A
-countdown slices 107 → 100). See `CHANGELOG.md` for the running set
-of `[Unreleased]` entries that move into the next `[N.M.P]` block at
+The current cut is `v0.4.2`. Cargo.toml reads `version = "0.4.2"`
+(bumped from `0.4.1` during the v0.4.2 release pre-flight, Phase B
+countdown slice 85). See `CHANGELOG.md` for the running set of
+`[Unreleased]` entries that move into the next `[N.M.P]` block at
 tag time.
+
+## v0.4.2 — 2026-05-15
+
+Phase B closes with five countdown slices (99 → 95) shipping LLD v0.4
+§5 (graph-level lifecycle UDFs) end-to-end, plus a release preflight
+countdown (95 → 85). The marquee surface lands four partition-level
+primitives: `pgrdf.drop_graph` (slice 99), `pgrdf.clear_graph` (slice
+98), `pgrdf.copy_graph` (slice 97), `pgrdf.move_graph` (slice 96), and
+an end-to-end integration regression (slice 95) wiring the four UDFs
+together against a load → mutate → verify flow.
+
+### Engine surface delta vs v0.4.1
+
+- **Storage / SPARQL / OWL 2 RL inference / SHACL** — incrementally
+  extended; no breaking changes to existing surfaces.
+- **Lifecycle UDF track (LLD v0.4 §5)** — **shipped end-to-end via
+  five countdown slices (99 → 95)**. Four new partition-level UDFs
+  on `_pgrdf_quads`:
+    - `pgrdf.drop_graph(id, cascade => TRUE) → BIGINT` — DETACH +
+      DROP partition; deletes `_pgrdf_graphs` row; returns the
+      pre-drop row count. `cascade => FALSE` errors with the stable
+      `drop_graph: inferred rows present` prefix if any `is_inferred
+      = TRUE` row is present. Idempotent on absent graphs.
+    - `pgrdf.clear_graph(id) → BIGINT` — TRUNCATE ONLY the per-graph
+      partition. Partition shell + IRI binding survive. `clear_graph(0)`
+      permitted (operates on explicit `_pgrdf_quads_g0`); negative ids
+      rejected with the stable prefix.
+    - `pgrdf.copy_graph(src, dst) → BIGINT` — INSERT INTO … SELECT
+      between per-graph partitions; carries forward both base and
+      `is_inferred = TRUE` rows. Auto-creates dst partition + IRI.
+      The only lifecycle UDF that touches every row.
+    - `pgrdf.move_graph(src, dst) → BIGINT` — `copy + drop` compose.
+      The LLD §5.2 metadata-only partition rebind is aspirational
+      for v0.4.2; flagged as a v0.5 perf optimisation.
+
+### crates.io — not published
+
+v0.4.2 is **not** published to crates.io. The `[patch.crates-io]`
+block for `reasonable` (E-011) continues to block `cargo publish`.
+The `publish-crate.yml` workflow remains disabled per the v0.4.1
+post-release ops note; tag push fires `release.yml` only (8
+prebuilt tarballs + GH Release). Re-enables once upstream
+[gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+merges and the patch retires.
+
+### Test bar
+
+- 133 pgrx integration tests (`cargo pgrx test`, +15 vs v0.4.1 —
+  runtime count; static `#[pg_test]` attribute count is 127)
+- 54 pg_regress golden tests (+5 vs v0.4.1 — files `88-91` per UDF
+  plus `92` end-to-end integration)
+- 26 W3C-shape SPARQL conformance tests (unchanged from v0.4.1)
+- 3 LUBM-shape correctness tests (unchanged from v0.4.1)
+- Plus `tests/regression/scripts/pg-dump-roundtrip.sh` driving
+  `_pgrdf_graphs` pg_dump round-trip (binary mode, unchanged from
+  v0.4.1)
+
+Total: 216 automated tests + 1 round-trip gate.
+
+### Supported Postgres
+
+PG 14, 15, 16, 17 across {amd64, arm64} = 8 prebuilt tarballs.
+PG 18 deferred per [ERRATA E-006](../specs/ERRATA.v0.2.md).
+
+### Tarball layout
+
+Same as v0.4.1 — `lib/pgrdf.so`, `share/extension/{pgrdf.control,
+pgrdf--0.4.2.sql, pgrdf--0.4.1.sql, pgrdf--0.4.0.sql}`, `LICENSE`,
+`NOTICE`. The `pgrdf--N.M.P.sql` files accumulate so a
+`CREATE EXTENSION pgrdf VERSION '0.4.1'` against a v0.4.2 install
+still resolves; only the version literal changes.
+
+### Known issues — carried from v0.4.1
+
+- **E-011** — `[patch.crates-io]` fork-dep for `reasonable` still
+  in place (carried). Drops once upstream PR
+  [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+  merges.
+- **E-006** — pgrx 0.18 / Postgres 18 deferred (carried).
+- **E-007** — `extension_control_path` GUC blocked by E-006
+  (carried).
+- **E-009** — original SHACL upstream-block resolved at the
+  validation-engine half (carried).
+- **E-010** — cargo audit informational advisories (carried).
+
+### v0.4.2-introduced
+
+- **pgrx-tests parallelism flake on partition DDL.** Two Phase A
+  tests (`pg_add_graph_iri_idempotent`,
+  `pg_add_graph_id_iri_synthetic_upgrade`) occasionally race under
+  pgrx-tests 0.16's parallel scheduler because both exercise
+  partition DDL inside `add_graph(iri)` / `add_graph(id BIGINT)`
+  through SPI. Pre-existing on v0.4.1 (verified empirically); the
+  v0.4.2 Phase B test annotations were tightened to exact-match the
+  panic strings so the four lifecycle-UDF rejection-path tests are
+  deterministic.
+
+### What's deferred from the v0.4 LLD
+
+Still 🚧 in [`SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md):
+
+- SPARQL UPDATE (§4) — Phase C opens at v0.4.3
+- CONSTRUCT (§6) — v0.4.4
+- Property paths (§7) — v0.4.5
+- SPARQL surface backlog — multi-triple OPTIONAL, VALUES,
+  BIND-downstream, aggregates over UNION, DESCRIBE (§11) — v0.4.6
+- `heap_multi_insert` / `COPY BINARY` ingest (§12 phase B)
+- W3C SPARQL 1.1 manifest runner (§13)
 
 ## v0.4.1 — 2026-05-15
 
