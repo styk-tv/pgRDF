@@ -6,6 +6,38 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase 5 — Real SHACL validation lands (E-009 / E-011 resolved upstream-pending)
+
+`pgrdf.validate(data_graph, shapes_graph) → JSONB` now executes
+real SHACL Core validation via `shacl 0.3.x`. The stub body is
+replaced with rehydrate-shapes / build-validator / run-validation
+/ shape-W3C-report-as-JSONB. Coverage: new
+`71-shacl-real.sql` exercising sh:NodeShape + sh:property +
+sh:datatype violations, plus three `#[pg_test]` integration tests
+(conforming, violations, unknown graphs). Existing
+`70-validate-stub.sql` repurposed to lock the real-impl basic
+shape (vacuously-conforming + unknown-graph degenerate cases);
+filename retained for diff-friendly history.
+
+Unblocked via `[patch.crates-io]` to the styk-tv/reasonable fork
+branch `rdf12-passthrough`, which adds the `TermRef::Triple(_)`
+arm needed for coexistence with shacl 0.3.x. Drop the patch once
+gtfierro/reasonable merges the upstream PR (held in fork
+PR-DRAFT.md).
+
+Surface: `Cargo.toml` gains `shacl = "0.3"`, `rudof_rdf = "0.3"`,
+flips `reasonable` to `{ version = "0.4", features = ["rdf-12"] }`,
+and adds a `[patch.crates-io]` block pointing `reasonable` at the
+fork. `src/validation/shacl.rs` rewritten from stub to real
+impl. Specs: LLD v0.4-FUTURE §9 moves SHACL from v0.5 → v0.4 (real
+impl section); §2 capability matrix flips Real SHACL output to ✅;
+scope list expanded from five tracks to six; ERRATA.v0.4 E-011
+gains a "Verified locally in pgRDF" section with the post-slice
+test bar.
+
+Test bar after: **94 pgrx + 40 pg_regress + 23 W3C + 3 LUBM = 160
+tests** green (was 158).
+
 ### Spec — ERRATA.v0.4 file created (v0.4 cycle tracking)
 
 New [`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md) carries v0.4-era

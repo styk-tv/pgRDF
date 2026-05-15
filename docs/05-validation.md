@@ -1,11 +1,11 @@
 # 05 — Validation
 
-> **Status: stub (Phase 5 v0.3).** The SQL surface
-> `pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` exists; the
-> body returns `{"status": "stub", …}` because the upstream SHACL
-> processor cannot currently coexist with our OWL 2 RL reasoner in
-> one workspace. See [`specs/ERRATA.v0.2.md`](../specs/ERRATA.v0.2.md)
-> **E-009** for the full dep-resolution analysis.
+> **Status: real SHACL Core (v0.4).** The SQL surface
+> `pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` ships as a
+> real W3C-shape SHACL Core validator backed by the rudof project's
+> `shacl 0.3.x` crate. The v0.3 stub is gone. The upstream unblock
+> is tracked in [`specs/ERRATA.v0.4.md`](../specs/ERRATA.v0.4.md)
+> **E-011** (which supersedes [`E-009`](../specs/ERRATA.v0.2.md)).
 
 ## Surface
 
@@ -15,81 +15,178 @@ SELECT pgrdf.validate(data_graph_id, shapes_graph_id);
 --   shapes_graph_id — graph containing the SHACL shapes (sh:NodeShape /
 --                     sh:PropertyShape) those assertions must satisfy
 -- Returns JSONB:
---   { "status": "stub",
---     "reason": "ERRATA E-009 — …",
---     "data_graph_id":    <i64>,
---     "shapes_graph_id":  <i64>,
---     "data_triples":     <i64>,
---     "shapes_triples":   <i64>,
---     "conforms":         null,        -- placeholder; never set
---     "results":          []           -- placeholder; never populated
+--   {
+--     "conforms":        <bool>,
+--     "results":         [ ValidationResult, ... ],
+--     "data_graph_id":   <i64>,
+--     "shapes_graph_id": <i64>,
+--     "data_triples":    <i64>,
+--     "shapes_triples":  <i64>,
+--     "elapsed_ms":      <f64>
 --   }
 ```
 
-`conforms` is `null` (rather than the W3C `sh:conforms` boolean) so
-calling code can distinguish "stub" from "validated and clean".
+Each `ValidationResult` element is:
 
-## Why it's a stub today
+```json
+{
+  "focusNode":      "<iri-or-bnode-or-literal-encoded>",
+  "resultPath":     "<iri-or-null>",
+  "sourceShape":    "<iri-or-bnode-or-null>",
+  "resultMessage":  "<string-or-null>",
+  "resultSeverity": "sh:Violation|sh:Warning|sh:Info|sh:Trace|sh:Debug",
+  "value":          "<term-encoded-or-null>",
+  "sourceConstraintComponent": "<iri>"
+}
+```
 
-We need a SHACL processor and an OWL 2 RL reasoner in the same
-binary. The two upstream crates have an incompatible dependency
-shape:
+`conforms` is `true` iff `results` is empty, mirroring W3C
+`sh:conforms`. A degenerate report whose shapes graph names no
+targets is vacuously conforming; missing graphs (zero triples)
+follow the same rule.
 
-1. `shacl_validation 0.2.x` (latest 0.2.12, 2026-04-22) ships an
-   unfinished `iri_s` → `rudof_iri` migration. `shacl_ast 0.2.9`
-   contains references to both crates and fails to compile:
-   `expected rudof_iri::IriS, found iri_s::IriS`.
-2. `shacl_validation 0.1.149` (last 0.1.x) compiles in isolation,
-   but its transitives enable `oxrdf`'s `rdf-12` feature. That
-   feature adds the `TermRef::Triple(_)` variant to `oxrdf::TermRef`.
-3. `reasonable 0.4.1` (our OWL 2 RL reasoner, see
-   [`docs/04-inference.md`](04-inference.md)) has a non-exhaustive
-   pattern match in `common.rs::oxrdf_to_rio` that does not cover
-   the triple-term variant.
+## Example
 
-So we can have `shacl_validation OR reasonable` in the workspace
-today, but not both. Phase 4 (inference) shipped first and is the
-load-bearing user-facing surface; Phase 5 ships as a stub until
-upstream catches up.
+```sql
+-- Data graph: Alice missing required ex:age, Bob complete.
+SELECT pgrdf.add_graph(8971);
+SELECT pgrdf.parse_turtle('
+@prefix ex: <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
-## What unblocks the real integration
+ex:alice a foaf:Person ;
+         foaf:name "Alice" .
+ex:bob a foaf:Person ;
+       foaf:name "Bob" ;
+       ex:age "30"^^xsd:integer .
+', 8971);
 
-Either of:
+-- Shapes graph: PersonShape requires foaf:name and ex:age.
+SELECT pgrdf.add_graph(8972);
+SELECT pgrdf.parse_turtle('
+@prefix ex: <http://example.org/> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
-- **`shacl_validation` 0.2.x release** that compiles cleanly against
-  a single `iri_s` major (i.e. completes the `rudof_iri` migration
-  in the AST + IR crates).
-- **`reasonable`** publishes a version whose pattern matches handle
-  RDF 1.2 triple-term operands (or otherwise tolerates the
-  `rdf-12` feature being on).
+ex:PersonShape a sh:NodeShape ;
+    sh:targetClass foaf:Person ;
+    sh:property [ sh:path foaf:name ; sh:minCount 1 ; sh:datatype xsd:string ] ;
+    sh:property [ sh:path ex:age   ; sh:minCount 1 ; sh:datatype xsd:integer ] .
+', 8972);
 
-When that happens the unblock ticket is straightforward (per
-[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §9,
-the real integration is gated to v0.5 — v0.4 keeps the stub):
-1. Uncomment the `shacl_validation` line in `Cargo.toml`.
-2. Replace the stub body of `pgrdf.validate` with serialization of
-   both graphs to N-Triples + a `GraphValidation::from_graph(…)
-   .validate(&schema_ir)` call.
-3. Translate `ValidationReport.results()` into the JSONB
-   `sh:ValidationReport` shape.
+SELECT jsonb_pretty(pgrdf.validate(8971, 8972));
+```
 
-## Scope when the real validator lands
+Yields:
 
-Per LLD v0.3 §5.3:
+```json
+{
+  "conforms": false,
+  "results": [{
+    "focusNode": "http://example.org/alice",
+    "resultPath": "http://example.org/age",
+    "sourceShape": "_:b…",
+    "resultMessage": "MinCount(1) not satisfied",
+    "resultSeverity": "sh:Violation",
+    "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+    "value": null
+  }],
+  "data_graph_id": 8971,
+  "shapes_graph_id": 8972,
+  "data_triples": 5,
+  "shapes_triples": 10,
+  "elapsed_ms": 1.68
+}
+```
 
-- ✅ SHACL Core node + property shapes
-- ✅ Cardinality, value-type, value-range constraints
-- ⚠️ SHACL-SPARQL constraints — Phase 5 stretch
-- ❌ SHACL inheritance via `sh:and` / `sh:or` / `sh:xone` —
-      depends on processor support
-- ❌ Custom validators via `sh:js` — out of scope
+Bob is silent because he conforms.
+
+## Pipeline
+
+`src/validation/shacl.rs` walks the same dictionary-join shape as
+`pgrdf.materialize`:
+
+1. **Rehydrate** — `_pgrdf_quads` JOIN `_pgrdf_dictionary` for
+   both data + shapes graphs; one SPI scan each. Both base and
+   inferred rows are included, so `pgrdf.materialize` followed by
+   `pgrdf.validate` validates the entailed closure.
+2. **Serialise** — `oxttl::NTriplesSerializer` writes each graph
+   to N-Triples text in memory.
+3. **Parse** — `rudof_rdf::InMemoryGraph::from_str(…, NTriples)`
+   re-loads each graph in rudof's shape.
+4. **Compile shapes** — `shacl::ShaclDataManager::load(…)`
+   compiles the shapes graph into a SHACL `IRSchema`.
+5. **Validate** — `GraphValidation::new(data).validate(&schema,
+   &ShaclValidationMode::Native)` runs the Native engine.
+6. **Shape** — the resulting `ValidationReport.results()` maps to
+   the JSONB shape above. Severities normalise to the canonical
+   `sh:` constants; literals render Turtle-ish.
+
+Validation is in-process. There is no external SPARQL endpoint,
+no external file IO, and the whole pipeline runs inside the
+calling Postgres transaction.
+
+## Scope
+
+- SHACL Core — `sh:NodeShape` + `sh:PropertyShape` + the standard
+  Core constraint components (cardinality, value-type, value-range,
+  string, property-pair, logical, shape-based).
+- Native engine (in-process). The `Sparql` engine in `shacl 0.3`
+  is wired but not exposed at the SQL boundary today; v0.5 may
+  add a third positional arg.
+- Validation against materialised graphs works today via the
+  rehydrate's `is_inferred` inclusivity (no explicit `materialize`
+  call inside `validate`).
+
+### Out of scope (v0.4)
+
+- Custom JavaScript validators (`sh:js`).
+- SHACL Advanced Features (`sh:rule`, `sh:targetSubjectsOf`, etc.) —
+  follows whatever `shacl 0.3.x` supports upstream; not promised.
+- RDF-star / RDF 1.2 quoted triples as focus nodes. The fork's
+  `rdf-12` passthrough adds a `TermRef::Triple(_)` arm that
+  panics rather than reasons — consistent with `reasonable`'s own
+  RDF-star posture.
+
+## Regression coverage
+
+- [`tests/regression/sql/70-validate-stub.sql`](../tests/regression/sql/70-validate-stub.sql) —
+  basic shape (vacuously conforming + unknown-graph degenerate
+  cases). Filename retained for diff-friendly history.
+- [`tests/regression/sql/71-shacl-real.sql`](../tests/regression/sql/71-shacl-real.sql) —
+  LLD §9 acceptance: `sh:NodeShape` + `sh:property` + `sh:datatype`
+  with a non-conforming focus node (Alice).
+
+Plus three `#[pg_test]` integration tests in
+`src/validation/shacl.rs::tests` (conforming, violations, unknown
+graphs).
+
+## Unblock vehicle
+
+The v0.4 unblock landed via:
+
+1. **rudof 0.3.1 (2026-05-12)** consolidating `shacl_ast` +
+   `shacl_validation` 0.2.x into a single `shacl 0.3.1` crate,
+   closing the `iri_s` → `rudof_iri` migration half of
+   [E-009](../specs/ERRATA.v0.2.md).
+2. **styk-tv/reasonable fork branch `rdf12-passthrough`** adding a
+   passthrough `rdf-12` feature + a `TermRef::Triple(_)` arm so
+   `shacl 0.3` (which hard-enables `rdf-12` via `rudof_rdf`) can
+   coexist with `reasonable` in one workspace. See
+   [`specs/ERRATA.v0.4.md`](../specs/ERRATA.v0.4.md) E-011.
+
+The fork is wired via `[patch.crates-io]` in
+[`Cargo.toml`](../Cargo.toml). Once `gtfierro/reasonable` merges
+the upstream PR, drop the patch and pin the released `reasonable`
+version (the `features = ["rdf-12"]` opt-in stays).
 
 ## See also
 
 - Implementation: [`src/validation/shacl.rs`](../src/validation/shacl.rs)
-- Regression: [`tests/regression/sql/70-validate-stub.sql`](../tests/regression/sql/70-validate-stub.sql)
-- ERRATA: [`E-001`](../specs/ERRATA.v0.2.md) — original
-  `shacl-rust` → `shacl_validation` supersession.
-- ERRATA: [`E-009`](../specs/ERRATA.v0.2.md) — current dep-block.
-- Forward-looking: [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §9 —
-  real SHACL integration (v0.5, gated on E-009 resolution).
+- Spec: [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §9
+- ERRATA: [`E-011`](../specs/ERRATA.v0.4.md) — fork patch +
+  unblock vehicle.
+- ERRATA: [`E-009`](../specs/ERRATA.v0.2.md) — original
+  dep-block, now resolved.

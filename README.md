@@ -5,13 +5,13 @@
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20v0.3%20engine%20feature--complete-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-93%20pgrx%20%2B%2039%20regression%20%2B%2023%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-94%20pgrx%20%2B%2040%20regression%20%2B%2023%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
 [![SPARQL](https://img.shields.io/badge/SPARQL-FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![BulkIngest](https://img.shields.io/badge/bulk%20ingest-LLD%20%C2%A74.3%20phase%20A-yellow)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20via%20reasonable-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
-[![Validation](https://img.shields.io/badge/SHACL%20validate-stub%20%28ERRATA%20E--009%29-orange)](specs/ERRATA.v0.2.md)
+[![Validation](https://img.shields.io/badge/SHACL%20validate-real%20W3C%20report%20%28v0.4%29-success)](docs/05-validation.md)
 [![CI](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml/badge.svg)](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml)
 [![W3C](https://img.shields.io/badge/W3C%20SPARQL%201.1-23%20starter%20tests-blue)](tests/w3c-sparql/)
 
@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Status** | Alpha — **v0.3 engine surface feature-complete**. Storage CRUD + Turtle ingest. SPARQL SELECT/ASK with N-pattern BGPs + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias + inline aggregate) + BIND. **Phase 3 storage perf** (shmem dict cache §4.1, prepared-plan cache §4.2, prepared bulk-INSERT §4.3 phase A). **Phase 4 inference** — `pgrdf.materialize` via `reasonable` (OWL 2 RL). **Phase 5 SHACL** — `pgrdf.validate` surface stub (real impl blocked by [ERRATA E-009](specs/ERRATA.v0.2.md)). **Phase 6** — regression suite + W3C-shape harness + LUBM-shape gates in CI. Deferred to v0.4: heap_multi_insert for the 2× ingest target, full W3C TTL-manifest runner, real LUBM + cross-engine benchmarks. |
+| **Status** | Alpha — **v0.3 engine surface feature-complete**. Storage CRUD + Turtle ingest. SPARQL SELECT/ASK with N-pattern BGPs + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias + inline aggregate) + BIND. **Phase 3 storage perf** (shmem dict cache §4.1, prepared-plan cache §4.2, prepared bulk-INSERT §4.3 phase A). **Phase 4 inference** — `pgrdf.materialize` via `reasonable` (OWL 2 RL). **Phase 5 SHACL** — `pgrdf.validate` ships a real W3C-shape SHACL Core report (v0.4) via `shacl 0.3.x` + a patched `reasonable` fork ([ERRATA E-011](specs/ERRATA.v0.4.md)). **Phase 6** — regression suite + W3C-shape harness + LUBM-shape gates in CI. Deferred to v0.4: heap_multi_insert for the 2× ingest target, full W3C TTL-manifest runner, real LUBM + cross-engine benchmarks. |
 | **Supported PG** | 14, 15, 16, 17. PG 18 support has landed upstream in pgrx 0.18.0 but adoption is deferred to v0.4 — 0.18.0 still fails to build locally and changes the schema-gen model. See [ERRATA](specs/ERRATA.v0.2.md) E-006 (re-checked 2026-05-14). |
 | **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
@@ -234,8 +234,8 @@ For people working on pgRDF itself.
 smoke-cold` is the cold-compose verification (use after touching
 anything in `compose/`, `fixtures/`, or the test SQL fixtures).
 
-Current bar — **93 pgrx + 39 pg_regress + 23 W3C-shape + 3
-LUBM-shape = 158 tests** green across the full pgrx PG 14-17
+Current bar — **94 pgrx + 40 pg_regress + 23 W3C-shape + 3
+LUBM-shape = 160 tests** green across the full pgrx PG 14-17
 matrix and the compose-based regression runtime (PG 17). Covers:
 - Storage CRUD + Turtle ingest (Phase 2.0-2.2).
 - SPARQL SELECT/ASK surface (Phase 3 steps 1-12, plus inline
@@ -245,7 +245,9 @@ matrix and the compose-based regression runtime (PG 17). Covers:
   prepared bulk-INSERT).
 - OWL 2 RL inference (`pgrdf.materialize`) + the
   materialize → SPARQL integration round-trip.
-- SHACL stub (real impl blocked by ERRATA E-009).
+- Real SHACL Core validation (`pgrdf.validate`) emitting a
+  W3C `sh:ValidationReport`-shape JSONB; unblocked via ERRATA
+  E-011 (patched `reasonable` fork + `shacl 0.3.x`).
 - Operator surface (`pgrdf.stats()` JSONB shape contract).
 - 7 negative regression signals locking the error-message
   contract for unsupported SPARQL shapes

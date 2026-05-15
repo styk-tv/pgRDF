@@ -44,12 +44,13 @@ inside Postgres, with four engines:
 2. **SPARQL Engine** — `pgrdf.sparql(q TEXT) → SETOF JSONB`;
    spargebra parser; dynamic-SQL executor with prepared-plan cache.
 3. **Inference Engine** — OWL 2 RL materialisation via `reasonable`.
-4. **Validation Engine** — SHACL via `shacl_validation` (stubbed in
-   v0.3 per ERRATA E-009; planned for v0.5 per §9).
+4. **Validation Engine** — SHACL Core via `shacl 0.3.x` (rudof
+   project). Real W3C-shape report in v0.4 (§9), replacing the
+   v0.3 stub. Unblocked via ERRATA.v0.4 E-011.
 
 ## 2. Scope of v0.4
 
-v0.4 ships five major tracks, plus the SPARQL surface backlog
+v0.4 ships six major tracks, plus the SPARQL surface backlog
 already enumerated in [`v0.3 §3`](SPEC.pgRDF.LLD.v0.3.md) as
 "⏳ v0.4":
 
@@ -67,6 +68,10 @@ already enumerated in [`v0.3 §3`](SPEC.pgRDF.LLD.v0.3.md) as
    returning `{subject, predicate, object}`-shaped rows.
 5. **Property paths** (§7) — `*`, `+`, `?`, `^`, with alternation
    `p1|p2` as a stretch. Materialised-closure-aware translation.
+6. **SHACL real validation** (§9) — `pgrdf.validate(data, shapes)`
+   ships the real W3C-shaped report; the v0.3 stub is gone. Lands
+   in v0.4 because the upstream unblock (rudof 0.3.1 + patched
+   `reasonable`) cleared during the cycle. See ERRATA.v0.4 E-011.
 
 Plus the v0.3-deferred SPARQL surface items (§11): multi-triple
 OPTIONAL, VALUES, BIND-downstream-of-FILTER, aggregates over UNION,
@@ -91,7 +96,7 @@ Capability matrix for the v0.4 target:
 | Aggregates over `UNION` | ⏳ deferred | ✅ §11 |
 | `DESCRIBE` | ⏳ deferred | ✅ §11 |
 | Reasoning profile selector (RDFS / OWL-RL) | not yet | ⏳ v0.5 §8 |
-| Real SHACL output | 🚧 stub | ⏳ v0.5 §9 (gated on E-009) |
+| Real SHACL output | 🚧 stub | ✅ §9 (unblocked via ERRATA.v0.4 E-011) |
 | TriG / N-Quads ingest | not yet | ⏳ v0.5 §10 |
 | Incremental materialisation | not yet | ⏳ v1.0 §15 |
 | RDF 1.2 triple terms | not yet | ⏳ v1.0 §15 (gated on E-009) |
@@ -575,41 +580,110 @@ pgrdf.materialize(graph_id BIGINT, profile TEXT DEFAULT 'owl-rl') → JSONB
 - The two profiles agree on the entailment of the RDFS axioms
   (subClassOf transitivity, domain/range propagation, etc.).
 
-## 9. SHACL real integration (v0.5 — gated on ERRATA E-009)
+## 9. SHACL real integration (v0.4 — unblocked via ERRATA.v0.4 E-011)
 
-The v0.3 `pgrdf.validate` stub remains in place. v0.4 does not
-attempt to unblock it. The mechanical plan to ship the real
-integration, once the upstream conflict resolves, is identical to
-[`v0.3 §5.3`](SPEC.pgRDF.LLD.v0.3.md):
+`pgrdf.validate(data_graph_id, shapes_graph_id) → JSONB` lands as
+a real W3C-shape SHACL Core validator in v0.4. The v0.3 stub is
+gone. The SQL surface signature is unchanged from v0.3 — only the
+JSONB body's keys shift from `{status: "stub", reason: …}` to a
+W3C `sh:ValidationReport`-shape document.
 
-**Unblock checklist:**
-1. Verify `shacl_validation 0.3.x` (or a 0.2.x point release)
-   compiles cleanly against a single `iri_s` major.
-2. Verify it does not force `oxrdf`'s `rdf-12` feature, OR confirm
-   that `reasonable` ships handling for `TermRef::Triple(_)`.
-3. Add `shacl_validation` back to `Cargo.toml`.
-4. Replace the `pgrdf.validate` stub body with N-Triples
-   serialisation of both data and shapes graphs +
-   `GraphValidation::from_graph(...).validate(&schema_ir)`.
-5. Map `ValidationReport.results()` → JSONB W3C
-   `sh:ValidationReport` shape.
+### 9.1 Body shape
 
-Surface stays stable: the stub already emits a versioned JSONB
-shape; the real implementation preserves it.
+```json
+{
+  "conforms":        <bool>,
+  "results":         [ ValidationResult, ... ],
+  "data_graph_id":   <i64>,
+  "shapes_graph_id": <i64>,
+  "data_triples":    <i64>,
+  "shapes_triples":  <i64>,
+  "elapsed_ms":      <f64>
+}
+```
 
-**v0.5 enhancement:** allow `data_graph` to be a materialised
-reasoning graph IRI (per §3/§8), so validation tooling consuming
-W3C `sh:ValidationReport` output can validate shapes against
-entailed triples, not just base ones.
+Each `ValidationResult` is:
 
-**Acceptance criteria (v0.5 gate):**
-- A SHACL `sh:NodeShape` with `sh:property` + `sh:class` reports
-  violations on malformed input.
-- The data graph IRI may resolve to either a base graph or a
-  materialised reasoning graph.
-- Output JSONB matches the W3C `sh:ValidationReport` shape
-  byte-for-byte (a regression fixture round-trips through
-  `pgrdf.load_turtle` of the JSONB-serialised report).
+```json
+{
+  "focusNode":      "<iri-or-bnode-or-literal-encoded>",
+  "resultPath":     "<iri-or-null>",
+  "sourceShape":    "<iri-or-bnode-or-null>",
+  "resultMessage":  "<string-or-null>",
+  "resultSeverity": "sh:Violation|sh:Warning|sh:Info|sh:Trace|sh:Debug",
+  "value":          "<term-encoded-or-null>",
+  "sourceConstraintComponent": "<iri>"
+}
+```
+
+### 9.2 Engine + pipeline
+
+The implementation in `src/validation/shacl.rs`:
+
+1. Rehydrates both graphs from `_pgrdf_quads` JOIN
+   `_pgrdf_dictionary` (same shape as `pgrdf.materialize`).
+2. Serialises each graph to N-Triples via `oxttl::NTriplesSerializer`.
+3. Builds `rudof_rdf::rdf_impl::InMemoryGraph::from_str` instances
+   from the N-Triples text.
+4. Compiles the shapes graph into a SHACL `IRSchema` via
+   `shacl::validator::store::ShaclDataManager::load`.
+5. Wraps the data graph as a `shacl::validator::store::Graph` and
+   constructs a `GraphValidation` validator.
+6. Runs `validator.validate(&schema, &ShaclValidationMode::Native)`.
+7. Maps the resulting `ValidationReport.results()` into JSONB,
+   normalising severities to the canonical `sh:` constants and
+   rendering literals in Turtle-ish form.
+
+### 9.3 Unblock vehicle (ERRATA.v0.4 E-011)
+
+Two upstream-side preconditions cleared during the v0.4 cycle:
+
+1. **rudof 0.3.1 consolidation (2026-05-12).** `shacl_ast` +
+   `shacl_validation` 0.2.x merged into a single `shacl 0.3.1`
+   crate, closing the `iri_s` → `rudof_iri` migration half of
+   ERRATA.v0.2 E-009.
+2. **Patched `reasonable` fork (styk-tv branch
+   `rdf12-passthrough`).** Adds a `#[cfg(feature = "rdf-12")]
+   TermRef::Triple(_) => panic!(...)` arm in
+   `lib/src/common.rs:140` plus a passthrough feature
+   `rdf-12 = ["oxrdf/rdf-12"]`. Strictly additive; lets pgRDF
+   compose `shacl 0.3` (which hard-enables `rdf-12` via
+   `rudof_rdf`) with `reasonable` 0.4.x in the same workspace.
+   See ERRATA.v0.4 E-011 for the full patch summary.
+
+The fork is wired via `[patch.crates-io]` in
+[`Cargo.toml`](../Cargo.toml). Once `gtfierro/reasonable` merges
+the upstream PR (held in the fork as `PR-DRAFT.md`), drop the
+patch and pin the released `reasonable` version.
+
+### 9.4 Acceptance criteria (v0.4 gate — landed)
+
+- A SHACL `sh:NodeShape` with `sh:property` + `sh:datatype`
+  reports a violation on a focus node whose data is missing the
+  required property. Regression:
+  [`tests/regression/sql/71-shacl-real.sql`](../tests/regression/sql/71-shacl-real.sql).
+- The report's `conforms` flag is `false` iff `results[]` is
+  non-empty, and `true` otherwise.
+- Each violation carries a `sh:Violation` severity by default;
+  shape-author `sh:severity` declarations override.
+- The data + shapes graphs are rehydrated from pgRDF's storage —
+  no external file IO, no external SPARQL endpoint — so the
+  validator runs inside the calling Postgres transaction.
+
+### 9.5 Forward look (v0.5+)
+
+- **Validation against a materialised graph.** Allow
+  `data_graph_id` to be a graph that has already had
+  `pgrdf.materialize` run; the SHACL engine then sees the
+  entailed closure. Today the rehydrate selects both `is_inferred
+  = TRUE` and `FALSE` rows, so this works in practice; v0.5 adds
+  documentation + a regression covering the case.
+- **SHACL-SPARQL constraint mode.** `shacl 0.3` exposes a
+  `Sparql` validation mode in addition to `Native`. v0.5 may
+  expose this as a third positional arg to `pgrdf.validate`.
+- **W3C SHACL manifest runner.** Wire the upstream `rudof`
+  SHACL test suite to CI as a third correctness gate alongside
+  the W3C SPARQL manifest (v0.4 §13).
 
 ## 10. TriG / N-Quads ingest (v0.5)
 
@@ -742,12 +816,13 @@ is that every UDF and every translator path takes its own file.
 ## 15. Forward look — v0.5 and v1.0
 
 **v0.5 contents (planned):**
-- Real SHACL output (§9 — gated on ERRATA E-009).
 - Reasoning profile selector (§8).
 - TriG / N-Quads ingest (§10).
 - Aggregates-over-UNION refinements not landed in v0.4 §11.
 - IRI overloads for the §5 lifecycle UDFs.
-- W3C SHACL manifest runner wired in CI.
+- W3C SHACL manifest runner wired in CI (§9.5).
+- SHACL-SPARQL constraint mode + validation-against-materialised-graph
+  (§9.5).
 
 **v1.0 contents (planned):**
 - Incremental (delta-driven) materialisation:

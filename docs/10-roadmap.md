@@ -238,24 +238,25 @@ Gates:
 
 ---
 
-## Phase 5 — Validation Engine 🚧 (stub)
+## Phase 5 — Validation Engine ✅ (v0.4)
 
 Outcome: SHACL validation works against real shapes graphs. Tracks
-LLD v0.3 §5.3.
+LLD v0.3 §5.3 and v0.4-FUTURE §9.
 
 Gates:
-- 🚧 `pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` —
-      surface SHIPPED (`src/validation/shacl.rs`); body returns
-      `{"status": "stub", …}` blocked by ERRATA E-009 (upstream
-      `iri_s`/`rdf-12` dep conflict between `shacl_validation` and
-      `reasonable`). Verified by `70-validate-stub.sql`.
-- ⏳ Real `shacl_validation` integration once either upstream
-      catches up (see `docs/05-validation.md` for the unblock
-      conditions). Targeted at v0.5 per
-      [`SPEC.pgRDF.LLD.v0.4-FUTURE.md §9`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)
-      (gated on ERRATA E-009).
+- ✅ `pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` —
+      real W3C-shape SHACL Core report, replacing the v0.3 stub.
+      Backed by `shacl 0.3.x` (rudof project). Verified by
+      `70-validate-stub.sql` (basic shape) and
+      `71-shacl-real.sql` (LLD §9 violations).
+- ✅ Upstream-dep unblock — `shacl 0.3.1` consolidated the
+      `iri_s` → `rudof_iri` migration; the `rdf-12 /
+      TermRef::Triple` half cleared via the patched
+      `styk-tv/reasonable` fork branch `rdf12-passthrough`
+      (ERRATA.v0.4 E-011). Fork wired via `[patch.crates-io]`
+      until upstream `gtfierro/reasonable` merges.
 - ⏳ W3C SHACL conformance manifest runner — paired with Phase 6,
-      lands with real SHACL output in v0.5.
+      targets v0.5 (see [`SPEC.pgRDF.LLD.v0.4-FUTURE.md §9.5`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)).
 
 ---
 
@@ -287,9 +288,10 @@ LLD v0.3 §5.4.
   `pgrdf-w3c-sparql` Rust binary placeholder in
   `regression-w3c.yml::sparql11` (gated `if: false`) is the
   destination shape; lands as v0.4.
-- ⏳ W3C SHACL manifest runner. Gated on ERRATA E-009 unblocking;
-  per [`SPEC.pgRDF.LLD.v0.4-FUTURE.md §9`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)
-  the SHACL pair (real output + manifest runner) targets v0.5.
+- ⏳ W3C SHACL manifest runner. Real SHACL output landed in v0.4
+  via ERRATA.v0.4 E-011; the manifest runner is the remaining
+  half and targets v0.5 (per
+  [`SPEC.pgRDF.LLD.v0.4-FUTURE.md §9.5`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)).
 - ⏳ Coverage targets ratchet per release:
   SPARQL `≥ 30 % → ≥ 70 % → ≥ 95 %`; SHACL `≥ 50 % → ≥ 90 %`.
 
@@ -318,9 +320,10 @@ LLD v0.3 §5.4.
   as workflow follow-up (slice #36 adjacent finding).
 - MSRV declared `rust-version = "1.91"` in `Cargo.toml` (slice
   #49).
-- Target gates: W3C SPARQL 1.1 ≥ 95 % pass; SHACL ≥ 90 % pass
-  (the SHACL gate moves with ERRATA E-009 resolution; per
-  v0.4-FUTURE §9, real SHACL output is a v0.5 ticket).
+- Target gates: W3C SPARQL 1.1 ≥ 95 % pass; SHACL ≥ 90 % pass.
+  Real SHACL output landed in v0.4 (ERRATA E-011); the SHACL
+  manifest gate is the remaining lever and targets v0.5 per
+  v0.4-FUTURE §9.5.
 
 ---
 
@@ -328,7 +331,7 @@ LLD v0.3 §5.4.
 
 v0.4 is the next major cut, drafted in
 [`SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).
-What follows summarises the five major tracks — the full contract
+What follows summarises the six major tracks — the full contract
 lives in the spec. Acceptance criteria, schema deltas, and
 translator-level wiring are NOT duplicated here; this section is a
 navigation aid only.
@@ -394,11 +397,19 @@ in v0.3) is wired in v0.4 — it gates the §11 SPARQL backlog
 automatically as the deferred forms come online. See
 [v0.4-FUTURE §13](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#13-test-policy-continues-v03-6-unchanged-in-spirit).
 
+### Track 6 — Real SHACL validation (✅ landed)
+`pgrdf.validate(data, shapes)` ships the real W3C `sh:ValidationReport`-shape
+JSONB, backed by `shacl 0.3.x` (rudof). Unblocked via the patched
+`reasonable` fork tracked in ERRATA.v0.4 E-011. Regression
+fixtures `70-validate-stub.sql` (basic shape) and
+`71-shacl-real.sql` (LLD §9 violations). See
+[v0.4-FUTURE §9](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).
+
 ### Excluded from v0.4 (planned v0.5)
-Real SHACL output (ERRATA E-009-gated), the reasoning profile
-selector (`pgrdf.materialize(graph_id, profile)` — RDFS vs OWL-RL),
-TriG / N-Quads ingest, IRI overloads for the §5 lifecycle UDFs, and
-the W3C SHACL manifest runner. See
+The reasoning profile selector (`pgrdf.materialize(graph_id, profile)`
+— RDFS vs OWL-RL), TriG / N-Quads ingest, IRI overloads for the §5
+lifecycle UDFs, the W3C SHACL manifest runner, and the SHACL-SPARQL
+constraint mode. See
 [v0.4-FUTURE §8](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#8-reasoning-profile-selector-v05--flagged-here-for-planning),
 [§9](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#9-shacl-real-integration-v05--gated-on-errata-e-009),
 [§10](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#10-trig--n-quads-ingest-v05).

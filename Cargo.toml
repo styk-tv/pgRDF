@@ -70,22 +70,28 @@ serde_json = "1"     # Used by load_turtle_verbose and sparql_parse to emit JSON
 # transitively (matches our own pin) plus datafrog / disjoint-sets /
 # roaring / rio_api. 0.4.1 (2026-05-10) supersedes the v0.2-LLD
 # reference to 0.2; see specs/ERRATA.v0.2.md for the rationale.
-reasonable = "0.4"
-# Phase 5: W3C-conformant SHACL processor from the rudof project.
-# NOT YET ENABLED — see specs/ERRATA.v0.2.md E-009. The 0.2.x line
-# (latest 0.2.12, 2026-04-22) ships an unfinished `iri_s` → `rudof_iri`
-# migration: `shacl_ast 0.2.9` fails with `expected
-# rudof_iri::IriS, found iri_s::IriS`. The 0.1.x line builds in
-# isolation but its transitives enable oxrdf's `rdf-12` feature
-# which adds `TermRef::Triple`; that variant is unhandled by
-# `reasonable 0.4.1` so feature unification breaks the workspace.
-# The `pgrdf.validate(...)` SQL surface ships as a stub returning
-# `{"status": "stub"}`. Re-evaluate when either:
-#   - shacl_validation publishes a 0.2.x release that compiles
-#     against a single `iri_s` major, OR
-#   - reasonable publishes a version that handles rdf-star /
-#     RDF 1.2 triple terms.
-# shacl_validation = "0.2"
+#
+# The `features = ["rdf-12"]` opts into the passthrough feature on
+# the styk-tv/reasonable fork (branch `rdf12-passthrough`, redirected
+# via `[patch.crates-io]` at the end of this file). The passthrough
+# feature forwards to `oxrdf/rdf-12`, which then unifies workspace-wide
+# with the `rdf-12` enablement that `shacl 0.3.x` (via `rudof_rdf`)
+# pulls in non-optionally. Drop the feature + the patch once
+# gtfierro/reasonable merges the upstream PR; see ERRATA.v0.4 E-011.
+reasonable = { version = "0.4", features = ["rdf-12"] }
+# Phase 5: W3C-conformant SHACL Core validator from the rudof project.
+# `shacl 0.3.1` (2026-05-12) consolidated the previous `shacl_ast` +
+# `shacl_validation` 0.2.x pair into a single crate, resolving the
+# `iri_s` → `rudof_iri` migration half of ERRATA.v0.2 E-009. The
+# remaining `rdf-12` half is resolved by the fork patch on `reasonable`
+# above; see ERRATA.v0.4 E-011.
+shacl = "0.3"
+# rudof's RDF abstraction layer. `shacl 0.3` exposes its API in terms
+# of `rudof_rdf::rdf_core::{RDFFormat, term::Object, ...}` and
+# `rudof_rdf::rdf_impl::InMemoryGraph` — none of which `shacl`
+# re-exports. The dep is pinned to the same 0.3.x major as `shacl`
+# so the type identity unifies workspace-wide.
+rudof_rdf = "0.3"
 
 [dev-dependencies]
 pgrx-tests = "0.16"
@@ -98,3 +104,17 @@ panic = "unwind"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+# Temporary: patches `reasonable` to handle `TermRef::Triple(_)` under
+# oxrdf's `rdf-12` feature. Required because `shacl 0.3.x` via
+# `rudof_rdf` hard-enables that feature workspace-wide, which surfaces
+# the otherwise non-exhaustive match in `reasonable`'s
+# `lib/src/common.rs:140`. The fork adds a `panic!(...)` arm gated
+# behind a new passthrough feature `rdf-12 = ["oxrdf/rdf-12"]` —
+# strictly additive when off, panics with a clear message when on.
+#
+# Tracked as ERRATA.v0.4 E-011. Drop this block + pin `reasonable =
+# "0.4.2"` (or whatever ships) once gtfierro/reasonable merges the
+# upstream PR (currently held on the fork as PR-DRAFT.md).
+[patch.crates-io]
+reasonable = { git = "https://github.com/styk-tv/reasonable", branch = "rdf12-passthrough" }
