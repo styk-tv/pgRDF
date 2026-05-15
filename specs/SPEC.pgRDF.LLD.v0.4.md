@@ -14,6 +14,19 @@ and OWL 2 RL reasoning.**
   whether the v0.4.0 tag has cut yet. Items still in progress are
   marked 🚧. The document is authoritative now — not aspirational —
   even though the cycle is mid-flight.
+- **§3 named-graph track — COMPLETE within the v0.4 cycle.** The
+  Phase A countdown closed the §3 surface across slices 120 → 110
+  (cumulative): `_pgrdf_graphs` table + `pg_extension_config_dump`
+  registration (slice 120), the five-UDF surface
+  (`add_graph(id)` / `add_graph(iri)` / `add_graph(id, iri)` /
+  `graph_id(iri)` / `graph_iri(id)`, slices 119 → 115), SPARQL
+  `GRAPH <iri>` literal + `GRAPH ?g` variable forms (slices 114 /
+  113), per-pattern GRAPH composition with OPTIONAL / UNION /
+  MINUS (slice 112), three W3C-shape conformance fixtures (slice
+  111), and the `pg_dump` round-trip script (slice 110). All four
+  §3.4 acceptance criteria verified end-to-end. The remaining v0.4
+  tracks (§4 UPDATE, §5 lifecycle, §6 CONSTRUCT, §7 paths, §11
+  backlog) carry forward.
 - **Supersedes:** [`SPEC.pgRDF.LLD.v0.3.md`](SPEC.pgRDF.LLD.v0.3.md)
   at the contract level for surfaces shipped in the v0.4 cycle.
   v0.3 LLD remains the verbatim record of the v0.3.0-cut surface.
@@ -66,7 +79,7 @@ already enumerated in [`v0.3 §3`](SPEC.pgRDF.LLD.v0.3.md) as
 
 1. **Named-graph scoping and IRI mapping** (§3) — `GRAPH { … }` in
    SPARQL, a new `_pgrdf_graphs` system table, IRI ↔ `graph_id`
-   helper UDFs. 🚧
+   helper UDFs. ✅ shipped (Phase A countdown slices 120 → 110).
 2. **SPARQL UPDATE** (§4) — `INSERT DATA`, `DELETE DATA`,
    `INSERT … WHERE …`, `DELETE … WHERE …`,
    `DELETE … INSERT … WHERE …`, and the graph-scoped variants
@@ -96,7 +109,7 @@ Capability matrix for the v0.4 target:
 | `GRAPH <iri> { … }` | ⏳ deferred | §3.3 | ✅ slice 114 |
 | `GRAPH ?g { … }` | ⏳ deferred | §3.3 | ✅ slice 113 |
 | GRAPH composition (OPTIONAL/UNION/MINUS) | ⏳ deferred | §3.3 | ✅ slice 112 |
-| IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | 🚧 |
+| IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | ✅ slices 120-115 |
 | SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | §4 | 🚧 |
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | 🚧 |
 | `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | 🚧 |
@@ -121,7 +134,10 @@ Named-graph workloads are first-class in pgRDF: storage already
 partitions `_pgrdf_quads` by `graph_id` (LIST partition), and the
 v0.3 cut ships `pgrdf.add_graph(id BIGINT)` and `pgrdf.count_quads`
 filtered by graph. What's missing is the **IRI ↔ id binding** and
-the **SPARQL `GRAPH { … }` surface**. v0.4 closes both. 🚧
+the **SPARQL `GRAPH { … }` surface**. v0.4 closes both. ✅ shipped
+across Phase A countdown slices 120 → 110 (table + UDF surface +
+SPARQL literal/variable forms + composition + W3C-shape fixtures +
+pg_dump round-trip).
 
 Downstream consumers running graph-level lifecycle operations
 (drop / clear / copy / move — §5) and atomic write-back via SPARQL

@@ -104,7 +104,7 @@ idempotently. `pgrdf.count_quads(g)` is a partition-pruning count.
 Dropping a whole graph is `DROP TABLE _pgrdf_quads_<g>` —
 seconds, not rows-times-vacuum.
 
-### Named-graph IRI mapping (`_pgrdf_graphs`, **shipped — Phase A slice 120**)
+### Named-graph IRI mapping (`_pgrdf_graphs`, **shipped — Phase A slices 120 → 115**)
 
 The integer `graph_id` LIST key is a storage detail; SPARQL
 users name graphs by **IRI**. The v0.4 schema extension
@@ -122,80 +122,114 @@ The default partition (`graph_id = 0`) is seeded with the synthetic
 IRI `urn:pgrdf:graph:0`, so the catch-all bucket has a queryable
 name from `CREATE EXTENSION` onwards.
 
-Slice 120 lands the table; **slice 119** wires the existing
-integer-keyed `pgrdf.add_graph(id BIGINT)` UDF to populate
-`_pgrdf_graphs` automatically — every successful partition
-creation also inserts `(id, 'urn:pgrdf:graph:' || id::text)`
-under an `ON CONFLICT (graph_id) DO NOTHING` clause, so v0.3
-callers gain a queryable IRI mapping for every graph they create
-through the integer surface without any signature change.
+The same migration carries a
+`SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', '');`
+registration so `pg_dump` includes the row data (not just the
+extension-managed DDL). Without this call, the seed row and every
+user-bound IRI would be silently dropped on restore. Round-trip
+discipline is locked end-to-end by
+[`tests/regression/scripts/pg-dump-roundtrip.sh`](../tests/regression/scripts/pg-dump-roundtrip.sh)
+(slice 110), wired into `just test-pg-dump-roundtrip` and
+`just test-conformance`.
 
-**Slice 118** adds the IRI-keyed overload
-`pgrdf.add_graph(iri TEXT) → BIGINT`. Idempotent on the IRI: a
-repeat call against the same IRI returns the existing `graph_id`
-without creating a second partition or duplicating the binding.
-On a fresh IRI it allocates the next id (smallest unused positive
-integer via `COALESCE(MAX(graph_id), 0) + 1`), inserts the
-user-supplied IRI into `_pgrdf_graphs` *before* re-entering
-through the integer overload (so slice 119's synthetic-IRI insert
-no-ops via `ON CONFLICT (graph_id) DO NOTHING` and the
-user-supplied IRI is preserved verbatim), and creates the LIST
-partition. Concurrent `add_graph(iri)` callers are serialised by
-a `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` taken
-before the SELECT-MAX, so two callers can't both compute the same
-id and race the INSERT. Empty / whitespace-only IRI panics with
-the stable `add_graph: iri must be non-empty` prefix; RFC-3987
-syntax validation is deferred to a later slice (we don't carry an
+**Slice 119 — synthetic IRI for integer-keyed `add_graph`.** The
+v0.3 `pgrdf.add_graph(id BIGINT)` UDF (signature unchanged) now
+inserts `(id, 'urn:pgrdf:graph:' || id::text)` into
+`_pgrdf_graphs` after creating the LIST partition, under
+`ON CONFLICT (graph_id) DO NOTHING` so re-calls stay idempotent.
+v0.3 callers gain a queryable IRI mapping for every graph without
+any signature change.
+
+**Slice 118 — IRI-keyed overload `pgrdf.add_graph(iri TEXT) → BIGINT`.**
+Idempotent on the IRI: a repeat call returns the existing
+`graph_id` without creating a second partition. On a fresh IRI it
+allocates the next id (smallest unused positive integer via
+`COALESCE(MAX(graph_id), 0) + 1`) under a
+`LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` so
+concurrent callers can't compute the same id and race the INSERT.
+The IRI is INSERTed into `_pgrdf_graphs` *before* re-entering
+through the integer overload — slice 119's synthetic-IRI insert
+then no-ops on `ON CONFLICT (graph_id) DO NOTHING`, preserving the
+user-supplied IRI verbatim. Empty / whitespace-only IRI panics
+with the stable `add_graph: iri must be non-empty` prefix.
+RFC-3987 syntax validation is deferred to a later slice (no
 `oxiri` dependency in v0.4.1).
 
-**Slice 117** adds the explicit-binding overload
-`pgrdf.add_graph(id BIGINT, iri TEXT) → BIGINT`. Caller specifies
-both halves; the function INSERTs the pair into `_pgrdf_graphs` and
-creates the matching LIST partition (via re-entry through the
-integer overload, same as slice 118). Idempotent on a matching
-`(id, iri)`: a repeat call returns `id` without touching the row.
-Conflicts panic with the stable `add_graph:` prefix:
+**Slice 117 — explicit-binding overload
+`pgrdf.add_graph(id BIGINT, iri TEXT) → BIGINT`.** Caller supplies
+both halves; idempotent on a matching `(id, iri)` pair. Conflicts
+panic with the stable `add_graph:` prefix —
 `add_graph: graph_id <N> is bound to a different IRI (<existing>)`
-when `id` is already bound to a non-synthetic IRI different from
-the requested one, or
+when `id` is bound to a non-synthetic IRI different from the
+request, or
 `add_graph: iri <iri> is bound to a different graph_id (<existing>)`
-when the requested IRI is bound to a different `graph_id`. The
-synthetic placeholder `urn:pgrdf:graph:{id}` (the slice-119 seed
-that the integer overload assigns automatically) is treated as
+when the IRI is bound to a different `graph_id`. The synthetic
+placeholder `urn:pgrdf:graph:{id}` (the slice-119 seed that the
+integer overload assigns automatically) is treated as
 **upgradable**: when `id` currently points at its synthetic IRI
 and the requested IRI is unbound elsewhere, the row is UPDATEd in
-place so the user-specified IRI replaces the placeholder. This
-covers the common sequence `add_graph(42)` →
-`add_graph(42, 'http://example.org/g42')`. Concurrent callers are
-serialised by the same
-`LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` the IRI-keyed
-overload takes. Negative `id` and empty/whitespace-only `iri` panic
-with the stable prefixes shared with the other two overloads.
+place — covering the common sequence `add_graph(42)` →
+`add_graph(42, 'http://example.org/g42')`. Concurrent writers
+serialised by the same lock idiom as slice 118. Negative `id` and
+empty IRI rejected with the same stable prefixes shared by the
+other two overloads.
 
-**Slice 116** adds the read-only lookup
-`pgrdf.graph_id(iri TEXT) → BIGINT`. Returns the integer `graph_id`
-bound to the given IRI in `_pgrdf_graphs`, or `NULL` if the IRI is
-not bound. No side effects, no panic on miss — NULL is the
+**Slices 116 / 115 — symmetric lookups
+`pgrdf.graph_id(iri TEXT) → BIGINT` and
+`pgrdf.graph_iri(id BIGINT) → TEXT`.** Read-only resolution in
+both directions; `NULL` on miss (no panic — NULL is the
 lookup-miss signal, distinct from an actual SPI error which still
-propagates with the stable `graph_id:` prefix. Marked
-`#[pg_extern(strict)]` so Postgres short-circuits a NULL argument
-to NULL output without invoking the function; the `&str` body
-therefore never sees a NULL input. Internally the lookup wraps its
-`SELECT graph_id … WHERE iri = $1 LIMIT 1` in a scalar subquery so
-SPI always returns "exactly one row" (NULL or the id), the same
-idiom the IRI-keyed `add_graph` overload uses to avoid the
+propagates with the stable `graph_id:` / `graph_iri:` prefix).
+Both UDFs are marked `#[pg_extern(strict)]` so Postgres
+short-circuits a NULL argument to NULL output without invoking
+the function body. Both wrap their `SELECT … WHERE … LIMIT 1` in
+a scalar subquery so SPI always returns "exactly one row" (NULL
+or the bound value), dodging the
 `SpiTupleTable positioned before the start` empty-result trip.
 
-**Slice 115** adds the symmetric inverse
-`pgrdf.graph_iri(id BIGINT) → TEXT`. Returns the IRI bound to
-`graph_id` in `_pgrdf_graphs`, or `NULL` if the id is not bound.
-Same `#[pg_extern(strict)]` + scalar-subquery wrapper discipline
-as slice 116; NULL input → NULL output, miss is NULL (no panic),
-SPI errors propagate with the stable `graph_iri:` prefix. With
-slice 115 landed the §3.2 UDF surface is fully shipped: the three
-`add_graph` overloads plus the symmetric `graph_id` / `graph_iri`
-lookups. SPARQL `GRAPH { … }` translation lands next in slices
-114-110. Spec: SPEC.pgRDF.LLD.v0.4 §3.
+With slice 115 landed, the §3.2 UDF surface is **fully shipped**:
+the three `add_graph` overloads plus the symmetric
+`graph_id` / `graph_iri` lookups. SPARQL `GRAPH { … }` translation
+follows in slices 114 → 112; the W3C-shape fixtures land in slice
+111; the `pg_dump` round-trip script in slice 110. Spec:
+[`SPEC.pgRDF.LLD.v0.4 §3`](../specs/SPEC.pgRDF.LLD.v0.4.md#3-named-graph-scoping-and-iri-mapping-new).
+
+#### UDF surface — worked example
+
+The five UDFs compose as follows. The session starts with one row
+in `_pgrdf_graphs` (the `graph_id = 0` synthetic seed) and gains
+two more across the example:
+
+```sql
+-- (1) Integer-keyed surface — slice 119 auto-binds the synthetic IRI.
+SELECT pgrdf.add_graph(42::bigint);
+--  → 42
+SELECT pgrdf.graph_iri(42::bigint);
+--  → 'urn:pgrdf:graph:42'
+
+-- (2) IRI-keyed surface — slice 118 auto-allocates the next id.
+SELECT pgrdf.add_graph('http://example.org/g1');
+--  → 43       -- COALESCE(MAX(graph_id), 0) + 1 against existing rows
+SELECT pgrdf.graph_id('http://example.org/g1');
+--  → 43
+
+-- (3) Explicit-binding surface — slice 117 with the synthetic
+--     placeholder upgrade path.
+SELECT pgrdf.add_graph(42::bigint, 'http://example.org/g42');
+--  → 42       -- in-place UPDATE: synthetic urn:pgrdf:graph:42 is replaced
+SELECT pgrdf.graph_iri(42::bigint);
+--  → 'http://example.org/g42'
+
+-- (4) Lookup misses are NULL (no panic, no error).
+SELECT pgrdf.graph_id('http://example.org/unbound');
+--  → NULL
+SELECT pgrdf.graph_iri(9999::bigint);
+--  → NULL
+
+-- (5) The mapping survives pg_dump/restore via the
+--     pg_extension_config_dump('_pgrdf_graphs', '') registration —
+--     covered by tests/regression/scripts/pg-dump-roundtrip.sh.
+```
 
 ## 2.3 Bulk loader (`src/storage/loader.rs`)
 

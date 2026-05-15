@@ -65,6 +65,75 @@ result rows ─► SETOF JSONB
 | ORDER BY ?v | `ORDER BY (SELECT lex …) ASC/DESC NULLS LAST` or by ordinal | Unprojected ?v → hidden trailing SELECT column |
 | LIMIT N / OFFSET N | `LIMIT N` / `OFFSET N` | Postgres-native |
 
+## Named-graph GRAPH-scope translation (LLD v0.4 §3.3, shipped — Phase A slices 114 → 112)
+
+The single-row "GRAPH composition" entry in the translation matrix
+above abbreviates the algorithm slice 112 landed; the engineering
+detail follows.
+
+**Per-pattern scope, not per-query.** Each triple, each OPTIONAL
+block, and each MINUS block carries an
+`Option<GraphScope>` describing the innermost enclosing GRAPH
+block during the algebra walk. `GraphScope` has two arms:
+
+- `Literal(graph_id: i64)` — resolved at translate time against
+  `_pgrdf_graphs.iri`; unresolved IRI binds to `-1` (no real
+  partition uses that value), so an unknown IRI yields zero rows
+  per W3C SPARQL 1.1 §13.3 "no solutions".
+- `Variable { name, scope_id }` — the `?g`-style variable name
+  plus a globally-unique scope id (counter on
+  `ParsedSelect.graph_scope_counter`). Two GRAPH blocks under the
+  same query get distinct `scope_id`s even if they name the same
+  variable.
+
+**INNER vs LEFT JOIN to `_pgrdf_graphs`.** `build_from_and_where`
+pre-scans the BGP and OPTIONALs to produce a `ScopePlan`:
+
+- **Mandatory** Variable scopes (a GRAPH block at the top level
+  of a BGP) get an `INNER JOIN _pgrdf_graphs g{scope_id} ON
+  g{scope_id}.graph_id = q{anchor}.graph_id`. The anchor is the
+  first BGP alias inside that scope. INNER matches W3C §13.3:
+  only graphs present in the IRI mapping bind the variable.
+- **OPTIONAL-born** Variable scopes (a GRAPH block nested inside
+  an OPTIONAL with no enclosing GRAPH) get a `LEFT JOIN
+  _pgrdf_graphs g{scope_id} ON g{scope_id}.graph_id =
+  q{opt_anchor}.graph_id`. An unmatched OPTIONAL leaves `?g`
+  NULL without dropping the outer row.
+- Triples 2..N within a scope carry `qN.graph_id =
+  q{anchor}.graph_id` (Variable) or `qN.graph_id = $K`
+  (Literal), so a multi-triple inner BGP cannot stitch triples
+  from different graphs together.
+- Two GRAPH blocks binding the same `?g` get a
+  `g{later}.graph_id = g{anchor}.graph_id` predicate so the
+  projected variable stays consistent across the joins.
+
+**MINUS inherits outer scope.** A MINUS block carries the GRAPH
+scope active at the point its `NOT EXISTS` sub-SELECT is built;
+the scope predicate lands inside the sub-SELECT so the MINUS
+remains internal to the outer row's existence test. OPTIONAL /
+MINUS that nest inside a GRAPH inherit the outer scope (innermost
+wins at AST-walk time, per W3C §13.3).
+
+**Projection.** When the projected variable matches a Variable
+scope's `name`, the SELECT clause emits `g{scope_id}.iri` rather
+than the integer `qN.graph_id` — the JSONB row value is the IRI
+string, matching SPARQL semantics. `SELECT *` adds the graph
+variable to the projected list even when no inner triple anchors
+it (the GRAPH block itself is the anchor).
+
+**Bare BGPs.** A triple outside any `GRAPH { … }` carries
+`scope = None`, meaning "match in any graph" — unchanged from
+v0.3 semantics (`pgrdf.sparql` over the union of all partitions).
+
+Implementation in
+[`src/query/executor.rs`](../src/query/executor.rs); regression
+coverage:
+[`78-sparql-graph-literal-iri.sql`](../tests/regression/sql/78-sparql-graph-literal-iri.sql),
+[`79-sparql-graph-variable.sql`](../tests/regression/sql/79-sparql-graph-variable.sql),
+[`87-sparql-graph-composition.sql`](../tests/regression/sql/87-sparql-graph-composition.sql),
+plus W3C-shape fixtures 24 / 25 / 26 under
+[`tests/w3c-sparql/`](../tests/w3c-sparql/).
+
 ## Prepared-plan cache (LLD §4.2, **shipped — Phase 3 step 2**)
 
 Lives in [`src/query/plan_cache.rs`](../src/query/plan_cache.rs).
@@ -123,7 +192,7 @@ Concrete shape:
   same shape but different IRI constants → 1 miss + 1 hit; a
   structurally distinct query → 1 miss + 0 hits.
 
-## Surface today (v0.3 SPARQL surface complete; v0.4 §3.3 GRAPH landing)
+## Surface today (v0.3 SPARQL surface complete; v0.4 §3.3 GRAPH shipped)
 
 - ✅ Basic Graph Patterns (1..N triples)
 - ✅ `SELECT` (explicit projection or `SELECT *`); `ASK`

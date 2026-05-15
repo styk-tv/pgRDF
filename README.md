@@ -5,8 +5,8 @@
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20v0.4%20engine%20surface%20all%20real-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-94%20pgrx%20%2B%2040%20regression%20%2B%2023%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
-[![SPARQL](https://img.shields.io/badge/SPARQL-FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
+[![Tests](https://img.shields.io/badge/tests-118%20pgrx%20%2B%2049%20regression%20%2B%2026%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
+[![SPARQL](https://img.shields.io/badge/SPARQL-FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES%20%2F%20GRAPH-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![BulkIngest](https://img.shields.io/badge/bulk%20ingest-LLD%20%C2%A74.3%20phase%20A-yellow)](specs/SPEC.pgRDF.LLD.v0.3.md)
@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Status** | Alpha — **v0.4 engine surface — all four engines real (storage / SPARQL / OWL 2 RL inference / SHACL Core validation)**. Storage CRUD + Turtle ingest. SPARQL SELECT/ASK with N-pattern BGPs + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias + inline aggregate) + BIND. **Phase 3 storage perf** (shmem dict cache §4.1, prepared-plan cache §4.2, prepared bulk-INSERT §4.3 phase A). **Phase 4 inference** — `pgrdf.materialize` via `reasonable` (OWL 2 RL). **Phase 5 SHACL** — `pgrdf.validate` returns a real W3C `sh:ValidationReport`-shape JSONB via `shacl 0.3.1` + a patched `reasonable` fork ([ERRATA E-011](specs/ERRATA.v0.4.md)). **Phase 6** — regression suite + W3C-shape harness + LUBM-shape gates in CI. Deferred to v0.4.x / v0.5: named-graph + SPARQL UPDATE + lifecycle UDFs + CONSTRUCT + property paths + heap_multi_insert phase B + full W3C TTL-manifest runner. |
+| **Status** | Alpha — **v0.4 engine surface — all four engines real (storage / SPARQL / OWL 2 RL inference / SHACL Core validation)**. Storage CRUD + Turtle ingest. SPARQL SELECT/ASK with N-pattern BGPs + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias + inline aggregate) + BIND + **named-graph SPARQL scoping (`GRAPH <iri> { … }` literal + `GRAPH ?g { … }` variable + composition with OPTIONAL/UNION/MINUS, LLD v0.4 §3 shipped via Phase A countdown slices 120 → 110)**. **Phase 3 storage perf** (shmem dict cache §4.1, prepared-plan cache §4.2, prepared bulk-INSERT §4.3 phase A). **Phase 4 inference** — `pgrdf.materialize` via `reasonable` (OWL 2 RL). **Phase 5 SHACL** — `pgrdf.validate` returns a real W3C `sh:ValidationReport`-shape JSONB via `shacl 0.3.1` + a patched `reasonable` fork ([ERRATA E-011](specs/ERRATA.v0.4.md)). **Phase 6** — regression suite + W3C-shape harness + LUBM-shape gates in CI. Deferred to v0.4.x / v0.5: SPARQL UPDATE + lifecycle UDFs + CONSTRUCT + property paths + heap_multi_insert phase B + full W3C TTL-manifest runner. |
 | **Supported PG** | 14, 15, 16, 17. PG 18 support has landed upstream in pgrx 0.18.0 but adoption is deferred to v0.4 — 0.18.0 still fails to build locally and changes the schema-gen model. See [ERRATA](specs/ERRATA.v0.2.md) E-006 (re-checked 2026-05-14). |
 | **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
@@ -104,6 +104,18 @@ SELECT * FROM pgrdf.sparql(
    GROUP BY ?p ORDER BY DESC(?n)'
 );
 --  → {"p": "http://xmlns.com/foaf/0.1/name", "n": "4"}
+
+-- Named-graph SPARQL — GRAPH ?g binds the graph IRI per match
+SELECT pgrdf.add_graph(101::bigint, 'http://example.org/g1');
+SELECT pgrdf.add_graph(102::bigint, 'http://example.org/g2');
+SELECT * FROM pgrdf.sparql(
+  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+   SELECT ?g (COUNT(*) AS ?n)
+     WHERE { GRAPH ?g { ?s foaf:name ?n } }
+   GROUP BY ?g ORDER BY ?g'
+);
+--  → {"g": "http://example.org/g1", "n": "3"}
+--  → {"g": "http://example.org/g2", "n": "2"}
 
 -- Inspect the parsed shape without executing
 SELECT pgrdf.sparql_parse('SELECT ?s WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }');
@@ -234,8 +246,8 @@ For people working on pgRDF itself.
 smoke-cold` is the cold-compose verification (use after touching
 anything in `compose/`, `fixtures/`, or the test SQL fixtures).
 
-Current bar — **94 pgrx + 40 pg_regress + 23 W3C-shape + 3
-LUBM-shape = 160 tests** green across the full pgrx PG 14-17
+Current bar — **118 pgrx + 49 pg_regress + 26 W3C-shape + 3
+LUBM-shape = 196 tests** green across the full pgrx PG 14-17
 matrix and the compose-based regression runtime (PG 17). Covers:
 - Storage CRUD + Turtle ingest (Phase 2.0-2.2).
 - SPARQL SELECT/ASK surface (Phase 3 steps 1-12, plus inline
@@ -248,6 +260,19 @@ matrix and the compose-based regression runtime (PG 17). Covers:
 - Real SHACL Core validation (`pgrdf.validate`) emitting a
   W3C `sh:ValidationReport`-shape JSONB; unblocked via ERRATA
   E-011 (patched `reasonable` fork + `shacl 0.3.x`).
+- Named-graph surface (LLD v0.4 §3) — `_pgrdf_graphs` system
+  table + `pg_extension_config_dump` registration for pg_dump
+  round-trip; the five-UDF surface
+  (`add_graph(id)` / `add_graph(iri)` / `add_graph(id, iri)` /
+  `graph_id(iri)` / `graph_iri(id)`); SPARQL `GRAPH <iri>`
+  literal + `GRAPH ?g` variable forms with per-pattern scope
+  composition over OPTIONAL / UNION / MINUS. Pg_regress fixtures
+  `72-79` + `87`, pgrx tests in `src/storage/graphs.rs` +
+  `src/query/executor.rs`, W3C-shape fixtures
+  `24-graph-named-iri` / `25-graph-var-projection` /
+  `26-graph-var-groupby`, and the
+  `tests/regression/scripts/pg-dump-roundtrip.sh` shell-driven
+  end-to-end round-trip.
 - Operator surface (`pgrdf.stats()` JSONB shape contract).
 - 7 negative regression signals locking the error-message
   contract for unsupported SPARQL shapes

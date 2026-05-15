@@ -6,6 +6,65 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 109 — docs sync for §3 named-graph surface
+
+Coherence pass across the engineering doc set after Phase A
+countdown slices 120 → 110 cumulatively shipped LLD v0.4 §3 (the
+named-graph track) on `main`. No code, no tests, no schema changes
+— this slice synchronises the engineering documentation surface to
+the now-shipped reality:
+
+- `specs/SPEC.pgRDF.LLD.v0.4.md`: §0 status note now records the §3
+  named-graph track as COMPLETE within the v0.4 cycle (with the
+  slice-level breakdown); §2 capability matrix flips the
+  "IRI ↔ graph_id mapping table + UDFs" row from 🚧 to ✅; §3
+  intro paragraph re-tagged from 🚧 to ✅ shipped, citing the full
+  Phase A countdown.
+- `docs/02-storage.md`: end-to-end coherence pass on the
+  `_pgrdf_graphs` subsection — removed slice-by-slice repetition
+  (scalar-subquery wrapper rationale, `#[pg_extern(strict)]`
+  discipline, lock idiom), folded slices 116/115 into a single
+  symmetric-lookup paragraph, called out the
+  `pg_extension_config_dump('_pgrdf_graphs', '')` registration as
+  part of the schema migration with the
+  `tests/regression/scripts/pg-dump-roundtrip.sh` end-to-end lock,
+  and added a worked example showing all five UDFs composing
+  through the synthetic-IRI seed, IRI-keyed allocation, the
+  explicit-binding upgrade path, NULL-on-miss lookups, and the
+  pg_dump round-trip discipline.
+- `docs/03-query.md`: "Surface today" section header flipped from
+  "v0.4 §3.3 GRAPH landing" to "v0.4 §3.3 GRAPH shipped"; new
+  "Named-graph GRAPH-scope translation" subsection captures the
+  per-pattern `Option<GraphScope>` algorithm from slice 112 (the
+  matrix row alone abbreviates the algorithm) — `Literal` vs
+  `Variable` scope arms, mandatory INNER vs OPTIONAL-born LEFT
+  JOIN to `_pgrdf_graphs`, two-GRAPH-blocks-same-`?g` consistency
+  predicate, MINUS scope inheritance, IRI vs integer projection
+  semantics, and bare-BGP "match in any graph" fallback.
+- `README.md`: status row extended with "named-graph SPARQL
+  scoping (`GRAPH <iri> { … }` literal + `GRAPH ?g { … }` variable
+  + composition with OPTIONAL/UNION/MINUS, LLD v0.4 §3 shipped via
+  Phase A countdown slices 120 → 110)"; "named-graph" removed from
+  the deferred-list; SPARQL feature pill extended with GRAPH; tests
+  pill bumped to 118 pgrx + 49 regression + 26 W3C + 3 LUBM = 196
+  (verified by counting `#[pg_test]` attributes in `src/` + entries
+  in `tests/regression/sql/` + non-README dirs in
+  `tests/w3c-sparql/`); new GRAPH SPARQL example block under the
+  existing SPARQL examples; new "covers" bullet enumerating the
+  shipped §3 surface with all the test artefacts.
+- `docs/10-roadmap.md`: Track 1 heading flipped from
+  "🚧 (Phase A in flight)" to "✅ (Phase A countdown slices 120 →
+  110 shipped)" with the continuation note for slices 109 → 100
+  toward a v0.4.1 tag; new "Phase A §3 named-graph shipped"
+  test-bar row recording the **196-test total** cumulative state
+  (118 + 49 + 26 + 3) with the per-slice landings, the new
+  pg_regress file range (`72-79` + `87`), the W3C-shape additions
+  (`24` / `25` / `26`), and the `§3 named-graph ✅` phase-status
+  marker against the v0.4 LLD §5 track set.
+
+No `guide/`, `src/`, `tests/`, `Cargo.toml`, `LICENSE`, or `NOTICE`
+edits; those are owned by parallel / settled slices.
+
 ### Phase A slice 110 — pg_dump round-trip for `_pgrdf_graphs`
 
 LLD v0.4 §3.1 carries an explicit acceptance criterion: "`pg_dump`
