@@ -41,7 +41,20 @@
 //! SPI errors propagate with the stable `graph_iri:` prefix.
 //! Together with slice 116 this closes the §3.2 UDF surface.
 //!
-//! Reference: SPEC.pgRDF.LLD.v0.4 §3.1, §3.2.
+//! Slice 99 (Phase B) — `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN
+//! DEFAULT TRUE) → BIGINT` ([`drop_graph`]). Removes the LIST partition
+//! `_pgrdf_quads_g<id>` from the parent `_pgrdf_quads` (`DETACH
+//! PARTITION` + `DROP TABLE`) and the matching `_pgrdf_graphs` row,
+//! returning the count of triples that lived in the partition at the
+//! time of the drop. `cascade => FALSE` errors with the stable
+//! `drop_graph: inferred rows present` prefix if any `is_inferred =
+//! TRUE` row exists in the partition. Default partition (graph_id =
+//! 0) cannot be dropped; negative ids panic with the
+//! `drop_graph: graph_id must be >= 0` prefix; dropping an absent
+//! graph is a 0-return no-op (idempotent). Opens Phase B (lifecycle
+//! UDFs §5) toward v0.4.2.
+//!
+//! Reference: SPEC.pgRDF.LLD.v0.4 §3.1, §3.2, §5.1.
 
 use pgrx::prelude::*;
 
@@ -88,6 +101,130 @@ fn graph_iri(id: i64) -> Option<String> {
         &[id.into()],
     )
     .unwrap_or_else(|e| panic!("graph_iri: lookup failed: {e}"))
+}
+
+/// Remove the LIST partition `_pgrdf_quads_g<id>` from the parent
+/// `_pgrdf_quads`, drop the partition's row storage and indexes, and
+/// remove the matching `_pgrdf_graphs` row. Returns the count of
+/// triples that were in the partition before the drop.
+///
+/// Per LLD v0.4 §5.1 / §5.2: `DETACH PARTITION` is metadata-only;
+/// `DROP TABLE` releases the partition's heap and btree pages. The
+/// metadata window takes an `ACCESS EXCLUSIVE` lock on the parent —
+/// the user-facing tradeoff documented for the "long-running
+/// maintenance" workflow.
+///
+/// Defaulting: `cascade` defaults to `TRUE` so the common-case caller
+/// (drop a graph regardless of its inferred-rows content) writes
+/// `pgrdf.drop_graph(42)` without a second arg. `cascade => FALSE`
+/// is the strict mode: any `is_inferred = TRUE` row blocks the drop
+/// with the stable `drop_graph: inferred rows present` prefix.
+///
+/// Idempotency: dropping a non-existent partition returns 0 and does
+/// NOT error (per LLD v0.4 §5.2 idempotency clause). A lingering
+/// `_pgrdf_graphs` row for an already-absent partition is cleaned up
+/// on this path so the IRI mapping converges with reality even if a
+/// prior crash left the binding stranded.
+///
+/// Guards:
+/// - `id < 0` panics with `drop_graph: graph_id must be >= 0, got <N>`.
+/// - `id == 0` panics with `drop_graph: cannot drop default partition
+///   (graph_id = 0)` — `_pgrdf_quads_default` is the catch-all bucket
+///   for unbound graph_ids and is not user-droppable.
+///
+/// Atomicity: the inferred-rows check and the DETACH/DROP happen in
+/// the same transaction (the calling statement's transaction). A
+/// concurrent INSERT of an `is_inferred = TRUE` row arriving between
+/// the check and the DROP would either block on the parent lock (if
+/// the check has already committed visibility) or be lost with the
+/// partition (if it commits inside the same window). The cascade
+/// guard is a best-effort signal for downstream maintenance flows;
+/// the partition-DDL lock makes the window narrow.
+///
+/// SQL surface: `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT
+/// TRUE) → BIGINT`. Per LLD v0.4 §5.1.
+#[pg_extern]
+fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
+    if id < 0 {
+        panic!("drop_graph: graph_id must be >= 0, got {id}");
+    }
+    if id == 0 {
+        panic!("drop_graph: cannot drop default partition (graph_id = 0)");
+    }
+
+    // Partition existence check — idempotent path returns 0 without
+    // error when the partition is already absent. We still clean up
+    // a possibly-stranded `_pgrdf_graphs` row so the IRI mapping
+    // converges with reality on a crash-recovery code path.
+    let part_name = format!("_pgrdf_quads_g{id}");
+    let exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(
+            SELECT 1 FROM pg_class
+            WHERE relnamespace = 'pgrdf'::regnamespace AND relname = $1
+         )",
+        &[part_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("drop_graph: partition existence check failed: {e}"))
+    .unwrap_or(false);
+
+    if !exists {
+        // Idempotent: prune any stale `_pgrdf_graphs` row pointing at
+        // the non-existent partition, return 0.
+        Spi::run_with_args(
+            "DELETE FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
+            &[id.into()],
+        )
+        .unwrap_or_else(|e| panic!("drop_graph: stale _pgrdf_graphs row cleanup failed: {e}"));
+        return 0;
+    }
+
+    // Count triples about to be dropped — the return value of the UDF.
+    // `count(*)::bigint` always yields exactly one row, no scalar-
+    // subquery wrapper needed. The format!-built SQL is safe: the
+    // partition name is constructed from a validated non-negative
+    // BIGINT (no user input in identifier position).
+    let total: i64 = Spi::get_one(&format!(
+        "SELECT count(*)::bigint FROM pgrdf.{part_name}"
+    ))
+    .unwrap_or_else(|e| panic!("drop_graph: count failed: {e}"))
+    .unwrap_or(0);
+
+    // Cascade guard — only when the caller asks for strict mode.
+    if !cascade {
+        let has_inferred: bool = Spi::get_one(&format!(
+            "SELECT EXISTS(SELECT 1 FROM pgrdf.{part_name} WHERE is_inferred)"
+        ))
+        .unwrap_or_else(|e| panic!("drop_graph: is_inferred check failed: {e}"))
+        .unwrap_or(false);
+        if has_inferred {
+            panic!(
+                "drop_graph: inferred rows present (graph_id = {id}); \
+                 pass cascade => true to proceed"
+            );
+        }
+    }
+
+    // DETACH + DROP — partition-DDL metadata window under ACCESS
+    // EXCLUSIVE on the parent. DETACH first so DROP TABLE doesn't
+    // need partition-aware locking; the partition becomes a regular
+    // table for the duration of one statement before going away.
+    Spi::run(&format!(
+        "ALTER TABLE pgrdf._pgrdf_quads DETACH PARTITION pgrdf.{part_name}"
+    ))
+    .unwrap_or_else(|e| panic!("drop_graph: DETACH PARTITION failed: {e}"));
+    Spi::run(&format!("DROP TABLE pgrdf.{part_name}"))
+        .unwrap_or_else(|e| panic!("drop_graph: DROP TABLE failed: {e}"));
+
+    // Remove the IRI binding so `pgrdf.graph_iri(id)` and
+    // `pgrdf.graph_id(iri)` start returning NULL post-drop, per
+    // LLD v0.4 §5.2 `_pgrdf_graphs` invalidation clause.
+    Spi::run_with_args(
+        "DELETE FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
+        &[id.into()],
+    )
+    .unwrap_or_else(|e| panic!("drop_graph: _pgrdf_graphs row cleanup failed: {e}"));
+
+    total
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -399,5 +536,130 @@ mod tests {
         let id: Option<i64> = Spi::get_one("SELECT pgrdf.graph_id('http://example.org/test-888')")
             .expect("graph_id round-trip lookup failed");
         assert_eq!(id, Some(888));
+    }
+
+    /// Slice 99 — idempotent absent-graph path. Dropping a graph_id
+    /// whose partition does not exist returns 0 and does NOT error,
+    /// per LLD v0.4 §5.2 idempotency clause. Also exercises the
+    /// stale-binding cleanup: a `_pgrdf_graphs` row pointing at the
+    /// non-existent partition is pruned, so a follow-up
+    /// `pgrdf.graph_iri(id)` returns NULL afterwards.
+    ///
+    /// Bypasses `add_graph` to avoid the partition-DDL parallelism
+    /// flake documented on `graph_id_after_iri_add`: we INSERT a row
+    /// directly into `_pgrdf_graphs` to simulate a stranded binding,
+    /// then drop the unbacked id. Partition id (`991100`) chosen
+    /// out-of-band from the other Phase B slices so concurrent
+    /// pg_test workers can't collide.
+    #[pg_test]
+    fn drop_graph_idempotent_absent() {
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (991100, 'http://example.org/stranded-991100')",
+        )
+        .expect("seed stranded _pgrdf_graphs row failed");
+
+        let dropped: i64 = Spi::get_one("SELECT pgrdf.drop_graph(991100::bigint)")
+            .expect("drop_graph absent partition failed")
+            .expect("drop_graph absent partition returned NULL");
+        assert_eq!(dropped, 0, "absent partition must return 0");
+
+        // Stranded `_pgrdf_graphs` row pruned, so the IRI lookup is
+        // a clean miss.
+        let iri: Option<String> =
+            Spi::get_one("SELECT pgrdf.graph_iri(991100::bigint)").expect("graph_iri lookup failed");
+        assert_eq!(iri, None, "stranded binding must be cleaned up");
+    }
+
+    /// Slice 99 — happy path with a manually-built partition.
+    /// Manually constructs the LIST partition, the matching
+    /// `_pgrdf_graphs` row, and three `is_inferred = FALSE` rows so
+    /// the test exercises the real DETACH + DROP path without
+    /// re-entering the pgrx-parallelism-flaky `add_graph` UDF.
+    /// Asserts:
+    ///   * The UDF returns the row count (3).
+    ///   * The partition is gone from `pg_class`.
+    ///   * The `_pgrdf_graphs` row is gone.
+    ///   * `pgrdf.graph_iri(id)` returns NULL post-drop.
+    #[pg_test]
+    fn drop_graph_happy_path() {
+        // Use an id unique to this slice so concurrent pg_test workers
+        // don't fight on the partition LIST value or the `_pgrdf_graphs`
+        // primary key.
+        Spi::run(
+            "CREATE TABLE pgrdf._pgrdf_quads_g992200 \
+             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (992200)",
+        )
+        .expect("manual partition creation failed");
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (992200, 'http://example.org/g992200')",
+        )
+        .expect("seed _pgrdf_graphs row failed");
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_quads \
+                (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+             VALUES (1, 1, 1, 992200, false), \
+                    (2, 2, 2, 992200, false), \
+                    (3, 3, 3, 992200, false)",
+        )
+        .expect("seed quads failed");
+
+        let dropped: i64 = Spi::get_one("SELECT pgrdf.drop_graph(992200::bigint)")
+            .expect("drop_graph happy path failed")
+            .expect("drop_graph happy path returned NULL");
+        assert_eq!(dropped, 3, "must return the pre-drop row count");
+
+        // Partition gone from `pg_class`.
+        let exists: bool = Spi::get_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_class \
+                           WHERE relnamespace = 'pgrdf'::regnamespace \
+                             AND relname = '_pgrdf_quads_g992200')",
+        )
+        .expect("pg_class probe failed")
+        .unwrap_or(false);
+        assert!(!exists, "partition table must be gone post-drop");
+
+        // IRI binding gone too.
+        let iri: Option<String> =
+            Spi::get_one("SELECT pgrdf.graph_iri(992200::bigint)").expect("graph_iri lookup failed");
+        assert_eq!(iri, None, "binding must be cleaned up");
+    }
+
+    /// Slice 99 — cascade guard. With `is_inferred = TRUE` rows in
+    /// the partition and `cascade => FALSE`, the UDF panics with the
+    /// stable `drop_graph: inferred rows present` prefix. Default
+    /// `cascade => TRUE` would proceed (covered by the regression
+    /// suite, not duplicated here to keep pg_test count tight).
+    #[pg_test(error = "drop_graph: inferred rows present")]
+    fn drop_graph_cascade_false_blocks_inferred() {
+        Spi::run(
+            "CREATE TABLE pgrdf._pgrdf_quads_g993300 \
+             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (993300)",
+        )
+        .expect("manual partition creation failed");
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_quads \
+                (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+             VALUES (1, 1, 1, 993300, true)",
+        )
+        .expect("seed inferred quad failed");
+        Spi::run("SELECT pgrdf.drop_graph(993300::bigint, cascade => false)").unwrap();
+    }
+
+    /// Slice 99 — default-partition guard. `pgrdf.drop_graph(0)` is
+    /// not allowed because `_pgrdf_quads_default` is the catch-all
+    /// bucket. Stable `drop_graph: cannot drop default partition`
+    /// prefix.
+    #[pg_test(error = "drop_graph: cannot drop default partition (graph_id = 0)")]
+    fn drop_graph_default_partition_rejected() {
+        Spi::run("SELECT pgrdf.drop_graph(0::bigint)").unwrap();
+    }
+
+    /// Slice 99 — negative-id guard. Mirrors the parallel guard in
+    /// `add_graph(g BIGINT)` so the surface is symmetric.
+    #[pg_test(error = "drop_graph: graph_id must be >= 0, got -1")]
+    fn drop_graph_negative_id_rejected() {
+        Spi::run("SELECT pgrdf.drop_graph(-1::bigint)").unwrap();
     }
 }

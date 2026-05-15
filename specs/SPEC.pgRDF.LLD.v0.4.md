@@ -112,7 +112,7 @@ Capability matrix for the v0.4 target:
 | IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | ✅ slices 120-115 |
 | SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | §4 | 🚧 |
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | 🚧 |
-| `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | 🚧 |
+| `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | 🚧 (`drop_graph` ✅ slice 99) |
 | `CONSTRUCT` | ⏳ deferred | §6 | 🚧 |
 | Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | 🚧 |
 | Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | 🚧 |
@@ -456,7 +456,7 @@ partitioning. 🚧
 
 | UDF | Signature | Returns | Semantics |
 |---|---|---|---|
-| `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE)` | new | `BIGINT` | Removes the partition entirely; returns the count of triples that were in it. `cascade => FALSE` errors if inferred rows are present. |
+| `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE)` | ✅ slice 99 | `BIGINT` | Removes the partition entirely; returns the count of triples that were in it. `cascade => FALSE` errors if inferred rows are present. |
 | `pgrdf.clear_graph(id BIGINT)` | new | `BIGINT` | `TRUNCATE ONLY` the partition; the partition itself is preserved (so subsequent inserts route normally). Returns triples removed. |
 | `pgrdf.copy_graph(src BIGINT, dst BIGINT)` | new | `BIGINT` | Copies all quads from `src` to `dst`. Creates the `dst` partition if absent. Returns triples copied. |
 | `pgrdf.move_graph(src BIGINT, dst BIGINT)` | new | `BIGINT` | Atomic association swap: the `src` partition's `FOR VALUES IN (...)` clause rebinds to the new id. Returns triples moved (== row count at swap time). |

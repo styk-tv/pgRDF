@@ -298,7 +298,81 @@ default partition; subsequent `add_graph(g)` calls don't move
 them — the partition-creation order is the caller's
 responsibility.
 
-## 2.4 What's NOT in storage
+## 2.4 Graph-level lifecycle UDFs (LLD v0.4 §5, **Phase B in flight — slice 99 → v0.4.2**)
+
+Partition-level primitives over `_pgrdf_quads`. Constant-time DDL
+where possible (DETACH/DROP for `drop_graph`, TRUNCATE for
+`clear_graph`, DETACH/ATTACH metadata swap for `move_graph`). All
+four UDFs land across the Phase B countdown (slices 99 → 96) toward
+the v0.4.2 cut.
+
+### `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE) → BIGINT` (**shipped — Phase B slice 99**)
+
+Removes the LIST partition `_pgrdf_quads_g<id>` from the parent
+`_pgrdf_quads` via `ALTER TABLE ... DETACH PARTITION` followed by
+`DROP TABLE`, then deletes the matching `_pgrdf_graphs` row.
+Returns the count of triples that lived in the partition at the
+time of the drop.
+
+`cascade => TRUE` (the default) drops the partition regardless of
+content. `cascade => FALSE` errors with the stable
+`drop_graph: inferred rows present` prefix if any `is_inferred =
+TRUE` row exists — the strict-mode signal for downstream
+maintenance flows that want to gate the drop on the
+materialisation state of the graph.
+
+Guards (stable error prefixes per the error-message contract):
+
+```
+drop_graph: graph_id must be >= 0, got <N>            -- negative id
+drop_graph: cannot drop default partition (graph_id = 0)  -- catch-all
+drop_graph: inferred rows present (graph_id = <N>); ...   -- cascade=false guard
+```
+
+Idempotent: dropping a graph_id whose partition doesn't exist
+returns 0 (no error). A stranded `_pgrdf_graphs` row pointing at a
+non-existent partition is pruned on this path so the IRI mapping
+converges with reality on a crash-recovery code path. Post-drop,
+`pgrdf.graph_iri(id)` and `pgrdf.graph_id(iri)` both return NULL.
+
+Concurrency: the metadata window takes an `ACCESS EXCLUSIVE` lock
+on the parent `_pgrdf_quads`. SELECT/UPDATE traffic on unrelated
+graphs blocks briefly for the duration; this is documented for the
+"long-running maintenance" workflow per LLD v0.4 §5.2.
+
+```sql
+-- Drop a graph + return the triple count that was in it.
+SELECT pgrdf.add_graph(42);
+INSERT INTO pgrdf._pgrdf_quads (subject_id, predicate_id, object_id, graph_id)
+     VALUES (1, 2, 3, 42), (4, 5, 6, 42);
+SELECT pgrdf.drop_graph(42);
+--  → 2  (triples removed)
+
+-- Idempotent — re-dropping returns 0.
+SELECT pgrdf.drop_graph(42);
+--  → 0
+
+-- Strict mode blocks inferred content.
+SELECT pgrdf.drop_graph(43, cascade => false);
+--  ERROR:  drop_graph: inferred rows present (graph_id = 43); ...
+```
+
+Regression coverage: `tests/regression/sql/88-drop-graph.sql` locks
+the full surface (idempotent absent, happy path returning row
+count, cascade-FALSE-inferred guard, cascade-TRUE-inferred
+override, default-partition guard, negative-id guard). Pgrx
+integration tests in `src/storage/graphs.rs` cover the idempotent
+absent + happy + cascade-FALSE + default-partition + negative-id
+paths under the pgrx `pg_test` harness.
+
+Spec: [LLD v0.4 §5.1 / §5.2](../specs/SPEC.pgRDF.LLD.v0.4.md#5-graph-level-lifecycle-udfs-new).
+
+### `pgrdf.clear_graph` / `copy_graph` / `move_graph` (🚧 slices 98 → 96)
+
+Carry forward in the Phase B countdown — see LLD v0.4 §5.1 for the
+signatures and §5.2 for the partition-DDL idioms each one uses.
+
+## 2.5 What's NOT in storage
 
 - **No vacuum tuning yet.** Standard autovacuum suffices for v0.2;
   tuning lives in [`docs/10-roadmap.md`](10-roadmap.md) Phase 4.

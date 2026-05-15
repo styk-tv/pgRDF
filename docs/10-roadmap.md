@@ -555,13 +555,39 @@ to dispatch by query form; UPDATE forms return an `_update` JSONB
 summary row. See
 [LLD v0.4 §4](../specs/SPEC.pgRDF.LLD.v0.4.md#4-sparql-update-new).
 
-### Track 3 — Graph-level lifecycle UDFs
+### Track 3 — Graph-level lifecycle UDFs (Phase B countdown 99 → 96)
 `pgrdf.drop_graph`, `clear_graph`, `copy_graph`, `move_graph` as
 partition-level primitives over `_pgrdf_quads` — constant-time
 `move_graph` via DETACH/ATTACH metadata swap, `TRUNCATE ONLY` for
 `clear_graph`. Also wires the corresponding SPARQL UPDATE forms
 (`DROP/CLEAR/CREATE/COPY/MOVE/ADD GRAPH`) to these UDFs. See
 [LLD v0.4 §5](../specs/SPEC.pgRDF.LLD.v0.4.md#5-graph-level-lifecycle-udfs-new).
+
+- ✅ **Slice 99 — `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN
+  DEFAULT TRUE) → BIGINT`.** Removes the LIST partition
+  `_pgrdf_quads_g<id>` from the parent `_pgrdf_quads` via
+  `ALTER TABLE ... DETACH PARTITION` followed by `DROP TABLE`,
+  deletes the matching `_pgrdf_graphs` row, returns the pre-drop
+  triple count. `cascade => FALSE` errors with the stable
+  `drop_graph: inferred rows present` prefix when any
+  `is_inferred = TRUE` row exists. Default partition (graph_id = 0)
+  rejected with `drop_graph: cannot drop default partition`;
+  negative ids rejected with `drop_graph: graph_id must be >= 0`.
+  Idempotent: dropping an absent graph returns 0 (and prunes any
+  stranded `_pgrdf_graphs` binding so the IRI mapping converges
+  with reality). Post-drop, `pgrdf.graph_iri(id)` and
+  `pgrdf.graph_id(iri)` both return NULL — closes the
+  `_pgrdf_graphs` invalidation clause of LLD v0.4 §5.2.
+  Regression: `88-drop-graph.sql` locks six invariants (idempotent
+  absent, happy path with triple count, cascade-FALSE-inferred
+  guard, cascade-TRUE-inferred override, default-partition guard,
+  negative-id guard). Pgrx integration tests cover the absent +
+  happy + cascade-FALSE + default-partition + negative-id paths.
+  Opens Phase B toward v0.4.2.
+
+- 🚧 Slices 98 → 96: `clear_graph` (parallel slice 98), then
+  `copy_graph`, `move_graph` — same partition-DDL discipline,
+  documented per LLD v0.4 §5.1 / §5.2.
 
 ### Track 4 — CONSTRUCT
 `pgrdf.construct(q TEXT) → SETOF JSONB` returning structured

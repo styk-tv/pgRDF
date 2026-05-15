@@ -6,6 +6,50 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase B slice 99 — pgrdf.drop_graph lifecycle UDF
+
+Opens Phase B (lifecycle UDFs §5) toward v0.4.2.
+`pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE) →
+BIGINT` removes the LIST partition `_pgrdf_quads_g<id>` from the
+parent `_pgrdf_quads` via `ALTER TABLE ... DETACH PARTITION` +
+`DROP TABLE`, deletes the matching `_pgrdf_graphs` row, and
+returns the pre-drop triple count. `cascade => FALSE` errors with
+the stable `drop_graph: inferred rows present` prefix if any
+`is_inferred = TRUE` row exists; `cascade => TRUE` (the default)
+drops both base and inferred content. Default partition
+(`graph_id = 0`) rejected with `drop_graph: cannot drop default
+partition`; negative ids rejected with
+`drop_graph: graph_id must be >= 0`. Idempotent: dropping an
+absent graph returns 0 (no error) and also prunes any stranded
+`_pgrdf_graphs` row so the IRI mapping converges with reality on
+a crash-recovery code path. Post-drop, `pgrdf.graph_iri(id)` and
+`pgrdf.graph_id(iri)` both return NULL — closes the
+`_pgrdf_graphs` invalidation clause from LLD v0.4 §5.2.
+
+Implementation lands in `src/storage/graphs.rs` (the same module
+slice 120 introduced for graph-related UDFs). The partition-DDL
+metadata window takes an `ACCESS EXCLUSIVE` lock on
+`_pgrdf_quads` per Postgres's partition-management semantics —
+the user-facing tradeoff documented for the "long-running
+maintenance" workflow.
+
+Regression: `tests/regression/sql/88-drop-graph.sql` locks six
+invariants (idempotent absent, happy path with triple count,
+cascade-FALSE-inferred guard, cascade-TRUE-inferred override,
+default-partition guard, negative-id guard) via the `_check_error`
+plpgsql helper shared with `81-error-paths.sql`. Expected output
+hand-authored; never ACCEPT=1 baselined. Pgrx integration tests
+cover the absent + happy + cascade-FALSE + default-partition +
+negative-id paths under the `pg_test` harness, bypassing
+`add_graph` via manual partition + `_pgrdf_graphs` INSERT to
+avoid the documented pgrx-parallelism flake on partition DDL.
+
+LLD v0.4 §5.1 row marked `✅ slice 99`; §2 status row updated to
+reflect the `drop_graph` ✅ partial-completion of the
+lifecycle-UDFs track. `docs/02-storage.md` gains §2.4 covering
+the new `drop_graph` surface; `docs/10-roadmap.md` Track 3 picks
+up the slice 99 ✅ entry plus a 🚧 placeholder for slices 98 → 96.
+
 ### Release ops — `publish-crate.yml` disabled until E-011 retires
 
 `.github/workflows/publish-crate.yml` renamed to
