@@ -331,14 +331,14 @@ surface. 🚧
 
 | Form | Notes |
 |---|---|
-| `INSERT DATA { … }` | Direct triple insertion (single triple or BGP-style block). Constants only — no variables. |
-| `DELETE DATA { … }` | Direct triple removal. Constants only. |
-| `INSERT { template } WHERE { pattern }` | Pattern-driven insertion. Each solution of `WHERE` instantiates `template` once. |
-| `DELETE { template } WHERE { pattern }` | Pattern-driven removal. |
-| `DELETE { … } INSERT { … } WHERE { … }` | Atomic modify — both operations run against the same `WHERE` solutions snapshot. |
-| `WITH <iri> …` | Graph scope for the surrounding INSERT/DELETE/WHERE. |
-| `INSERT { GRAPH <iri> { … } }` | Inline graph scope on the template. |
-| `DELETE { GRAPH <iri> { … } }` | Inline graph scope on the template. |
+| `INSERT DATA { … }` | ✅ slice 84 — direct triple insertion (single triple or BGP-style block). Constants only — no variables. Default-graph + `GRAPH <iri> { … }` inline graph scope both supported; unknown IRIs auto-allocate via `pgrdf.add_graph(iri)`. Idempotent on repeat via `WHERE NOT EXISTS` guard (the `_pgrdf_quads` table carries no `UNIQUE` constraint, so `ON CONFLICT` is unavailable). |
+| `DELETE DATA { … }` | 🚧 slice 83 — direct triple removal. Constants only. |
+| `INSERT { template } WHERE { pattern }` | 🚧 slices 82-77 — pattern-driven insertion. Each solution of `WHERE` instantiates `template` once. |
+| `DELETE { template } WHERE { pattern }` | 🚧 slices 82-77 — pattern-driven removal. |
+| `DELETE { … } INSERT { … } WHERE { … }` | 🚧 slices 82-77 — atomic modify; both operations run against the same `WHERE` solutions snapshot. |
+| `WITH <iri> …` | 🚧 slices 82-77 — graph scope for the surrounding INSERT/DELETE/WHERE. |
+| `INSERT { GRAPH <iri> { … } }` | ✅ slice 84 (for the `INSERT DATA` variant) — inline graph scope on the template. WHERE-driven variant 🚧 slices 82-77. |
+| `DELETE { GRAPH <iri> { … } }` | 🚧 slices 82-77 — inline graph scope on the template. |
 
 The graph-scoped variants compose with §3's IRI mapping: every
 `<iri>` resolves to a `graph_id` via `_pgrdf_graphs.iri`. Unknown
@@ -370,11 +370,19 @@ ASK queries — callers discriminate on the leading key.
 
 **Algebra.** `spargebra` already parses UPDATE forms via
 `SparqlParser::new().parse_update(q)` returning `spargebra::Update`,
-a vector of `GraphUpdateOperation`s. The translator walks that
-algebra parallel to the SELECT translation in
-`src/query/executor.rs`, dispatching per operation variant
-(`InsertData`, `DeleteData`, `DeleteInsert`, `Load`, `Clear`,
-`Create`, `Drop`, `Add`, `Move`, `Copy`).
+a vector of `GraphUpdateOperation`s. Detection at the
+`pgrdf.sparql(q)` entry point is **try-parse-then-fallback**:
+`parse_query` first (the SELECT/ASK path, unchanged from v0.3), then
+`parse_update` on query-side failure. Both failing yields the stable
+`sparql: parse error:` prefix (slice #63 contract — the query-side
+error message is surfaced because that's what downstream tooling
+scrapes). The dispatcher walks `update.operations` and routes per
+operation variant. The variants enumerated by spargebra 0.4.6 are
+`InsertData`, `DeleteData`, `DeleteInsert`, `Load`, `Clear`,
+`Create`, `Drop`; SPARQL `ADD`, `MOVE`, `COPY` are desugared by the
+parser into combinations of the above (e.g. `MOVE` becomes
+`DeleteInsert` + `Clear`). The §4.4 lifecycle-algebra mapping below
+flows through the desugared shape rather than the surface keyword.
 
 **Transaction discipline.** The UDF runs inside the calling
 Postgres transaction. One `pgrdf.sparql(q)` call is one transaction
@@ -393,9 +401,14 @@ within a constant factor.
 
 ### 4.3 `pgrdf.sparql_parse` integration
 
-`pgrdf.sparql_parse(q TEXT)` already parses UPDATE shapes through
-the same `spargebra` entry point. v0.4 revs the JSONB return to
-surface the UPDATE form variants explicitly:
+`pgrdf.sparql_parse(q TEXT)` mirrors the executor's detection
+strategy: `parse_query` first, `parse_update` on failure. UPDATE
+queries surface as `form: "UPDATE"` with a per-operation summary
+array. UPDATE operations that the executor doesn't translate yet
+(e.g. `DELETE DATA` until slice 83 ships) are NOT flagged in
+`unsupported_algebra` — that array is reserved for genuinely-out-
+of-scope shapes (e.g. `LOAD <url>`, see §14). Sample JSONB shape
+for the slice-84-shipped INSERT DATA form:
 
 ```json
 {

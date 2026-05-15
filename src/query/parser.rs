@@ -26,23 +26,34 @@
 use pgrx::prelude::*;
 use serde_json::{json, Value};
 use spargebra::algebra::GraphPattern;
-use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
-use spargebra::{Query, SparqlParser};
+use spargebra::term::{GraphName, NamedNodePattern, TermPattern, TriplePattern};
+use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 
-/// Parse a SPARQL query and return a JSONB describing its top-level
-/// shape: form (SELECT / CONSTRUCT / ASK / DESCRIBE), projected
-/// variables, and the BGP triple patterns when present.
+/// Parse a SPARQL query (or UPDATE) and return a JSONB describing its
+/// top-level shape: form (`SELECT` / `CONSTRUCT` / `ASK` / `DESCRIBE`
+/// / `UPDATE`), projected variables (for queries), BGP triple patterns,
+/// and — for UPDATEs (Phase C slice 84+) — a per-operation summary.
 ///
 /// SQL: `pgrdf.sparql_parse(q TEXT) → JSONB`.
 ///
 /// On syntax error the function aborts the query with a Postgres
-/// ERROR carrying the spargebra parser message.
+/// ERROR carrying the spargebra parser message. As with
+/// `pgrdf.sparql`, the parser tries `parse_query` first (current
+/// behaviour) and only retries as `parse_update` on query-side
+/// failure — keeps the SELECT/ASK code path untouched while widening
+/// the surface to UPDATE introspection.
 #[pg_extern]
 fn sparql_parse(query: &str) -> pgrx::JsonB {
-    let parsed = SparqlParser::new()
-        .parse_query(query)
-        .unwrap_or_else(|e| panic!("sparql_parse: {e}"));
-    pgrx::JsonB(serialize_query(&parsed))
+    match SparqlParser::new().parse_query(query) {
+        Ok(parsed) => pgrx::JsonB(serialize_query(&parsed)),
+        Err(query_err) => match SparqlParser::new().parse_update(query) {
+            Ok(update) => pgrx::JsonB(serialize_update(&update)),
+            // Surface the *query*-side parser error — the
+            // `sparql_parse:` prefix is the locked contract for
+            // syntax-error tail.
+            Err(_) => panic!("sparql_parse: {query_err}"),
+        },
+    }
 }
 
 fn serialize_query(q: &Query) -> Value {
@@ -75,6 +86,91 @@ fn serialize_query(q: &Query) -> Value {
                     "reason": "DESCRIBE not in Phase 2.2 scope" })
         }
     }
+}
+
+/// Walk an `spargebra::Update` and report its top-level shape. The
+/// `form` is uniformly `"UPDATE"` regardless of which operations are
+/// inside; per-op detail lives under `operations[]`. For slice 84 the
+/// per-op shape is intentionally minimal — INSERT_DATA gets its triple
+/// + graph counts, the others get the variant name only so callers
+/// can preview which sub-slice (83/82/…) will translate them. Forms
+/// the parser parses but the executor doesn't translate yet are NOT
+/// flagged in `unsupported_algebra` — that array is reserved for
+/// algebra shapes we can't even parse-walk (e.g. `LOAD` is out of
+/// scope per LLD v0.4 §14).
+fn serialize_update(u: &Update) -> Value {
+    let mut ops: Vec<Value> = Vec::with_capacity(u.operations.len());
+    let mut unsupported: Vec<&'static str> = Vec::new();
+    for op in &u.operations {
+        match op {
+            GraphUpdateOperation::InsertData { data } => {
+                let mut graphs: Vec<String> = Vec::new();
+                for q in data {
+                    match &q.graph_name {
+                        GraphName::DefaultGraph => {
+                            if !graphs.iter().any(|g| g == "DEFAULT") {
+                                graphs.push("DEFAULT".to_string());
+                            }
+                        }
+                        GraphName::NamedNode(n) => {
+                            let s = n.as_str().to_string();
+                            if !graphs.contains(&s) {
+                                graphs.push(s);
+                            }
+                        }
+                    }
+                }
+                ops.push(json!({
+                    "op":      "InsertData",
+                    "triples": data.len(),
+                    "graphs":  graphs,
+                }));
+            }
+            GraphUpdateOperation::DeleteData { data } => {
+                ops.push(json!({
+                    "op":      "DeleteData",
+                    "triples": data.len(),
+                }));
+            }
+            GraphUpdateOperation::DeleteInsert {
+                delete,
+                insert,
+                pattern,
+                ..
+            } => {
+                ops.push(json!({
+                    "op": "DeleteInsert",
+                    "delete_template_size": delete.len(),
+                    "insert_template_size": insert.len(),
+                    "where_pattern_size":   bgp_count(pattern),
+                }));
+            }
+            GraphUpdateOperation::Load { .. } => {
+                ops.push(json!({ "op": "Load" }));
+                unsupported.push("Load (URL fetch out of v0.4 scope)");
+            }
+            GraphUpdateOperation::Clear { .. } => ops.push(json!({ "op": "Clear" })),
+            GraphUpdateOperation::Create { .. } => ops.push(json!({ "op": "Create" })),
+            GraphUpdateOperation::Drop { .. } => ops.push(json!({ "op": "Drop" })),
+        }
+    }
+    json!({
+        "form":                "UPDATE",
+        "operations":          ops,
+        "unsupported_algebra": unsupported,
+    })
+}
+
+/// Best-effort BGP-pattern count inside a `WHERE` clause — used by
+/// `DeleteInsert` summary lines. Re-uses the existing `walk` helper
+/// (collects BGP triples + tags unsupported shapes) but discards
+/// everything except the triple count.
+fn bgp_count(p: &GraphPattern) -> usize {
+    let mut vars: Vec<String> = Vec::new();
+    let mut bgp: Vec<Value> = Vec::new();
+    let mut unsupported: Vec<&'static str> = Vec::new();
+    walk(p, &mut vars, &mut bgp, &mut unsupported);
+    bgp.len()
 }
 
 /// Walk a SELECT pattern, collect projected variables and the BGP
@@ -383,6 +479,70 @@ mod tests {
                 .any(|x| x.as_str().is_some_and(|s| s.contains("Path"))),
             "expected Path to be flagged, got {unsupported:?}"
         );
+    }
+
+    /// Phase C slice 84 — `sparql_parse` reports `form: "UPDATE"`
+    /// for INSERT DATA queries, with per-op `triples` counts and
+    /// nothing in `unsupported_algebra`.
+    #[pg_test]
+    fn sparql_parse_update_insert_data() {
+        let q = "INSERT DATA { <http://x/a> <http://x/b> <http://x/c> }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        assert_eq!(v["form"], "UPDATE");
+        let ops = v["operations"].as_array().unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0]["op"], "InsertData");
+        assert_eq!(ops[0]["triples"], 1);
+        // Default graph appears as the synthetic "DEFAULT" sentinel.
+        let graphs = ops[0]["graphs"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(graphs[0], "DEFAULT");
+        // No `unsupported_algebra` flags — INSERT DATA is parseable,
+        // translatable, and end-to-end on slice 84.
+        let unsupported = v["unsupported_algebra"].as_array().unwrap();
+        assert!(unsupported.is_empty());
+    }
+
+    /// `INSERT DATA { GRAPH <iri> { … } }` — the per-op `graphs`
+    /// array carries the named-graph IRI, not the `"DEFAULT"`
+    /// sentinel.
+    #[pg_test]
+    fn sparql_parse_update_insert_data_named_graph() {
+        let q = "INSERT DATA { GRAPH <http://example.org/g1> { \
+                   <http://x/a> <http://x/b> <http://x/c> } }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        assert_eq!(v["form"], "UPDATE");
+        let ops = v["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["op"], "InsertData");
+        let graphs = ops[0]["graphs"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(graphs[0], "http://example.org/g1");
+    }
+
+    /// DELETE DATA still parses to UPDATE; the per-op `op` field
+    /// carries the variant name so callers see the shape even though
+    /// the executor doesn't ship its translation until slice 83.
+    #[pg_test]
+    fn sparql_parse_update_delete_data_visible() {
+        let q = "DELETE DATA { <http://x/a> <http://x/b> <http://x/c> }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        assert_eq!(v["form"], "UPDATE");
+        let ops = v["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["op"], "DeleteData");
+        // `unsupported_algebra` MUST stay empty even for ops the
+        // executor can't translate yet — that array is reserved for
+        // genuinely-out-of-scope shapes (e.g. LOAD).
+        let unsupported = v["unsupported_algebra"].as_array().unwrap();
+        assert!(unsupported.is_empty());
     }
 
     #[pg_test]

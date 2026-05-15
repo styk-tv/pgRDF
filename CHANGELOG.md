@@ -6,6 +6,106 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase C slice 84 — SPARQL UPDATE foundation + INSERT DATA
+
+Opens Phase C (LLD v0.4 §4 — SPARQL UPDATE) toward v0.4.3.
+`pgrdf.sparql(q)` now detects UPDATE queries at the entry point via
+a **try-parse-then-fallback** strategy: `parse_query` first (the
+v0.3 SELECT/ASK path, unchanged), then
+`SparqlParser::new().parse_update(q)` on query-side failure. If
+both fail, the stable `sparql: parse error:` prefix from slice #63
+is preserved (the query-side error message is surfaced because
+that's the locked downstream-tooling contract). The dispatch routes
+to `execute_update(&spargebra::Update)`, which walks
+`update.operations` and either materialises the operation (INSERT
+DATA today) or panics with a stable `sparql: UPDATE form '<name>'
+lands in slice <NN>` prefix for the variants that follow-up slices
+will land.
+
+`INSERT DATA { … }` lands end-to-end:
+
+- **Default graph** — `INSERT DATA { <s> <p> <o> }` lands the triple
+  in `_pgrdf_quads_g0` and reports `graphs_touched: ["DEFAULT"]` in
+  the summary row.
+- **Named graph** — `INSERT DATA { GRAPH <iri> { … } }` auto-
+  allocates a fresh `graph_id` via `pgrdf.add_graph(iri TEXT)`
+  (slice 118), creates the partition, and lands the triple there.
+  `graphs_touched` carries the IRI, not the synthetic seed
+  `urn:pgrdf:graph:<N>`.
+- **Multi-triple** — a single statement with N triples reports
+  `triples_inserted = N` and all N rows are observable in the
+  table.
+- **Typed-literal payload** — datatype IRIs are interned first
+  (matching the existing `loader.rs::object_to_id` convention) so
+  the literal row can reference them by id; round-trip via SELECT
+  returns the original lexical form.
+- **Idempotent on repeat** — `_pgrdf_quads` has no `UNIQUE`
+  constraint (the hexastore indexes are covering, not unique, by
+  design — the bulk Turtle loader appends without dedup checks for
+  perf). To honour LLD v0.4 §4's "INSERT DATA is set-semantics"
+  contract, the INSERT routes through a `WHERE NOT EXISTS` guard
+  against the SPO covering index. Cost: one index probe per
+  inserted triple. The `_update` summary still reports
+  `triples_inserted = 1` on the second call (attempted inserts, not
+  net row delta — the explicit semantic is locked by regression).
+
+**Return shape.** UPDATE forms now return a single summary row of
+shape `{"_update": {form, triples_inserted, triples_deleted,
+graphs_touched, elapsed_ms}}`, paralleling the v0.3 `_ask` JSONB
+sentinel for ASK queries. Callers discriminate on the leading
+JSONB key. The `form` field for the slice-84-shipped variant is
+`"INSERT_DATA"`; per-form follow-up slices (`"DELETE_DATA"`,
+`"DELETE_INSERT_WHERE"`, `"CLEAR"`, `"CREATE"`, `"DROP"`) will
+populate the discriminator as they ship.
+
+**Per-form dispatch panics.** Forms the executor doesn't translate
+yet panic with stable prefixes so callers can preview the rollout
+schedule: `DELETE DATA` lands in slice 83, `DELETE/INSERT WHERE`
+in slices 82-77, `CLEAR GRAPH` in slice 71, `CREATE GRAPH` in 70,
+`DROP GRAPH` in 69. `LOAD <url>` is out of scope for v0.4 (LLD
+v0.4 §14). spargebra 0.4.6 does not expose separate `ADD` /
+`MOVE` / `COPY` variants — those SPARQL surface keywords desugar
+to combinations of `Clear` + `DeleteInsert` at parse time.
+
+**`pgrdf.sparql_parse` integration.** The introspection UDF mirrors
+the detection strategy and reports `form: "UPDATE"` for any UPDATE
+query, with a per-op summary array (`InsertData` carries `triples`
++ `graphs` counts; the other ops surface only their variant name
+for slice 84). Unimplemented ops are NOT flagged in
+`unsupported_algebra` — that array stays reserved for genuinely-
+out-of-scope shapes (`LOAD <url>`, etc.). The locked syntax-error
+prefix `sparql_parse:` is preserved.
+
+**Test coverage.**
+- `tests/regression/sql/93-update-insert-data.sql` locks six
+  invariants (default-graph, named-graph IRI auto-allocate, multi-
+  triple, idempotent-on-repeat, typed-literal round-trip,
+  sparql_parse integration) plus six negative-path "lands in slice
+  NN" prefix locks via the `_check_error` plpgsql helper shared
+  with `81-error-paths.sql` / `88-drop-graph.sql`. Hand-authored
+  expected output; never ACCEPT=1 baselined.
+- Five `#[pg_test]`s in `src/query/executor.rs`
+  (`sparql_update_insert_data_default_graph`,
+  `sparql_update_insert_data_named_graph`,
+  `sparql_update_returns_update_summary_shape`,
+  `sparql_update_insert_data_idempotent_on_repeat`,
+  `sparql_update_form_dispatch_panics_for_unimplemented`).
+- Three `#[pg_test]`s in `src/query/parser.rs`
+  (`sparql_parse_update_insert_data`,
+  `sparql_parse_update_insert_data_named_graph`,
+  `sparql_parse_update_delete_data_visible`).
+
+Test bar after slice 84: 141 pgrx integration + 55 pg_regress + 26
+W3C-shape + 3 LUBM-shape = 225 automated tests across all four
+layers (up from 216 at v0.4.2: +8 pgrx + 1 pg_regress).
+
+LLD v0.4 §4.1 row table updated — `INSERT DATA` marked
+`✅ slice 84`; per-form follow-up slices flagged with the
+appropriate landing-slice number. §4.2 dispatcher described.
+`docs/03-query.md` "Surface today" gains an UPDATE foundation row;
+`docs/10-roadmap.md` Track 2 picks up the slice 84 ✅ entry and
+re-titles to "Phase C countdown 84 → 67 toward v0.4.3".
+
 ## [0.4.2] — 2026-05-15
 
 Phase B closes with five countdown slices (99 → 95) shipping LLD v0.4

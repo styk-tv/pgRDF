@@ -99,19 +99,21 @@
 //!   a term id missing from the dictionary).
 
 use crate::query::plan_cache;
-use crate::storage::dict::term_type;
+use crate::storage::dict::{put_term_full, term_type};
 use pgrx::datum::DatumWithOid;
 use pgrx::iter::SetOfIterator;
 use pgrx::pg_sys::{Oid, PgBuiltInOids};
 use pgrx::prelude::*;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, Function, GraphPattern, OrderExpression,
 };
-use spargebra::term::{Literal, NamedNodePattern, TermPattern, TriplePattern};
-use spargebra::{Query, SparqlParser};
+use spargebra::term::{
+    GraphName, Literal, NamedNodePattern, NamedOrBlankNode, Term, TermPattern, TriplePattern,
+};
+use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ─────────────────────────────────────────────────────────────────────
 // Parameter buffer
@@ -149,8 +151,11 @@ fn id_placeholder(id: i64) -> String {
     })
 }
 
-/// Execute a SPARQL SELECT query and return one JSONB row per solution.
-/// Each row is a JSON object keyed by the projected variable names.
+/// Execute a SPARQL query (SELECT / ASK / UPDATE) and return one JSONB
+/// row per solution. For SELECT/ASK each row is a JSON object keyed by
+/// the projected variable names (ASK uses the `_ask` sentinel key).
+/// For UPDATE forms (Phase C slice 84+) a single summary row of shape
+/// `{"_update": {...}}` is returned — see LLD v0.4 §4.2.
 ///
 /// SQL surface: `pgrdf.sparql(q TEXT) → SETOF JSONB`.
 ///
@@ -160,15 +165,47 @@ fn id_placeholder(id: i64) -> String {
 /// SELECT * FROM pgrdf.sparql('SELECT ?s ?p WHERE { ?s foaf:name ?p }');
 ///   →  {"s": "http://example.com/alice", "p": "Alice"}
 ///      {"s": "http://example.com/bob",   "p": "Bob"}
+///
+/// SELECT * FROM pgrdf.sparql('INSERT DATA { <s> <p> <o> }');
+///   →  {"_update": {"form": "INSERT_DATA", "triples_inserted": 1, …}}
 /// ```
+///
+/// Detection strategy: try `parse_query` first (SELECT / ASK / CONSTRUCT
+/// / DESCRIBE). On parse failure, retry as `parse_update` (the UPDATE
+/// surface — INSERT DATA, DELETE DATA, DELETE/INSERT WHERE, lifecycle
+/// algebra). If both fail, propagate the *query* parser error message
+/// via the stable `sparql: parse error:` prefix (slice #63 contract).
+/// This ordering keeps current SELECT/ASK behaviour untouched.
 #[pg_extern]
 fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
-    let parsed = SparqlParser::new()
-        .parse_query(query)
-        .unwrap_or_else(|e| panic!("sparql: parse error: {e}"));
-    let plan = translate(&parsed);
-    let rows = execute(&plan);
-    SetOfIterator::new(rows.into_iter())
+    let parser = SparqlParser::new();
+    match parser.parse_query(query) {
+        Ok(parsed) => {
+            let plan = translate(&parsed);
+            let rows = execute(&plan);
+            SetOfIterator::new(rows.into_iter())
+        }
+        Err(query_err) => {
+            // Fallback: maybe it's an UPDATE form. spargebra splits
+            // the SPARQL grammar — query forms vs. update forms — into
+            // two parse entry points, so we have to try both before
+            // declaring the input invalid. Build a fresh parser; the
+            // builder isn't `Copy` and the previous `parse_query` call
+            // consumed it.
+            match SparqlParser::new().parse_update(query) {
+                Ok(update) => {
+                    let rows = execute_update(&update);
+                    SetOfIterator::new(rows.into_iter())
+                }
+                // Surface the *query*-side parse error — that's the
+                // existing slice #63 contract scraped by downstream
+                // tooling. The update-side error is informational and
+                // would only confuse callers who wrote a malformed
+                // SELECT.
+                Err(_) => panic!("sparql: parse error: {query_err}"),
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -2537,6 +2574,233 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// SPARQL UPDATE execution (Phase C slice 84 — foundation)
+//
+// `pgrdf.sparql(q)` routes UPDATE forms here after `parse_query` fails
+// and `parse_update` succeeds. The dispatcher walks the Update's
+// `Vec<GraphUpdateOperation>` and either materialises the operation
+// (INSERT DATA today) or panics with a "lands in slice NN" message for
+// the variants the per-form follow-up slices will land.
+//
+// Return shape: a single summary row with one key `_update`, paralleling
+// the v0.3 `_ask` sentinel for ASK queries (LLD v0.4 §4.2). Callers
+// discriminate on the leading JSONB key.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Walk an `spargebra::Update` and dispatch each operation to its
+/// per-form implementation. Returns a single-row `Vec<pgrx::JsonB>`
+/// carrying the `_update` summary; the caller wraps it in
+/// `SetOfIterator`. Wall-clock timing starts at function entry so the
+/// dictionary internment + partition setup cost is visible to operators.
+fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
+    let start = std::time::Instant::now();
+    let mut triples_inserted: i64 = 0;
+    // INSERT DATA never deletes; the field is kept in scope so the
+    // summary JSONB shape stays uniform across forms (DELETE DATA in
+    // slice 83 will start incrementing it).
+    let triples_deleted: i64 = 0;
+    let mut graphs_touched: HashSet<i64> = HashSet::new();
+    // First-operation form, used as the summary's `form` label. Multi-
+    // operation UPDATEs (sequenced with `;`) collapse to the first op
+    // for slice 84 — the LLD v0.4 §4.2 example shows a single-form
+    // shape; multi-op nuance is a follow-up cosmetic.
+    let mut form: &'static str = "EMPTY";
+
+    for (i, op) in update.operations.iter().enumerate() {
+        if i == 0 {
+            form = update_op_name(op);
+        }
+        match op {
+            GraphUpdateOperation::InsertData { data } => {
+                for quad in data {
+                    let g_id = resolve_or_allocate_graph(&quad.graph_name);
+                    let s_id = intern_subject(&quad.subject);
+                    let p_id = intern_named_node(quad.predicate.as_str());
+                    let o_id = intern_object(&quad.object);
+                    insert_quad(s_id, p_id, o_id, g_id);
+                    triples_inserted += 1;
+                    graphs_touched.insert(g_id);
+                }
+            }
+            GraphUpdateOperation::DeleteData { .. } => {
+                panic!("sparql: UPDATE form 'DELETE DATA' lands in slice 83")
+            }
+            GraphUpdateOperation::DeleteInsert { .. } => {
+                panic!("sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slices 82-77")
+            }
+            GraphUpdateOperation::Load { .. } => {
+                panic!("sparql: UPDATE form 'LOAD' is out of scope for v0.4 (see LLD v0.4 §14)")
+            }
+            GraphUpdateOperation::Clear { .. } => {
+                panic!("sparql: UPDATE form 'CLEAR GRAPH' lands in slice 71")
+            }
+            GraphUpdateOperation::Create { .. } => {
+                panic!("sparql: UPDATE form 'CREATE GRAPH' lands in slice 70")
+            }
+            GraphUpdateOperation::Drop { .. } => {
+                panic!("sparql: UPDATE form 'DROP GRAPH' lands in slice 69")
+            }
+        }
+    }
+
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // Resolve each touched graph_id back to its IRI for the summary.
+    // We hand back the IRIs (not raw graph_ids) so the JSONB shape
+    // stays portable across pg_dump round-trips and matches the LLD
+    // v0.4 §4.2 example.
+    let mut graphs: Vec<String> = graphs_touched
+        .iter()
+        .filter_map(|g| lookup_graph_iri(*g))
+        .collect();
+    graphs.sort();
+
+    let summary = json!({
+        "_update": {
+            "form":             form,
+            "triples_inserted": triples_inserted,
+            "triples_deleted":  triples_deleted,
+            "graphs_touched":   graphs,
+            "elapsed_ms":       elapsed_ms,
+        }
+    });
+    vec![pgrx::JsonB(summary)]
+}
+
+/// Discriminator for the JSONB `form` field in the `_update` summary.
+/// Mirrors the SPARQL surface from LLD v0.4 §4.1. Per-form slices will
+/// extend the dispatch table; the variant string stays stable so it
+/// can be matched on by downstream callers.
+fn update_op_name(op: &GraphUpdateOperation) -> &'static str {
+    match op {
+        GraphUpdateOperation::InsertData { .. } => "INSERT_DATA",
+        GraphUpdateOperation::DeleteData { .. } => "DELETE_DATA",
+        GraphUpdateOperation::DeleteInsert { .. } => "DELETE_INSERT_WHERE",
+        GraphUpdateOperation::Load { .. } => "LOAD",
+        GraphUpdateOperation::Clear { .. } => "CLEAR",
+        GraphUpdateOperation::Create { .. } => "CREATE",
+        GraphUpdateOperation::Drop { .. } => "DROP",
+    }
+}
+
+/// Resolve an `InsertData` quad's `graph_name` field to a `graph_id`:
+///   - `DefaultGraph` → 0 (the default partition; always exists post
+///     `CREATE EXTENSION`).
+///   - `NamedNode(iri)` → existing `graph_id` if the IRI is already
+///     bound; otherwise allocate a fresh `graph_id` via
+///     `pgrdf.add_graph(iri TEXT)` (slice 118), matching the LLD v0.4
+///     §4.1 "Unknown IRIs auto-allocate (default behaviour, matching
+///     `add_graph(iri)`)" contract.
+fn resolve_or_allocate_graph(g: &GraphName) -> i64 {
+    match g {
+        GraphName::DefaultGraph => 0,
+        GraphName::NamedNode(n) => {
+            let iri = n.as_str();
+            if let Some(id) = lookup_graph_id(iri) {
+                return id;
+            }
+            Spi::get_one_with_args::<i64>("SELECT pgrdf.add_graph($1::text)", &[iri.into()])
+                .unwrap_or_else(|e| panic!("sparql: UPDATE: add_graph({iri}) failed: {e}"))
+                .expect("sparql: UPDATE: add_graph returned NULL (impossible)")
+        }
+    }
+}
+
+/// Intern an IRI (URI term) into `_pgrdf_dictionary` and return its id.
+/// Routes through `put_term_full` so we pick up the shmem cache hit
+/// path (LLD §4.1) and stage commit-deferred publish on insert.
+fn intern_named_node(iri: &str) -> i64 {
+    put_term_full(iri, term_type::URI, None, None)
+}
+
+/// Intern a quad subject (IRI or blank node) into the dictionary.
+fn intern_subject(s: &NamedOrBlankNode) -> i64 {
+    match s {
+        NamedOrBlankNode::NamedNode(n) => intern_named_node(n.as_str()),
+        NamedOrBlankNode::BlankNode(b) => {
+            put_term_full(b.as_str(), term_type::BLANK_NODE, None, None)
+        }
+    }
+}
+
+/// Intern a quad object (IRI / blank node / literal) into the
+/// dictionary. Literal datatype IRIs are themselves interned first so
+/// the literal row can reference them by id, matching the existing
+/// Turtle-loader convention in `src/storage/loader.rs::object_to_id`.
+fn intern_object(t: &Term) -> i64 {
+    match t {
+        Term::NamedNode(n) => intern_named_node(n.as_str()),
+        Term::BlankNode(b) => put_term_full(b.as_str(), term_type::BLANK_NODE, None, None),
+        Term::Literal(lit) => {
+            let lang = lit.language();
+            let datatype_id = if lang.is_some() {
+                None
+            } else {
+                Some(intern_named_node(lit.datatype().as_str()))
+            };
+            put_term_full(lit.value(), term_type::LITERAL, datatype_id, lang)
+        }
+        #[allow(unreachable_patterns)]
+        _ => panic!("sparql: UPDATE: unsupported object term (RDF-star not in v0.4 scope)"),
+    }
+}
+
+/// INSERT one resolved quad into `pgrdf._pgrdf_quads`. The destination
+/// partition for `graph_id = g` is ensured up front (a no-op when
+/// already present).
+///
+/// `_pgrdf_quads` has no `UNIQUE` constraint on `(subject_id,
+/// predicate_id, object_id, graph_id)` — the hexastore indexes are
+/// covering, not unique, by design (the bulk Turtle loader appends
+/// without dedup checks for perf). To honour LLD v0.4 §4's
+/// "INSERT DATA is set-semantics" contract on re-runs of the same
+/// statement, we route the INSERT through a `WHERE NOT EXISTS`
+/// guard against the existing row (base OR inferred). Cost: one
+/// index probe against the SPO covering index per inserted triple.
+/// `ON CONFLICT DO NOTHING` would have been the cleaner shape, but
+/// it requires a unique constraint Postgres can attach to — which
+/// `_pgrdf_quads` deliberately doesn't have.
+fn insert_quad(s_id: i64, p_id: i64, o_id: i64, g_id: i64) {
+    // Auto-create the partition for non-default graphs. graph_id = 0
+    // always has the default partition seeded at CREATE EXTENSION
+    // (slice 120 contract), so we skip the call to avoid a redundant
+    // `pgrdf.add_graph(0)` round-trip.
+    if g_id != 0 {
+        Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[g_id.into()])
+            .unwrap_or_else(|e| panic!("sparql: UPDATE: add_graph({g_id}) failed: {e}"));
+    }
+    Spi::run_with_args(
+        "INSERT INTO pgrdf._pgrdf_quads \
+              (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+         SELECT $1, $2, $3, $4, false \
+          WHERE NOT EXISTS ( \
+             SELECT 1 FROM pgrdf._pgrdf_quads \
+              WHERE subject_id = $1 \
+                AND predicate_id = $2 \
+                AND object_id = $3 \
+                AND graph_id = $4)",
+        &[s_id.into(), p_id.into(), o_id.into(), g_id.into()],
+    )
+    .unwrap_or_else(|e| panic!("sparql: UPDATE: INSERT quad failed: {e}"));
+}
+
+/// Reverse-lookup a `graph_id` to its IRI for the `graphs_touched`
+/// summary array. Returns `None` for the default graph (id = 0) by
+/// convention — operators reading the summary see `"DEFAULT"` as the
+/// absence of a named-graph IRI rather than the synthetic seed row
+/// `urn:pgrdf:graph:0` (which IS bound, but is not user-visible).
+fn lookup_graph_iri(g: i64) -> Option<String> {
+    if g == 0 {
+        return Some("DEFAULT".to_string());
+    }
+    Spi::get_one_with_args(
+        "SELECT (SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = $1 LIMIT 1)",
+        &[g.into()],
+    )
+    .ok()
+    .flatten()
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────
 
@@ -4681,5 +4945,127 @@ mod tests {
             v2_unmatched, 1,
             "v2's OPTIONAL inherits the outer GRAPH ?g scope; v2 has no ex:q so ?v stays NULL"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Phase C slice 84 — SPARQL UPDATE foundation + INSERT DATA
+    // ─────────────────────────────────────────────────────────────────
+
+    /// `INSERT DATA { <s> <p> <o> }` against the default graph: the
+    /// triple appears in `_pgrdf_quads_g0` and a follow-up SELECT
+    /// retrieves it.
+    #[pg_test]
+    fn sparql_update_insert_data_default_graph() {
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { <http://example.org/a> <http://example.org/b> <http://example.org/c> }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "INSERT_DATA");
+        assert_eq!(summary["triples_inserted"], 1);
+        assert_eq!(summary["triples_deleted"], 0);
+        let graphs = summary["graphs_touched"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(graphs[0], "DEFAULT");
+
+        // Round-trip — SELECT against the same triple should find it.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'SELECT ?s ?p ?o WHERE { ?s ?p ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 1, "the INSERT DATA triple must be queryable");
+    }
+
+    /// `INSERT DATA { GRAPH <iri> { … } }` against a fresh named
+    /// graph: the IRI is auto-allocated, the partition is created,
+    /// and the triple lands in the partition.
+    #[pg_test]
+    fn sparql_update_insert_data_named_graph() {
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { GRAPH <http://example.org/g1> { \
+                  <http://example.org/a> <http://example.org/b> <http://example.org/c> \
+                } }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "INSERT_DATA");
+        assert_eq!(summary["triples_inserted"], 1);
+        let graphs = summary["graphs_touched"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(graphs[0], "http://example.org/g1");
+
+        // The triple should live in the named graph's partition.
+        let in_graph: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
+               WHERE graph_id = pgrdf.graph_id('http://example.org/g1')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(in_graph, 1);
+    }
+
+    /// The `_update` summary row carries the LLD v0.4 §4.2 shape
+    /// (form / triples_inserted / triples_deleted / graphs_touched /
+    /// elapsed_ms). Sanity-check the key set and the types.
+    #[pg_test]
+    fn sparql_update_returns_update_summary_shape() {
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { <http://example.org/a> <http://example.org/b> \"hi\" }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = j.0.get("_update").expect("_update key must be present");
+        assert!(summary.get("form").is_some(), "form key missing");
+        assert!(summary.get("triples_inserted").is_some());
+        assert!(summary.get("triples_deleted").is_some());
+        assert!(summary.get("graphs_touched").is_some());
+        assert!(summary.get("elapsed_ms").is_some());
+        assert!(
+            summary["elapsed_ms"].as_f64().unwrap_or(-1.0) >= 0.0,
+            "elapsed_ms must be a non-negative number"
+        );
+    }
+
+    /// Idempotency — issuing the same `INSERT DATA` twice must not
+    /// duplicate the row. The second call reports
+    /// `triples_inserted = 1` (we count attempted inserts, not net
+    /// row delta), but `ON CONFLICT DO NOTHING` keeps the table at
+    /// one row.
+    #[pg_test]
+    fn sparql_update_insert_data_idempotent_on_repeat() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { <http://example.org/a> <http://example.org/b> <http://example.org/c> }')",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { <http://example.org/a> <http://example.org/b> <http://example.org/c> }')",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads")
+            .unwrap()
+            .unwrap_or(0);
+        assert_eq!(n, 1, "INSERT DATA must be set-semantic (no duplicates)");
+    }
+
+    /// DELETE DATA isn't wired yet — slice 83 lands it. Until then,
+    /// the dispatcher panics with the documented "lands in slice NN"
+    /// message so callers know the per-form work is tracked.
+    #[pg_test(error = "sparql: UPDATE form 'DELETE DATA' lands in slice 83")]
+    fn sparql_update_form_dispatch_panics_for_unimplemented() {
+        let _: Option<pgrx::JsonB> = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'DELETE DATA { <http://example.org/a> <http://example.org/b> <http://example.org/c> }')",
+        )
+        .ok()
+        .flatten();
     }
 }

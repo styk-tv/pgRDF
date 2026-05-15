@@ -547,13 +547,47 @@ toward a v0.4.1 tag.
   (compose-stack contention with the parallel slice-112 worktree
   during the slice's authorship).
 
-### Track 2 — SPARQL UPDATE
+### Track 2 — SPARQL UPDATE (Phase C countdown 84 → 67 toward v0.4.3)
 `INSERT DATA`, `DELETE DATA`, pattern-driven `INSERT/DELETE … WHERE`,
 the atomic `DELETE … INSERT … WHERE` modify, plus `WITH <iri>` and
 inline `GRAPH <iri> { … }` graph scope. Overloads `pgrdf.sparql(q)`
 to dispatch by query form; UPDATE forms return an `_update` JSONB
 summary row. See
 [LLD v0.4 §4](../specs/SPEC.pgRDF.LLD.v0.4.md#4-sparql-update-new).
+
+- ✅ **Slice 84 — SPARQL UPDATE foundation + INSERT DATA.** Opens
+  Phase C toward v0.4.3. `pgrdf.sparql(q)` now detects UPDATE
+  queries via a **try-parse-then-fallback** at the entry point:
+  `parse_query` first (the v0.3 SELECT/ASK path, unchanged), then
+  `parse_update` on query-side failure. UPDATE forms route to
+  `execute_update(&spargebra::Update)`, which walks
+  `update.operations` (a `Vec<GraphUpdateOperation>`) and dispatches
+  per variant. `InsertData` lands end-to-end:
+  default-graph + `GRAPH <iri> { … }` inline graph scope, multi-
+  triple blocks, mixed-IRI-and-literal payload (typed literals get
+  their datatype IRI interned first per the loader convention),
+  unknown IRIs auto-allocate via `pgrdf.add_graph(iri TEXT)` (slice
+  118). Idempotency: `_pgrdf_quads` has no UNIQUE constraint, so
+  the INSERT routes through a `WHERE NOT EXISTS` guard against the
+  SPO covering index — set-semantics per LLD v0.4 §4 honoured
+  without the `ON CONFLICT` shape Postgres can't support against
+  the unconstrained table. Return shape: a single summary row of
+  `{"_update": {form, triples_inserted, triples_deleted,
+  graphs_touched, elapsed_ms}}` paralleling the v0.3 `_ask`
+  sentinel. Per-form panics with stable "lands in slice NN" prefixes
+  for the variants that follow-up slices will land: DELETE DATA →
+  83, DELETE/INSERT WHERE → 82-77, CLEAR/CREATE/DROP GRAPH →
+  71/70/69, LOAD → out of scope for v0.4 (LLD v0.4 §14). The
+  `pgrdf.sparql_parse(q)` UDF mirrors the detection strategy and
+  reports `form: "UPDATE"` with a per-op summary array; unimplemented
+  ops are NOT flagged in `unsupported_algebra` (that array stays
+  reserved for genuinely-out-of-scope shapes). Regression coverage:
+  `tests/regression/sql/93-update-insert-data.sql` locks six
+  invariants (default-graph, named-graph, multi-triple, idempotent
+  on repeat, typed-literal round-trip, sparql_parse integration)
+  plus six negative-path "lands in slice NN" prefix locks via the
+  `_check_error` plpgsql helper. Eight pgrx integration tests cover
+  the executor + parser paths under the `pg_test` harness.
 
 ### Track 3 — Graph-level lifecycle UDFs (Phase B countdown 99 → 96)
 `pgrdf.drop_graph`, `clear_graph`, `copy_graph`, `move_graph` as

@@ -235,6 +235,20 @@ Concrete shape:
       independent `_pgrdf_graphs` joins; OPTIONAL-born Variable
       scopes use a LEFT JOIN so an unmatched OPTIONAL leaves `?g`
       NULL without dropping the outer row.
+- ✅ SPARQL UPDATE foundation — `INSERT DATA { … }` (Phase C slice 84,
+      LLD v0.4 §4). `pgrdf.sparql(q)` detects UPDATE forms via a
+      try-parse-then-fallback: `parse_query` first (the v0.3 path,
+      unchanged), `parse_update` on query-side failure. UPDATE forms
+      return a single summary row with shape `{"_update": {form,
+      triples_inserted, triples_deleted, graphs_touched,
+      elapsed_ms}}` paralleling the v0.3 `_ask` sentinel. Slice 84
+      lands INSERT DATA end-to-end (default + named graph,
+      multi-triple, idempotent on repeat via `WHERE NOT EXISTS`);
+      other UPDATE forms panic with "lands in slice NN" pending
+      per-form follow-ups (DELETE DATA → 83, DELETE/INSERT WHERE →
+      82-77, CLEAR/CREATE/DROP GRAPH → 71/70/69).
+- ⏳ `DELETE DATA`, `INSERT/DELETE … WHERE`, lifecycle algebra
+      (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices 83 → 69.
 - ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4
