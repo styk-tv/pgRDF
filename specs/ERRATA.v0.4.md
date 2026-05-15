@@ -118,6 +118,18 @@ required `ex:age`):
 }
 ```
 
+#### Shipped in v0.4.0 (2026-05-15)
+
+pgRDF v0.4.0 cut with the `[patch.crates-io]` block in place
+([commit `d6fc261`](https://github.com/styk-tv/pgRDF/commit/d6fc261),
+[release page](https://github.com/styk-tv/pgRDF/releases/tag/v0.4.0)).
+The release ships 8 prebuilt tarballs (PG 14-17 × {amd64, arm64})
+and 160 automated tests green. Users `cargo build`ing from source
+pull the `styk-tv/reasonable@rdf12-passthrough` fork transparently
+via Cargo's `[patch.crates-io]` resolution. v0.4.1 will drop the
+patch once gtfierro/reasonable#50 merges; until then, the patch
+is a load-bearing part of the v0.4.0 build graph.
+
 #### PR draft
 
 Held in `/Users/neoxr/git_styk/reasonable/PR-DRAFT.md` pending

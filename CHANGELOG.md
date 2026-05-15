@@ -6,6 +6,22 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release — v0.4.0 shipped
+
+v0.4.0 tagged and released 2026-05-15
+([release page](https://github.com/styk-tv/pgRDF/releases/tag/v0.4.0)).
+8 prebuilt tarballs (PG 14-17 × {amd64, arm64}) + aggregate
+`SHA256SUMS` attached. release.yml run
+[25902864745](https://github.com/styk-tv/pgRDF/actions/runs/25902864745)
+green end-to-end in ~8 min. Tarball smoke verified: aggregate
+checksum OK, internal `SHA256SUMS` OK, layout includes
+`lib/pgrdf.so` + `share/extension/{pgrdf.control, pgrdf--0.4.0.sql}`
++ LICENSE + NOTICE.
+
+The `[patch.crates-io]` block in `Cargo.toml` stays in place
+through v0.4.x — see ERRATA.v0.4 E-011. v0.4.1 drops the patch
+once gtfierro/reasonable#50 merges.
+
 ## [0.4.0] — 2026-05-15
 
 The first pgRDF release with the full four-engine mission shipping
