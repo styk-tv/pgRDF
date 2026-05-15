@@ -6,122 +6,175 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-### Phase A slice 108 — user-guide updates for §3 named-graph surface
+## [0.4.1] — 2026-05-15
 
-The user-facing guide under `guide/` picks up the now-shipped §3
-surface (slices 120-110): three `pgrdf.add_graph` overloads, the
-`graph_id` / `graph_iri` lookups, and SPARQL `GRAPH <iri> { … }` /
-`GRAPH ?g { … }` scoping with full composition into OPTIONAL,
-UNION, and MINUS. `guide/02-loading-rdf.md` gains a "Named graphs
-by IRI" subsection covering the three overloads, the lookup
-functions, and the synthetic-IRI binding behaviour of the legacy
-integer-keyed call. `guide/03-querying.md` gains a "Named graphs"
-section after MINUS, walking through the literal-IRI form, the
-variable form with IRI projection, GRAPH-in-OPTIONAL for side-graph
-enrichment, GRAPH-in-UNION for cross-graph row collection, and
-GRAPH-against-MINUS for side-graph exclusion, plus an end-to-end
-worked example combining loading and querying. The surface tables
-in `guide/00-intro.md` and the index entries in `guide/README.md`
-flip the GRAPH row from ⏳ to ✅ and call out the new entry points;
-the previous "cross-graph queries land in v0.4" caveat in
-`guide/03-querying.md` is rewritten to point at the now-shipped
-forms. No changes outside `guide/` and this CHANGELOG entry.
+Phase A closes with thirteen countdown slices (120 → 108) shipping
+LLD v0.4 §3 (named-graph SPARQL scoping) end-to-end, then the
+release pre-flight countdown (107 → 100) cuts v0.4.1. First pgRDF
+release on crates.io. The combined surface lands the
+`pgrdf._pgrdf_graphs(graph_id, iri)` mapping table, three
+`pgrdf.add_graph` overloads, two symmetric lookup UDFs
+(`graph_id` / `graph_iri`), SPARQL `GRAPH <iri> { … }` literal-form
+and `GRAPH ?g { … }` variable-form translation, GRAPH composition
+with OPTIONAL / UNION / MINUS via a per-triple `GraphScope` plan,
+and `pg_dump` round-trip discipline (LLD v0.4 §3.1 acceptance
+criterion). Test bar at cut: 195 automated (117 pgrx + 49
+pg_regress + 26 W3C-shape + 3 LUBM) plus the `pg_dump` round-trip
+gate.
 
-### Phase A slice 109 — docs sync for §3 named-graph surface
+### Phase A slice 120 — `_pgrdf_graphs` schema lands (LLD v0.4 §3.1)
 
-Coherence pass across the engineering doc set after Phase A
-countdown slices 120 → 110 cumulatively shipped LLD v0.4 §3 (the
-named-graph track) on `main`. No code, no tests, no schema changes
-— this slice synchronises the engineering documentation surface to
-the now-shipped reality:
+New `pgrdf._pgrdf_graphs(graph_id BIGINT PRIMARY KEY, iri TEXT NOT
+NULL UNIQUE)` table establishes the IRI ↔ graph_id mapping that
+SPARQL `GRAPH { … }` (slices 111-110), the IRI-keyed UDF overloads
+(slices 118-115), and §4/§5/§6/§7 graph-scoped surfaces all depend
+on. The seed row `(0, 'urn:pgrdf:graph:0')` covers the existing
+default-partition catch-all bucket.
 
-- `specs/SPEC.pgRDF.LLD.v0.4.md`: §0 status note now records the §3
-  named-graph track as COMPLETE within the v0.4 cycle (with the
-  slice-level breakdown); §2 capability matrix flips the
-  "IRI ↔ graph_id mapping table + UDFs" row from 🚧 to ✅; §3
-  intro paragraph re-tagged from 🚧 to ✅ shipped, citing the full
-  Phase A countdown.
-- `docs/02-storage.md`: end-to-end coherence pass on the
-  `_pgrdf_graphs` subsection — removed slice-by-slice repetition
-  (scalar-subquery wrapper rationale, `#[pg_extern(strict)]`
-  discipline, lock idiom), folded slices 116/115 into a single
-  symmetric-lookup paragraph, called out the
-  `pg_extension_config_dump('_pgrdf_graphs', '')` registration as
-  part of the schema migration with the
-  `tests/regression/scripts/pg-dump-roundtrip.sh` end-to-end lock,
-  and added a worked example showing all five UDFs composing
-  through the synthetic-IRI seed, IRI-keyed allocation, the
-  explicit-binding upgrade path, NULL-on-miss lookups, and the
-  pg_dump round-trip discipline.
-- `docs/03-query.md`: "Surface today" section header flipped from
-  "v0.4 §3.3 GRAPH landing" to "v0.4 §3.3 GRAPH shipped"; new
-  "Named-graph GRAPH-scope translation" subsection captures the
-  per-pattern `Option<GraphScope>` algorithm from slice 112 (the
-  matrix row alone abbreviates the algorithm) — `Literal` vs
-  `Variable` scope arms, mandatory INNER vs OPTIONAL-born LEFT
-  JOIN to `_pgrdf_graphs`, two-GRAPH-blocks-same-`?g` consistency
-  predicate, MINUS scope inheritance, IRI vs integer projection
-  semantics, and bare-BGP "match in any graph" fallback.
-- `README.md`: status row extended with "named-graph SPARQL
-  scoping (`GRAPH <iri> { … }` literal + `GRAPH ?g { … }` variable
-  + composition with OPTIONAL/UNION/MINUS, LLD v0.4 §3 shipped via
-  Phase A countdown slices 120 → 110)"; "named-graph" removed from
-  the deferred-list; SPARQL feature pill extended with GRAPH; tests
-  pill bumped to 118 pgrx + 49 regression + 26 W3C + 3 LUBM = 196
-  (verified by counting `#[pg_test]` attributes in `src/` + entries
-  in `tests/regression/sql/` + non-README dirs in
-  `tests/w3c-sparql/`); new GRAPH SPARQL example block under the
-  existing SPARQL examples; new "covers" bullet enumerating the
-  shipped §3 surface with all the test artefacts.
-- `docs/10-roadmap.md`: Track 1 heading flipped from
-  "🚧 (Phase A in flight)" to "✅ (Phase A countdown slices 120 →
-  110 shipped)" with the continuation note for slices 109 → 100
-  toward a v0.4.1 tag; new "Phase A §3 named-graph shipped"
-  test-bar row recording the **196-test total** cumulative state
-  (118 + 49 + 26 + 3) with the per-slice landings, the new
-  pg_regress file range (`72-79` + `87`), the W3C-shape additions
-  (`24` / `25` / `26`), and the `§3 named-graph ✅` phase-status
-  marker against the v0.4 LLD §5 track set.
+Schema-only this slice — no UDF surface change, no behaviour change
+to existing `pgrdf.add_graph(id BIGINT)`. Regression coverage:
+`tests/regression/sql/72-graphs-table-shape.sql` + one `#[pg_test]`
+in `src/storage/graphs.rs`. Test bar: 95 pgrx + 41 pg_regress + 23
+W3C + 3 LUBM = 162 green.
 
-Co-landed with slice 108 in parallel batch 3; slice 108 owns
-`guide/` updates while this slice handles the LLD / docs/ /
-README surface. No `src/`, `tests/`, `Cargo.toml`, `LICENSE`, or
-`NOTICE` edits.
+### Phase A slice 119 — `add_graph(id BIGINT)` populates `_pgrdf_graphs`
 
-### Phase A slice 110 — pg_dump round-trip for `_pgrdf_graphs`
+The existing integer-keyed `pgrdf.add_graph(id BIGINT)` UDF now
+inserts `(id, 'urn:pgrdf:graph:' || id::text)` into `_pgrdf_graphs`
+on each successful partition creation. Idempotent via
+`ON CONFLICT (graph_id) DO NOTHING`. No signature change; downstream
+callers gain a queryable IRI mapping for every graph they create
+through the integer surface.
 
-LLD v0.4 §3.1 carries an explicit acceptance criterion: "`pg_dump`
-of a pgRDF database carrying the mapping round-trips the mapping
-verbatim". Slice 110 wires the end-to-end regression that proves it.
+Regression: `tests/regression/sql/73-add-graph-populates-iri.sql` +
+pgrx test `src/storage/graphs.rs::add_graph_populates_synthetic_iri`.
+Test bar: 96 pgrx + 42 pg_regress + 23 W3C + 3 LUBM = 164 green.
 
-New shell-orchestrated test
-`tests/regression/scripts/pg-dump-roundtrip.sh` (cannot live as a
-plain `.sql` fixture because `pg_dump` is an external binary, not a
-`psql` builtin) drives a three-step sequence against the compose
-Postgres:
+### Phase A slice 118 — `pgrdf.add_graph(iri TEXT)` overload (LLD v0.4 §3.2)
 
-1. Drop + recreate the extension; seed two known IRI bindings via
-   `pgrdf.add_graph(101::bigint, 'http://example.org/rt-1')` and
-   `pgrdf.add_graph(102::bigint, 'http://example.org/rt-2')`.
-2. Run `pg_dump` to a tmpfile inside the container; grep the dump
-   for both IRI strings as a fast canary on whether row data was
-   serialised at all.
-3. Drop the extension (wiping the rows), restore from the dump,
-   then verify the two rows survived (count check on
-   `pgrdf._pgrdf_graphs WHERE iri IN (…)` plus a symmetric
-   `pgrdf.graph_iri(101::bigint)` lookup).
+New `#[pg_extern]` overload `pgrdf.add_graph(iri TEXT) → BIGINT`.
+Idempotent on the IRI: if the IRI is already bound in `_pgrdf_graphs`,
+returns the existing `graph_id` without creating a new partition.
+Otherwise auto-allocates the next `graph_id` (smallest unused
+positive integer) and creates both the partition and the IRI
+binding atomically.
 
-Two new Justfile recipes: `just test-pg-dump-roundtrip` is the
-direct entry point; `just test-conformance` now lists it as the
-fourth prerequisite alongside `test-regression`, `test-w3c`, and
-`test-lubm` so the broader compose-based sweep (and `smoke-cold`)
-catches it on every cold boot.
+Uses `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` to
+serialise concurrent allocate-and-insert sequences. The IRI is
+pre-INSERTed before re-entering through the integer overload, so
+slice 119's synthetic-IRI insert no-ops on `ON CONFLICT (graph_id)
+DO NOTHING` and the user-supplied IRI persists verbatim. Pgrx
+surfaces both Rust functions under the SQL name `add_graph` via
+`#[pg_extern(name = "add_graph")]`; Postgres dispatches on the
+argument types (BIGINT vs TEXT). Empty / whitespace-only IRIs
+panic with the stable `add_graph: iri must be non-empty` prefix.
+RFC-3987 syntax validation deferred to a later slice (no oxiri
+dependency in v0.4.1).
 
-`sql/schema_v0_4_0_graphs.sql` gains a
-`SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', '');`
-registration so the table's row data is included by `pg_dump` rather
-than treated as extension-managed DDL. Without this call, the seed
-+ user-bound IRI rows would be silently dropped on restore.
+Regression: `tests/regression/sql/74-add-graph-iri.sql` + pgrx
+tests `add_graph_iri_idempotent` and `add_graph_iri_empty_rejected`.
+Test bar: 98 pgrx + 43 pg_regress + 23 W3C + 3 LUBM = 167 green.
+
+### Phase A slice 117 — `pgrdf.add_graph(id BIGINT, iri TEXT)` explicit binding
+
+Third `pgrdf.add_graph` overload landing. Caller specifies both id
+and iri; idempotent on matching pairs; errors on conflicting
+bindings (id bound to different iri, or iri bound to different id);
+upgrades a synthetic `urn:pgrdf:graph:{id}` binding to a
+user-specified iri when the synthetic was auto-allocated by the
+integer-keyed overload.
+
+Error message contracts locked:
+  add_graph: graph_id <N> is bound to a different IRI (<existing>)
+  add_graph: iri <iri> is bound to a different graph_id (<existing>)
+
+Regression: `tests/regression/sql/75-add-graph-id-iri.sql` +
+pgrx tests covering fresh pair, synthetic upgrade, id conflict,
+iri conflict, negative id, empty iri. Test bar: 102 pgrx + 44
+pg_regress + 23 W3C + 3 LUBM = 172 green.
+
+### Phase A slice 116 — `pgrdf.graph_id(iri)` lookup
+
+Read-only `pgrdf.graph_id(iri TEXT) → BIGINT` returns the integer
+`graph_id` bound to the given IRI in `_pgrdf_graphs`, or NULL if
+unbound. Marked STRICT so NULL input → NULL output without an SPI
+round trip.
+
+Regression: `tests/regression/sql/76-graph-id-lookup.sql` covers
+seed, post-IRI-add, post-(id,iri)-add, post-integer-add (synthetic
+binding), miss, empty-input, and NULL-input cases. Plus four pgrx
+tests in `src/storage/graphs.rs` covering seed lookup, post-add
+lookup, miss, and NULL input. Test bar: 106 pgrx + 45 pg_regress +
+23 W3C + 3 LUBM = 177 green.
+
+### Phase A slice 115 — `pgrdf.graph_iri(id)` symmetric lookup
+
+Read-only `pgrdf.graph_iri(id BIGINT) → TEXT` returns the IRI
+bound to `graph_id`, or NULL if the id is unbound. STRICT for NULL
+input. Symmetric to slice 116's `pgrdf.graph_id(iri)`.
+
+With slice 115 done, the §3.2 UDF surface is fully landed
+(add_graph × 3 overloads + graph_id + graph_iri). SPARQL
+`GRAPH { … }` translation lands next in slices 114-110.
+
+Regression: `tests/regression/sql/77-graph-iri-lookup.sql` covers
+seed, post-add IRI lookup, integer-add synthetic, miss, NULL
+input, and the round-trip via slice 116's `graph_id()`.
+
+### Phase A slice 114 — SPARQL `GRAPH <iri> { … }` translation (LLD v0.4 §3.3)
+
+The SPARQL executor now handles literal-IRI `GRAPH { … }` blocks.
+At translate time, the IRI resolves to a `graph_id` via
+`_pgrdf_graphs.iri`; unresolved IRIs bind to `-1` (zero-rows
+sentinel, spec-correct "no solutions"). Every triple alias inside
+the GRAPH block carries an additional `q.graph_id = <resolved>`
+WHERE constraint.
+
+`pgrdf.sparql_parse` no longer flags `GRAPH { … }` with a literal
+IRI under `unsupported_algebra`. Variable form `GRAPH ?g { … }`
+stays 🚧 until slice 113.
+
+Regression: `tests/regression/sql/78-sparql-graph-literal-iri.sql`
+verifies the per-graph scoping (g1 vs g2), pre-existing
+no-graph-scope path preservation, unresolved-IRI zero-rows
+semantics, and the `unsupported_algebra` flip. Plus one pgrx test
+exercising the same surface.
+
+### Phase A slice 113 — SPARQL `GRAPH ?g { … }` variable form translation
+
+The SPARQL executor now handles variable-form `GRAPH ?g { … }`
+blocks. At translate time, the graph variable name is recorded on
+`ParsedSelect.graph_var` (or `UnionBranch.graph_var`) and threaded
+through `build_from_and_where`, which appends an
+`INNER JOIN pgrdf._pgrdf_graphs g0 ON g0.graph_id = q1.graph_id`
+(exactly one such JOIN per inner BGP) and adds
+`qN.graph_id = q1.graph_id` for every additional mandatory /
+OPTIONAL / MINUS alias inside the GRAPH block — so a multi-triple
+inner BGP cannot stitch triples from different graphs together.
+
+The projection layer emits `g0.iri` whenever the projected variable
+matches `graph_var`, so the JSONB row carries the IRI string rather
+than the integer graph_id. INNER JOIN matches W3C SPARQL 1.1 §13.3:
+only graphs present in the IRI mapping bind ?g.
+
+`pgrdf.sparql_parse` no longer flags `GRAPH ?g { … }` under
+`unsupported_algebra` — the parser walks `inner` like the literal-IRI
+form. Composition with OPTIONAL / UNION / MINUS that spans DIFFERENT
+GRAPH scopes is slice 112.
+
+Regression: `tests/regression/sql/79-sparql-graph-variable.sql`
+verifies per-row IRI projection, COUNT + GROUP BY ?g, the
+multi-triple shared-graph constraint (no cross-graph stitches), and
+the `unsupported_algebra` flip. Plus one pgrx test
+(`sparql_graph_variable_projects_iri`) exercising the same surface.
+`tests/regression/sql/80-unsupported-shapes.sql` retires the gap-4
+entry (variable-form GRAPH is no longer a gap).
+
+Slices 111 + 113 ship as the first **parallel batch** in the
+countdown — two worktree-isolated agents authored independent
+slices that converge on main via cherry-pick. See ERRATA.v0.4 for
+the multi-agent pattern. Tests 25 + 26 (slice 111) verify slice
+113's translation end-to-end.
 
 ### Phase A slice 112 — SPARQL GRAPH composition with OPTIONAL/UNION/MINUS
 
@@ -228,175 +281,133 @@ function return values from any setup.sql calls.
 W3C-shape harness count: 23 → 26. All three fixtures pass against
 the merged state of parallel batch 1 (slices 111 + 113).
 
-### Phase A slice 113 — SPARQL `GRAPH ?g { … }` variable form translation
+### Phase A slice 110 — pg_dump round-trip for `_pgrdf_graphs`
 
-The SPARQL executor now handles variable-form `GRAPH ?g { … }`
-blocks. At translate time, the graph variable name is recorded on
-`ParsedSelect.graph_var` (or `UnionBranch.graph_var`) and threaded
-through `build_from_and_where`, which appends an
-`INNER JOIN pgrdf._pgrdf_graphs g0 ON g0.graph_id = q1.graph_id`
-(exactly one such JOIN per inner BGP) and adds
-`qN.graph_id = q1.graph_id` for every additional mandatory /
-OPTIONAL / MINUS alias inside the GRAPH block — so a multi-triple
-inner BGP cannot stitch triples from different graphs together.
+LLD v0.4 §3.1 carries an explicit acceptance criterion: "`pg_dump`
+of a pgRDF database carrying the mapping round-trips the mapping
+verbatim". Slice 110 wires the end-to-end regression that proves it.
 
-The projection layer emits `g0.iri` whenever the projected variable
-matches `graph_var`, so the JSONB row carries the IRI string rather
-than the integer graph_id. INNER JOIN matches W3C SPARQL 1.1 §13.3:
-only graphs present in the IRI mapping bind ?g.
+New shell-orchestrated test
+`tests/regression/scripts/pg-dump-roundtrip.sh` (cannot live as a
+plain `.sql` fixture because `pg_dump` is an external binary, not a
+`psql` builtin) drives a three-step sequence against the compose
+Postgres:
 
-`pgrdf.sparql_parse` no longer flags `GRAPH ?g { … }` under
-`unsupported_algebra` — the parser walks `inner` like the literal-IRI
-form. Composition with OPTIONAL / UNION / MINUS that spans DIFFERENT
-GRAPH scopes is slice 112.
+1. Drop + recreate the extension; seed two known IRI bindings via
+   `pgrdf.add_graph(101::bigint, 'http://example.org/rt-1')` and
+   `pgrdf.add_graph(102::bigint, 'http://example.org/rt-2')`.
+2. Run `pg_dump` to a tmpfile inside the container; grep the dump
+   for both IRI strings as a fast canary on whether row data was
+   serialised at all.
+3. Drop the extension (wiping the rows), restore from the dump,
+   then verify the two rows survived (count check on
+   `pgrdf._pgrdf_graphs WHERE iri IN (…)` plus a symmetric
+   `pgrdf.graph_iri(101::bigint)` lookup).
 
-Regression: `tests/regression/sql/79-sparql-graph-variable.sql`
-verifies per-row IRI projection, COUNT + GROUP BY ?g, the
-multi-triple shared-graph constraint (no cross-graph stitches), and
-the `unsupported_algebra` flip. Plus one pgrx test
-(`sparql_graph_variable_projects_iri`) exercising the same surface.
-`tests/regression/sql/80-unsupported-shapes.sql` retires the gap-4
-entry (variable-form GRAPH is no longer a gap).
+Two new Justfile recipes: `just test-pg-dump-roundtrip` is the
+direct entry point; `just test-conformance` now lists it as the
+fourth prerequisite alongside `test-regression`, `test-w3c`, and
+`test-lubm` so the broader compose-based sweep (and `smoke-cold`)
+catches it on every cold boot.
 
-Slices 111 + 113 ship as the first **parallel batch** in the
-countdown — two worktree-isolated agents authored independent
-slices that converge on main via cherry-pick. See ERRATA.v0.4 for
-the multi-agent pattern. Tests 25 + 26 (slice 111) verify slice
-113's translation end-to-end.
+`sql/schema_v0_4_0_graphs.sql` gains a
+`SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', '');`
+registration so the table's row data is included by `pg_dump` rather
+than treated as extension-managed DDL. Without this call, the seed
++ user-bound IRI rows would be silently dropped on restore.
 
-### Phase A slice 114 — SPARQL `GRAPH <iri> { … }` translation (LLD v0.4 §3.3)
+### Phase A slice 109 — docs sync for §3 named-graph surface
 
-The SPARQL executor now handles literal-IRI `GRAPH { … }` blocks.
-At translate time, the IRI resolves to a `graph_id` via
-`_pgrdf_graphs.iri`; unresolved IRIs bind to `-1` (zero-rows
-sentinel, spec-correct "no solutions"). Every triple alias inside
-the GRAPH block carries an additional `q.graph_id = <resolved>`
-WHERE constraint.
+Coherence pass across the engineering doc set after Phase A
+countdown slices 120 → 110 cumulatively shipped LLD v0.4 §3 (the
+named-graph track) on `main`. No code, no tests, no schema changes
+— this slice synchronises the engineering documentation surface to
+the now-shipped reality:
 
-`pgrdf.sparql_parse` no longer flags `GRAPH { … }` with a literal
-IRI under `unsupported_algebra`. Variable form `GRAPH ?g { … }`
-stays 🚧 until slice 113.
+- `specs/SPEC.pgRDF.LLD.v0.4.md`: §0 status note now records the §3
+  named-graph track as COMPLETE within the v0.4 cycle (with the
+  slice-level breakdown); §2 capability matrix flips the
+  "IRI ↔ graph_id mapping table + UDFs" row from 🚧 to ✅; §3
+  intro paragraph re-tagged from 🚧 to ✅ shipped, citing the full
+  Phase A countdown.
+- `docs/02-storage.md`: end-to-end coherence pass on the
+  `_pgrdf_graphs` subsection — removed slice-by-slice repetition
+  (scalar-subquery wrapper rationale, `#[pg_extern(strict)]`
+  discipline, lock idiom), folded slices 116/115 into a single
+  symmetric-lookup paragraph, called out the
+  `pg_extension_config_dump('_pgrdf_graphs', '')` registration as
+  part of the schema migration with the
+  `tests/regression/scripts/pg-dump-roundtrip.sh` end-to-end lock,
+  and added a worked example showing all five UDFs composing
+  through the synthetic-IRI seed, IRI-keyed allocation, the
+  explicit-binding upgrade path, NULL-on-miss lookups, and the
+  pg_dump round-trip discipline.
+- `docs/03-query.md`: "Surface today" section header flipped from
+  "v0.4 §3.3 GRAPH landing" to "v0.4 §3.3 GRAPH shipped"; new
+  "Named-graph GRAPH-scope translation" subsection captures the
+  per-pattern `Option<GraphScope>` algorithm from slice 112 (the
+  matrix row alone abbreviates the algorithm) — `Literal` vs
+  `Variable` scope arms, mandatory INNER vs OPTIONAL-born LEFT
+  JOIN to `_pgrdf_graphs`, two-GRAPH-blocks-same-`?g` consistency
+  predicate, MINUS scope inheritance, IRI vs integer projection
+  semantics, and bare-BGP "match in any graph" fallback.
+- `README.md`: status row extended with "named-graph SPARQL
+  scoping (`GRAPH <iri> { … }` literal + `GRAPH ?g { … }` variable
+  + composition with OPTIONAL/UNION/MINUS, LLD v0.4 §3 shipped via
+  Phase A countdown slices 120 → 110)"; "named-graph" removed from
+  the deferred-list; SPARQL feature pill extended with GRAPH; tests
+  pill bumped to 118 pgrx + 49 regression + 26 W3C + 3 LUBM = 196
+  (verified by counting `#[pg_test]` attributes in `src/` + entries
+  in `tests/regression/sql/` + non-README dirs in
+  `tests/w3c-sparql/`); new GRAPH SPARQL example block under the
+  existing SPARQL examples; new "covers" bullet enumerating the
+  shipped §3 surface with all the test artefacts.
+- `docs/10-roadmap.md`: Track 1 heading flipped from
+  "🚧 (Phase A in flight)" to "✅ (Phase A countdown slices 120 →
+  110 shipped)" with the continuation note for slices 109 → 100
+  toward a v0.4.1 tag; new "Phase A §3 named-graph shipped"
+  test-bar row recording the **196-test total** cumulative state
+  (118 + 49 + 26 + 3) with the per-slice landings, the new
+  pg_regress file range (`72-79` + `87`), the W3C-shape additions
+  (`24` / `25` / `26`), and the `§3 named-graph ✅` phase-status
+  marker against the v0.4 LLD §5 track set.
 
-Regression: `tests/regression/sql/78-sparql-graph-literal-iri.sql`
-verifies the per-graph scoping (g1 vs g2), pre-existing
-no-graph-scope path preservation, unresolved-IRI zero-rows
-semantics, and the `unsupported_algebra` flip. Plus one pgrx test
-exercising the same surface.
+Co-landed with slice 108 in parallel batch 3; slice 108 owns
+`guide/` updates while this slice handles the LLD / docs/ /
+README surface. No `src/`, `tests/`, `Cargo.toml`, `LICENSE`, or
+`NOTICE` edits.
 
-### Phase A slice 115 — `pgrdf.graph_iri(id)` symmetric lookup
+### Phase A slice 108 — user-guide updates for §3 named-graph surface
 
-Read-only `pgrdf.graph_iri(id BIGINT) → TEXT` returns the IRI
-bound to `graph_id`, or NULL if the id is unbound. STRICT for NULL
-input. Symmetric to slice 116's `pgrdf.graph_id(iri)`.
+The user-facing guide under `guide/` picks up the now-shipped §3
+surface (slices 120-110): three `pgrdf.add_graph` overloads, the
+`graph_id` / `graph_iri` lookups, and SPARQL `GRAPH <iri> { … }` /
+`GRAPH ?g { … }` scoping with full composition into OPTIONAL,
+UNION, and MINUS. `guide/02-loading-rdf.md` gains a "Named graphs
+by IRI" subsection covering the three overloads, the lookup
+functions, and the synthetic-IRI binding behaviour of the legacy
+integer-keyed call. `guide/03-querying.md` gains a "Named graphs"
+section after MINUS, walking through the literal-IRI form, the
+variable form with IRI projection, GRAPH-in-OPTIONAL for side-graph
+enrichment, GRAPH-in-UNION for cross-graph row collection, and
+GRAPH-against-MINUS for side-graph exclusion, plus an end-to-end
+worked example combining loading and querying. The surface tables
+in `guide/00-intro.md` and the index entries in `guide/README.md`
+flip the GRAPH row from ⏳ to ✅ and call out the new entry points;
+the previous "cross-graph queries land in v0.4" caveat in
+`guide/03-querying.md` is rewritten to point at the now-shipped
+forms. No changes outside `guide/` and this CHANGELOG entry.
 
-With slice 115 done, the §3.2 UDF surface is fully landed
-(add_graph × 3 overloads + graph_id + graph_iri). SPARQL
-`GRAPH { … }` translation lands next in slices 114-110.
-
-Regression: `tests/regression/sql/77-graph-iri-lookup.sql` covers
-seed, post-add IRI lookup, integer-add synthetic, miss, NULL
-input, and the round-trip via slice 116's `graph_id()`.
-
-### Phase A slice 116 — `pgrdf.graph_id(iri)` lookup
-
-Read-only `pgrdf.graph_id(iri TEXT) → BIGINT` returns the integer
-`graph_id` bound to the given IRI in `_pgrdf_graphs`, or NULL if
-unbound. Marked STRICT so NULL input → NULL output without an SPI
-round trip.
-
-Regression: `tests/regression/sql/76-graph-id-lookup.sql` covers
-seed, post-IRI-add, post-(id,iri)-add, post-integer-add (synthetic
-binding), miss, empty-input, and NULL-input cases. Plus four pgrx
-tests in `src/storage/graphs.rs` covering seed lookup, post-add
-lookup, miss, and NULL input. Test bar: 106 pgrx + 45 pg_regress +
-23 W3C + 3 LUBM = 177 green.
-
-### Phase A slice 117 — `pgrdf.add_graph(id BIGINT, iri TEXT)` explicit binding
-
-Third `pgrdf.add_graph` overload landing. Caller specifies both id
-and iri; idempotent on matching pairs; errors on conflicting
-bindings (id bound to different iri, or iri bound to different id);
-upgrades a synthetic `urn:pgrdf:graph:{id}` binding to a
-user-specified iri when the synthetic was auto-allocated by the
-integer-keyed overload.
-
-Error message contracts locked:
-  add_graph: graph_id <N> is bound to a different IRI (<existing>)
-  add_graph: iri <iri> is bound to a different graph_id (<existing>)
-
-Regression: `tests/regression/sql/75-add-graph-id-iri.sql` +
-pgrx tests covering fresh pair, synthetic upgrade, id conflict,
-iri conflict, negative id, empty iri. Test bar: 102 pgrx + 44
-pg_regress + 23 W3C + 3 LUBM = 172 green.
-
-### Phase A slice 118 — `pgrdf.add_graph(iri TEXT)` overload (LLD v0.4 §3.2)
-
-New `#[pg_extern]` overload `pgrdf.add_graph(iri TEXT) → BIGINT`.
-Idempotent on the IRI: if the IRI is already bound in `_pgrdf_graphs`,
-returns the existing `graph_id` without creating a new partition.
-Otherwise auto-allocates the next `graph_id` (smallest unused
-positive integer) and creates both the partition and the IRI
-binding atomically.
-
-Uses `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` to
-serialise concurrent allocate-and-insert sequences. The IRI is
-pre-INSERTed before re-entering through the integer overload, so
-slice 119's synthetic-IRI insert no-ops on `ON CONFLICT (graph_id)
-DO NOTHING` and the user-supplied IRI persists verbatim. Pgrx
-surfaces both Rust functions under the SQL name `add_graph` via
-`#[pg_extern(name = "add_graph")]`; Postgres dispatches on the
-argument types (BIGINT vs TEXT). Empty / whitespace-only IRIs
-panic with the stable `add_graph: iri must be non-empty` prefix.
-RFC-3987 syntax validation deferred to a later slice (no oxiri
-dependency in v0.4.1).
-
-Regression: `tests/regression/sql/74-add-graph-iri.sql` + pgrx
-tests `add_graph_iri_idempotent` and `add_graph_iri_empty_rejected`.
-Test bar: 98 pgrx + 43 pg_regress + 23 W3C + 3 LUBM = 167 green.
-
-### Phase A slice 119 — `add_graph(id BIGINT)` populates `_pgrdf_graphs`
-
-The existing integer-keyed `pgrdf.add_graph(id BIGINT)` UDF now
-inserts `(id, 'urn:pgrdf:graph:' || id::text)` into `_pgrdf_graphs`
-on each successful partition creation. Idempotent via
-`ON CONFLICT (graph_id) DO NOTHING`. No signature change; downstream
-callers gain a queryable IRI mapping for every graph they create
-through the integer surface.
-
-Regression: `tests/regression/sql/73-add-graph-populates-iri.sql` +
-pgrx test `src/storage/graphs.rs::add_graph_populates_synthetic_iri`.
-Test bar: 96 pgrx + 42 pg_regress + 23 W3C + 3 LUBM = 164 green.
-
-### Phase A slice 120 — `_pgrdf_graphs` schema lands (LLD v0.4 §3.1)
-
-New `pgrdf._pgrdf_graphs(graph_id BIGINT PRIMARY KEY, iri TEXT NOT
-NULL UNIQUE)` table establishes the IRI ↔ graph_id mapping that
-SPARQL `GRAPH { … }` (slices 111-110), the IRI-keyed UDF overloads
-(slices 118-115), and §4/§5/§6/§7 graph-scoped surfaces all depend
-on. The seed row `(0, 'urn:pgrdf:graph:0')` covers the existing
-default-partition catch-all bucket.
-
-Schema-only this slice — no UDF surface change, no behaviour change
-to existing `pgrdf.add_graph(id BIGINT)`. Regression coverage:
-`tests/regression/sql/72-graphs-table-shape.sql` + one `#[pg_test]`
-in `src/storage/graphs.rs`. Test bar: 95 pgrx + 41 pg_regress + 23
-W3C + 3 LUBM = 162 green.
-
-### Release — v0.4.0 shipped
+### Inherits — v0.4.0 lineage
 
 v0.4.0 tagged and released 2026-05-15
-([release page](https://github.com/styk-tv/pgRDF/releases/tag/v0.4.0)).
-8 prebuilt tarballs (PG 14-17 × {amd64, arm64}) + aggregate
-`SHA256SUMS` attached. release.yml run
-[25902864745](https://github.com/styk-tv/pgRDF/actions/runs/25902864745)
-green end-to-end in ~8 min. Tarball smoke verified: aggregate
-checksum OK, internal `SHA256SUMS` OK, layout includes
-`lib/pgrdf.so` + `share/extension/{pgrdf.control, pgrdf--0.4.0.sql}`
-+ LICENSE + NOTICE.
-
-The `[patch.crates-io]` block in `Cargo.toml` stays in place
-through v0.4.x — see ERRATA.v0.4 E-011. v0.4.1 drops the patch
-once gtfierro/reasonable#50 merges.
+([release page](https://github.com/styk-tv/pgRDF/releases/tag/v0.4.0));
+v0.4.1 builds on that base, carrying every v0.4.0 surface forward
+(real SHACL Core, OWL 2 RL inference, SPARQL SELECT / ASK / OPTIONAL
+/ UNION / MINUS / aggregates / BIND / FILTER richness, dictionary-
+encoded LIST-partitioned hexastore storage). The `[patch.crates-io]`
+block in `Cargo.toml` stays in place through v0.4.x — see ERRATA.v0.4
+E-011. The patch retires once gtfierro/reasonable#50 merges.
 
 ## [0.4.0] — 2026-05-15
 

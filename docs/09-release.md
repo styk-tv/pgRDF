@@ -4,10 +4,127 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is `v0.4.0`. Cargo.toml reads `version = "0.4.0"`
-(bumped from `0.3.0` during the v0.4 release pre-flight). See
-`CHANGELOG.md` for the running set of `[Unreleased]` entries that
-move into the next `[N.M.P]` block at tag time.
+The current cut is `v0.4.1`. Cargo.toml reads `version = "0.4.1"`
+(bumped from `0.4.0` during the v0.4.1 release pre-flight, Phase A
+countdown slices 107 → 100). See `CHANGELOG.md` for the running set
+of `[Unreleased]` entries that move into the next `[N.M.P]` block at
+tag time.
+
+## v0.4.1 — 2026-05-15
+
+Phase A closes with thirteen countdown slices (120 → 108) shipping
+LLD v0.4 §3 (named-graph SPARQL scoping) end-to-end, plus a release
+preflight countdown (107 → 100). The marquee surface lands the
+`_pgrdf_graphs(graph_id, iri)` mapping table, three `add_graph`
+overloads, two symmetric lookup UDFs (`graph_id` / `graph_iri`),
+SPARQL `GRAPH <iri> { … }` literal-form and `GRAPH ?g { … }`
+variable-form translation, GRAPH composition with OPTIONAL / UNION /
+MINUS, and `pg_dump` round-trip discipline (LLD v0.4 §3.1 acceptance
+criterion).
+
+### Engine surface delta vs v0.4.0
+
+- **Storage / SPARQL / OWL 2 RL inference / SHACL** — incrementally
+  extended; no breaking changes to existing surfaces.
+- **Named-graph track (LLD v0.4 §3)** — **shipped end-to-end via
+  thirteen countdown slices (120 → 108)**. New table
+  `pgrdf._pgrdf_graphs(graph_id BIGINT PRIMARY KEY, iri TEXT NOT
+  NULL UNIQUE)` with seed row `(0, 'urn:pgrdf:graph:0')`. Three
+  `pgrdf.add_graph` overloads (integer-keyed, IRI-keyed,
+  explicit-pair-binding) plus `pgrdf.graph_id(iri)` and
+  `pgrdf.graph_iri(id)` symmetric lookups. SPARQL executor learns
+  per-triple `GraphScope` planning with `Literal(i64)` and
+  `Variable { name, scope_id }` arms; SQL builder grows a
+  `ScopePlan` driving INNER vs LEFT JOIN to `_pgrdf_graphs`.
+  GRAPH composes into OPTIONAL (LEFT JOIN, W3C §13.3 semantics),
+  UNION (per-branch scope), and MINUS (scope local to the
+  `NOT EXISTS` subquery).
+- **pg_dump round-trip** — LLD v0.4 §3.1 acceptance criterion
+  locked via `tests/regression/scripts/pg-dump-roundtrip.sh` and
+  `pg_extension_config_dump('_pgrdf_graphs', '')` registration on
+  the schema migration.
+
+### crates.io — first publish
+
+v0.4.1 is the first pgRDF release on crates.io. The
+`.github/workflows/publish-crate.yml` workflow fires on
+`release: published` and runs `cargo publish` against
+`CARGO_REGISTRY_TOKEN`. From-source consumers can now
+`cargo add pgrdf` or write `pgrdf = "0.4.1"` in their Cargo.toml.
+
+Cargo.toml metadata polished at slice 107 prep
+(`documentation`, `keywords`, `categories`, `readme`,
+`description`, `license`, `repository`, `homepage`, `authors`).
+
+### The fork-patch caveat — carried
+
+`Cargo.toml`'s `[patch.crates-io]` block overriding `reasonable` to
+[`styk-tv/reasonable@rdf12-passthrough`](https://github.com/styk-tv/reasonable/tree/rdf12-passthrough)
+stays in place through v0.4.x while
+[gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+is in review. v0.4.2 (or whichever release lands after the upstream
+merge) drops the patch and pins the released `reasonable` version.
+Tracked at [`specs/ERRATA.v0.4.md`](../specs/ERRATA.v0.4.md) E-011.
+
+### Test bar
+
+- 117 pgrx integration tests (`cargo pgrx test`, +23 vs v0.4.0)
+- 49 pg_regress golden tests (+9 vs v0.4.0 — files `72-79` for the
+  named-graph surface + `87-sparql-graph-composition.sql`)
+- 26 W3C-shape SPARQL conformance tests (+3 vs v0.4.0 — fixtures
+  `24-graph-named-iri`, `25-graph-var-projection`,
+  `26-graph-var-groupby`)
+- 3 LUBM-shape correctness gates (unchanged)
+- Plus `tests/regression/scripts/pg-dump-roundtrip.sh` end-to-end
+  round-trip gate on `_pgrdf_graphs`
+- Plus manual smoke: 24 ontologies, 17,134 triples (totals locked
+  in `tests/perf/smoke-ontologies.expected.tsv` with `--check`
+  mode, unchanged from v0.4.0)
+
+**Total: 195 automated + pg_dump round-trip gate + 24-ontology
+manual smoke.** All green at cut time.
+
+### Supported Postgres
+
+PG 14, 15, 16, 17 × {amd64, arm64} = 8 prebuilt tarballs.
+PG 18 still deferred per ERRATA E-006 (carried).
+
+### Tarball layout
+
+`pgrdf-0.4.1-pg<N>-glibc-<arch>.tar.gz`:
+
+```
+pgrdf-0.4.1-pg<N>-glibc-<arch>/
+├── lib/pgrdf.so
+├── share/extension/pgrdf.control
+├── share/extension/pgrdf--0.4.1.sql
+├── LICENSE
+├── NOTICE
+└── SHA256SUMS   (per-tarball, covers every file above)
+```
+
+Plus an aggregate `SHA256SUMS` attached to the GitHub Release
+covering every `pgrdf-*.tar.gz` asset. Same INSTALL §3 layout as
+v0.4.0; only the version literal changes.
+
+### Known issues — carried from v0.4.0
+
+- **E-011** — `[patch.crates-io]` to the `styk-tv/reasonable`
+  fork still in place. Drops once
+  [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+  merges.
+- **E-006** / **E-007** / **E-009** / **E-010** — carried, see
+  v0.4.0 entry below.
+
+### What's deferred from the v0.4 LLD
+
+Still 🚧 in
+[`SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md): SPARQL
+UPDATE (§4), graph-level lifecycle UDFs (§5 — Phase B opens at
+slice 99), CONSTRUCT (§6), property paths (§7), the SPARQL backlog
+from v0.3 (§11), heap_multi_insert phase B (§12), and the W3C
+SPARQL 1.1 manifest runner (§13). These land in subsequent v0.4.x
+point releases or in a refreshed v0.5.0 cut.
 
 ## v0.4.0 — 2026-05-15
 

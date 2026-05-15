@@ -6,7 +6,7 @@ at the canonical Postgres paths via **per-file bind mounts**:
 
     ./extensions/lib/pgrdf.so                       → /usr/lib/postgresql/17/lib/pgrdf.so
     ./extensions/share/extension/pgrdf.control      → /usr/share/postgresql/17/extension/pgrdf.control
-    ./extensions/share/extension/pgrdf--0.4.0.sql   → /usr/share/postgresql/17/extension/pgrdf--0.4.0.sql
+    ./extensions/share/extension/pgrdf--0.4.1.sql   → /usr/share/postgresql/17/extension/pgrdf--0.4.1.sql
 
 ## Layout
 
@@ -32,7 +32,7 @@ From the repo root:
     just compose-up       # boots Postgres
     just psql             # connects as pgrdf/pgrdf to the pgrdf database
     pgrdf=# CREATE EXTENSION pgrdf;
-    pgrdf=# SELECT pgrdf.version();    -- → "0.4.0"
+    pgrdf=# SELECT pgrdf.version();    -- → "0.4.1"
 
 ## Why PG 17 (not 18)
 

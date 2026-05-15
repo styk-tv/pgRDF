@@ -690,8 +690,7 @@ fn walk_branch(
         }
         GraphPattern::Minus { left, right } => {
             walk_branch(left, ub, current_scope, scope_counter);
-            let (triples, minus_scope) =
-                extract_minus_triples(right, current_scope, scope_counter);
+            let (triples, minus_scope) = extract_minus_triples(right, current_scope, scope_counter);
             ub.minuses.push(MinusBlock {
                 triples,
                 scope: minus_scope,
@@ -763,9 +762,9 @@ fn extract_optional_triple(
             "sparql: OPTIONAL today only supports a single triple pattern (got {} triples)",
             patterns.len()
         ),
-        other => panic!(
-            "sparql: OPTIONAL today only supports a single triple pattern (got {other:?})"
-        ),
+        other => {
+            panic!("sparql: OPTIONAL today only supports a single triple pattern (got {other:?})")
+        }
     }
 }
 
@@ -852,11 +851,8 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
             // optional's effective scope. `OPTIONAL { GRAPH … { … } }`
             // overrides the outer scope; plain `OPTIONAL { … }`
             // inherits `current_scope` (W3C §13.3).
-            let (triple, opt_scope) = extract_optional_triple(
-                right,
-                current_scope,
-                &mut ps.graph_scope_counter,
-            );
+            let (triple, opt_scope) =
+                extract_optional_triple(right, current_scope, &mut ps.graph_scope_counter);
             ps.optionals.push(OptionalBlock {
                 triple,
                 filter: expression.clone(),
@@ -1546,11 +1542,7 @@ struct ScopePlan {
 impl ScopePlan {
     /// Build the plan by scanning every BGP + OPTIONAL scope. MINUS
     /// scopes are handled inside `translate_minus`.
-    fn build(
-        bgp: &[ScopedTriple],
-        optionals: &[OptionalBlock],
-        alias_offset: usize,
-    ) -> Self {
+    fn build(bgp: &[ScopedTriple], optionals: &[OptionalBlock], alias_offset: usize) -> Self {
         let mut plan = ScopePlan::default();
         // Mandatory-BGP scopes first so the "first scope binding ?g
         // wins" rule favours the mandatory side.
@@ -4262,7 +4254,10 @@ mod tests {
         )
         .unwrap()
         .unwrap_or(0);
-        assert_eq!(count_g1, 1, "GRAPH <g1> should surface exactly its 1 triple");
+        assert_eq!(
+            count_g1, 1,
+            "GRAPH <g1> should surface exactly its 1 triple"
+        );
 
         let count_g2: i64 = Spi::get_one(
             "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
@@ -4271,7 +4266,10 @@ mod tests {
         )
         .unwrap()
         .unwrap_or(0);
-        assert_eq!(count_g2, 1, "GRAPH <g2> should surface exactly its 1 triple");
+        assert_eq!(
+            count_g2, 1,
+            "GRAPH <g2> should surface exactly its 1 triple"
+        );
 
         let count_unresolved: i64 = Spi::get_one(
             "SELECT count(*)::BIGINT FROM pgrdf.sparql(\

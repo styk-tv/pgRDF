@@ -114,10 +114,9 @@ mod tests {
         // `pgrdf.add_graph(id BIGINT)`. Pinning the literal here keeps
         // the catch-all bucket's user-visible name stable across the
         // remaining Phase A slices.
-        let iri: String =
-            Spi::get_one("SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = 0")
-                .expect("iri lookup failed")
-                .expect("iri returned NULL");
+        let iri: String = Spi::get_one("SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = 0")
+            .expect("iri lookup failed")
+            .expect("iri returned NULL");
         assert_eq!(iri, "urn:pgrdf:graph:0");
     }
 
@@ -141,7 +140,10 @@ mod tests {
             Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_graphs WHERE graph_id = 42")
                 .expect("count query failed")
                 .expect("count returned NULL");
-        assert_eq!(count, 1, "expected exactly one row for graph_id = 42, got {count}");
+        assert_eq!(
+            count, 1,
+            "expected exactly one row for graph_id = 42, got {count}"
+        );
 
         // A second distinct id gets its own row.
         Spi::run("SELECT pgrdf.add_graph(100)").expect("add_graph(100) failed");
@@ -196,11 +198,9 @@ mod tests {
     /// echoes `id` back.
     #[pg_test]
     fn add_graph_id_iri_fresh_pair() {
-        let id: i64 = Spi::get_one(
-            "SELECT pgrdf.add_graph(50::bigint, 'http://example.org/g50')",
-        )
-        .expect("fresh add_graph(id, iri) failed")
-        .expect("fresh add_graph(id, iri) returned NULL");
+        let id: i64 = Spi::get_one("SELECT pgrdf.add_graph(50::bigint, 'http://example.org/g50')")
+            .expect("fresh add_graph(id, iri) failed")
+            .expect("fresh add_graph(id, iri) returned NULL");
         assert_eq!(id, 50, "echoed id must equal the input");
         let bound: Option<String> =
             Spi::get_one("SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = 50")
@@ -221,11 +221,9 @@ mod tests {
                 .expect("synthetic iri lookup failed");
         assert_eq!(synthetic.as_deref(), Some("urn:pgrdf:graph:60"));
 
-        let id: i64 = Spi::get_one(
-            "SELECT pgrdf.add_graph(60::bigint, 'http://example.org/g60')",
-        )
-        .expect("upgrade add_graph(60, iri) failed")
-        .expect("upgrade add_graph(60, iri) returned NULL");
+        let id: i64 = Spi::get_one("SELECT pgrdf.add_graph(60::bigint, 'http://example.org/g60')")
+            .expect("upgrade add_graph(60, iri) failed")
+            .expect("upgrade add_graph(60, iri) returned NULL");
         assert_eq!(id, 60);
 
         let upgraded: Option<String> =
@@ -233,12 +231,14 @@ mod tests {
                 .expect("upgraded iri lookup failed");
         assert_eq!(upgraded.as_deref(), Some("http://example.org/g60"));
 
-        let count: i64 = Spi::get_one(
-            "SELECT count(*)::bigint FROM pgrdf._pgrdf_graphs WHERE graph_id = 60",
-        )
-        .expect("row count failed")
-        .expect("row count returned NULL");
-        assert_eq!(count, 1, "synthetic upgrade must UPDATE in place, not duplicate");
+        let count: i64 =
+            Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_graphs WHERE graph_id = 60")
+                .expect("row count failed")
+                .expect("row count returned NULL");
+        assert_eq!(
+            count, 1,
+            "synthetic upgrade must UPDATE in place, not duplicate"
+        );
     }
 
     /// Slice 117 — id-conflict path: `id` is already bound to a
@@ -252,8 +252,7 @@ mod tests {
     fn add_graph_id_iri_id_conflict() {
         Spi::run("SELECT pgrdf.add_graph(70::bigint, 'http://example.org/g70')")
             .expect("first add_graph(70, iri) failed");
-        Spi::run("SELECT pgrdf.add_graph(70::bigint, 'http://example.org/different')")
-            .unwrap();
+        Spi::run("SELECT pgrdf.add_graph(70::bigint, 'http://example.org/different')").unwrap();
     }
 
     /// Slice 117 — iri-conflict path: the IRI is already bound to a
@@ -356,8 +355,8 @@ mod tests {
              VALUES (777, 'http://example.org/test-777')",
         )
         .expect("seed _pgrdf_graphs row failed");
-        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(777::bigint)")
-            .expect("graph_iri lookup failed");
+        let iri: Option<String> =
+            Spi::get_one("SELECT pgrdf.graph_iri(777::bigint)").expect("graph_iri lookup failed");
         assert_eq!(iri.as_deref(), Some("http://example.org/test-777"));
     }
 
@@ -366,8 +365,8 @@ mod tests {
     /// Symmetric to slice 116's `graph_id_miss_returns_null`.
     #[pg_test]
     fn graph_iri_miss_returns_null() {
-        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(99999::bigint)")
-            .expect("graph_iri lookup failed");
+        let iri: Option<String> =
+            Spi::get_one("SELECT pgrdf.graph_iri(99999::bigint)").expect("graph_iri lookup failed");
         assert_eq!(iri, None);
     }
 
@@ -394,12 +393,11 @@ mod tests {
              VALUES (888, 'http://example.org/test-888')",
         )
         .expect("seed _pgrdf_graphs row failed");
-        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(888::bigint)")
-            .expect("graph_iri lookup failed");
+        let iri: Option<String> =
+            Spi::get_one("SELECT pgrdf.graph_iri(888::bigint)").expect("graph_iri lookup failed");
         assert_eq!(iri.as_deref(), Some("http://example.org/test-888"));
-        let id: Option<i64> =
-            Spi::get_one("SELECT pgrdf.graph_id('http://example.org/test-888')")
-                .expect("graph_id round-trip lookup failed");
+        let id: Option<i64> = Spi::get_one("SELECT pgrdf.graph_id('http://example.org/test-888')")
+            .expect("graph_id round-trip lookup failed");
         assert_eq!(id, Some(888));
     }
 }

@@ -181,11 +181,8 @@ fn add_graph_iri(iri: &str) -> i64 {
     // re-enter through the SQL surface so any future change to the
     // partition-creation idiom stays single-sourced in
     // `add_graph(g BIGINT)` above.
-    Spi::run_with_args(
-        "SELECT pgrdf.add_graph($1::bigint)",
-        &[next.into()],
-    )
-    .unwrap_or_else(|e| panic!("add_graph: partition creation failed: {e}"));
+    Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[next.into()])
+        .unwrap_or_else(|e| panic!("add_graph: partition creation failed: {e}"));
 
     next
 }
@@ -262,11 +259,7 @@ fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
 
     match (id_iri.as_deref(), iri_id) {
         // Exact match already bound — idempotent.
-        (Some(existing_iri), Some(existing_id))
-            if existing_iri == iri && existing_id == id =>
-        {
-            id
-        }
+        (Some(existing_iri), Some(existing_id)) if existing_iri == iri && existing_id == id => id,
         // id is bound to its synthetic placeholder, iri is unbound
         // elsewhere — UPDATE the row in place. Slice-119's synthetic
         // shape `urn:pgrdf:graph:{id}` is the only IRI we treat as
