@@ -302,8 +302,10 @@ of cut:
   (v0.4.2)" section enumerates the four UDFs with their stable
   error-prefix contracts for downstream tooling.
 - `README` — test pill bumps from 118 pgrx + 49 regression to
-  127 pgrx + 54 regression; aggregate test bar 196 → 210. The
-  Status pill calls out Phase B (v0.4.2) shipped and drops
+  133 pgrx + 54 regression (runtime count; the static
+  `#[pg_test]` attribute count is 127 — pgrx-tests 0.16 generates
+  6 additional harness wrappers); aggregate test bar 196 → 216.
+  The Status pill calls out Phase B (v0.4.2) shipped and drops
   "lifecycle UDFs" from the deferred set.
 
 
