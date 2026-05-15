@@ -833,10 +833,7 @@ fn execute_count_only(sql: &str, params: &[i64]) -> usize {
 /// constant-only template the cells don't depend on the solution, so
 /// we clone the pre-encoded template values `n_solutions` times. The
 /// resulting `Vec<pgrx::JsonB>` is what the SetOfIterator wraps.
-fn expand_template_per_solution(
-    template_rows: &[Value],
-    n_solutions: usize,
-) -> Vec<pgrx::JsonB> {
+fn expand_template_per_solution(template_rows: &[Value], n_solutions: usize) -> Vec<pgrx::JsonB> {
     let mut out: Vec<pgrx::JsonB> = Vec::with_capacity(template_rows.len() * n_solutions);
     for _ in 0..n_solutions {
         for row in template_rows {

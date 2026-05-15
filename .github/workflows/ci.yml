@@ -37,6 +37,20 @@ jobs:
       fail-fast: false
       matrix:
         pg: ["14", "15", "16", "17"]
+    env:
+      # Serialise test execution. The pgrx-tests framework spawns one
+      # Postgres backend per worker thread against a SHARED $PGDATA,
+      # and several of our suite's tests issue DDL on the same
+      # `pgrdf._pgrdf_quads` partitioned parent (`add_graph` →
+      # `CREATE TABLE ... PARTITION OF ...`). Parallel workers race
+      # for AccessExclusiveLock on the parent and deadlock under
+      # GitHub Actions' tighter scheduling. Locally with `cargo pgrx
+      # test` on a workstation the deadlock window is much narrower
+      # and tests usually pass parallel; on CI it's near-deterministic.
+      # `--test-threads=1` (via RUST_TEST_THREADS) is the standard
+      # mitigation called out in user memory for this exact failure
+      # mode.
+      RUST_TEST_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
