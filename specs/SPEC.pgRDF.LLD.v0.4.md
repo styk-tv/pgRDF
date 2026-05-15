@@ -169,13 +169,15 @@ CREATE TABLE _pgrdf_graphs (
 | `pgrdf.add_graph(id BIGINT, iri TEXT)` | overload ✅ slice 117 | `BIGINT` | Explicit id binding. Idempotent on a matching `(id, iri)` pair; panics with the stable `add_graph:` prefix if `id` is bound to a different non-synthetic IRI (`add_graph: graph_id <N> is bound to a different IRI (<existing>)`) or `iri` is bound to a different graph_id (`add_graph: iri <iri> is bound to a different graph_id (<existing>)`). A synthetic placeholder `urn:pgrdf:graph:{id}` (the slice-119 seed for the integer overload) is treated as upgradable: the row is UPDATEd in place when the requested IRI is unbound elsewhere. Negative id and empty IRI rejected with the same stable prefixes shared by the other two overloads. |
 | `pgrdf.add_graph(id BIGINT)` | retained | `BIGINT` | Back-compat with v0.3; assigns synthetic IRI `urn:pgrdf:graph:{id}` automatically as of slice 119 (`ON CONFLICT (graph_id) DO NOTHING` keeps idempotency intact). |
 | `pgrdf.graph_id(iri TEXT)` | new ✅ slice 116 | `BIGINT` | Read-only lookup: returns the integer `graph_id` bound to `iri` in `_pgrdf_graphs`, or `NULL` if the IRI is not bound. Marked `STRICT` — NULL input short-circuits to NULL output without invoking the function body. No panic on miss; an actual SPI error still propagates with the stable `graph_id:` prefix. |
-| `pgrdf.graph_iri(id BIGINT)` | new | `TEXT` | Returns `NULL` if the id is not bound. |
+| `pgrdf.graph_iri(id BIGINT)` | new ✅ slice 115 | `TEXT` | Read-only lookup: returns the IRI bound to `graph_id` in `_pgrdf_graphs`, or `NULL` if the id is not bound. Marked `STRICT` — NULL input short-circuits to NULL output without invoking the function body. No panic on miss; an actual SPI error still propagates with the stable `graph_iri:` prefix. Symmetric inverse of `pgrdf.graph_id(iri)` above. |
 
-The integer-id and IRI surfaces are interchangeable at the UDF
-boundary. `pgrdf.put_quad`, `pgrdf.count_quads`, and the lifecycle
-UDFs in §5 retain their `BIGINT graph_id` argument forms; an
-IRI-keyed overload moves to
-[`v0.5-FUTURE §7`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+With slice 115 landed the §3.2 UDF surface is now fully shipped
+(all five rows ✅). The integer-id and IRI surfaces are
+interchangeable at the UDF boundary. `pgrdf.put_quad`,
+`pgrdf.count_quads`, and the lifecycle UDFs in §5 retain their
+`BIGINT graph_id` argument forms; an IRI-keyed overload moves to
+[`v0.5-FUTURE §7`](SPEC.pgRDF.LLD.v0.5-FUTURE.md). SPARQL
+`GRAPH { … }` translation lands next in slices 114-110.
 
 ### 3.3 SPARQL GRAPH support
 

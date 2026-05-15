@@ -6,6 +6,20 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 115 — `pgrdf.graph_iri(id)` symmetric lookup
+
+Read-only `pgrdf.graph_iri(id BIGINT) → TEXT` returns the IRI
+bound to `graph_id`, or NULL if the id is unbound. STRICT for NULL
+input. Symmetric to slice 116's `pgrdf.graph_id(iri)`.
+
+With slice 115 done, the §3.2 UDF surface is fully landed
+(add_graph × 3 overloads + graph_id + graph_iri). SPARQL
+`GRAPH { … }` translation lands next in slices 114-110.
+
+Regression: `tests/regression/sql/77-graph-iri-lookup.sql` covers
+seed, post-add IRI lookup, integer-add synthetic, miss, NULL
+input, and the round-trip via slice 116's `graph_id()`.
+
 ### Phase A slice 116 — `pgrdf.graph_id(iri)` lookup
 
 Read-only `pgrdf.graph_id(iri TEXT) → BIGINT` returns the integer

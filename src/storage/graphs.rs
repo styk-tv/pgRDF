@@ -32,6 +32,15 @@
 //! NULL is the lookup-miss signal, distinct from an actual SPI
 //! error which still propagates.
 //!
+//! Slice 115 — `pgrdf.graph_iri(id BIGINT) → TEXT` lookup
+//! ([`graph_iri`]). Symmetric inverse of slice 116. Read-only
+//! resolution of an integer `graph_id` back to its bound IRI in
+//! `_pgrdf_graphs`, or `NULL` when the id is not bound. Same
+//! `#[pg_extern(strict)]` + scalar-subquery wrapper discipline as
+//! slice 116; NULL input → NULL output, miss is NULL (no panic),
+//! SPI errors propagate with the stable `graph_iri:` prefix.
+//! Together with slice 116 this closes the §3.2 UDF surface.
+//!
 //! Reference: SPEC.pgRDF.LLD.v0.4 §3.1, §3.2.
 
 use pgrx::prelude::*;
@@ -58,6 +67,27 @@ fn graph_id(iri: &str) -> Option<i64> {
         &[iri.into()],
     )
     .unwrap_or_else(|e| panic!("graph_id: lookup failed: {e}"))
+}
+
+/// Look up the IRI bound to a `graph_id` in `_pgrdf_graphs`.
+/// Returns `NULL` if the id is not bound.
+///
+/// Read-only — no side effects, no panic on miss. Marked `strict`
+/// so Postgres short-circuits a NULL argument to NULL output
+/// without invoking the function. The inner `SELECT (subquery)`
+/// idiom keeps SPI on the "exactly one row" path: NULL when the
+/// id is unbound, the IRI otherwise — same wrapper trick as slice
+/// 116's `graph_id` UDF.
+///
+/// SQL surface: `pgrdf.graph_iri(id BIGINT) → TEXT`. Per LLD v0.4
+/// §3.2. Symmetric inverse of [`graph_id`].
+#[pg_extern(strict)]
+fn graph_iri(id: i64) -> Option<String> {
+    Spi::get_one_with_args(
+        "SELECT (SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = $1 LIMIT 1)",
+        &[id.into()],
+    )
+    .unwrap_or_else(|e| panic!("graph_iri: lookup failed: {e}"))
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -296,5 +326,80 @@ mod tests {
         let id: Option<i64> = Spi::get_one("SELECT pgrdf.graph_id(NULL::text)")
             .expect("graph_id(NULL) lookup failed");
         assert_eq!(id, None);
+    }
+
+    /// Slice 115 — seed row `(0, 'urn:pgrdf:graph:0')` is reachable
+    /// via `pgrdf.graph_iri(0)` immediately after `CREATE EXTENSION`,
+    /// returning the synthetic IRI bound to the default-partition id.
+    /// Symmetric to slice 116's `graph_id_seed_lookup`.
+    #[pg_test]
+    fn graph_iri_seed_lookup() {
+        let iri: Option<String> =
+            Spi::get_one("SELECT pgrdf.graph_iri(0::bigint)").expect("seed lookup failed");
+        assert_eq!(iri.as_deref(), Some("urn:pgrdf:graph:0"));
+    }
+
+    /// Slice 115 — given a binding pre-existing in `_pgrdf_graphs`,
+    /// `pgrdf.graph_iri(id)` returns the bound IRI. Bypasses the
+    /// `add_graph(…)` overloads with a direct INSERT for the same
+    /// partition-DDL-parallelism reason as slice 116's
+    /// `graph_id_after_iri_add`: `add_graph` CREATEs a LIST partition
+    /// under AccessExclusiveLock on the parent partitioned table, and
+    /// pgrx runs `#[pg_test]`s in parallel — direct INSERT exercises
+    /// the lookup code path without contending on the partition DDL.
+    /// IRI is unique to this slice (`/test-777`) to avoid concurrent-
+    /// worker row collisions.
+    #[pg_test]
+    fn graph_iri_direct_insert_lookup() {
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (777, 'http://example.org/test-777')",
+        )
+        .expect("seed _pgrdf_graphs row failed");
+        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(777::bigint)")
+            .expect("graph_iri lookup failed");
+        assert_eq!(iri.as_deref(), Some("http://example.org/test-777"));
+    }
+
+    /// Slice 115 — lookup miss returns NULL rather than panicking.
+    /// NULL is the documented lookup-miss signal per LLD v0.4 §3.2.
+    /// Symmetric to slice 116's `graph_id_miss_returns_null`.
+    #[pg_test]
+    fn graph_iri_miss_returns_null() {
+        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(99999::bigint)")
+            .expect("graph_iri lookup failed");
+        assert_eq!(iri, None);
+    }
+
+    /// Slice 115 — `#[pg_extern(strict)]` makes Postgres skip the
+    /// function entirely on a NULL argument and emit NULL directly.
+    /// The Rust `i64` body therefore never observes a NULL input;
+    /// callers passing `NULL::bigint` get `NULL` back. Symmetric to
+    /// slice 116's `graph_id_null_input_null_output`.
+    #[pg_test]
+    fn graph_iri_null_input_null_output() {
+        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(NULL::bigint)")
+            .expect("graph_iri(NULL) lookup failed");
+        assert_eq!(iri, None);
+    }
+
+    /// Slice 115 — round-trip via slice 116's `graph_id`. The two
+    /// UDFs are exact inverses: any bound `(id, iri)` pair satisfies
+    /// `graph_id(graph_iri(id)) = id` and `graph_iri(graph_id(iri))
+    /// = iri`. Locks the inverse contract.
+    #[pg_test]
+    fn graph_iri_roundtrip() {
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (888, 'http://example.org/test-888')",
+        )
+        .expect("seed _pgrdf_graphs row failed");
+        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(888::bigint)")
+            .expect("graph_iri lookup failed");
+        assert_eq!(iri.as_deref(), Some("http://example.org/test-888"));
+        let id: Option<i64> =
+            Spi::get_one("SELECT pgrdf.graph_id('http://example.org/test-888')")
+                .expect("graph_id round-trip lookup failed");
+        assert_eq!(id, Some(888));
     }
 }

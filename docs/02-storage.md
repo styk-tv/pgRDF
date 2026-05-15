@@ -186,9 +186,16 @@ SPI always returns "exactly one row" (NULL or the id), the same
 idiom the IRI-keyed `add_graph` overload uses to avoid the
 `SpiTupleTable positioned before the start` empty-result trip.
 
-The remaining IRI-keyed UDF surface (`pgrdf.graph_iri(id)`) lands
-in the next Phase A slice; SPARQL `GRAPH { … }` translation lands
-later in Phase A. Spec: SPEC.pgRDF.LLD.v0.4 §3.
+**Slice 115** adds the symmetric inverse
+`pgrdf.graph_iri(id BIGINT) → TEXT`. Returns the IRI bound to
+`graph_id` in `_pgrdf_graphs`, or `NULL` if the id is not bound.
+Same `#[pg_extern(strict)]` + scalar-subquery wrapper discipline
+as slice 116; NULL input → NULL output, miss is NULL (no panic),
+SPI errors propagate with the stable `graph_iri:` prefix. With
+slice 115 landed the §3.2 UDF surface is fully shipped: the three
+`add_graph` overloads plus the symmetric `graph_id` / `graph_iri`
+lookups. SPARQL `GRAPH { … }` translation lands next in slices
+114-110. Spec: SPEC.pgRDF.LLD.v0.4 §3.
 
 ## 2.3 Bulk loader (`src/storage/loader.rs`)
 

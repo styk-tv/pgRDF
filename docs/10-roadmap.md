@@ -430,8 +430,26 @@ not the integer. See
   (`graph_id_seed_lookup`, `graph_id_after_iri_add`,
   `graph_id_miss_returns_null`,
   `graph_id_null_input_null_output`).
-- ⏳ Slice 115 — remaining UDF surface (`pgrdf.graph_iri(id)`).
-- ⏳ Slices 111-110 — SPARQL `GRAPH { … }` translation
+- ✅ **Slice 115 — `pgrdf.graph_iri(id BIGINT) → TEXT` symmetric
+  lookup.** Read-only resolution of an integer `graph_id` back to
+  its bound IRI in `_pgrdf_graphs`, or `NULL` when the id is not
+  bound. Marked `#[pg_extern(strict)]` so a NULL argument short-
+  circuits to NULL output without invoking the function body. The
+  same scalar-subquery `SELECT (subquery)` wrapper discipline as
+  slice 116 keeps SPI on the "exactly one row" path. No panic on
+  miss — NULL is the documented lookup-miss signal (LLD v0.4 §3.2).
+  Symmetric inverse of slice 116's `pgrdf.graph_id(iri)` — together
+  they close the §3.2 UDF surface (all five rows now ✅). Regression
+  coverage:
+  [`tests/regression/sql/77-graph-iri-lookup.sql`](../tests/regression/sql/77-graph-iri-lookup.sql)
+  + five `#[pg_test]`s in
+  [`src/storage/graphs.rs`](../src/storage/graphs.rs)
+  (`graph_iri_seed_lookup`, `graph_iri_direct_insert_lookup`,
+  `graph_iri_miss_returns_null`, `graph_iri_null_input_null_output`,
+  `graph_iri_roundtrip`). With slice 115 done, the Phase A §3.2 UDF
+  surface is complete (slices 120-115); the SPARQL surface lands
+  next (slices 114-110).
+- ⏳ Slices 114-110 — SPARQL `GRAPH { … }` translation
   (resolution against `_pgrdf_graphs.iri`, projection of `?g` as
   IRI).
 
