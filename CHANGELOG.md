@@ -6,7 +6,16 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-(No entries yet — v0.4 work begins after this point.)
+### Spec — ERRATA.v0.4 file created (v0.4 cycle tracking)
+
+New [`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md) carries v0.4-era
+spec deltas. E-011 first entry tracks the upstream `reasonable` patch
+for RDF 1.2 coexistence (unblocks the remaining
+`rdf-12 / TermRef::Triple` half of E-009). Branch
+[`styk-tv/reasonable@rdf12-passthrough`](https://github.com/styk-tv/reasonable/tree/rdf12-passthrough)
+is pushed; PR draft is held in the fork for review before filing
+upstream. v0.2-era entries (E-006, E-007, E-008, E-009, E-010) are
+carried forward by cross-link rather than duplicated.
 
 ## [0.3.0] — 2026-05-14
 
