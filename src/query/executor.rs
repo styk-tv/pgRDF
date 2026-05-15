@@ -432,21 +432,24 @@ fn execute_construct_per_solution_path(
     );
 
     let mut select_clauses: Vec<String> = Vec::new();
-    let mut col_order: Vec<String> = Vec::new();
+    let mut col_order: Vec<(String, ConstructProjShape)> = Vec::new();
     for var in template_vars {
-        // Slice 112 graph-scope variables bind to a `g{S}.iri` join
-        // column — that's a TEXT IRI, not a dict id. The construct
-        // path expects BIGINT dict ids per variable, so resolve the
-        // IRI back to a dict id via a scalar subselect. This keeps the
-        // row-iteration loop uniform (every column is `Option<i64>`).
+        // Slice 55: graph-scope variables bind to a `g{S}.iri` join
+        // column — that's a TEXT IRI, NOT a dict id, and graph IRIs
+        // are NOT entered in `_pgrdf_dictionary` (only RDF term IRIs
+        // are). The earlier scalar-subselect rewrite would return
+        // NULL for every named-graph row → the unbound-check then
+        // dropped the entire template triple. Slice 55 projects the
+        // graph IRI directly as TEXT and resolves it inline at row
+        // time via `encode_iri_term` — no dict round-trip needed
+        // (we know the term_type is IRI by construction of the
+        // `_pgrdf_graphs.iri` column).
         if let Some(scope_id) = plan.projection_scope(var) {
             select_clauses.push(format!(
-                "(SELECT id FROM pgrdf._pgrdf_dictionary \
-                   WHERE term_type = 1 AND lexical_value = g{scope_id}.iri \
-                     AND datatype_iri_id IS NULL AND language_tag IS NULL) AS {alias_v}",
+                "g{scope_id}.iri AS {alias_v}",
                 alias_v = quote_identifier(var),
             ));
-            col_order.push(var.clone());
+            col_order.push((var.clone(), ConstructProjShape::GraphIri));
             continue;
         }
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
@@ -459,7 +462,7 @@ fn execute_construct_per_solution_path(
             "q{alias_idx}.{col} AS {alias_v}",
             alias_v = quote_identifier(var),
         ));
-        col_order.push(var.clone());
+        col_order.push((var.clone(), ConstructProjShape::DictId));
     }
     if select_clauses.is_empty() {
         // Blank-node-only template (no variables anywhere): we still
@@ -506,11 +509,25 @@ fn execute_construct_per_solution_path(
             .expect("pgrdf.construct: WHERE-SELECT failed");
         for row in table {
             solution_idx += 1;
-            // Pull each template var's dict id for this binding.
-            let mut binding: HashMap<&str, Option<i64>> = HashMap::new();
-            for (i, var) in col_order.iter().enumerate() {
-                let v: Option<i64> = row.get::<i64>(i + 1).ok().flatten();
-                binding.insert(var.as_str(), v);
+            // Pull each template var's per-solution binding. Two
+            // projection shapes coexist: BGP-anchored vars come back
+            // as BIGINT dict ids (`DictId`); graph-scope vars
+            // (slice 55) come back as TEXT IRIs (`GraphIri`). The
+            // binding map carries both — `encode_template_position`
+            // discriminates at use time.
+            let mut binding: HashMap<&str, ConstructBoundValue> = HashMap::new();
+            for (i, (var, shape)) in col_order.iter().enumerate() {
+                let bound = match shape {
+                    ConstructProjShape::DictId => match row.get::<i64>(i + 1).ok().flatten() {
+                        Some(id) => ConstructBoundValue::DictId(id),
+                        None => ConstructBoundValue::Unbound,
+                    },
+                    ConstructProjShape::GraphIri => match row.get::<String>(i + 1).ok().flatten() {
+                        Some(iri) => ConstructBoundValue::GraphIri(iri),
+                        None => ConstructBoundValue::Unbound,
+                    },
+                };
+                binding.insert(var.as_str(), bound);
             }
             // Fresh minter per solution — within-solution label
             // sameness preserved; across-solution labels differ
@@ -545,7 +562,7 @@ fn execute_construct_per_solution_path(
 /// mint a fresh label.
 fn construct_slot_has_unbound(
     slot: &TemplateTripleSlots,
-    binding: &HashMap<&str, Option<i64>>,
+    binding: &HashMap<&str, ConstructBoundValue>,
 ) -> bool {
     construct_position_unbound(&slot.subject, binding)
         || construct_position_unbound(&slot.predicate, binding)
@@ -554,20 +571,48 @@ fn construct_slot_has_unbound(
 
 fn construct_position_unbound(
     slot: &ConstructTermSlot,
-    binding: &HashMap<&str, Option<i64>>,
+    binding: &HashMap<&str, ConstructBoundValue>,
 ) -> bool {
     matches!(
         slot,
-        ConstructTermSlot::Variable(v) if binding.get(v.as_str()).copied().flatten().is_none()
+        ConstructTermSlot::Variable(v)
+            if matches!(
+                binding.get(v.as_str()),
+                None | Some(ConstructBoundValue::Unbound)
+            )
     )
+}
+
+/// Slice 55 — projection shape per template variable. BGP-anchored
+/// vars (subject/predicate/object positions) project as BIGINT dict
+/// ids; graph-scope vars (from `GRAPH ?g { … }`) project as TEXT
+/// IRIs directly off the `_pgrdf_graphs` join (no dict round-trip,
+/// since graph IRIs are not entered in `_pgrdf_dictionary`).
+#[derive(Clone, Copy)]
+enum ConstructProjShape {
+    DictId,
+    GraphIri,
+}
+
+/// Slice 55 — per-solution binding shape. Mirrors `ConstructProjShape`
+/// at the value level: `DictId(id)` for the dictionary-resolved path,
+/// `GraphIri(iri)` for the direct-IRI path from a graph scope, and
+/// `Unbound` when the column came back NULL (e.g. OPTIONAL-side var
+/// for a solution that didn't match).
+#[derive(Clone)]
+enum ConstructBoundValue {
+    DictId(i64),
+    GraphIri(String),
+    Unbound,
 }
 
 /// Shape one template triple into its `{"subject", "predicate",
 /// "object"}` row by walking each position's slot and resolving
-/// variable bindings through the dictionary.
+/// variable bindings through the dictionary (or directly off a graph
+/// scope's IRI projection, per slice 55).
 fn encode_template_triple_for_solution(
     slot: &TemplateTripleSlots,
-    binding: &HashMap<&str, Option<i64>>,
+    binding: &HashMap<&str, ConstructBoundValue>,
     dict_cache: &mut HashMap<i64, ResolvedTerm>,
     minter: &mut BNodeMinter,
 ) -> Value {
@@ -579,7 +624,7 @@ fn encode_template_triple_for_solution(
 
 fn encode_template_position(
     slot: &ConstructTermSlot,
-    binding: &HashMap<&str, Option<i64>>,
+    binding: &HashMap<&str, ConstructBoundValue>,
     dict_cache: &mut HashMap<i64, ResolvedTerm>,
     minter: &mut BNodeMinter,
 ) -> Value {
@@ -590,15 +635,21 @@ fn encode_template_position(
         }
         ConstructTermSlot::Variable(name) => {
             // construct_slot_has_unbound is the gate — this row is
-            // guaranteed Some(id). Defensive unwrap with a clear
-            // message if the invariant ever slips.
-            let id = binding
-                .get(name.as_str())
-                .copied()
-                .flatten()
-                .expect("pgrdf.construct: variable binding vanished after unbound-check");
-            let term = resolve_dict_term(id, dict_cache);
-            encode_dict_term(&term)
+            // guaranteed bound. Defensive panic with a clear message
+            // if the invariant ever slips. The two bound shapes are
+            // discriminated here: DictId resolves through the dict
+            // cache; GraphIri shapes directly as an IRI term (slice
+            // 55 — graph IRIs do not live in _pgrdf_dictionary).
+            match binding.get(name.as_str()) {
+                Some(ConstructBoundValue::DictId(id)) => {
+                    let term = resolve_dict_term(*id, dict_cache);
+                    encode_dict_term(&term)
+                }
+                Some(ConstructBoundValue::GraphIri(iri)) => encode_iri_term(iri),
+                Some(ConstructBoundValue::Unbound) | None => {
+                    panic!("pgrdf.construct: variable binding vanished after unbound-check")
+                }
+            }
         }
         // Slice 57 — fresh per-solution bnode label, with within-
         // solution label sameness for the same template label.
@@ -2501,13 +2552,22 @@ fn build_from_and_where(
     // `q{first_qN_in_S}.graph_id` (which is in scope by this point)
     // so the join is unambiguous. INNER matches W3C §13.3: a
     // mandatory `?g` MUST bind to a graph in the IRI mapping.
+    //
+    // Slice 55: exclude `graph_id = 0` (the default graph). Per W3C
+    // SPARQL 1.1 §13.3, `GRAPH ?g { … }` ranges over the NAMED
+    // graphs ONLY — the default graph never binds `?g`. Slice 79
+    // shipped without this exclusion because no test had default-
+    // graph quads coexisting with named-graph quads; slice 55's
+    // CONSTRUCT invariant F surfaces it. Adding the predicate here
+    // fixes both the SELECT and CONSTRUCT paths uniformly.
     for &scope_id in &plan.mandatory_join_ids {
         let anchor_qi = plan
             .first_qi_for(scope_id)
             .expect("ScopePlan: every mandatory scope has a first_qi");
         from_sql.push_str(&format!(
             " INNER JOIN pgrdf._pgrdf_graphs g{scope_id} \
-             ON (g{scope_id}.graph_id = q{anchor_qi}.graph_id)"
+             ON (g{scope_id}.graph_id = q{anchor_qi}.graph_id \
+                 AND g{scope_id}.graph_id <> 0)"
         ));
     }
     // Cross-scope consistency: two mandatory GRAPH blocks binding
@@ -2555,9 +2615,15 @@ fn build_from_and_where(
             if plan.optional_join_ids.contains(scope_id)
                 && !emitted_left_join_scopes.contains(scope_id)
             {
+                // Slice 55: same default-graph exclusion as the
+                // mandatory side. An OPTIONAL `GRAPH ?g { … }` that
+                // would have matched a default-graph quad now leaves
+                // `?g` unbound — consistent with W3C §13.3 + LEFT
+                // JOIN's NULL semantics.
                 from_sql.push_str(&format!(
                     " LEFT JOIN pgrdf._pgrdf_graphs g{scope_id} \
-                     ON (g{scope_id}.graph_id = q{opt_qi}.graph_id)"
+                     ON (g{scope_id}.graph_id = q{opt_qi}.graph_id \
+                         AND g{scope_id}.graph_id <> 0)"
                 ));
                 emitted_left_join_scopes.push(*scope_id);
             }
@@ -2700,6 +2766,10 @@ fn translate_minus(
         if let Some(first_qi) = minus_first_qi {
             from_aliases.push(format!("pgrdf._pgrdf_graphs g{scope_id}"));
             all_clauses.push(format!("g{scope_id}.graph_id = q{first_qi}.graph_id"));
+            // Slice 55: default-graph exclusion for variable scope —
+            // a `MINUS { GRAPH ?g { … } }` NOT EXISTS never matches a
+            // default-graph quad against `?g`.
+            all_clauses.push(format!("g{scope_id}.graph_id <> 0"));
         }
     }
     let where_inside = if all_clauses.is_empty() {
@@ -8669,5 +8739,192 @@ mod tests {
                'CONSTRUCT { } WHERE { ?s ?p ?o }')",
         )
         .unwrap();
+    }
+
+    // ─── Phase D slice 55 — GRAPH-scoped WHERE in pgrdf.construct ────
+    //
+    // The WHERE-side can now wrap its BGP in `GRAPH <iri> { … }` or
+    // `GRAPH ?g { … }`. The literal form scopes solutions to a single
+    // named graph; the variable form binds `?g` per-solution to the
+    // source graph IRI and ranges over named graphs only (W3C §13.3
+    // — default-graph quads are excluded via the `g{S}.graph_id <> 0`
+    // predicate on the `_pgrdf_graphs` JOIN).
+
+    /// Positive — literal-GRAPH WHERE. Seed 2 quads in g1, 2 in g2,
+    /// 1 in default; `CONSTRUCT { ?s ex:tag "x" } WHERE { GRAPH <g1>
+    /// { ?s ?p ?o } }` returns exactly 2 rows (the g1 subjects only).
+    #[pg_test]
+    fn construct_graph_literal_where_scopes_solutions() {
+        Spi::run(
+            "SELECT pgrdf.add_graph('http://example.com/sl55a-g1');
+             SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> .
+                ex:alice ex:sl55ap \"a\" .
+                ex:bob   ex:sl55ap \"b\" .',
+               pgrdf.graph_id('http://example.com/sl55a-g1'));
+             SELECT pgrdf.add_graph('http://example.com/sl55a-g2');
+             SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> .
+                ex:carol ex:sl55ap \"c\" .
+                ex:dave  ex:sl55ap \"d\" .',
+               pgrdf.graph_id('http://example.com/sl55a-g2'));
+             SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> . ex:def ex:sl55ap \"e\" .',
+               0);",
+        )
+        .unwrap();
+
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/tag> \"x\" } \
+                  WHERE { GRAPH <http://example.com/sl55a-g1> { ?s ?p ?o } }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            n, 2,
+            "literal-GRAPH <g1> WHERE filters solutions to g1 quads only"
+        );
+
+        let bleed: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/tag> \"x\" } \
+                  WHERE { GRAPH <http://example.com/sl55a-g1> { ?s ?p ?o } }') AS t(j) \
+              WHERE j->'subject'->>'value'
+                    IN ('http://example.com/carol',
+                        'http://example.com/dave',
+                        'http://example.com/def')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(bleed, 0, "no g2 or default-graph subjects bleed through");
+    }
+
+    /// Positive — variable-GRAPH WHERE. `?g` binds to the source
+    /// graph IRI per solution; 4 rows total (2 from g1 + 2 from g2),
+    /// default-graph quads excluded per W3C §13.3. Each row's object
+    /// carries the source graph IRI as an `iri` term.
+    #[pg_test]
+    fn construct_graph_variable_where_projects_iri() {
+        Spi::run(
+            "SELECT pgrdf.add_graph('http://example.com/sl55b-g1');
+             SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> .
+                ex:alice ex:sl55bp \"a\" .
+                ex:bob   ex:sl55bp \"b\" .',
+               pgrdf.graph_id('http://example.com/sl55b-g1'));
+             SELECT pgrdf.add_graph('http://example.com/sl55b-g2');
+             SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> .
+                ex:carol ex:sl55bp \"c\" .
+                ex:dave  ex:sl55bp \"d\" .',
+               pgrdf.graph_id('http://example.com/sl55b-g2'));
+             SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> . ex:def ex:sl55bp \"e\" .',
+               0);",
+        )
+        .unwrap();
+
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/from_graph> ?g } \
+                  WHERE { GRAPH ?g { ?s <http://example.com/sl55bp> ?o } }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            n, 4,
+            "variable-GRAPH WHERE binds 4 named-graph solutions; default-graph excluded"
+        );
+
+        // Each row's object value is one of the named-graph IRIs;
+        // default-graph (urn:pgrdf:graph:0) never surfaces.
+        let n_named: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/from_graph> ?g } \
+                  WHERE { GRAPH ?g { ?s <http://example.com/sl55bp> ?o } }') AS t(j) \
+              WHERE j->'object'->>'value' IN
+                    ('http://example.com/sl55b-g1', 'http://example.com/sl55b-g2')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n_named, 4, "every row's ?g object is a named-graph IRI");
+
+        // The ?g-bound object emits as an IRI term per LLD §6.1.
+        let all_iri: bool = Spi::get_one(
+            "SELECT bool_and(j->'object'->>'type' = 'iri') \
+               FROM pgrdf.construct(
+                 'CONSTRUCT { ?s <http://example.com/from_graph> ?g } \
+                    WHERE { GRAPH ?g { ?s <http://example.com/sl55bp> ?o } }') AS t(j)",
+        )
+        .unwrap()
+        .unwrap_or(false);
+        assert!(all_iri, "variable-GRAPH binding shapes as iri term");
+    }
+
+    /// Positive — multi-triple template + variable-GRAPH WHERE.
+    /// 2-triple template × 4 named-graph solutions → 8 rows; within
+    /// each solution the source_graph row's object MUST agree with
+    /// the per-solution ?g binding (no cross-row drift).
+    #[pg_test]
+    fn construct_multi_triple_graph_variable_consistent() {
+        Spi::run(
+            "SELECT pgrdf.add_graph('http://example.com/sl55d-g1');
+             SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> .
+                ex:alice ex:sl55dp \"a\" .
+                ex:bob   ex:sl55dp \"b\" .',
+               pgrdf.graph_id('http://example.com/sl55d-g1'));
+             SELECT pgrdf.add_graph('http://example.com/sl55d-g2');
+             SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> .
+                ex:carol ex:sl55dp \"c\" .
+                ex:dave  ex:sl55dp \"d\" .',
+               pgrdf.graph_id('http://example.com/sl55d-g2'));",
+        )
+        .unwrap();
+
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { <http://example.com/export> \
+                              <http://example.com/contains> ?s . \
+                            ?s <http://example.com/source_graph> ?g } \
+                  WHERE { GRAPH ?g { ?s <http://example.com/sl55dp> ?o } }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n, 8, "2-triple template × 4 named-graph solutions → 8 rows");
+
+        // Pair each `contains` row's object (the subject IRI) with the
+        // corresponding `source_graph` row's object. They must align
+        // by source graph: alice/bob ↔ g1, carol/dave ↔ g2.
+        let pairing_ok: bool = Spi::get_one(
+            "WITH r AS ( \
+               SELECT * FROM pgrdf.construct(
+                 'CONSTRUCT { <http://example.com/export> \
+                                <http://example.com/contains> ?s . \
+                              ?s <http://example.com/source_graph> ?g } \
+                    WHERE { GRAPH ?g { ?s <http://example.com/sl55dp> ?o } }') AS t(j) \
+             ), pairs AS ( \
+               SELECT (j->'object'->>'value') AS subj_iri, \
+                      (SELECT u.j->'object'->>'value' FROM r u \
+                         WHERE (u.j->'predicate'->>'value') = \
+                               'http://example.com/source_graph' \
+                           AND (u.j->'subject'->>'value') = \
+                               (r.j->'object'->>'value')) AS source_iri \
+               FROM r \
+               WHERE (j->'predicate'->>'value') = 'http://example.com/contains' \
+             ) SELECT bool_and( \
+                 (subj_iri IN ('http://example.com/alice', 'http://example.com/bob') \
+                   AND source_iri = 'http://example.com/sl55d-g1') OR \
+                 (subj_iri IN ('http://example.com/carol', 'http://example.com/dave') \
+                   AND source_iri = 'http://example.com/sl55d-g2')) FROM pairs",
+        )
+        .unwrap()
+        .unwrap_or(false);
+        assert!(
+            pairing_ok,
+            "within-solution ?g binding is consistent across the two emitted triples"
+        );
     }
 }

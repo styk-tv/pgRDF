@@ -174,6 +174,11 @@ SELECT count(*) AS case3_no_alice_rows FROM pgrdf.sparql(
 WHERE (s.j->>'s') = 'http://example.org/alice';
 
 -- ─── Case 4: GRAPH ?g { ?s ex:p ?o OPTIONAL { ?s ex:q ?v } } ─────
+-- Per W3C SPARQL 1.1 §13.3, `GRAPH ?g { … }` ranges over the NAMED
+-- graphs only — the default graph never binds `?g`. Slice 55 added
+-- the default-graph exclusion (`g{S}.graph_id <> 0` on the
+-- `_pgrdf_graphs` join) so the case-4 row count is 3 (g1+g2+g3),
+-- NOT 5 (which would silently include the two default-graph quads).
 -- Both triples MUST come from the same graph (the OPTIONAL inherits
 -- the outer GRAPH ?g scope; slice 112's per-pattern scope propagates
 -- into the OPTIONAL's triple). g1 has ex:p and ex:q both for alice

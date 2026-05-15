@@ -8,6 +8,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ### Added
 
+- `pgrdf.construct` GRAPH-scoped WHERE — Phase D slice 55. `WHERE { GRAPH <iri> { ... } }` and `WHERE { GRAPH ?g { ... } }` compose with all prior template surfaces (constant, variable, blank-node, multi-triple). Variable-GRAPH binds `?g` to the source graph IRI per solution; default-graph quads are excluded per W3C SPARQL 1.1 §13.3. Empty named graphs and missing graphs yield zero solutions.
 - `pgrdf.construct` multi-triple template support — Phase D slice 56.
   N-triple templates emit N rows per solution; blank-node labels are
   shared across all N triples within the same solution (and fresh per
@@ -50,6 +51,10 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   (`b{solution}_{n}`) so callers can rely on the `value` column alone
   to distinguish per-solution bnodes within one `pgrdf.construct`
   call.
+
+### Fixed
+
+- `GRAPH ?g { ... }` no longer matches default-graph quads in either `pgrdf.sparql` or `pgrdf.construct` (Phase D slice 55). The `_pgrdf_graphs` JOIN now carries an `AND g{S}.graph_id <> 0` predicate so variable GRAPH ranges over named graphs only, per W3C SPARQL 1.1 §13.3. Prior slice-79 / slice-87 behaviour silently bound `?g` to `urn:pgrdf:graph:0` when default-graph quads existed alongside named-graph quads; the slice-87 regression's case-4 expected-count was updated from 5 to 3 to reflect the corrected behaviour. Mandatory, OPTIONAL, MINUS, and UNION-branch joins to `_pgrdf_graphs` all carry the predicate uniformly.
 
 ## [0.4.3] — 2026-05-15
 

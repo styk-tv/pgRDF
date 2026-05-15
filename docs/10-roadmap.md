@@ -172,13 +172,20 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
       predicate / object positions); slice 57 landed (blank-node
       template positions with per-solution fresh-label minting +
       within-solution label sameness per W3C SPARQL 1.1 §16.2;
-      single-triple scope); ✅ slice 56 landed (multi-triple
-      templates: N-triple templates emit N rows per solution, with
-      blank-node labels SHARED across all N template triples within
-      the same solution; empty templates `{ }` reject cleanly). GRAPH-
-      scoping of the WHERE (slice 55), CONSTRUCT WHERE shorthand
-      (slice 54), round-trip preservation (slice 53), and
-      `pgrdf.sparql_parse` enrichment (slice 50) all still pending.
+      single-triple scope); slice 56 landed (multi-triple templates:
+      N-triple templates emit N rows per solution, with blank-node
+      labels SHARED across all N template triples within the same
+      solution; empty templates `{ }` reject cleanly); ✅ slice 55
+      landed (GRAPH-scoped WHERE: `GRAPH <iri> { … }` and
+      `GRAPH ?g { … }` inside the WHERE block, composing with all
+      prior template surfaces; variable-GRAPH binds `?g` to the
+      source graph IRI per solution; default-graph quads excluded
+      per W3C SPARQL 1.1 §13.3 — the JOIN to `_pgrdf_graphs` now
+      carries `g{S}.graph_id <> 0`, which also corrected the
+      slice-79 / slice-87 SELECT-side latent bleed). CONSTRUCT
+      WHERE shorthand (slice 54), round-trip preservation (slice
+      53), and `pgrdf.sparql_parse` enrichment (slice 50) all
+      still pending.
       `DESCRIBE` carried forward. (`ASK` shipped step 12.) LLD v0.4
       §6.
 

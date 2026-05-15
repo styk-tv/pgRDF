@@ -377,7 +377,7 @@ Concrete shape:
       (spargebra parser.rs §Add / §Move / §Copy) into compositions
       of `Drop + DeleteInsert` (or just `DeleteInsert` for ADD),
       so they ride the existing per-form dispatcher arms.
-- 🚧 `CONSTRUCT` (Phase D slice 56 — multi-triple templates) —
+- 🚧 `CONSTRUCT` (Phase D slice 55 — GRAPH-scoped WHERE) —
       sibling UDF `pgrdf.construct(q TEXT) → SETOF JSONB`. Each row
       carries `{"subject": …, "predicate": …, "object": …}` with
       structured term cells `{"type": "iri"|"literal"|"bnode",
@@ -417,10 +417,27 @@ Concrete shape:
       OPTIONAL / UNION / MINUS surface (translation reuses
       `parse_select` + `build_from_and_where`). Variables that the
       WHERE pattern does not bind panic with
-      `pgrdf.construct: unbound template variable ?X`. GRAPH-scoping
-      of the WHERE (slice 55), CONSTRUCT WHERE shorthand (slice 54),
-      round-trip preservation (slice 53), and `sparql_parse`
-      enrichment (slice 50) all still pending. DISTINCT / ORDER BY /
+      `pgrdf.construct: unbound template variable ?X`. **GRAPH-scoped
+      WHERE (slice 55)** widens to `GRAPH <iri> { … }` and
+      `GRAPH ?g { … }` inside the WHERE block. The literal form
+      filters solutions to a single named graph; the variable form
+      binds `?g` per-solution to the source graph IRI (`g{S}.iri`
+      from the `_pgrdf_graphs` join, projected as TEXT and shaped as
+      an `iri` term — graph IRIs are NOT entered in
+      `_pgrdf_dictionary`, so the construct path now projects the
+      IRI text directly instead of round-tripping through a scalar
+      subselect that would always return NULL for named-graph rows).
+      `GRAPH ?g` ranges over named graphs only per W3C SPARQL 1.1
+      §13.3 — default-graph quads never bind `?g` (the
+      `_pgrdf_graphs` JOIN carries `AND g{S}.graph_id <> 0`,
+      which also corrected the slice-79 / slice-87 SELECT path's
+      latent default-graph bleed). All prior template surfaces
+      compose: variable substitution, blank-node label sharing,
+      multi-triple emission, constant constants. Empty named graphs
+      and missing graphs yield zero solutions. CONSTRUCT WHERE
+      shorthand (slice 54), round-trip preservation (slice 53),
+      and `sparql_parse` enrichment (slice 50) all still pending.
+      DISTINCT / ORDER BY /
       GROUP BY / aggregates on CONSTRUCT are explicitly out of scope
       per W3C 1.1 §16.2 — rejected with `pgrdf.construct: DISTINCT /
       ORDER BY / GROUP BY / aggregates not supported (W3C 1.1
