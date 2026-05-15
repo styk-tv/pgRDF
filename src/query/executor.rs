@@ -1046,7 +1046,7 @@ fn reject_construct_modifiers(p: &GraphPattern) {
 /// NOT apply. (A pathological `CONSTRUCT FROM <iri> WHERE { … }` is
 /// the shorthand-with-dataset form per the grammar; we accept it as
 /// shorthand here.)
-fn detect_construct_where_shorthand(query: &str) -> bool {
+pub(crate) fn detect_construct_where_shorthand(query: &str) -> bool {
     let bytes = query.as_bytes();
     let mut i = skip_ws_and_comments(bytes, 0);
     // Skip optional PREFIX / BASE declarations — the grammar allows

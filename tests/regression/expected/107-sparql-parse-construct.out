@@ -1,0 +1,26 @@
+CONSTRUCT
+1
+t
+f
+Bgp
+f
+[]
+2
+t
+["?o", "?s"]
+Bgp
+2
+["?o", "?o2", "?s"]
+t
+f
+Graph
+["http://example.org/g1"]
+Graph
+["?g"]
+t
+1
+1
+CONSTRUCT
+["Distinct"]
+SELECT
+UPDATE

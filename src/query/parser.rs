@@ -11,10 +11,19 @@
 //!   * ASK — supported. The parser reports `bgp_pattern_count` +
 //!     `unsupported_algebra` just like SELECT; the executor wraps
 //!     the probe SELECT in `EXISTS(...)`.
-//!   * CONSTRUCT / DESCRIBE — recognised but reported as
-//!     `supported: false`; the executor doesn't handle them yet
-//!     (CONSTRUCT lands in v0.4 — see
-//!     SPEC.pgRDF.LLD.v0.4.md §6).
+//!   * CONSTRUCT — Phase D slice 52 enrichment. Reports `form:
+//!     "CONSTRUCT"` with a `template` block (triple count, has_variables,
+//!     has_blank_nodes, has_constants_only, variables) and a
+//!     `where_shape` block (kind, triple_count, named_graphs_used,
+//!     variables). Detects the W3C SPARQL 1.1 §16.2.4 shorthand form
+//!     (`CONSTRUCT WHERE { ... }`) via the same ASCII probe the
+//!     executor uses (`crate::query::executor::detect_construct_where_shorthand`).
+//!     Flags `Distinct` / `OrderBy` / `Group` / `Aggregate` wrappings
+//!     in `unsupported_algebra` — they panic at execute time per LLD
+//!     §6.2.
+//!   * DESCRIBE — recognised but reported as `supported: false`; the
+//!     executor doesn't handle it yet (carried forward to a later
+//!     v0.4 slice).
 //!   * OPTIONAL / UNION / MINUS / FILTER / aggregates / BIND — the
 //!     parser walks through them; the executor supports them too,
 //!     so they are NOT flagged in `unsupported_algebra`.
@@ -28,6 +37,8 @@ use serde_json::{json, Value};
 use spargebra::algebra::{GraphPattern, QueryDataset};
 use spargebra::term::{GraphName, GraphNamePattern, NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
+
+use crate::query::executor::detect_construct_where_shorthand;
 
 /// Parse a SPARQL query (or UPDATE) and return a JSONB describing its
 /// top-level shape: form (`SELECT` / `CONSTRUCT` / `ASK` / `DESCRIBE`
@@ -45,7 +56,7 @@ use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 #[pg_extern]
 fn sparql_parse(query: &str) -> pgrx::JsonB {
     match SparqlParser::new().parse_query(query) {
-        Ok(parsed) => pgrx::JsonB(serialize_query(&parsed)),
+        Ok(parsed) => pgrx::JsonB(serialize_query(&parsed, query)),
         Err(query_err) => match SparqlParser::new().parse_update(query) {
             Ok(update) => pgrx::JsonB(serialize_update(&update)),
             // Surface the *query*-side parser error — the
@@ -56,7 +67,7 @@ fn sparql_parse(query: &str) -> pgrx::JsonB {
     }
 }
 
-fn serialize_query(q: &Query) -> Value {
+fn serialize_query(q: &Query, raw: &str) -> Value {
     match q {
         Query::Select { pattern, .. } => {
             let (vars, bgp, unsupported) = walk_select_pattern(pattern);
@@ -68,9 +79,26 @@ fn serialize_query(q: &Query) -> Value {
                 "unsupported_algebra": unsupported,
             })
         }
-        Query::Construct { .. } => {
-            json!({ "form": "CONSTRUCT", "supported": false,
-                    "reason": "CONSTRUCT not in Phase 2.2 scope" })
+        Query::Construct {
+            template, pattern, ..
+        } => {
+            // Phase D slice 52 — CONSTRUCT enrichment. Walk the
+            // template + WHERE pattern, report shapes alongside the
+            // shorthand-form flag and any out-of-scope algebra
+            // modifiers (Distinct / OrderBy / Group / Aggregate)
+            // that pgrdf.construct will refuse at execute time per
+            // LLD §6.2.
+            let where_shape = analyse_where_shape(pattern);
+            let template_shape = analyse_construct_template(template);
+            let shorthand = detect_construct_where_shorthand(raw);
+            let unsupported = detect_unsupported_algebra(pattern);
+            json!({
+                "form":                "CONSTRUCT",
+                "where_shape":         where_shape,
+                "template":            template_shape,
+                "shorthand":           shorthand,
+                "unsupported_algebra": unsupported,
+            })
         }
         Query::Ask { pattern, .. } => {
             let (_vars, bgp, unsupported) = walk_select_pattern(pattern);
@@ -442,6 +470,321 @@ fn named_node_pattern_to_json(n: &NamedNodePattern) -> Value {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase D slice 52 — CONSTRUCT-side analysis helpers.
+// ---------------------------------------------------------------------------
+
+/// Analyse the top-level WHERE pattern of a CONSTRUCT query.
+///
+/// Returns the JSON shape:
+///
+/// ```json
+/// {
+///   "kind": "Bgp" | "Optional" | "Union" | "Minus" | "Graph" |
+///           "Filter" | "Bind" | "Values" | "Group" | "OrderBy" |
+///           "Distinct" | "Service",
+///   "triple_count": <usize>,        // sum of BGP triples beneath this pattern
+///   "named_graphs_used": [..],      // IRIs and ?vars under any GRAPH scope
+///   "variables": [..]               // distinct variables in the WHERE pattern, sorted
+/// }
+/// ```
+///
+/// Trivial outer `Project` wrappers (which spargebra synthesises even
+/// for CONSTRUCT — the `build_select` machinery layers a Project for
+/// the implicit all-vars projection) are peeled before reporting `kind`,
+/// matching how the UPDATE path treats them. A `Slice` wrapper is
+/// likewise transparent. The inner variant — the BGP or composite —
+/// is what surfaces.
+fn analyse_where_shape(pattern: &GraphPattern) -> Value {
+    let inner = peel_trivial_wrappers(pattern);
+    let kind = where_shape_kind(inner);
+    let triple_count = count_bgp_triples(inner);
+    let mut named_graphs: Vec<String> = Vec::new();
+    collect_named_graphs(inner, &mut named_graphs);
+    let mut variables: Vec<String> = Vec::new();
+    collect_pattern_vars(inner, &mut variables);
+    variables.sort();
+    json!({
+        "kind":              kind,
+        "triple_count":      triple_count,
+        "named_graphs_used": named_graphs,
+        "variables":         variables,
+    })
+}
+
+/// Walk past `Project` / `Slice` wrappers that spargebra adds even on
+/// queries that have no meaningful projection (CONSTRUCT in particular
+/// always carries an outer Project for the implicit all-vars list).
+fn peel_trivial_wrappers(p: &GraphPattern) -> &GraphPattern {
+    match p {
+        GraphPattern::Project { inner, .. } | GraphPattern::Slice { inner, .. } => {
+            peel_trivial_wrappers(inner)
+        }
+        _ => p,
+    }
+}
+
+/// Report the spargebra-variant-name (PascalCase, matching the enum
+/// arm names) of the immediate top-level shape, after trivial wrappers
+/// have been peeled.
+fn where_shape_kind(p: &GraphPattern) -> &'static str {
+    match p {
+        GraphPattern::Bgp { .. } => "Bgp",
+        // `LeftJoin` is spargebra's algebra arm for OPTIONAL — surface
+        // the user-visible W3C name rather than the internal algebra
+        // label.
+        GraphPattern::LeftJoin { .. } => "Optional",
+        GraphPattern::Union { .. } => "Union",
+        GraphPattern::Minus { .. } => "Minus",
+        GraphPattern::Graph { .. } => "Graph",
+        GraphPattern::Filter { .. } => "Filter",
+        GraphPattern::Extend { .. } => "Bind",
+        GraphPattern::Values { .. } => "Values",
+        GraphPattern::Group { .. } => "Group",
+        GraphPattern::OrderBy { .. } => "OrderBy",
+        GraphPattern::Distinct { .. } => "Distinct",
+        GraphPattern::Reduced { .. } => "Distinct",
+        GraphPattern::Service { .. } => "Service",
+        GraphPattern::Join { .. } => "Join",
+        GraphPattern::Path { .. } => "Path",
+        // Project / Slice are usually peeled before we reach this
+        // branch; if a caller hands us one directly, surface the
+        // variant name for transparency.
+        GraphPattern::Project { .. } => "Project",
+        GraphPattern::Slice { .. } => "Slice",
+        _ => "Other",
+    }
+}
+
+/// Recursively count BGP triple patterns under any composite shape.
+/// Composite arms (LeftJoin / Union / Minus / Graph / Filter / Extend /
+/// Group / OrderBy / Distinct / Reduced / Slice / Project / Service)
+/// recurse into their inner arms; `Path` and `Values` carry no triples
+/// (Path is a property-path predicate, not a BGP triple; Values is an
+/// inline table) so they contribute zero.
+fn count_bgp_triples(p: &GraphPattern) -> usize {
+    match p {
+        GraphPattern::Bgp { patterns } => patterns.len(),
+        GraphPattern::Join { left, right }
+        | GraphPattern::LeftJoin { left, right, .. }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right } => count_bgp_triples(left) + count_bgp_triples(right),
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Graph { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Group { inner, .. }
+        | GraphPattern::Service { inner, .. } => count_bgp_triples(inner),
+        GraphPattern::Path { .. } | GraphPattern::Values { .. } => 0,
+        _ => 0,
+    }
+}
+
+/// Walk the pattern tree collecting any `GRAPH <iri> { … }` or
+/// `GRAPH ?var { … }` scope names. Literal IRIs surface as the IRI
+/// string verbatim; variables surface as `"?name"` (matching the
+/// `UPDATE` path's `push_graph_name_pattern` convention). Order is
+/// insertion order; duplicates are skipped.
+fn collect_named_graphs(p: &GraphPattern, out: &mut Vec<String>) {
+    match p {
+        GraphPattern::Graph { name, inner } => {
+            let label = match name {
+                NamedNodePattern::NamedNode(n) => n.as_str().to_string(),
+                NamedNodePattern::Variable(v) => format!("?{}", v.as_str()),
+            };
+            if !out.iter().any(|existing| existing == &label) {
+                out.push(label);
+            }
+            collect_named_graphs(inner, out);
+        }
+        GraphPattern::Join { left, right }
+        | GraphPattern::LeftJoin { left, right, .. }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right } => {
+            collect_named_graphs(left, out);
+            collect_named_graphs(right, out);
+        }
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Group { inner, .. }
+        | GraphPattern::Service { inner, .. } => collect_named_graphs(inner, out),
+        _ => {}
+    }
+}
+
+/// Walk the pattern tree collecting every distinct variable name
+/// referenced in any TriplePattern position (subject / predicate /
+/// object). The output list is unsorted on insertion; callers
+/// (`analyse_where_shape`) sort for deterministic regression hashes.
+fn collect_pattern_vars(p: &GraphPattern, out: &mut Vec<String>) {
+    match p {
+        GraphPattern::Bgp { patterns } => {
+            for tp in patterns {
+                if let TermPattern::Variable(v) = &tp.subject {
+                    push_unique(out, format!("?{}", v.as_str()));
+                }
+                if let NamedNodePattern::Variable(v) = &tp.predicate {
+                    push_unique(out, format!("?{}", v.as_str()));
+                }
+                if let TermPattern::Variable(v) = &tp.object {
+                    push_unique(out, format!("?{}", v.as_str()));
+                }
+            }
+        }
+        GraphPattern::Graph { name, inner } => {
+            if let NamedNodePattern::Variable(v) = name {
+                push_unique(out, format!("?{}", v.as_str()));
+            }
+            collect_pattern_vars(inner, out);
+        }
+        GraphPattern::Join { left, right }
+        | GraphPattern::LeftJoin { left, right, .. }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right } => {
+            collect_pattern_vars(left, out);
+            collect_pattern_vars(right, out);
+        }
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Group { inner, .. }
+        | GraphPattern::Service { inner, .. } => collect_pattern_vars(inner, out),
+        _ => {}
+    }
+}
+
+fn push_unique(out: &mut Vec<String>, value: String) {
+    if !out.iter().any(|existing| existing == &value) {
+        out.push(value);
+    }
+}
+
+/// Analyse a CONSTRUCT template (`Vec<TriplePattern>`), returning:
+///
+/// ```json
+/// {
+///   "triple_count": <usize>,
+///   "has_variables": <bool>,
+///   "has_blank_nodes": <bool>,
+///   "has_constants_only": <bool>,   // !has_variables && !has_blank_nodes
+///   "variables": [..]               // distinct, sorted
+/// }
+/// ```
+fn analyse_construct_template(template: &[TriplePattern]) -> Value {
+    let mut has_variables = false;
+    let mut has_blank_nodes = false;
+    let mut variables: Vec<String> = Vec::new();
+    for tp in template {
+        match &tp.subject {
+            TermPattern::Variable(v) => {
+                has_variables = true;
+                push_unique(&mut variables, format!("?{}", v.as_str()));
+            }
+            TermPattern::BlankNode(_) => has_blank_nodes = true,
+            _ => {}
+        }
+        match &tp.predicate {
+            NamedNodePattern::Variable(v) => {
+                has_variables = true;
+                push_unique(&mut variables, format!("?{}", v.as_str()));
+            }
+            NamedNodePattern::NamedNode(_) => {}
+        }
+        match &tp.object {
+            TermPattern::Variable(v) => {
+                has_variables = true;
+                push_unique(&mut variables, format!("?{}", v.as_str()));
+            }
+            TermPattern::BlankNode(_) => has_blank_nodes = true,
+            _ => {}
+        }
+    }
+    variables.sort();
+    let has_constants_only = !has_variables && !has_blank_nodes;
+    json!({
+        "triple_count":       template.len(),
+        "has_variables":      has_variables,
+        "has_blank_nodes":    has_blank_nodes,
+        "has_constants_only": has_constants_only,
+        "variables":          variables,
+    })
+}
+
+/// Detect WHERE-clause shapes that `pgrdf.construct` will reject at
+/// execute time (LLD §6.2; cf.
+/// `crate::query::executor::reject_construct_modifiers`): `Distinct` /
+/// `OrderBy` / `Group` modifiers and `Aggregate` expressions inside a
+/// `Group`. Wrappers are returned by their W3C-facing names, matching
+/// the executor's reject prefix family. The walk descends through all
+/// composite shapes so a modifier nested inside a sub-SELECT or under
+/// a UNION arm still surfaces.
+fn detect_unsupported_algebra(p: &GraphPattern) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    walk_unsupported(p, &mut out);
+    out
+}
+
+fn walk_unsupported(p: &GraphPattern, out: &mut Vec<&'static str>) {
+    match p {
+        GraphPattern::Distinct { inner } => {
+            push_unique_static(out, "Distinct");
+            walk_unsupported(inner, out);
+        }
+        GraphPattern::Reduced { inner } => {
+            // REDUCED is a DISTINCT cousin per W3C 1.1 §15.6 — same
+            // reject family per LLD §6.2.
+            push_unique_static(out, "Distinct");
+            walk_unsupported(inner, out);
+        }
+        GraphPattern::OrderBy { inner, .. } => {
+            push_unique_static(out, "OrderBy");
+            walk_unsupported(inner, out);
+        }
+        GraphPattern::Group {
+            inner, aggregates, ..
+        } => {
+            push_unique_static(out, "Group");
+            if !aggregates.is_empty() {
+                push_unique_static(out, "Aggregate");
+            }
+            walk_unsupported(inner, out);
+        }
+        GraphPattern::Join { left, right }
+        | GraphPattern::LeftJoin { left, right, .. }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right } => {
+            walk_unsupported(left, out);
+            walk_unsupported(right, out);
+        }
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Graph { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Service { inner, .. } => walk_unsupported(inner, out),
+        _ => {}
+    }
+}
+
+fn push_unique_static(out: &mut Vec<&'static str>, value: &'static str) {
+    if !out.contains(&value) {
+        out.push(value);
+    }
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
@@ -805,6 +1148,100 @@ mod tests {
         let ops = j.0["operations"].as_array().unwrap();
         assert_eq!(ops[0]["op"], "Drop");
         assert_eq!(ops[0]["target"], "ALL");
+    }
+
+    /// Phase D slice 52 — CONSTRUCT enrichment. A constant-only
+    /// template (no variables, no blank nodes) reports
+    /// `has_constants_only: true`, `has_variables: false`, and the
+    /// WHERE shape's `kind` is `"Bgp"` for a trivial BGP pattern. The
+    /// `shorthand` flag is false (explicit `CONSTRUCT { ... } WHERE { ... }`).
+    #[pg_test]
+    fn sparql_parse_construct_constant_template() {
+        let q =
+            "CONSTRUCT { <http://example.org/s> <http://example.org/p> \"x\" } WHERE { ?s ?p ?o }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        assert_eq!(v["form"], "CONSTRUCT");
+        let tmpl = &v["template"];
+        assert_eq!(tmpl["triple_count"], 1);
+        assert_eq!(tmpl["has_constants_only"], true);
+        assert_eq!(tmpl["has_variables"], false);
+        assert_eq!(tmpl["has_blank_nodes"], false);
+        assert_eq!(v["where_shape"]["kind"], "Bgp");
+        assert_eq!(v["shorthand"], false);
+        let unsupported = v["unsupported_algebra"].as_array().unwrap();
+        assert!(unsupported.is_empty());
+    }
+
+    /// Phase D slice 52 — variable template. `?s` and `?o` appear in
+    /// the template; the constant literal `"src"` is NOT a variable so
+    /// the template's `variables` array contains only `?s` and `?o`.
+    #[pg_test]
+    fn sparql_parse_construct_variable_template() {
+        let q = "PREFIX ex: <http://example.org/> \
+                 CONSTRUCT { ?s ex:tag ?o . ?s ex:from \"src\" } \
+                 WHERE { ?s ex:p ?o . ?s ex:p2 ?o2 }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        let tmpl = &v["template"];
+        assert_eq!(tmpl["triple_count"], 2);
+        assert_eq!(tmpl["has_variables"], true);
+        let tmpl_vars = tmpl["variables"].as_array().unwrap();
+        // Sorted: ?o, ?s.
+        assert_eq!(tmpl_vars.len(), 2);
+        assert!(tmpl_vars.iter().any(|x| x.as_str() == Some("?o")));
+        assert!(tmpl_vars.iter().any(|x| x.as_str() == Some("?s")));
+        // WHERE has four distinct variables: ?o, ?o2, ?p (no — predicate is
+        // constant ex:p), ?s. Predicate is constant so it's NOT a variable.
+        let where_vars = v["where_shape"]["variables"].as_array().unwrap();
+        assert!(where_vars.iter().any(|x| x.as_str() == Some("?s")));
+        assert!(where_vars.iter().any(|x| x.as_str() == Some("?o")));
+        assert!(where_vars.iter().any(|x| x.as_str() == Some("?o2")));
+        assert_eq!(v["where_shape"]["triple_count"], 2);
+    }
+
+    /// Phase D slice 52 — shorthand form. `CONSTRUCT WHERE { ?s ?p ?o }`
+    /// is equivalent to `CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }`; the
+    /// `shorthand` flag MUST be true. spargebra populates the AST's
+    /// `template` from the BGP at parse time, so template/where shapes
+    /// match each other.
+    #[pg_test]
+    fn sparql_parse_construct_shorthand_form() {
+        let q = "CONSTRUCT WHERE { ?s ?p ?o }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        assert_eq!(v["form"], "CONSTRUCT");
+        assert_eq!(v["shorthand"], true);
+        assert_eq!(v["template"]["triple_count"], 1);
+        assert_eq!(v["where_shape"]["triple_count"], 1);
+        assert_eq!(v["where_shape"]["kind"], "Bgp");
+    }
+
+    /// Phase D slice 52 — unsupported algebra detection. DISTINCT
+    /// inside the CONSTRUCT's WHERE (via a sub-SELECT) surfaces as
+    /// `Distinct` in `unsupported_algebra`. The query still parses to
+    /// `form: "CONSTRUCT"` — the flag just signals
+    /// `pgrdf.construct` will panic at execute time per LLD §6.2.
+    #[pg_test]
+    fn sparql_parse_construct_unsupported_distinct() {
+        let q = "CONSTRUCT { <http://example.org/s> <http://example.org/p> \"x\" } \
+                 WHERE { { SELECT DISTINCT ?s WHERE { ?s ?p ?o } } }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        assert_eq!(v["form"], "CONSTRUCT");
+        let unsupported = v["unsupported_algebra"].as_array().unwrap();
+        assert!(
+            unsupported.iter().any(|x| x.as_str() == Some("Distinct")),
+            "expected Distinct flagged, got {unsupported:?}"
+        );
     }
 
     #[pg_test]

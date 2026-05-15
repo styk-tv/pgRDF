@@ -88,7 +88,9 @@ already enumerated in [`v0.3 §3`](SPEC.pgRDF.LLD.v0.3.md) as
    `copy_graph`, `move_graph` as state-management primitives over
    the LIST-partitioned `_pgrdf_quads` table. 🚧
 4. **CONSTRUCT** (§6) — `pgrdf.construct(q TEXT) → SETOF JSONB`
-   returning `{subject, predicate, object}`-shaped rows. 🚧
+   returning `{subject, predicate, object}`-shaped rows. ✅ shipped
+   across Phase D countdown slices 59 → 52 (templates, GRAPH-scoped
+   WHERE, shorthand, round-trip ingest, `sparql_parse` enrichment).
 5. **Property paths** (§7) — `*`, `+`, `?`, `^`, with alternation
    `p1|p2` as a stretch. Materialised-closure-aware translation. 🚧
 6. **SHACL real validation** (§9) — `pgrdf.validate(data, shapes)`
@@ -114,7 +116,7 @@ Capability matrix for the v0.4 target:
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | ✅ slice 79 |
 | Lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / ALL / NAMED`) | not yet | §4.4 | ✅ slice 78 |
 | `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | ✅ all four shipped (slices 99 / 98 / 97 / 96) |
-| `CONSTRUCT` | ⏳ deferred | §6 | 🚧 (slice 53: variables + constants + blank-node templates + N-triple templates (with cross-triple bnode label joining) + GRAPH-scoped WHERE (literal-IRI and variable form, W3C §13.3 named-graph-only) + WHERE shorthand (W3C SPARQL 1.1 §16.2.4, pure BGP only, no blank nodes) + **round-trip ingest via `pgrdf.put_construct_row` / `pgrdf.put_construct_rows`** (slice 53; preserves typed literals, language tags, and within-solution bnode joining; idempotent re-ingest); `sparql_parse` enrichment (slice 50) still pending) |
+| `CONSTRUCT` | ⏳ deferred | §6 | ✅ slice 52 (variables + constants + blank-node templates + N-triple templates (with cross-triple bnode label joining) + GRAPH-scoped WHERE (literal-IRI and variable form, W3C §13.3 named-graph-only) + WHERE shorthand (W3C SPARQL 1.1 §16.2.4, pure BGP only, no blank nodes) + **round-trip ingest via `pgrdf.put_construct_row` / `pgrdf.put_construct_rows`** (slice 53; preserves typed literals, language tags, and within-solution bnode joining; idempotent re-ingest) + **`sparql_parse` CONSTRUCT enrichment** (slice 52; `form: "CONSTRUCT"` with `template` (triple count, has_variables, has_blank_nodes, has_constants_only, variables) and `where_shape` (kind, triple_count, named_graphs_used, variables) blocks; `shorthand` flag; `unsupported_algebra` lists Distinct/OrderBy/Group/Aggregate wrappings that panic at execute time per §6.2)) |
 | Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | 🚧 |
 | Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | 🚧 |
 | Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | 🚧 |
@@ -559,7 +561,8 @@ route IRI input through `pgrdf.graph_id(iri)` explicitly.
 `CONSTRUCT` is the canonical SPARQL form for graph snapshot export,
 Turtle output, and sub-graph extraction. v0.3 lists it as
 deferred-to-v0.4 because its return shape (triples, not solutions)
-diverges from the `pgrdf.sparql` JSONB row shape. 🚧 (slice 54:
+diverges from the `pgrdf.sparql` JSONB row shape. ✅ shipped across
+Phase D countdown slices 59 → 52 (slice 52:
 CONSTRUCT WHERE shorthand landed. `CONSTRUCT WHERE { pattern }` is
 equivalent to `CONSTRUCT { pattern } WHERE { pattern }` per W3C
 SPARQL 1.1 §16.2.4 ("the pattern itself"). spargebra populates the
@@ -605,8 +608,23 @@ typed literals, language tags, and within-solution bnode
 joining preserved; the plural form maintains a per-call bnode
 label map so labels shared across multiple template-triple
 rows resolve to one stored blank node. Re-ingestion is
-idempotent via `WHERE NOT EXISTS`. `sparql_parse` enrichment
-(slice 50) still pending.)
+idempotent via `WHERE NOT EXISTS`. Slice 52 ships `sparql_parse`
+enrichment: `Query::Construct` now returns the structured shape
+`{form: "CONSTRUCT", template: { … }, where_shape: { … }, shorthand,
+unsupported_algebra}` rather than the placeholder
+`supported: false`. `template` reports `triple_count` /
+`has_variables` / `has_blank_nodes` / `has_constants_only` /
+`variables`; `where_shape` reports the immediate top-level pattern
+variant (`kind`) along with `triple_count` (recursive BGP count),
+`named_graphs_used` (literal IRIs and `?var` sentinels under any
+GRAPH scope), and `variables` (sorted). The `shorthand` flag
+detects the W3C §16.2.4 form via the same ASCII probe
+`pgrdf.construct` uses (`detect_construct_where_shorthand` —
+hoisted to `pub(crate)` and shared with the executor).
+`unsupported_algebra` lists `Distinct` / `OrderBy` / `Group` /
+`Aggregate` wrappings that `pgrdf.construct` will panic on at
+execute time per §6.2 — surfaced ahead of execution so callers
+can route on the JSONB shape alone.)
 
 ### 6.1 Surface decision
 

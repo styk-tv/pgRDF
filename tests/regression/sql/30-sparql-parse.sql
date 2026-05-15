@@ -67,14 +67,18 @@ SELECT (
   )->'unsupported_algebra'
 )::text AS unsupported_path;
 
--- 5. CONSTRUCT recognised but flagged out-of-scope.
+-- 5. CONSTRUCT — Phase D slice 52 enriched the JSONB shape: `form` is
+-- still `"CONSTRUCT"` but the `supported: false` placeholder is gone,
+-- replaced by `template` + `where_shape` + `shorthand` +
+-- `unsupported_algebra`. See 107-sparql-parse-construct for full
+-- coverage; here we just lock the `form` field.
 SELECT (
   pgrdf.sparql_parse('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }')->>'form'
 ) AS form_construct;
 
 SELECT (
-  pgrdf.sparql_parse('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }')->>'supported'
-)::bool AS construct_supported;
+  pgrdf.sparql_parse('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }')->'template'->>'triple_count'
+)::int AS construct_template_triples;
 
 -- 6. Literal object (typed) round-trips through the JSONB shape.
 SELECT (

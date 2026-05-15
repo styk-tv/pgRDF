@@ -199,8 +199,19 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
       blank-node label joining are all preserved; re-ingestion is
       idempotent via `WHERE NOT EXISTS`; NULL array input is a no-op
       so the `(SELECT array_agg(j) FROM pgrdf.construct(...))`
-      idiom works for empty-result queries too).
-      `pgrdf.sparql_parse` enrichment (slice 50) still pending.
+      idiom works for empty-result queries too). ✅ slice 52 landed
+      (`pgrdf.sparql_parse` CONSTRUCT enrichment: returns `form:
+      "CONSTRUCT"` with a `template` block reporting `triple_count` /
+      `has_variables` / `has_blank_nodes` / `has_constants_only` /
+      `variables`, and a `where_shape` block reporting `kind` (Bgp /
+      Optional / Union / Minus / Graph / Filter / Bind / Values /
+      Group / OrderBy / Distinct / Service) / `triple_count` /
+      `named_graphs_used` / `variables`. Shorthand form
+      (`CONSTRUCT WHERE { … }`) surfaces via the `shorthand` flag,
+      detected with the same ASCII probe `pgrdf.construct` uses
+      (slice 54). `unsupported_algebra` flags `Distinct` / `OrderBy` /
+      `Group` / `Aggregate` wrappings — `pgrdf.construct` panics on
+      these at execute time per LLD §6.2.).
       `DESCRIBE` carried forward. (`ASK` shipped step 12.) LLD v0.4
       §6.
 

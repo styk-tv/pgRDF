@@ -484,12 +484,54 @@ Concrete shape:
           'WHERE { GRAPH <urn:src> { ?s ?p ?o } }') AS t(j)),
         dst_graph_id);
       ```
-      `sparql_parse` enrichment for CONSTRUCT (slice 50) still
-      pending. DISTINCT / ORDER BY /
-      GROUP BY / aggregates on CONSTRUCT are explicitly out of scope
-      per W3C 1.1 §16.2 — rejected with `pgrdf.construct: DISTINCT /
-      ORDER BY / GROUP BY / aggregates not supported (W3C 1.1
-      §16.2)`.
+      **`sparql_parse` CONSTRUCT enrichment (slice 52)** — the
+      previous placeholder `{form: "CONSTRUCT", supported: false,
+      reason: "…"}` is gone. `pgrdf.sparql_parse` now returns the
+      structured shape:
+      ```json
+      {
+        "form": "CONSTRUCT",
+        "template": {
+          "triple_count": 1,
+          "has_variables": true,
+          "has_blank_nodes": false,
+          "has_constants_only": false,
+          "variables": ["?o", "?s"]
+        },
+        "where_shape": {
+          "kind": "Bgp",
+          "triple_count": 1,
+          "named_graphs_used": [],
+          "variables": ["?o", "?p", "?s"]
+        },
+        "shorthand": false,
+        "unsupported_algebra": []
+      }
+      ```
+      `template.has_constants_only` is true iff the template has no
+      variables and no blank nodes (the all-constants case the
+      slice-59 foundation supported). `where_shape.kind` is the
+      W3C-facing name of the immediate top-level WHERE pattern
+      variant (`Bgp` / `Optional` / `Union` / `Minus` / `Graph` /
+      `Filter` / `Bind` / `Values` / `Group` / `OrderBy` /
+      `Distinct` / `Service`); trivial outer `Project` / `Slice`
+      wrappers that spargebra adds for the implicit all-vars
+      projection are peeled before reporting. `triple_count` sums
+      BGP triples recursively across composite shapes;
+      `named_graphs_used` lists literal IRIs and `?var` sentinels
+      under any GRAPH scope; `variables` is the distinct sorted
+      list of variables in the WHERE pattern.
+      `shorthand` is true when the input is in W3C SPARQL 1.1 §16.2.4
+      form (`CONSTRUCT WHERE { ... }`), detected with the same ASCII
+      probe `pgrdf.construct` uses. `unsupported_algebra` flags
+      `Distinct` / `OrderBy` / `Group` / `Aggregate` modifiers that
+      `pgrdf.construct` will panic on at execute time per LLD §6.2 —
+      surfaced ahead of execution so callers can route on the JSONB
+      shape alone.
+      DISTINCT / ORDER BY / GROUP BY / aggregates on CONSTRUCT are
+      explicitly out of scope per W3C 1.1 §16.2 — rejected with
+      `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates
+      not supported (W3C 1.1 §16.2)`.
 - ⏳ `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4
