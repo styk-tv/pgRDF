@@ -117,6 +117,7 @@
 //!
 //! Reference: SPEC.pgRDF.LLD.v0.4 §3.1, §3.2, §5.1.
 
+use crate::storage::partition::acquire_partition_ddl_gate;
 use pgrx::prelude::*;
 
 /// Look up the integer `graph_id` bound to an IRI in
@@ -212,6 +213,16 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
     if id == 0 {
         panic!("drop_graph: cannot drop default partition (graph_id = 0)");
     }
+
+    // Partition-DDL gate FIRST — the same global outermost lock the
+    // `add_graph` family takes. `DETACH PARTITION` / `DROP TABLE`
+    // below escalate to `AccessExclusiveLock` on the `_pgrdf_quads`
+    // parent (the original deadlock surface), and this path also
+    // writes `_pgrdf_graphs`. Taking the gate before either makes a
+    // concurrent `add_graph` / `drop_graph` QUEUE on the advisory
+    // lock instead of racing the parent's catalog lock. Re-entrant
+    // and xact-scoped (releases at the pgrx rollback boundary).
+    acquire_partition_ddl_gate();
 
     // Partition existence check — idempotent path returns 0 without
     // error when the partition is already absent. We still clean up
@@ -642,6 +653,7 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
+    use crate::storage::partition::create_quads_partition;
     use pgrx::prelude::*;
 
     /// Slice 120 — the table is materialised at `CREATE EXTENSION`
@@ -998,11 +1010,7 @@ mod tests {
         // Use an id unique to this slice so concurrent pg_test workers
         // don't fight on the partition LIST value or the `_pgrdf_graphs`
         // primary key.
-        Spi::run(
-            "CREATE TABLE pgrdf._pgrdf_quads_g992200 \
-             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (992200)",
-        )
-        .expect("manual partition creation failed");
+        create_quads_partition(992200);
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
              VALUES (992200, 'http://example.org/g992200')",
@@ -1049,11 +1057,7 @@ mod tests {
         error = "drop_graph: inferred rows present (graph_id = 993300); pass cascade => true to proceed"
     )]
     fn drop_graph_cascade_false_blocks_inferred() {
-        Spi::run(
-            "CREATE TABLE pgrdf._pgrdf_quads_g993300 \
-             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (993300)",
-        )
-        .expect("manual partition creation failed");
+        create_quads_partition(993300);
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_quads \
                 (subject_id, predicate_id, object_id, graph_id, is_inferred) \
@@ -1221,11 +1225,7 @@ mod tests {
     /// can't collide on the partition LIST value or the rows.
     #[pg_test]
     fn copy_graph_happy_path() {
-        Spi::run(
-            "CREATE TABLE pgrdf._pgrdf_quads_g971100 \
-             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (971100)",
-        )
-        .expect("manual src partition creation failed");
+        create_quads_partition(971100);
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_quads \
                 (subject_id, predicate_id, object_id, graph_id, is_inferred) \

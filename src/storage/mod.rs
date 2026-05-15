@@ -6,6 +6,8 @@
 //!     §3.1, schema landed by Phase A slice 120; UDF surface lands
 //!     in subsequent slices).
 //!   * [`hexastore`] — partitioned `_pgrdf_quads` CRUD + `add_graph`.
+//!   * [`partition`] — serialised `_pgrdf_quads` partition DDL (xact
+//!     advisory lock; restores parallel test threads, see module docs).
 //!   * [`loader`] — Turtle ingest with per-call cache + batched
 //!     prepared INSERTs (LLD §4.3 phase A).
 //!   * [`construct_ingest`] — round-trip pair for `pgrdf.construct`:
@@ -24,5 +26,6 @@ pub mod dict;
 pub mod graphs;
 pub mod hexastore;
 pub mod loader;
+pub mod partition;
 pub mod shmem_cache;
 pub mod stats;

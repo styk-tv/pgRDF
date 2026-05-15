@@ -4,6 +4,7 @@
 //! `COPY … FROM STDIN (FORMAT BINARY)` lands in Phase 2.1 per
 //! [`docs/02-storage.md`].
 
+use crate::storage::partition::{acquire_partition_ddl_gate, create_quads_partition};
 use pgrx::prelude::*;
 
 /// Insert one quad into the partitioned hexastore. The graph_id
@@ -58,6 +59,14 @@ fn add_graph(g: i64) -> bool {
     if g < 0 {
         panic!("add_graph: graph_id must be >= 0, got {}", g);
     }
+    // Take the partition-DDL gate FIRST — the global outermost lock
+    // (see `partition::acquire_partition_ddl_gate`). This must precede
+    // both the partition `CREATE` *and* the `_pgrdf_graphs` INSERT
+    // below so this path agrees on the same `advisory → _pgrdf_graphs`
+    // order the IRI-keyed overloads use; otherwise concurrent callers
+    // deadlock on `_pgrdf_graphs` instead of the parent. Re-entrant:
+    // `create_quads_partition` re-acquires the same key cheaply.
+    acquire_partition_ddl_gate();
     let part_name = format!("_pgrdf_quads_g{}", g);
     let exists: bool = Spi::get_one_with_args(
         "SELECT EXISTS(
@@ -71,15 +80,18 @@ fn add_graph(g: i64) -> bool {
     if exists {
         return false;
     }
-    // `part_name` is a string we constructed from a BIGINT (no user
-    // input in a SQL identifier position), so direct interpolation is
-    // safe. `g` is bound via the LIST value position which Postgres
-    // accepts as a constant in DDL.
-    let sql = format!(
-        "CREATE TABLE pgrdf.{} PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN ({})",
-        part_name, g
-    );
-    Spi::run(&sql).expect("add_graph: CREATE TABLE failed");
+    // Partition creation goes through the centralised, advisory-lock-
+    // serialised helper (see `storage::partition`). Concurrent
+    // `add_graph` callers QUEUE on the xact advisory lock instead of
+    // deadlocking on the `_pgrdf_quads` parent's AccessExclusiveLock —
+    // which is what makes parallel `cargo pgrx test` (and CI without
+    // `RUST_TEST_THREADS=1`) deadlock-free. The helper re-checks
+    // existence INSIDE the lock, so if a concurrent caller created
+    // this same partition while we were queued, it is a safe no-op
+    // (we already returned `false` above for the pre-existing case;
+    // the racing-create case still yields a created partition and we
+    // report `true`, which is the correct "ensured present" signal).
+    create_quads_partition(g);
     // Slice 119 — bind the synthetic IRI for this graph_id in
     // `_pgrdf_graphs`. `ON CONFLICT (graph_id) DO NOTHING` keeps the
     // UDF re-entrant: if a prior writer (or a future explicit
@@ -135,6 +147,15 @@ fn add_graph_iri(iri: &str) -> i64 {
     if iri.trim().is_empty() {
         panic!("add_graph: iri must be non-empty");
     }
+
+    // Partition-DDL gate FIRST — the global outermost lock — taken
+    // *before* the `_pgrdf_graphs` table lock below so this overload
+    // agrees on the same `advisory → _pgrdf_graphs` order the integer
+    // overload uses (it re-enters here via `SELECT pgrdf.add_graph`,
+    // and `create_quads_partition` re-acquires the same key cheaply).
+    // Without this the two paths invert their lock order and deadlock
+    // on `_pgrdf_graphs`.
+    acquire_partition_ddl_gate();
 
     // Serialise concurrent allocate-and-insert. SHARE ROW EXCLUSIVE
     // blocks other writers (including itself) but not readers; the
@@ -232,6 +253,13 @@ fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
     if iri.trim().is_empty() {
         panic!("add_graph: iri must be non-empty");
     }
+
+    // Partition-DDL gate FIRST — global outermost lock — before the
+    // `_pgrdf_graphs` table lock, so this overload's lock order
+    // matches the integer overload it re-enters via
+    // `SELECT pgrdf.add_graph`. (See `add_graph_iri` for the full
+    // rationale; same deadlock-avoidance contract.)
+    acquire_partition_ddl_gate();
 
     // Serialise concurrent (id, iri) writers — same idiom as the
     // IRI-keyed overload. SHARE ROW EXCLUSIVE blocks other writers

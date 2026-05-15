@@ -5281,6 +5281,7 @@ fn execute_delete_insert_where(
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
+    use crate::storage::partition::create_quads_partition_named;
     use pgrx::prelude::*;
 
     /// Load three triples then issue a basic 3-var SELECT — every
@@ -6962,16 +6963,8 @@ mod tests {
                     (502, 'http://example.org/test-g2')",
         )
         .unwrap();
-        Spi::run(
-            "CREATE TABLE pgrdf._pgrdf_quads_test501 \
-             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (501)",
-        )
-        .unwrap();
-        Spi::run(
-            "CREATE TABLE pgrdf._pgrdf_quads_test502 \
-             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (502)",
-        )
-        .unwrap();
+        create_quads_partition_named("_pgrdf_quads_test501", 501);
+        create_quads_partition_named("_pgrdf_quads_test502", 502);
         Spi::run(
             "SELECT pgrdf.parse_turtle(\
                  '@prefix ex: <http://example.org/> . \
@@ -7042,16 +7035,8 @@ mod tests {
                     (512, 'http://example.org/test-v2')",
         )
         .unwrap();
-        Spi::run(
-            "CREATE TABLE pgrdf._pgrdf_quads_test511 \
-             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (511)",
-        )
-        .unwrap();
-        Spi::run(
-            "CREATE TABLE pgrdf._pgrdf_quads_test512 \
-             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (512)",
-        )
-        .unwrap();
+        create_quads_partition_named("_pgrdf_quads_test511", 511);
+        create_quads_partition_named("_pgrdf_quads_test512", 512);
         // Two triples in g1 (so the multi-triple BGP can match a
         // shared subject), two in g2.
         Spi::run(
@@ -7142,11 +7127,7 @@ mod tests {
         )
         .unwrap();
         for gid in [521, 522, 523] {
-            Spi::run(&format!(
-                "CREATE TABLE pgrdf._pgrdf_quads_test{gid} \
-                 PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN ({gid})",
-            ))
-            .unwrap();
+            create_quads_partition_named(&format!("_pgrdf_quads_test{gid}"), gid);
         }
         Spi::run(
             "SELECT pgrdf.parse_turtle(\
@@ -7231,11 +7212,7 @@ mod tests {
         )
         .unwrap();
         for gid in [531, 532] {
-            Spi::run(&format!(
-                "CREATE TABLE pgrdf._pgrdf_quads_test{gid} \
-                 PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN ({gid})",
-            ))
-            .unwrap();
+            create_quads_partition_named(&format!("_pgrdf_quads_test{gid}"), gid);
         }
         Spi::run(
             "SELECT pgrdf.parse_turtle(\
@@ -7280,11 +7257,7 @@ mod tests {
              VALUES (541, 'http://example.org/test-m1')",
         )
         .unwrap();
-        Spi::run(
-            "CREATE TABLE pgrdf._pgrdf_quads_test541 \
-             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (541)",
-        )
-        .unwrap();
+        create_quads_partition_named("_pgrdf_quads_test541", 541);
         // m1: alice has ex:q ; default graph (id 0): alice + bob have ex:p.
         Spi::run(
             "SELECT pgrdf.parse_turtle(\
@@ -7350,11 +7323,7 @@ mod tests {
         )
         .unwrap();
         for gid in [551, 552] {
-            Spi::run(&format!(
-                "CREATE TABLE pgrdf._pgrdf_quads_test{gid} \
-                 PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN ({gid})",
-            ))
-            .unwrap();
+            create_quads_partition_named(&format!("_pgrdf_quads_test{gid}"), gid);
         }
         // v1: alice has both ex:p and ex:q. v2: bob has only ex:p.
         Spi::run(
