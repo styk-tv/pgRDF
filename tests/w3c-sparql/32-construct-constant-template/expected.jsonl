@@ -1,0 +1,3 @@
+{"object": {"type": "literal", "value": "loaded", "datatype": "http://www.w3.org/2001/XMLSchema#string"}, "subject": {"type": "iri", "value": "http://example.org/dataset"}, "predicate": {"type": "iri", "value": "http://example.org/hasState"}}
+{"object": {"type": "literal", "value": "loaded", "datatype": "http://www.w3.org/2001/XMLSchema#string"}, "subject": {"type": "iri", "value": "http://example.org/dataset"}, "predicate": {"type": "iri", "value": "http://example.org/hasState"}}
+{"object": {"type": "literal", "value": "loaded", "datatype": "http://www.w3.org/2001/XMLSchema#string"}, "subject": {"type": "iri", "value": "http://example.org/dataset"}, "predicate": {"type": "iri", "value": "http://example.org/hasState"}}

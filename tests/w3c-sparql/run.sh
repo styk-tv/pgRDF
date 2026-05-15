@@ -7,6 +7,18 @@
 #     data.ttl       — Turtle loaded into a fresh graph
 #     query.rq       — SPARQL query executed via pgrdf.sparql
 #     expected.jsonl — one JSONB row per line, lexicographically sorted
+#     kind           — optional; one word. Default (absent) routes the
+#                      query through `pgrdf.sparql` (SELECT/ASK/UPDATE
+#                      solution-row shape). `construct` routes it
+#                      through `pgrdf.construct` instead — CONSTRUCT
+#                      emits triple rows `{"subject":…,"predicate":…,
+#                      "object":…}`, NOT solution bindings, so it
+#                      cannot go through pgrdf.sparql (which only
+#                      translates SELECT/ASK). The JSON-line filter +
+#                      bag-equivalent sort below works unchanged for
+#                      either shape — both are `{…}` objects per line.
+#                      (Phase D slice 51 — CONSTRUCT W3C-shape fixtures
+#                      30-35.)
 #
 # Compares engine output to expected.jsonl. The comparison is
 # bag-equivalent — both sides are sorted before diffing so unordered
@@ -92,6 +104,17 @@ run_one() {
   local test_dir="$1" query="$2" gid="$3"
   local data="${test_dir}/data.ttl"
   local setup="${test_dir}/setup.sql"
+  local kind_file="${test_dir}/kind"
+  # Phase D slice 51 — per-fixture entry-point selector. Absent →
+  # `pgrdf.sparql` (the v0.3 default; SELECT/ASK/UPDATE). `construct`
+  # → `pgrdf.construct` (CONSTRUCT triple-row shape; pgrdf.sparql
+  # only translates SELECT/ASK so a CONSTRUCT through it would panic
+  # `sparql: query form not supported yet`). Any other value is a
+  # fixture-authoring error and fails loudly.
+  local kind="sparql"
+  if [ -f "${kind_file}" ]; then
+    kind="$(tr -d '[:space:]' < "${kind_file}")"
+  fi
   local q
   q=$(< "${query}")
   # Escape single quotes for SQL string literals.
@@ -123,7 +146,23 @@ run_one() {
     sql+="SELECT pgrdf.parse_turtle('${content_esc}', ${gid});"$'\n'
   fi
 
-  sql+="SELECT sparql::text FROM pgrdf.sparql('${q_esc}');"$'\n'
+  case "${kind}" in
+    sparql)
+      sql+="SELECT sparql::text FROM pgrdf.sparql('${q_esc}');"$'\n'
+      ;;
+    construct)
+      # CONSTRUCT emits one structured-term triple row per
+      # (solution, template-triple) pair (LLD v0.4 §6.1). Rendered
+      # `::text` it is one `{…}` JSON object per line — the same
+      # line shape the JSON-line filter + bag-equivalent sort below
+      # already handles for SELECT solution rows.
+      sql+="SELECT j::text FROM pgrdf.construct('${q_esc}') AS t(j);"$'\n'
+      ;;
+    *)
+      echo "run.sh: unknown kind '${kind}' in ${test_dir}/kind" >&2
+      return 2
+      ;;
+  esac
 
   "${RUNTIME}" exec -i "${CONTAINER}" \
     psql -U "${PSQL_USER}" -d "${PSQL_DB}" \

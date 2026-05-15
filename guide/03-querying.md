@@ -45,7 +45,8 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `DELETE { … } INSERT { … } WHERE { … }` atomic modify | ✅ v0.4.3 |
 | `WITH <iri>` graph scoping, `GRAPH <iri>` in templates + WHERE (cross-graph copy) | ✅ v0.4.3 |
 | Lifecycle algebra — `DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / NAMED / ALL` targets, `SILENT` flag | ✅ v0.4.3 |
-| `CONSTRUCT`, `DESCRIBE` | ⏳ v0.4 |
+| `CONSTRUCT { template } WHERE { … }` (constant / variable / blank-node / multi-triple templates, GRAPH-scoped WHERE, `CONSTRUCT WHERE { … }` shorthand, round-trip ingest) via `pgrdf.construct(q)` | ✅ v0.4 |
+| `DESCRIBE` | ⏳ v0.4 |
 | Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) | ⏳ v0.4 |
 | `VALUES (?x) { … }` inline data | ⏳ v0.4 |
 | Aggregates over `UNION` | ⏳ v0.4 |
@@ -1104,6 +1105,95 @@ For pattern-driven UPDATE forms it surfaces a `kind` label
 the executor's runtime `form`, plus `template_graphs` and (when
 `WITH <iri>` is present) `with_graph`. Lifecycle ops surface a
 `target` label (`DEFAULT` / `NAMED <iri>` / `NAMED_ALL` / `ALL`).
+
+## Building graphs with CONSTRUCT
+
+`CONSTRUCT` produces an RDF graph (triples) instead of a solution
+table. Because the result shape differs from `SELECT`, it has its
+own UDF — **`pgrdf.construct(q TEXT) → SETOF JSONB`** — rather than
+overloading `pgrdf.sparql`. Each returned row is one triple:
+
+```json
+{
+  "subject":   {"type": "iri",     "value": "http://example.org/alice"},
+  "predicate": {"type": "iri",     "value": "http://example.org/label"},
+  "object":    {"type": "literal", "value": "Alice",
+                "datatype": "http://www.w3.org/2001/XMLSchema#string"}
+}
+```
+
+Each term cell is `{"type": "iri"|"literal"|"bnode", "value": …}`
+with `datatype` / `language` on literals (language-tagged literals
+carry both `language` and the implicit `rdf:langString` datatype per
+RDF 1.1 §3.3).
+
+### Worked example — seed → construct → round-trip
+
+Seed a `people` graph, then reshape it into a `labels` graph:
+
+```sql
+SELECT pgrdf.add_graph('http://example.org/people');
+SELECT pgrdf.parse_turtle($$
+  @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+  @prefix ex:   <http://example.org/> .
+  ex:alice foaf:name "Alice" ; foaf:age 30 .
+  ex:bob   foaf:name "Bob"   ; foaf:age 25 .
+$$, pgrdf.graph_id('http://example.org/people'));
+
+-- Inspect the constructed triples (one JSONB row per triple):
+SELECT jsonb_pretty(j)
+FROM pgrdf.construct($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  PREFIX ex:   <http://example.org/>
+  CONSTRUCT { ?p ex:label ?n }
+  WHERE { GRAPH <http://example.org/people> { ?p foaf:name ?n } }
+$$) AS t(j);
+```
+
+`pgrdf.construct` does not write anything — it returns rows. To
+persist the constructed graph, pair it with the round-trip ingest
+UDF **`pgrdf.put_construct_rows(rows JSONB[], graph_id BIGINT)`**:
+
+```sql
+SELECT pgrdf.add_graph('http://example.org/labels');
+
+SELECT pgrdf.put_construct_rows(
+  (SELECT array_agg(j)
+     FROM pgrdf.construct($$
+       PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+       PREFIX ex:   <http://example.org/>
+       CONSTRUCT { ?p ex:label ?n }
+       WHERE { GRAPH <http://example.org/people> { ?p foaf:name ?n } }
+     $$) AS t(j)),
+  pgrdf.graph_id('http://example.org/labels'));   -- → 2 rows landed
+```
+
+Re-ingest is idempotent (set semantics) — running the same pairing
+twice lands the second batch as a no-op. Typed literals, language
+tags, and within-solution blank-node joining all survive the
+round-trip. A NULL array (from `array_agg` over an empty result) is
+also a safe no-op. The single-row primitive
+`pgrdf.put_construct_row(row JSONB, graph_id BIGINT)` exists for
+callers that batch coordination themselves; the plural form is the
+recommended surface.
+
+### Template forms
+
+| Form | Example | Notes |
+|---|---|---|
+| Constant template | `CONSTRUCT { ex:g ex:status "live" } WHERE { ?s ?p ?o }` | One row per solution (multiplicity preserved) |
+| Variable template | `CONSTRUCT { ?s ex:copied ?o } WHERE { ?s ?p ?o }` | Per-solution substitution through the dictionary |
+| Blank-node template | `CONSTRUCT { ?s ex:n _:v . _:v ex:val ?o } WHERE { ?s ex:p ?o }` | Fresh `_:v` per solution; shared across the solution's triples |
+| Multi-triple template | `CONSTRUCT { ?s a ex:T . ?s ex:v ?o } WHERE { ?s ex:p ?o }` | N triples → N rows per solution |
+| GRAPH-scoped WHERE | `CONSTRUCT { ?s ex:from ?g } WHERE { GRAPH ?g { ?s ?p ?o } }` | `GRAPH ?g` ranges over named graphs only (W3C §13.3) |
+| WHERE shorthand | `CONSTRUCT WHERE { ?s ?p ?o }` | Equivalent to explicit form (W3C §16.2.4); pure BGP, no blank nodes |
+
+`DISTINCT` / `ORDER BY` / `GROUP BY` / aggregates are not valid on
+`CONSTRUCT` (W3C SPARQL 1.1 §16.2) and are rejected with a stable
+`pgrdf.construct: …` error prefix. `pgrdf.sparql_parse(q)` reports
+`form: "CONSTRUCT"` with `template` / `where_shape` / `shorthand` /
+`unsupported_algebra` blocks so you can preview a CONSTRUCT before
+running it (see below).
 
 ## Inspecting queries before running them
 

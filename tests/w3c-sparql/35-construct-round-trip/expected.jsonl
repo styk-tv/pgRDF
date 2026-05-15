@@ -1,0 +1,3 @@
+{"object": {"type": "iri", "value": "http://example.org/b"}, "subject": {"type": "iri", "value": "http://example.org/a"}, "predicate": {"type": "iri", "value": "http://example.org/p"}}
+{"object": {"type": "literal", "value": "hello", "datatype": "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString", "language": "en"}, "subject": {"type": "iri", "value": "http://example.org/b"}, "predicate": {"type": "iri", "value": "http://example.org/q"}}
+{"object": {"type": "literal", "value": "7", "datatype": "http://www.w3.org/2001/XMLSchema#integer"}, "subject": {"type": "iri", "value": "http://example.org/c"}, "predicate": {"type": "iri", "value": "http://example.org/r"}}

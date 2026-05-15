@@ -167,7 +167,9 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`,
       alternation). Simple sequence already works because spargebra
       desugars `:a/:b` into a BGP chain. LLD v0.4 §7.
-- 🚧 `CONSTRUCT` — slice 59 landed (foundation, constant-only
+- ✅ `CONSTRUCT` — full surface shipped across Phase D countdown
+      slices 59 → 51 (slice 50 = the v0.4.4 release cut remains).
+      slice 59 landed (foundation, constant-only
       templates); slice 58 landed (variable substitution — subject /
       predicate / object positions); slice 57 landed (blank-node
       template positions with per-solution fresh-label minting +
@@ -211,7 +213,16 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
       detected with the same ASCII probe `pgrdf.construct` uses
       (slice 54). `unsupported_algebra` flags `Distinct` / `OrderBy` /
       `Group` / `Aggregate` wrappings — `pgrdf.construct` panics on
-      these at execute time per LLD §6.2.).
+      these at execute time per LLD §6.2.). ✅ slice 51 landed
+      (W3C-shape CONSTRUCT conformance fixtures 30-35 in
+      `tests/w3c-sparql/` — basic bnode+var+multi-triple §16.2.1,
+      WHERE shorthand §16.2.4, constant-template multiplicity §16.2,
+      variable-GRAPH §13.3, typed/lang-literal term shaping, and
+      round-trip via `pgrdf.put_construct_rows`; the harness gained a
+      surgical per-fixture `kind: construct` selector routing through
+      `pgrdf.construct` instead of `pgrdf.sparql` — plus a docs /
+      spec / guide coherence sweep). Phase D is feature- and
+      test-complete; only slice 50 (the v0.4.4 release cut) remains.
       `DESCRIBE` carried forward. (`ASK` shipped step 12.) LLD v0.4
       §6.
 

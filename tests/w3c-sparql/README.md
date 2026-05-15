@@ -12,14 +12,23 @@ is one test:
   setup.sql      — optional per-test SQL run BEFORE data.ttl (slice 111+);
                    used by §13.3 GRAPH fixtures that need MULTIPLE named
                    graphs. When present, data.ttl MAY be empty.
+  kind           — optional one-word entry-point selector (slice 51+).
+                   Absent (default) → query.rq runs through pgrdf.sparql
+                   (SELECT / ASK / UPDATE solution-row shape).
+                   `construct` → query.rq runs through pgrdf.construct
+                   (CONSTRUCT triple-row shape `{subject,predicate,
+                   object}`; pgrdf.sparql only translates SELECT / ASK).
 ```
 
-**Phase 6 step 2 (v0.3) ships the runner + 5 starter tests.** The
-**actual W3C SPARQL 1.1 manifest runner** — reading
+Phase 6 step 2 (v0.3) shipped the runner + 5 starter tests; the
+suite has since grown to **35 hand-authored fixtures** spanning
+SELECT / ASK (01-23), GRAPH (24-26), UPDATE (27-29), and CONSTRUCT
+(30-35, Phase D slice 51). The **actual W3C SPARQL 1.1 manifest
+runner** — reading
 `https://w3c.github.io/rdf-tests/sparql/sparql11/manifest.ttl`,
 materialising each test from `mf:QueryEvaluationTest`, comparing
-SRX / SRJ result graphs — is a v0.4 work item; we don't yet
-parse SRX/SRJ.
+SRX / SRJ result graphs — is later v0.4 work; we don't yet parse
+SRX/SRJ.
 
 ## Runner
 
@@ -85,8 +94,17 @@ against the W3C spec is the load-bearing part.
 | `GRAPH <iri> { … }` literal-IRI form | §13.3 | ✅ 24 (lands with slice 114) |
 | `GRAPH ?g { … }` variable form — projection | §13.3 | ✅ 25 (lands with slices 111 + 113) |
 | `GRAPH ?g { … }` + `COUNT(*)` + `GROUP BY ?g` + `ORDER BY ?g` | §13.3 + §11 + §15.1 | ✅ 26 (lands with slices 111 + 113) |
+| `INSERT DATA` (default + named graph) | §3.1.1 | ✅ 27 (Phase C) |
+| `DELETE … WHERE { … }` | §3.1.3 | ✅ 28 (Phase C) |
+| `WITH <iri> INSERT … WHERE …` graph-scoped UPDATE | §3.1.3 | ✅ 29 (Phase C) |
+| `CONSTRUCT { ?s vcard:N _:v . _:v … }` (bnode + var + multi-triple) | §16.2.1 | ✅ 30 (Phase D 59 → 52) |
+| `CONSTRUCT WHERE { ?s ?p ?o }` shorthand | §16.2.4 | ✅ 31 (Phase D slice 54) |
+| `CONSTRUCT { const-template } WHERE { … }` — N-solution multiplicity | §16.2 | ✅ 32 (Phase D slice 59) |
+| `CONSTRUCT { ?s ex:from ?g } WHERE { GRAPH ?g { … } }` — named-graph-only | §13.3 + §16.2 | ✅ 33 (Phase D slice 55) |
+| CONSTRUCT typed (`xsd:integer`) + lang-tagged literal term shaping | §16.2 + RDF 1.1 §3.3 | ✅ 34 (Phase D slice 58) |
+| CONSTRUCT round-trip via `pgrdf.put_construct_rows` | §16.2 + LLD v0.4 §6.3 | ✅ 35 (Phase D slice 53) |
 | Property paths beyond `:a/:b` sequence | §9 | ❌ deferred — see v0.4 |
-| VALUES / FROM NAMED / CONSTRUCT / DESCRIBE | §10.2 / §13 / §16 | ❌ deferred — see v0.3 LLD §3 |
+| VALUES / FROM NAMED / DESCRIBE | §10.2 / §13 / §16 | ❌ deferred — see v0.3 LLD §3 |
 
 ## See also
 

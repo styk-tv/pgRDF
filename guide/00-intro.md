@@ -64,6 +64,7 @@ SELECT * FROM pgrdf.sparql(
 | Bulk-INSERT plan reuse (LLD §4.3 phase A) | ✅ |
 | SPARQL SELECT / ASK with BGP + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias **and** inline aggregate) + BIND | ✅ |
 | Named-graph SPARQL — `GRAPH <iri> { … }` + `GRAPH ?g { … }` with composition into OPTIONAL / UNION / MINUS | ✅ |
+| SPARQL `CONSTRUCT` — constant / variable / blank-node / multi-triple templates, GRAPH-scoped WHERE, `CONSTRUCT WHERE { … }` shorthand, round-trip ingest (`pgrdf.construct` + `pgrdf.put_construct_rows`) | ✅ v0.4 |
 | OWL 2 RL materialization via `reasonable` (`pgrdf.materialize`) | ✅ |
 | Operator surface — `pgrdf.stats()`, `pgrdf.shmem_reset()`, `pgrdf.plan_cache_clear()` | ✅ |
 | Regression suite + W3C-shape harness in CI (PR-gate + nightly) | ✅ |
@@ -71,7 +72,7 @@ SELECT * FROM pgrdf.sparql(
 | 2× ingest target (true COPY BINARY / heap_multi_insert) | ⏳ v0.4 |
 | Full W3C SPARQL 1.1 TTL-manifest runner against `w3c/rdf-tests` | ⏳ v0.4 |
 | LUBM-10 / LUBM-100 cross-engine benchmarks (Jena TDB, Apache AGE) | ⏳ v0.4 |
-| SPARQL surface — VALUES, property paths beyond simple seq, multi-triple OPTIONAL, CONSTRUCT, DESCRIBE, aggregates over UNION, BIND-in-FILTER | ⏳ v0.4 |
+| SPARQL surface — VALUES, property paths beyond simple seq, multi-triple OPTIONAL, DESCRIBE, aggregates over UNION, BIND-in-FILTER | ⏳ v0.4 |
 
 For the long-form plan see
 [`docs/10-roadmap.md`](../docs/10-roadmap.md).

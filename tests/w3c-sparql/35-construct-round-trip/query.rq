@@ -1,0 +1,2 @@
+CONSTRUCT { ?s ?p ?o }
+WHERE     { GRAPH <http://example.org/dst> { ?s ?p ?o } }

@@ -128,9 +128,11 @@ jobs:
       - name: Run W3C-shape SPARQL harness
         env:
           PGRDF_RUNTIME: docker
-        # Phase 6 step 2: 18 hand-authored tests covering W3C SPARQL
-        # 1.1 patterns. The full TTL-manifest runner against
-        # w3c/rdf-tests is v0.4 work — see tests/w3c-sparql/README.md.
+        # 35 hand-authored W3C-shape fixtures covering W3C SPARQL 1.1
+        # SELECT / ASK / GRAPH / UPDATE / CONSTRUCT patterns. CONSTRUCT
+        # fixtures 30-35 landed Phase D slice 51 (see the `kind` file
+        # convention in tests/w3c-sparql/README.md). The full
+        # TTL-manifest runner against w3c/rdf-tests is later v0.4 work.
         run: bash tests/w3c-sparql/run.sh
       - name: Run LUBM-shape correctness gate
         env:

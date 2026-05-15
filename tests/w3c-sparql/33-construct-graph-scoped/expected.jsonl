@@ -1,0 +1,2 @@
+{"object": {"type": "iri", "value": "http://example.org/g1"}, "subject": {"type": "iri", "value": "http://example.org/alice"}, "predicate": {"type": "iri", "value": "http://example.org/from"}}
+{"object": {"type": "iri", "value": "http://example.org/g2"}, "subject": {"type": "iri", "value": "http://example.org/bob"}, "predicate": {"type": "iri", "value": "http://example.org/from"}}

@@ -1,0 +1,2 @@
+{"object": {"type": "iri", "value": "http://example.org/bob"}, "subject": {"type": "iri", "value": "http://example.org/alice"}, "predicate": {"type": "iri", "value": "http://example.org/knows"}}
+{"object": {"type": "literal", "value": "30", "datatype": "http://www.w3.org/2001/XMLSchema#integer"}, "subject": {"type": "iri", "value": "http://example.org/alice"}, "predicate": {"type": "iri", "value": "http://example.org/age"}}

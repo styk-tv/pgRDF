@@ -1,0 +1,2 @@
+{"object": {"type": "bnode", "value": "b1_1"}, "subject": {"type": "iri", "value": "http://example.org/alice"}, "predicate": {"type": "iri", "value": "http://www.w3.org/2001/vcard-rdf/3.0#N"}}
+{"object": {"type": "literal", "value": "Alice", "datatype": "http://www.w3.org/2001/XMLSchema#string"}, "subject": {"type": "bnode", "value": "b1_1"}, "predicate": {"type": "iri", "value": "http://www.w3.org/2001/vcard-rdf/3.0#givenName"}}

@@ -1,0 +1,5 @@
+@prefix ex:  <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:widget ex:weight "42"^^xsd:integer .
+ex:widget ex:label  "Le Widget"@fr .

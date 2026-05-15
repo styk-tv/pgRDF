@@ -1,0 +1,2 @@
+{"object": {"type": "literal", "value": "42", "datatype": "http://www.w3.org/2001/XMLSchema#integer"}, "subject": {"type": "iri", "value": "http://example.org/widget"}, "predicate": {"type": "iri", "value": "http://example.org/copied"}}
+{"object": {"type": "literal", "value": "Le Widget", "datatype": "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString", "language": "fr"}, "subject": {"type": "iri", "value": "http://example.org/widget"}, "predicate": {"type": "iri", "value": "http://example.org/copied"}}

@@ -192,7 +192,7 @@ Concrete shape:
   same shape but different IRI constants → 1 miss + 1 hit; a
   structurally distinct query → 1 miss + 0 hits.
 
-## Surface today (v0.3 SPARQL surface complete; v0.4 §3.3 GRAPH shipped)
+## Surface today (v0.3 SPARQL surface complete; v0.4 §3.3 GRAPH, §4 UPDATE, §6 CONSTRUCT shipped)
 
 - ✅ Basic Graph Patterns (1..N triples)
 - ✅ `SELECT` (explicit projection or `SELECT *`); `ASK`
@@ -377,7 +377,10 @@ Concrete shape:
       (spargebra parser.rs §Add / §Move / §Copy) into compositions
       of `Drop + DeleteInsert` (or just `DeleteInsert` for ADD),
       so they ride the existing per-form dispatcher arms.
-- 🚧 `CONSTRUCT` (Phase D slice 54 — WHERE shorthand) —
+- ✅ `CONSTRUCT` — full surface (Phase D slices 59 → 52: constant /
+      variable / blank-node / multi-triple templates, GRAPH-scoped
+      WHERE, WHERE shorthand, round-trip ingest, `sparql_parse`
+      enrichment; LLD v0.4 §6) —
       sibling UDF `pgrdf.construct(q TEXT) → SETOF JSONB`. Each row
       carries `{"subject": …, "predicate": …, "object": …}` with
       structured term cells `{"type": "iri"|"literal"|"bnode",
