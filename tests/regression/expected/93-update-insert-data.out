@@ -17,9 +17,6 @@ UPDATE
 InsertData
 0
 DELETE_INSERT_WHERE|0|0
-update-clear-graph-lands-71: t
-update-create-graph-lands-70: t
-update-drop-graph-lands-69: t
 update-malformed-still-uses-query-parse-error: t
 
 2

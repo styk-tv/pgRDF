@@ -243,11 +243,11 @@ Concrete shape:
       triples_inserted, triples_deleted, graphs_touched,
       elapsed_ms}}` paralleling the v0.3 `_ask` sentinel. Slice 84
       lands INSERT DATA end-to-end (default + named graph,
-      multi-triple, idempotent on repeat via `WHERE NOT EXISTS`);
-      other UPDATE forms panic with "lands in slice NN" pending
-      per-form follow-ups (CLEAR/CREATE/DROP GRAPH → 71/70/69). The
-      pattern-driven UPDATE forms shipped in slices 82 (INSERT WHERE),
-      81 (DELETE WHERE), and 80 (combined DELETE+INSERT WHERE).
+      multi-triple, idempotent on repeat via `WHERE NOT EXISTS`).
+      The pattern-driven UPDATE forms shipped in slices 82 (INSERT
+      WHERE), 81 (DELETE WHERE), and 80 (combined DELETE+INSERT
+      WHERE); the lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`)
+      shipped in slice 78. LOAD remains out of scope (LLD v0.4 §14).
 - ✅ SPARQL UPDATE — `INSERT { template } WHERE { pattern }` (Phase C
       slice 82, LLD v0.4 §4.1). Pattern-driven insertion: the WHERE
       pattern goes through the v0.3 `parse_select` walker (sharing the
@@ -341,8 +341,42 @@ Concrete shape:
       `USING NAMED <iri>` clauses (distinct from the WITH-injected
       sentinel — i.e. multi-default-graph or USING NAMED) panic with
       `'USING / USING NAMED' not yet supported`.
-- ⏳ Lifecycle algebra (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices
-      71 → 69.
+- ✅ SPARQL UPDATE — lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`,
+      `DEFAULT / NAMED / ALL` qualifiers) (Phase C slice 78, LLD v0.4
+      §4.4). Closes the SPARQL UPDATE ↔ §5 lifecycle-UDF lattice.
+      Spargebra-0.4.6 models the three lifecycle forms as the
+      `Clear { graph: GraphTarget, silent }`, `Create { graph:
+      NamedNode, silent }`, and `Drop { graph: GraphTarget, silent }`
+      variants of `GraphUpdateOperation`; the dispatcher in
+      `src/query/executor.rs::execute_update` routes through
+      `pgrdf.drop_graph(id, true)`, `pgrdf.clear_graph(id)`, and
+      `pgrdf.add_graph(iri TEXT)` (the §5 UDFs shipped at slices
+      99 / 98 / 118). SQL strings (not Rust direct) — the SPARQL
+      front-end and the SQL UDF front-end remain two consumers of
+      the same partition-level primitives; every existence check,
+      partition-DDL window, and `_pgrdf_graphs` binding update
+      happens once in the UDFs. `GraphTarget::NamedNode(iri)`
+      panics on not-bound unless `SILENT`; `GraphTarget::DefaultGraph`
+      routes to a direct `DELETE FROM _pgrdf_quads WHERE graph_id = 0`
+      for BOTH `CLEAR DEFAULT` and `DROP DEFAULT` (W3C §3.1.3
+      paragraph 7 "DROP DEFAULT empties, not destroys"; routine
+      default-graph inserts land in `_pgrdf_quads_default` rather
+      than `_pgrdf_quads_g0`, so `pgrdf.clear_graph(0)` would miss
+      them — the partition-wide DELETE catches both via Postgres
+      partition routing; `pgrdf.drop_graph(0)` panics by design);
+      `GraphTarget::AllGraphs` iterates every `_pgrdf_graphs` row
+      INCLUDING `graph_id = 0`; `GraphTarget::NamedGraphs` excludes
+      `graph_id = 0`. `CREATE GRAPH <iri>` on an already-bound IRI
+      panics with `CREATE GRAPH <iri>: graph already exists` unless
+      `SILENT` (W3C §3.1.3 paragraph 12). CREATE never touches row
+      counts (`triples_inserted = 0`). The `_update` summary's
+      `form` field reports `"CLEAR"` / `"CREATE"` / `"DROP"` for the
+      single-op forms; multi-op Updates collapse to `"MIXED"` via
+      the existing `form != op_name` rule. `ADD / MOVE / COPY` are
+      not separate enum variants — they desugar at parse time
+      (spargebra parser.rs §Add / §Move / §Copy) into compositions
+      of `Drop + DeleteInsert` (or just `DeleteInsert` for ADD),
+      so they ride the existing per-form dispatcher arms.
 - ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4

@@ -112,6 +112,7 @@ use spargebra::term::{
     GraphName, GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern, Literal,
     NamedNode, NamedNodePattern, NamedOrBlankNode, QuadPattern, Term, TermPattern, TriplePattern,
 };
+use spargebra::algebra::GraphTarget;
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -2618,6 +2619,14 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
     let mut triples_inserted: i64 = 0;
     let mut triples_deleted: i64 = 0;
     let mut graphs_touched: HashSet<i64> = HashSet::new();
+    // Slice 78 — DROP GRAPH removes the `_pgrdf_graphs` binding, so
+    // the post-op `lookup_graph_iri(id)` returns None and the IRI
+    // would silently drop out of the summary. Lifecycle dispatchers
+    // capture the IRI BEFORE the drop and stash it here; the summary
+    // builder unions this set with the lookup-resolved set. For
+    // non-DROP ops the binding survives, so this set stays empty and
+    // the lookup path handles it.
+    let mut captured_graph_iris: HashSet<String> = HashSet::new();
     // Form discriminator strategy: if every operation in the Update
     // shares the same variant name, the summary's `form` field carries
     // that name (the single-form case — INSERT DATA, DELETE DATA, etc.).
@@ -2822,14 +2831,50 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
             GraphUpdateOperation::Load { .. } => {
                 panic!("sparql: UPDATE form 'LOAD' is out of scope for v0.4 (see LLD v0.4 §14)")
             }
-            GraphUpdateOperation::Clear { .. } => {
-                panic!("sparql: UPDATE form 'CLEAR GRAPH' lands in slice 71")
+            GraphUpdateOperation::Clear { graph, silent } => {
+                // Phase C slice 78 — `CLEAR GRAPH <iri>` / `CLEAR
+                // DEFAULT` / `CLEAR NAMED` / `CLEAR ALL` route through
+                // `pgrdf.clear_graph(id BIGINT)` (LLD v0.4 §5,
+                // slice 98). The UDF TRUNCATEs the partition while
+                // leaving the `_pgrdf_graphs` IRI binding in place,
+                // matching the W3C SPARQL 1.1 Update §3.1.3 contract
+                // ("All triples in the named graph are removed; the
+                // named graph itself is preserved").
+                let n = execute_clear(graph, *silent, &mut graphs_touched);
+                triples_deleted += n;
             }
-            GraphUpdateOperation::Create { .. } => {
-                panic!("sparql: UPDATE form 'CREATE GRAPH' lands in slice 70")
+            GraphUpdateOperation::Create { graph, silent } => {
+                // Phase C slice 78 — `CREATE GRAPH <iri>` routes
+                // through `pgrdf.add_graph(iri TEXT)` (LLD v0.4 §5,
+                // slice 118). Idempotent on the IRI; an already-bound
+                // graph errors unless `SILENT` was specified. CREATE
+                // never touches row counts (it only allocates a
+                // partition + binding); we still surface the graph in
+                // `graphs_touched` to record the operator's intent.
+                execute_create(graph, *silent, &mut graphs_touched);
             }
-            GraphUpdateOperation::Drop { .. } => {
-                panic!("sparql: UPDATE form 'DROP GRAPH' lands in slice 69")
+            GraphUpdateOperation::Drop { graph, silent } => {
+                // Phase C slice 78 — `DROP GRAPH <iri>` / `DROP
+                // DEFAULT` / `DROP NAMED` / `DROP ALL` route through
+                // `pgrdf.drop_graph(id BIGINT, true)` (LLD v0.4 §5,
+                // slice 99). Returns the count of triples that were
+                // in the partition. Per W3C SPARQL 1.1 Update §3.1.3
+                // "DROP DEFAULT" semantically empties the default
+                // graph rather than destroying it — `pgrdf.drop_graph(0)`
+                // panics by design (the default partition is the
+                // catch-all), so we route `DefaultGraph` to
+                // `clear_graph(0)` instead. The dispatcher captures
+                // the IRI BEFORE the drop so the summary's
+                // `graphs_touched` array surfaces it (post-drop the
+                // `_pgrdf_graphs` binding is gone, so the lookup path
+                // can't recover it).
+                let n = execute_drop(
+                    graph,
+                    *silent,
+                    &mut graphs_touched,
+                    &mut captured_graph_iris,
+                );
+                triples_deleted += n;
             }
         }
     }
@@ -2839,10 +2884,16 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
     // We hand back the IRIs (not raw graph_ids) so the JSONB shape
     // stays portable across pg_dump round-trips and matches the LLD
     // v0.4 §4.2 example.
-    let mut graphs: Vec<String> = graphs_touched
+    let mut graph_iris: HashSet<String> = graphs_touched
         .iter()
         .filter_map(|g| lookup_graph_iri(*g))
         .collect();
+    // Union the lifecycle-captured IRIs (slice 78 — DROP path: the
+    // _pgrdf_graphs binding is gone by the time the summary lands, so
+    // the lookup_graph_iri above can't find them; the dispatcher
+    // pre-captured the IRI before issuing the drop and parked it here).
+    graph_iris.extend(captured_graph_iris);
+    let mut graphs: Vec<String> = graph_iris.into_iter().collect();
     graphs.sort();
 
     let summary = json!({
@@ -3070,6 +3121,262 @@ fn lookup_graph_iri(g: i64) -> Option<String> {
     )
     .ok()
     .flatten()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SPARQL UPDATE — Lifecycle algebra (Phase C slice 78)
+//
+// Wires `DROP GRAPH`, `CLEAR GRAPH`, `CREATE GRAPH` (plus the
+// `GraphTarget` enum's `DefaultGraph`, `NamedGraphs`, `AllGraphs`
+// variants) to the §5 lifecycle UDFs `pgrdf.drop_graph(id, true)`,
+// `pgrdf.clear_graph(id)`, and `pgrdf.add_graph(iri TEXT)`. The
+// dispatcher routes via SQL strings (not Rust direct) so the SPARQL
+// front-end and the SQL UDF front-end remain two consumers of the
+// same partition-level primitives — every existence check, partition-
+// DDL window, and cascade guard happens once in the UDFs, not twice.
+//
+// `ADD/MOVE/COPY` desugar at parse time (spargebra parser.rs §Move
+// / §Copy emit `Drop + DeleteInsert` / `Drop + DeleteInsert + Drop`
+// compositions) so they are NOT separate enum variants — they ride
+// the per-form arms above (DeleteInsert + Drop).
+//
+// W3C semantics this slice locks:
+//   - `DROP GRAPH <iri>` removes the partition AND the
+//     `_pgrdf_graphs` row. Triggers a not-bound panic for absent IRIs
+//     unless `SILENT` was specified.
+//   - `CLEAR GRAPH <iri>` empties the partition but preserves the
+//     `_pgrdf_graphs` binding (SPARQL 1.1 Update §3.1.3 paragraph 5:
+//     "the named graph itself is preserved"). Same SILENT semantics.
+//   - `CLEAR DEFAULT` / `DROP DEFAULT` both route to
+//     `clear_graph(0)` — the default partition is never destroyed
+//     (per W3C §3.1.3 paragraph 7 + `pgrdf.drop_graph(0)`'s explicit
+//     panic guard at slice 99).
+//   - `CLEAR ALL` / `DROP ALL` walk every binding in `_pgrdf_graphs`
+//     including `graph_id = 0`. `NAMED` excludes `graph_id = 0`.
+//   - `CREATE GRAPH <iri>` panics when the IRI is already bound
+//     unless `SILENT` was specified. Idempotent under SILENT.
+// ─────────────────────────────────────────────────────────────────────
+
+/// List every bound `graph_id` for the `AllGraphs` / `NamedGraphs`
+/// iteration variants. `include_default` discriminates `ALL` (true —
+/// graph_id 0 included) from `NAMED` (false — only IRI-bound named
+/// graphs). Ordered by `graph_id` ASC so the iteration is
+/// deterministic; the `graphs_touched` summary is then a stable set
+/// regardless of partition allocation order.
+fn enumerate_bound_graph_ids(include_default: bool) -> Vec<i64> {
+    let sql = if include_default {
+        "SELECT graph_id FROM pgrdf._pgrdf_graphs ORDER BY graph_id"
+    } else {
+        "SELECT graph_id FROM pgrdf._pgrdf_graphs WHERE graph_id <> 0 ORDER BY graph_id"
+    };
+    Spi::connect(|client| {
+        let tuples = client
+            .select(sql, None, &[])
+            .unwrap_or_else(|e| panic!("sparql: UPDATE lifecycle: enumerate _pgrdf_graphs: {e}"));
+        let mut out = Vec::new();
+        for row in tuples {
+            let g: i64 = row
+                .get(1)
+                .unwrap_or_else(|e| panic!("sparql: UPDATE lifecycle: graph_id column: {e}"))
+                .expect("sparql: UPDATE lifecycle: NULL graph_id (impossible)");
+            out.push(g);
+        }
+        out
+    })
+}
+
+/// `pgrdf.clear_graph(id)` SPI thunk; centralised so the named /
+/// default / iteration branches all route through one place. Returns
+/// the count of triples truncated.
+fn clear_graph_by_id(id: i64) -> i64 {
+    Spi::get_one_with_args("SELECT pgrdf.clear_graph($1::bigint)", &[id.into()])
+        .unwrap_or_else(|e| panic!("sparql: UPDATE: CLEAR GRAPH failed: {e}"))
+        .unwrap_or(0)
+}
+
+/// Clear the default partition's rows. The §5 `pgrdf.clear_graph(0)`
+/// looks for `_pgrdf_quads_g0`, which is only created when
+/// `pgrdf.add_graph(0)` ran explicitly; default-routed inserts
+/// (every `graph_id = 0` write that didn't pre-allocate g0) land
+/// in `_pgrdf_quads_default` instead. So we route the SPARQL
+/// `CLEAR DEFAULT` / `DROP DEFAULT` semantics to a direct
+/// `DELETE FROM _pgrdf_quads WHERE graph_id = 0` — partition-
+/// routing inside Postgres still confines the delete to whichever
+/// partition the rows ended up in (g0 if it exists, default
+/// otherwise), so the operation always empties the default-graph
+/// contents per W3C §3.1.3.
+fn clear_default_graph_rows() -> i64 {
+    Spi::get_one(
+        "WITH d AS (
+            DELETE FROM pgrdf._pgrdf_quads
+             WHERE graph_id = 0
+           RETURNING 1)
+         SELECT count(*)::bigint FROM d",
+    )
+    .unwrap_or_else(|e| panic!("sparql: UPDATE: CLEAR/DROP DEFAULT failed: {e}"))
+    .unwrap_or(0)
+}
+
+/// `pgrdf.drop_graph(id, true)` SPI thunk; cascade defaults to TRUE
+/// (the SPARQL DROP semantics — inferred rows go with the partition,
+/// no separate cascade flag at the SPARQL surface). Returns the count
+/// of triples that were in the partition before the DETACH+DROP.
+fn drop_graph_by_id(id: i64) -> i64 {
+    Spi::get_one_with_args("SELECT pgrdf.drop_graph($1::bigint, true)", &[id.into()])
+        .unwrap_or_else(|e| panic!("sparql: UPDATE: DROP GRAPH failed: {e}"))
+        .unwrap_or(0)
+}
+
+/// Dispatch a `CLEAR` operation. Returns the count of triples
+/// truncated across every partition the operation touched.
+fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet<i64>) -> i64 {
+    match graph {
+        GraphTarget::NamedNode(n) => {
+            let iri = n.as_str();
+            match lookup_graph_id(iri) {
+                Some(id) => {
+                    let n = clear_graph_by_id(id);
+                    graphs_touched.insert(id);
+                    n
+                }
+                None if silent => 0,
+                None => panic!("sparql: CLEAR GRAPH <{iri}>: graph not bound"),
+            }
+        }
+        GraphTarget::DefaultGraph => {
+            let n = clear_default_graph_rows();
+            graphs_touched.insert(0);
+            n
+        }
+        GraphTarget::AllGraphs => {
+            // Every binding — including the default partition. CLEAR
+            // ALL semantically empties the whole dataset. The default
+            // routes through the partition-wide DELETE (covers both
+            // `_pgrdf_quads_g0` and `_pgrdf_quads_default` regardless
+            // of which one `add_graph(0)` allocated).
+            let mut total: i64 = clear_default_graph_rows();
+            graphs_touched.insert(0);
+            for id in enumerate_bound_graph_ids(false) {
+                total += clear_graph_by_id(id);
+                graphs_touched.insert(id);
+            }
+            total
+        }
+        GraphTarget::NamedGraphs => {
+            // IRI-bound named graphs only — the default partition is
+            // out of scope per W3C §3.1.3.
+            let mut total: i64 = 0;
+            for id in enumerate_bound_graph_ids(false) {
+                total += clear_graph_by_id(id);
+                graphs_touched.insert(id);
+            }
+            total
+        }
+    }
+}
+
+/// Dispatch a `CREATE GRAPH <iri>` operation. CREATE doesn't touch
+/// row counts; it only allocates the partition + IRI binding (or
+/// no-ops under SILENT when the binding already exists). The created
+/// graph is surfaced in `graphs_touched` so operators see the intent
+/// even though `triples_inserted` stays at 0.
+fn execute_create(graph: &NamedNode, silent: bool, graphs_touched: &mut HashSet<i64>) {
+    let iri = graph.as_str();
+    if let Some(existing) = lookup_graph_id(iri) {
+        if !silent {
+            panic!("sparql: CREATE GRAPH <{iri}>: graph already exists");
+        }
+        // SILENT idempotent path — already bound, no-op, but still
+        // record the touched graph_id for the summary.
+        graphs_touched.insert(existing);
+        return;
+    }
+    let allocated: i64 = Spi::get_one_with_args(
+        "SELECT pgrdf.add_graph($1::text)",
+        &[iri.into()],
+    )
+    .unwrap_or_else(|e| panic!("sparql: CREATE GRAPH <{iri}>: add_graph failed: {e}"))
+    .expect("sparql: CREATE GRAPH: add_graph returned NULL (impossible)");
+    graphs_touched.insert(allocated);
+}
+
+/// Dispatch a `DROP` operation. Returns the count of triples that
+/// were in the dropped partition(s).
+///
+/// `DROP DEFAULT` routes to `clear_graph(0)` — `pgrdf.drop_graph(0)`
+/// panics by design (the default catch-all partition is non-
+/// droppable, see `src/storage/graphs.rs::drop_graph` slice 99
+/// guard). W3C SPARQL 1.1 Update §3.1.3 paragraph 7 makes this an
+/// "empty, not destroy" anyway, so the routing matches the spec.
+///
+/// `captured_graph_iris` accumulates IRI strings BEFORE the drop
+/// — the post-drop `_pgrdf_graphs` row is gone, so the summary
+/// builder's `lookup_graph_iri` path can't recover the name.
+/// `DROP DEFAULT` doesn't need this (the binding survives clear),
+/// but we union the captured set anyway for shape symmetry.
+fn execute_drop(
+    graph: &GraphTarget,
+    silent: bool,
+    graphs_touched: &mut HashSet<i64>,
+    captured_graph_iris: &mut HashSet<String>,
+) -> i64 {
+    match graph {
+        GraphTarget::NamedNode(n) => {
+            let iri = n.as_str();
+            match lookup_graph_id(iri) {
+                Some(id) => {
+                    // Capture the IRI before the drop wipes the binding.
+                    captured_graph_iris.insert(iri.to_string());
+                    let n = drop_graph_by_id(id);
+                    graphs_touched.insert(id);
+                    n
+                }
+                None if silent => 0,
+                None => panic!("sparql: DROP GRAPH <{iri}>: graph not bound"),
+            }
+        }
+        GraphTarget::DefaultGraph => {
+            // Route to clear-semantics — `pgrdf.drop_graph(0)` panics
+            // by design (the default catch-all partition is non-
+            // droppable); W3C §3.1.3 paragraph 7 makes `DROP DEFAULT`
+            // an "empty, not destroy" anyway. Direct partition-wide
+            // DELETE handles both g0 and default routing.
+            let n = clear_default_graph_rows();
+            graphs_touched.insert(0);
+            n
+        }
+        GraphTarget::AllGraphs => {
+            // Every binding. The default partition routes through
+            // clear-semantics; named graphs route through drop. The
+            // post-state is an empty default partition + zero named
+            // graphs bound.
+            let mut total: i64 = clear_default_graph_rows();
+            graphs_touched.insert(0);
+            for id in enumerate_bound_graph_ids(false) {
+                // Capture the IRI before drop_graph_by_id wipes it.
+                if let Some(iri) = lookup_graph_iri(id) {
+                    captured_graph_iris.insert(iri);
+                }
+                total += drop_graph_by_id(id);
+                graphs_touched.insert(id);
+            }
+            total
+        }
+        GraphTarget::NamedGraphs => {
+            // IRI-bound named graphs only — every one is droppable
+            // (no special-case at graph_id = 0 because the filter
+            // excluded it).
+            let mut total: i64 = 0;
+            for id in enumerate_bound_graph_ids(false) {
+                if let Some(iri) = lookup_graph_iri(id) {
+                    captured_graph_iris.insert(iri);
+                }
+                total += drop_graph_by_id(id);
+                graphs_touched.insert(id);
+            }
+            total
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -6925,5 +7232,143 @@ mod tests {
                 .unwrap()
                 .unwrap_or(-1);
         assert_eq!(n_in_default, 1, "default-graph draft untouched");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Phase C slice 78 — SPARQL UPDATE lifecycle algebra (DROP / CLEAR
+    // / CREATE GRAPH). Routes the three GraphTarget-bearing
+    // GraphUpdateOperation variants through the §5 lifecycle UDFs
+    // (`pgrdf.drop_graph`, `pgrdf.clear_graph`, `pgrdf.add_graph`).
+    // Closes LLD v0.4 §4.4 (the lifecycle algebra ↔ §5 UDF lattice).
+    // Same as the slice 79 family, the named-graph allocation runs via
+    // `INSERT DATA { GRAPH <g> { … } }` to bypass `add_graph`'s
+    // parallel-test flake; the SPARQL UPDATE seed is single-step so it
+    // avoids the deadlock window.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// DROP GRAPH <iri> on a bound named graph deletes the partition
+    /// AND the `_pgrdf_graphs` row; the row count reported in
+    /// `triples_deleted` matches the partition's pre-drop population.
+    #[pg_test]
+    fn sparql_update_drop_graph_named_happy_path() {
+        // Seed 3 triples in g1 via INSERT DATA so the allocation +
+        // partition setup happens single-step.
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { \
+                  GRAPH <http://example.org/g1> { \
+                    <http://example.org/a> <http://example.org/p> \"1\" . \
+                    <http://example.org/b> <http://example.org/p> \"2\" . \
+                    <http://example.org/c> <http://example.org/p> \"3\" \
+                  } \
+                }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql('DROP GRAPH <http://example.org/g1>')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DROP");
+        assert_eq!(
+            summary["triples_deleted"], 3,
+            "DROP must report the row count that was in the partition"
+        );
+        assert_eq!(summary["triples_inserted"], 0);
+
+        // Post-state: `_pgrdf_graphs` row is gone, lookup returns NULL.
+        let bound: Option<i64> = Spi::get_one(
+            "SELECT pgrdf.graph_id('http://example.org/g1')",
+        )
+        .unwrap();
+        assert!(
+            bound.is_none(),
+            "DROP must remove the _pgrdf_graphs row; got {bound:?}"
+        );
+    }
+
+    /// CLEAR GRAPH <iri> on a bound named graph empties the partition
+    /// but PRESERVES the IRI binding — distinct from DROP. The row
+    /// count reported in `triples_deleted` matches the pre-clear
+    /// population.
+    #[pg_test]
+    fn sparql_update_clear_graph_named_preserves_binding() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { \
+                  GRAPH <http://example.org/g2> { \
+                    <http://example.org/d> <http://example.org/p> \"4\" . \
+                    <http://example.org/e> <http://example.org/p> \"5\" \
+                  } \
+                }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql('CLEAR GRAPH <http://example.org/g2>')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "CLEAR");
+        assert_eq!(summary["triples_deleted"], 2);
+
+        // The IRI binding survives (CLEAR != DROP).
+        let bound: Option<i64> =
+            Spi::get_one("SELECT pgrdf.graph_id('http://example.org/g2')").unwrap();
+        assert!(bound.is_some(), "CLEAR must preserve the _pgrdf_graphs row");
+
+        // The partition itself is empty post-clear.
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
+               WHERE graph_id = pgrdf.graph_id('http://example.org/g2')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n, 0, "CLEAR must truncate the partition");
+    }
+
+    /// CREATE GRAPH <iri> on an unbound IRI allocates a fresh
+    /// partition + `_pgrdf_graphs` row; subsequent CREATE SILENT on
+    /// the same IRI is a no-op (the existing binding is preserved).
+    /// CREATE without SILENT on an already-bound IRI panics.
+    #[pg_test]
+    fn sparql_update_create_graph_idempotent_silent() {
+        // Fresh IRI — CREATE allocates the binding.
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql('CREATE GRAPH <http://example.org/g3>')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "CREATE");
+        assert_eq!(
+            summary["triples_inserted"], 0,
+            "CREATE must not touch row counts"
+        );
+        assert_eq!(summary["triples_deleted"], 0);
+
+        let bound: Option<i64> =
+            Spi::get_one("SELECT pgrdf.graph_id('http://example.org/g3')").unwrap();
+        assert!(bound.is_some(), "CREATE must populate _pgrdf_graphs");
+
+        // SILENT re-CREATE is a no-op — the binding survives unchanged.
+        let j2: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql('CREATE SILENT GRAPH <http://example.org/g3>')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary2 = &j2.0["_update"];
+        assert_eq!(summary2["form"], "CREATE");
+        assert_eq!(summary2["triples_inserted"], 0);
+
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_graphs WHERE iri = 'http://example.org/g3'",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n, 1, "no duplicate binding after SILENT re-CREATE");
     }
 }

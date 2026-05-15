@@ -1,0 +1,26 @@
+
+0
+3
+2
+1
+DROP|3|0|["http://example.org/g1"]
+
+0
+CLEAR|2|["http://example.org/g2"]
+t
+0
+CREATE|0|0
+t
+CREATE|0
+1
+drop-unbound-no-silent: t
+DROP|0
+CLEAR|1
+0
+1
+1
+CLEAR|2
+t|t
+0
+
+2

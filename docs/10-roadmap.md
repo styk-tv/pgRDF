@@ -555,6 +555,60 @@ to dispatch by query form; UPDATE forms return an `_update` JSONB
 summary row. See
 [LLD v0.4 §4](../specs/SPEC.pgRDF.LLD.v0.4.md#4-sparql-update-new).
 
+- ✅ **Slice 78 — SPARQL UPDATE lifecycle algebra (`DROP / CLEAR /
+  CREATE GRAPH`).** Closes the LLD v0.4 §4.4 lattice between the
+  SPARQL UPDATE lifecycle forms and the §5 SQL UDF surface. The
+  three `GraphTarget`-bearing `spargebra::GraphUpdateOperation`
+  variants (`Drop`, `Clear`, `Create`) now route through
+  `pgrdf.drop_graph(id, true)`, `pgrdf.clear_graph(id)`, and
+  `pgrdf.add_graph(iri TEXT)` (§5 slices 99 / 98 / 118
+  respectively). Routing through SQL strings (not direct Rust
+  calls into the `#[pg_extern]` functions) keeps the SPARQL and
+  SQL UDF front-ends as two consumers of the same partition-level
+  primitives — every existence check, partition-DDL window
+  (`DETACH PARTITION` / `DROP TABLE` / `TRUNCATE ONLY`), inferred-
+  row cascade guard, and `_pgrdf_graphs` binding update happens
+  once in the UDFs. `GraphTarget` enum coverage: `NamedNode(iri)`
+  → bigint-id lookup + panic-or-no-op on not-bound per `SILENT`;
+  `DefaultGraph` → direct `DELETE FROM _pgrdf_quads WHERE
+  graph_id = 0` for BOTH `CLEAR DEFAULT` AND `DROP DEFAULT` (W3C
+  §3.1.3 paragraph 7 "DROP DEFAULT empties, not destroys";
+  `pgrdf.drop_graph(0)` panics by design under the slice-99
+  guard; `pgrdf.clear_graph(0)` only handles `_pgrdf_quads_g0`
+  which most default-graph inserts never touch — they land in
+  `_pgrdf_quads_default` via LIST-partition catch-all routing, so
+  the partition-wide DELETE is the only correct shape); `AllGraphs` → enumerate every `_pgrdf_graphs`
+  row INCLUDING `graph_id = 0`; `NamedGraphs` → enumerate every
+  `graph_id <> 0` (default excluded per W3C). `CREATE GRAPH <iri>`
+  panics with `CREATE GRAPH <iri>: graph already exists` when the
+  IRI is bound + not SILENT (the underlying
+  `pgrdf.add_graph(iri TEXT)` is idempotent on its own, so the
+  pre-check happens in the SPARQL dispatcher); CREATE never
+  touches row counts (`triples_inserted = 0` always). ADD / MOVE
+  / COPY are NOT separate variants — spargebra parser.rs §Add /
+  §Move / §Copy desugars them at parse time into compositions of
+  `Drop + DeleteInsert` (for COPY) / `Drop + DeleteInsert + Drop`
+  (for MOVE) / `DeleteInsert` (for ADD); they ride the existing
+  per-form dispatcher arms (slice 78 + slice 80). The `_update`
+  summary's `form` field reports `"CLEAR"` / `"CREATE"` / `"DROP"`
+  for single-op shapes; multi-op Updates collapse to `"MIXED"`.
+  Regression coverage: `tests/regression/sql/99-update-lifecycle-algebra.sql`
+  locks eight invariants — DROP GRAPH counter + binding removal,
+  CLEAR GRAPH counter + binding preservation, CREATE GRAPH happy
+  path + SILENT idempotency, DROP GRAPH not-bound panic without
+  SILENT (via `_check_error` from 81-error-paths), DROP SILENT
+  GRAPH not-bound no-op, CLEAR DEFAULT counter + post-state row
+  count, CLEAR ALL summed counter + binding preservation. Three
+  `#[pg_test]`s in `src/query/executor.rs`:
+  `sparql_update_drop_graph_named_happy_path`,
+  `sparql_update_clear_graph_named_preserves_binding`,
+  `sparql_update_create_graph_idempotent_silent` (named graph
+  seeding via `INSERT DATA { GRAPH <g> { … } }` to bypass
+  `add_graph`'s parallel-test flake — same pattern as slice 79).
+  Test bar after slice 78: 159 pgrx integration + 61 pg_regress +
+  26 W3C-shape + 3 LUBM-shape = 249 automated tests (up from 245
+  at slice 79: +3 pgrx, +1 pg_regress).
+
 - ✅ **Slice 79 — SPARQL UPDATE graph-scoped variants (`WITH <iri>` +
   `GRAPH <iri> { … }` in template / WHERE).** Closes the graph-aware
   loop for pattern-driven UPDATEs. Spargebra-0.4.6 desugars

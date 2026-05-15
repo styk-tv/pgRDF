@@ -112,6 +112,7 @@ Capability matrix for the v0.4 target:
 | IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | ✅ slices 120-115 |
 | SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | §4 | 🚧 |
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | ✅ slice 79 |
+| Lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / ALL / NAMED`) | not yet | §4.4 | ✅ slice 78 |
 | `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | ✅ all four shipped (slices 99 / 98 / 97 / 96) |
 | `CONSTRUCT` | ⏳ deferred | §6 | 🚧 |
 | Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | 🚧 |
@@ -436,12 +437,15 @@ honour the IRI mapping from §3.
 
 | SPARQL form | Backing UDF |
 |---|---|
-| `DROP GRAPH <iri>` | `pgrdf.drop_graph(graph_id(iri))` |
-| `CLEAR GRAPH <iri>` | `pgrdf.clear_graph(graph_id(iri))` |
-| `CREATE GRAPH <iri>` | `pgrdf.add_graph(iri)` |
-| `COPY <src> TO <dst>` | `pgrdf.copy_graph(graph_id(src), graph_id(dst))` |
-| `MOVE <src> TO <dst>` | `pgrdf.move_graph(graph_id(src), graph_id(dst))` |
-| `ADD <src> TO <dst>` | `pgrdf.copy_graph` (ADD = COPY without first-clearing dst per W3C SPARQL 1.1 Update §3.2.6) |
+| `DROP GRAPH <iri>` | ✅ slice 78 — `pgrdf.drop_graph(graph_id(iri), true)`; not-bound IRI panics with `DROP GRAPH <iri>: graph not bound` unless `SILENT`. |
+| `CLEAR GRAPH <iri>` | ✅ slice 78 — `pgrdf.clear_graph(graph_id(iri))`; preserves the `_pgrdf_graphs` binding (W3C §3.1.3 "the named graph itself is preserved"); not-bound IRI panics with `CLEAR GRAPH <iri>: graph not bound` unless `SILENT`. |
+| `CREATE GRAPH <iri>` | ✅ slice 78 — `pgrdf.add_graph(iri TEXT)`; already-bound IRI panics with `CREATE GRAPH <iri>: graph already exists` unless `SILENT`. No row-count change (CREATE only allocates a partition + binding). |
+| `DROP DEFAULT` / `CLEAR DEFAULT` | ✅ slice 78 — both route to a direct `DELETE FROM _pgrdf_quads WHERE graph_id = 0`. `pgrdf.clear_graph(0)` only handles the explicit `_pgrdf_quads_g0` partition (if `add_graph(0)` ever ran); routine default-graph inserts land in `_pgrdf_quads_default`, which the direct DELETE catches via partition routing. `pgrdf.drop_graph(0)` panics by design (slice 99 guard); W3C §3.1.3 paragraph 7 makes `DROP DEFAULT` an "empty, not destroy" anyway. |
+| `DROP ALL` / `CLEAR ALL` | ✅ slice 78 — enumerate every `graph_id` in `_pgrdf_graphs` (including `0`) and dispatch per-id. `CLEAR ALL` empties every partition with bindings preserved; `DROP ALL` removes every named partition + binding, with the default routed to clear. |
+| `DROP NAMED` / `CLEAR NAMED` | ✅ slice 78 — enumerate every `graph_id <> 0` (default excluded per W3C §3.1.3) and dispatch per-id. |
+| `COPY <src> TO <dst>` | `pgrdf.copy_graph(graph_id(src), graph_id(dst))` — desugars at parse time (spargebra parser.rs §Copy) into `Drop + DeleteInsert`; lands via the slice 78 + slice 80 dispatcher arms. |
+| `MOVE <src> TO <dst>` | `pgrdf.move_graph(graph_id(src), graph_id(dst))` — desugars at parse time (spargebra §Move) into `Drop + DeleteInsert + Drop`; lands via slice 78 + 80. |
+| `ADD <src> TO <dst>` | `pgrdf.copy_graph` (ADD = COPY without first-clearing dst per W3C SPARQL 1.1 Update §3.2.6) — desugars at parse time (spargebra §Add) into a plain `DeleteInsert`; lands via slice 80. |
 
 ### 4.5 Acceptance criteria (v0.4 gate)
 

@@ -210,23 +210,10 @@ FROM pgrdf.sparql(
   'DELETE { ?s zzz:p ?o } INSERT { ?s zzz:p "x" } WHERE { ?s zzz:p ?o }'
 ) AS s(j);
 
-SELECT _check_error(
-  'update-clear-graph-lands-71',
-  $$SELECT * FROM pgrdf.sparql('CLEAR GRAPH <http://example.org/g1>')$$,
-  $$UPDATE form 'CLEAR GRAPH' lands in slice 71$$
-);
-
-SELECT _check_error(
-  'update-create-graph-lands-70',
-  $$SELECT * FROM pgrdf.sparql('CREATE GRAPH <http://example.org/gnew>')$$,
-  $$UPDATE form 'CREATE GRAPH' lands in slice 70$$
-);
-
-SELECT _check_error(
-  'update-drop-graph-lands-69',
-  $$SELECT * FROM pgrdf.sparql('DROP GRAPH <http://example.org/g1>')$$,
-  $$UPDATE form 'DROP GRAPH' lands in slice 69$$
-);
+-- Slice 78 shipped CLEAR/CREATE/DROP GRAPH lifecycle algebra wiring
+-- to the §5 UDFs; the slice-84 negative-path locks for those three
+-- forms are retired. Lifecycle algebra correctness is locked in
+-- `99-update-lifecycle-algebra.sql`.
 
 -- Malformed UPDATE — neither parse_query nor parse_update accepts
 -- it. The error message must carry the stable `sparql: parse error:`
