@@ -15,7 +15,7 @@ iri|http://example.com/d_s|iri|http://example.com/d_p|literal|d_o|http://www.w3.
 1
 Alice|en|http://www.w3.org/1999/02/22-rdf-syntax-ns#langString
 g-rejects-unbound-template-var: t
-h-rejects-bnode-in-template: t
+bnode
 i-rejects-literal-in-subject: t
 2
 2

@@ -168,10 +168,13 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
       alternation). Simple sequence already works because spargebra
       desugars `:a/:b` into a BGP chain. LLD v0.4 §7.
 - 🚧 `CONSTRUCT` — slice 59 landed (foundation, constant-only
-      templates); 🚧 slice 58 landed (variable substitution — subject /
-      predicate / object positions). Slice 57 widens to per-solution
-      fresh blank-node minting; slice 56 lifts the single-triple
-      template restriction; slices 53-50 add the round-trip into
+      templates); slice 58 landed (variable substitution — subject /
+      predicate / object positions); ✅ slice 57 landed (blank-node
+      template positions with per-solution fresh-label minting +
+      within-solution label sameness per W3C SPARQL 1.1 §16.2;
+      single-triple scope, multi-triple in slice 56). Slice 56 lifts
+      the single-triple template restriction (cross-triple bnode
+      label joining); slices 53-50 add the round-trip into
       `pgrdf.put_quad` + `pgrdf.sparql_parse` enrichment. `DESCRIBE`
       carried forward. (`ASK` shipped step 12.) LLD v0.4 §6.
 

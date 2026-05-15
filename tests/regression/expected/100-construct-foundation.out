@@ -8,7 +8,7 @@ iri|http://example.com/t1|iri|http://example.com/t2|literal|x|http://www.w3.org/
 literal|42|http://www.w3.org/2001/XMLSchema#integer
 0
 e-rejects-select: t
-f-rejects-bnode-in-template: t
+3
 g-rejects-literal-in-subject: t
 h-rejects-distinct-modifier: t
 

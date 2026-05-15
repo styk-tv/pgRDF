@@ -30,6 +30,20 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   the WHERE pattern surfaces shape as `{"type":"bnode","value":"_:b…"}`
   via the dictionary-driven term resolver. Variable predicates are
   legal (RDF admits variable predicates in templates).
+- `pgrdf.construct` blank-node template support — Phase D slice 57.
+  `_:label` in template positions mints fresh per-solution labels per
+  W3C SPARQL 1.1 §16.2; same template label across positions in the
+  same solution joins to the same fresh label (single-triple scope;
+  multi-triple joining lands in slice 56). Predicate-position blank
+  nodes are illegal RDF and rejected at parse time by spargebra
+  (surfacing as `pgrdf.construct: parse error: …`). Variable-bound
+  blank nodes from WHERE pass through with original labels unchanged.
+  Multi-triple templates panic with `pgrdf.construct: slice 57
+  supports single-triple templates; multi-triple lands in slice 56`.
+  Per-call fresh labels carry the solution index as a prefix
+  (`b{solution}_{n}`) so callers can rely on the `value` column alone
+  to distinguish per-solution bnodes within one `pgrdf.construct`
+  call.
 
 ## [0.4.3] — 2026-05-15
 

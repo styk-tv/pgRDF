@@ -226,13 +226,22 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 //    "object":    {"type": "literal", "value": "...",
 //                  "datatype": "...", "language": "..."}}
 //
-// The slice 59 NARROW SCOPE — constant-only templates. Variables and
-// blank nodes in the template panic with the stable
-// `pgrdf.construct: slice 58 supports variables and constants; blank
-// nodes land in slice 57` prefix (slice 58 widened the surface from
-// constant-only by adding per-solution variable substitution; the
-// remaining blank-node template position ships in slice 57). The
-// WHERE pattern itself accepts the full SELECT-side BGP / FILTER /
+// Slice progression:
+//
+//   * Slice 59 — constant-only templates (single triple). Variables and
+//     blank nodes panic.
+//   * Slice 58 — variable substitution. Each variable resolves
+//     per-solution through the dictionary. Blank nodes still panic.
+//   * Slice 57 — blank-node template support. `_:label` in template
+//     positions mints fresh per-solution labels per W3C SPARQL 1.1
+//     §16.2; same template label within the same solution joins to
+//     the same fresh label (single-triple scope; multi-triple
+//     joining lands in slice 56). Predicate-position blank nodes
+//     panic — illegal RDF. Variable-bound blank nodes from the
+//     WHERE flow through with their original dictionary labels
+//     unchanged.
+//
+// The WHERE pattern itself accepts the full SELECT-side BGP / FILTER /
 // OPTIONAL / UNION / MINUS surface — translation reuses
 // `parse_select` + `build_from_and_where` end-to-end, then projects
 // the dict ids of every template variable so per-row substitution
@@ -244,6 +253,11 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 // for a top-level Distinct / Reduced / OrderBy / Group wrapper and
 // reject with `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY /
 // aggregates not supported (W3C 1.1 §16.2)`.
+//
+// Out of scope on slice 57 (lands in slice 56): multi-triple templates.
+// Today the slice-57 boundary rejects them with `pgrdf.construct:
+// slice 57 supports single-triple templates; multi-triple lands in
+// slice 56`.
 
 /// Execute a SPARQL CONSTRUCT query and return one JSONB row per
 /// `(solution, template-triple)` pair. Each row carries the shape
@@ -254,9 +268,12 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 /// per-solution dict-id projection. Constants flow through the
 /// slice-59 `encode_constant_template_*` helpers unchanged; variables
 /// flow through `encode_dict_term` after a single dict resolve.
-/// Blank nodes in template positions still panic with a stable
-/// `pgrdf.construct: slice 58 supports variables and constants; blank
-/// nodes land in slice 57` prefix.
+/// Slice 57 admits blank nodes in subject/object positions of the
+/// template, minting a fresh label per (solution, template-label) pair
+/// per W3C SPARQL 1.1 §16.2. Predicate-position blank nodes panic
+/// (illegal RDF). Variable-bound blank nodes (the WHERE binds `?o` to
+/// a blank node) pass through the dict-resolve path with the
+/// dictionary-stored label unchanged.
 ///
 /// SQL: `pgrdf.construct(q TEXT) → SETOF JSONB`.
 #[pg_extern]
@@ -283,11 +300,23 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // way down to the BGP.
     reject_construct_modifiers(&pattern);
 
-    // Slice 58 — classify every template triple position into a
-    // ConstructTermSlot (constant value pre-encoded once, or variable
-    // name resolved per row). Blank nodes in any position still
-    // panic with the slice-58 prefix. Literals/blank-nodes in subject
-    // or predicate positions panic with the legal-RDF prefix.
+    // Slice 57 narrow scope — single-triple templates only. Multi-
+    // triple template support (cross-triple blank-node label joining
+    // in particular) lands in slice 56. The empty template is also
+    // rejected via this gate; a CONSTRUCT with `{}` carries no
+    // emission semantics worth supporting.
+    if template.len() != 1 {
+        panic!(
+            "pgrdf.construct: slice 57 supports single-triple templates; multi-triple lands in slice 56"
+        );
+    }
+
+    // Slice 57 — classify every template triple position into a
+    // ConstructTermSlot (constant value pre-encoded once, variable
+    // name resolved per row, or blank-node label minted per
+    // solution). Blank-node literals in predicate position panic with
+    // the legal-RDF prefix; literals in subject position panic with
+    // the legal-RDF prefix.
     let slots: Vec<TemplateTripleSlots> = template
         .iter()
         .map(classify_template_triple_slots)
@@ -296,6 +325,9 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // Collect the set of template variable names. We need them for
     // the unbound-variable check AND for the SQL projection list.
     let template_vars = collect_construct_template_vars(&slots);
+    // Whether any template position is a blank node — drives the
+    // per-solution path even when no variables are present.
+    let has_bnode = template_has_bnode(&slots);
 
     // Walk the WHERE pattern through the existing SELECT pipeline.
     // An empty BGP panics — a CONSTRUCT with no WHERE is degenerate;
@@ -314,10 +346,11 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
         }
     }
 
-    // Fast path: constant-only template (no variables anywhere).
-    // Pre-encode each triple ONCE and emit `n_solutions` clones —
-    // identical to the slice-59 behaviour, no per-row resolve cost.
-    if template_vars.is_empty() {
+    // Fast path: constant-only template (no variables, no blank
+    // nodes). Pre-encode each triple ONCE and emit `n_solutions`
+    // clones — identical to the slice-59 behaviour, no per-row
+    // resolve cost.
+    if template_vars.is_empty() && !has_bnode {
         let template_rows: Vec<Value> = slots.iter().map(encode_constant_slots).collect();
         // For solution-cardinality counting we just need SOME
         // projection (the row count is what matters). If the BGP
@@ -343,20 +376,33 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
         return SetOfIterator::new(rows.into_iter());
     }
 
-    // Variable path (slice 58). Build a custom SELECT that projects
-    // each template variable's dict-id as BIGINT, resolve per-row
-    // against the dictionary, and emit one row per (solution × triple).
-    let rows = execute_construct_variable_path(&ps, &slots, &template_vars);
+    // Per-solution path. Used whenever any template position needs
+    // per-solution data — variables (slice 58) and/or blank nodes
+    // (slice 57). Builds a custom SELECT that projects each template
+    // variable's dict-id as BIGINT (empty list if only blank nodes
+    // are in play), resolves per-row against the dictionary, and
+    // emits one row per (solution × template-triple). Blank-node
+    // template positions mint a fresh label per solution via
+    // `BNodeMinter`; the same template label appearing in multiple
+    // positions of the same solution resolves to the same fresh
+    // label (within-solution sameness per SPARQL 1.1 §16.2).
+    let rows = execute_construct_per_solution_path(&ps, &slots, &template_vars);
     SetOfIterator::new(rows.into_iter())
 }
 
-/// Build + run the variable-substitution path. Mirrors the
-/// INSERT-WHERE projection pattern (see `execute_insert_where`):
-/// project each template variable as `q{N}.{col} AS "<var>"`, so each
-/// row hands back a BIGINT dict id per template var. We then resolve
-/// each unique dict id once via a per-call cache and shape the
-/// structured term cells.
-fn execute_construct_variable_path(
+/// Build + run the per-solution path. Mirrors the INSERT-WHERE
+/// projection pattern (see `execute_insert_where`): project each
+/// template variable as `q{N}.{col} AS "<var>"`, so each row hands
+/// back a BIGINT dict id per template var. We then resolve each
+/// unique dict id once via a per-call cache and shape the structured
+/// term cells. Slice 57 widens this path: template positions that
+/// are blank nodes mint a fresh label per solution via `BNodeMinter`,
+/// with within-solution label joining preserved (the same template
+/// label resolves to the same fresh label across positions within
+/// one solution). When `template_vars` is empty (blank-node-only
+/// template, no variables), the SELECT projects a single
+/// `_pgrdf_unit` column and the row count drives solution iteration.
+fn execute_construct_per_solution_path(
     ps: &ParsedSelect,
     slots: &[TemplateTripleSlots],
     template_vars: &[String],
@@ -405,8 +451,10 @@ fn execute_construct_variable_path(
         col_order.push(var.clone());
     }
     if select_clauses.is_empty() {
-        // Defensive: template_vars non-empty implies select_clauses
-        // non-empty, but keep the SQL well-formed for the cold path.
+        // Blank-node-only template (no variables anywhere): we still
+        // need one row per solution to drive fresh-label minting. A
+        // literal `1` projection makes the row count == solution
+        // count and keeps the SQL shape uniform.
         select_clauses.push("1 AS _pgrdf_unit".to_string());
     }
 
@@ -424,6 +472,12 @@ fn execute_construct_variable_path(
     // Per-call dict-resolve cache. Each unique dict id resolves once,
     // even when the same value binds across multiple rows / triples.
     let mut dict_cache: HashMap<i64, ResolvedTerm> = HashMap::new();
+    // Per-call blank-node counter — guarantees fresh labels are
+    // globally unique across solutions within a single construct
+    // call. The minter is RE-CREATED per solution so within-solution
+    // label sameness is preserved while across-solution labels
+    // differ (W3C SPARQL 1.1 §16.2).
+    let mut solution_idx: u64 = 0;
     let mut out: Vec<pgrx::JsonB> = Vec::new();
 
     Spi::connect_mut(|client| {
@@ -440,12 +494,17 @@ fn execute_construct_variable_path(
             .select(&prepared, None, &datums)
             .expect("pgrdf.construct: WHERE-SELECT failed");
         for row in table {
+            solution_idx += 1;
             // Pull each template var's dict id for this binding.
             let mut binding: HashMap<&str, Option<i64>> = HashMap::new();
             for (i, var) in col_order.iter().enumerate() {
                 let v: Option<i64> = row.get::<i64>(i + 1).ok().flatten();
                 binding.insert(var.as_str(), v);
             }
+            // Fresh minter per solution — within-solution label
+            // sameness preserved; across-solution labels differ
+            // (the `solution_idx` prefix guarantees uniqueness).
+            let mut minter = BNodeMinter::new(solution_idx);
             // For each template triple, shape every position. Per W3C
             // §16.2 (template instantiation), if any template variable
             // is unbound for this solution (e.g. via OPTIONAL), the
@@ -454,7 +513,12 @@ fn execute_construct_variable_path(
                 if construct_slot_has_unbound(slot, &binding) {
                     continue;
                 }
-                let row_val = encode_template_triple_for_solution(slot, &binding, &mut dict_cache);
+                let row_val = encode_template_triple_for_solution(
+                    slot,
+                    &binding,
+                    &mut dict_cache,
+                    &mut minter,
+                );
                 out.push(pgrx::JsonB(row_val));
             }
         }
@@ -465,7 +529,9 @@ fn execute_construct_variable_path(
 
 /// True if any variable position in `slot` is unbound in this row's
 /// binding map. Matches the SPARQL §16.2 rule: "template variable
-/// unbound for a solution → omit the entire template group".
+/// unbound for a solution → omit the entire template group". Blank-
+/// node template positions never produce an "unbound" — they always
+/// mint a fresh label.
 fn construct_slot_has_unbound(
     slot: &TemplateTripleSlots,
     binding: &HashMap<&str, Option<i64>>,
@@ -492,10 +558,11 @@ fn encode_template_triple_for_solution(
     slot: &TemplateTripleSlots,
     binding: &HashMap<&str, Option<i64>>,
     dict_cache: &mut HashMap<i64, ResolvedTerm>,
+    minter: &mut BNodeMinter,
 ) -> Value {
-    let s = encode_template_position(&slot.subject, binding, dict_cache);
-    let p = encode_template_position(&slot.predicate, binding, dict_cache);
-    let o = encode_template_position(&slot.object, binding, dict_cache);
+    let s = encode_template_position(&slot.subject, binding, dict_cache, minter);
+    let p = encode_template_position(&slot.predicate, binding, dict_cache, minter);
+    let o = encode_template_position(&slot.object, binding, dict_cache, minter);
     json!({ "subject": s, "predicate": p, "object": o })
 }
 
@@ -503,6 +570,7 @@ fn encode_template_position(
     slot: &ConstructTermSlot,
     binding: &HashMap<&str, Option<i64>>,
     dict_cache: &mut HashMap<i64, ResolvedTerm>,
+    minter: &mut BNodeMinter,
 ) -> Value {
     match slot {
         ConstructTermSlot::Iri(iri) => encode_iri_term(iri),
@@ -521,26 +589,35 @@ fn encode_template_position(
             let term = resolve_dict_term(id, dict_cache);
             encode_dict_term(&term)
         }
+        // Slice 57 — fresh per-solution bnode label, with within-
+        // solution label sameness for the same template label.
+        ConstructTermSlot::BlankNode(template_label) => {
+            let fresh = minter.resolve(template_label);
+            encode_bnode_term(fresh)
+        }
     }
 }
 
 /// Per-position classification of a template triple's subject /
 /// predicate / object slot. The slot can be a constant IRI / literal
-/// (encoded once, cloned per row), or a variable name (resolved
-/// per-solution against the dict cache in
-/// `encode_template_position`).
+/// (encoded once, cloned per row), a variable name (resolved
+/// per-solution against the dict cache in `encode_template_position`),
+/// or a template blank-node label (per-solution fresh label via
+/// `BNodeMinter` — slice 57).
 ///
-/// Blank nodes don't land here — `classify_template_triple_slots`
-/// panics with the slice-58 prefix before constructing the slot. The
-/// language tag in `ConstructTermSlot::Literal` is `None` for plain
-/// strings; the datatype is `None` exactly when a language tag is
-/// present (RDF 1.1 §3.3 — a `rdf:langString` carries the language and
-/// the datatype IRI is implicit).
+/// The language tag in `ConstructTermSlot::Literal` is `None` for
+/// plain strings; the datatype is `None` exactly when a language tag
+/// is present (RDF 1.1 §3.3 — a `rdf:langString` carries the
+/// language and the datatype IRI is implicit).
 #[derive(Clone)]
 enum ConstructTermSlot {
     Iri(String),
     Literal(String, Option<String>, Option<String>),
     Variable(String),
+    /// Slice 57 — a template blank-node label `_:label`. The carried
+    /// string is the SPARQL template's own label; the fresh
+    /// per-solution label is allocated at row time by `BNodeMinter`.
+    BlankNode(String),
 }
 
 #[derive(Clone)]
@@ -551,9 +628,12 @@ struct TemplateTripleSlots {
 }
 
 /// Classify a template triple's three positions into structured
-/// slots. Panics with the slice-58 prefix on blank nodes (slice 57
-/// will land them) and with the legal-RDF prefix on literals or
-/// blank nodes in subject/predicate position.
+/// slots. Slice 57 admits blank nodes in subject/object position;
+/// blank-node *literals* in subject position are still rejected with
+/// the legal-RDF prefix. `NamedNodePattern` (predicate position)
+/// carries only `NamedNode` and `Variable` per spargebra — RDF
+/// disallows literals and blank nodes as predicates, so the parser
+/// never produces them and we need no panic here for that case.
 fn classify_template_triple_slots(tp: &TriplePattern) -> TemplateTripleSlots {
     let subject = match &tp.subject {
         TermPattern::NamedNode(n) => ConstructTermSlot::Iri(n.as_str().to_string()),
@@ -561,9 +641,7 @@ fn classify_template_triple_slots(tp: &TriplePattern) -> TemplateTripleSlots {
         TermPattern::Literal(_) => panic!(
             "pgrdf.construct: literal not allowed in subject/predicate position (SPARQL 1.1 §16.2)"
         ),
-        TermPattern::BlankNode(_) => panic!(
-            "pgrdf.construct: slice 58 supports variables and constants; blank nodes land in slice 57"
-        ),
+        TermPattern::BlankNode(b) => ConstructTermSlot::BlankNode(b.as_str().to_string()),
         #[allow(unreachable_patterns)]
         _ => panic!("pgrdf.construct: unsupported subject term shape"),
     };
@@ -582,9 +660,7 @@ fn classify_template_triple_slots(tp: &TriplePattern) -> TemplateTripleSlots {
                 ConstructTermSlot::Literal(value, Some(lit.datatype().as_str().to_string()), None)
             }
         }
-        TermPattern::BlankNode(_) => panic!(
-            "pgrdf.construct: slice 58 supports variables and constants; blank nodes land in slice 57"
-        ),
+        TermPattern::BlankNode(b) => ConstructTermSlot::BlankNode(b.as_str().to_string()),
         #[allow(unreachable_patterns)]
         _ => panic!("pgrdf.construct: unsupported object term shape"),
     };
@@ -614,6 +690,62 @@ fn collect_construct_template_vars(slots: &[TemplateTripleSlots]) -> Vec<String>
     out
 }
 
+/// True iff any template position carries a blank-node label. Used
+/// to short-circuit out of the constant-only fast path — even
+/// otherwise-constant templates with a blank node need per-solution
+/// fresh-label minting.
+fn template_has_bnode(slots: &[TemplateTripleSlots]) -> bool {
+    slots.iter().any(|s| {
+        matches!(s.subject, ConstructTermSlot::BlankNode(_))
+            || matches!(s.predicate, ConstructTermSlot::BlankNode(_))
+            || matches!(s.object, ConstructTermSlot::BlankNode(_))
+    })
+}
+
+/// Fresh per-solution blank-node label minter. Per W3C SPARQL 1.1
+/// §16.2: "Each time the CONSTRUCT template is instantiated for a
+/// specific solution, any blank nodes in the template are replaced
+/// with new blank nodes." We mint one per (template-label, solution),
+/// memoising the per-template-label map for the duration of one
+/// solution so the same template label in multiple positions
+/// resolves to the SAME fresh label within the row.
+///
+/// Labels carry the solution index as a prefix (`b{solution}_{n}`) so
+/// labels minted across solutions are globally unique within a single
+/// `pgrdf.construct` call — clients can rely on the value column
+/// alone to distinguish per-solution bnodes (regression invariant B).
+struct BNodeMinter {
+    solution_idx: u64,
+    counter: u64,
+    map: HashMap<String, String>,
+}
+
+impl BNodeMinter {
+    fn new(solution_idx: u64) -> Self {
+        Self {
+            solution_idx,
+            counter: 0,
+            map: HashMap::new(),
+        }
+    }
+
+    /// Map a template blank-node label to its per-solution fresh
+    /// label. First lookup for a given template label mints the
+    /// fresh label; subsequent lookups (for the same solution)
+    /// return the same fresh label, preserving within-solution
+    /// joining (SPARQL 1.1 §16.2).
+    fn resolve(&mut self, template_label: &str) -> &str {
+        let solution_idx = self.solution_idx;
+        let counter = &mut self.counter;
+        self.map
+            .entry(template_label.to_string())
+            .or_insert_with(|| {
+                *counter += 1;
+                format!("b{solution_idx}_{counter}")
+            })
+    }
+}
+
 /// Encode a fully-constant template triple (no variables) into the
 /// per-row JSONB cell shape. Slice-59 fast path.
 fn encode_constant_slots(slot: &TemplateTripleSlots) -> Value {
@@ -633,12 +765,24 @@ fn encode_constant_position(slot: &ConstructTermSlot) -> Value {
             // Callers gate this branch behind `template_vars.is_empty()`.
             panic!("pgrdf.construct: constant-fast-path called on variable slot (internal)")
         }
+        ConstructTermSlot::BlankNode(_) => {
+            // Callers gate this branch behind `!has_bnode`.
+            panic!("pgrdf.construct: constant-fast-path called on blank-node slot (internal)")
+        }
     }
 }
 
 /// `{"type": "iri", "value": "<iri>"}` — shape contract per LLD §6.1.
 fn encode_iri_term(iri: &str) -> Value {
     json!({ "type": "iri", "value": iri })
+}
+
+/// `{"type": "bnode", "value": "<label>"}` — shape contract per LLD
+/// §6.1. Slice 57 uses this for both the fresh-minted labels from
+/// `BNodeMinter` (template blank nodes) and for variable-bound blank
+/// nodes resolved via the dictionary in `encode_dict_term`.
+fn encode_bnode_term(label: &str) -> Value {
+    json!({ "type": "bnode", "value": label })
 }
 
 /// `{"type": "literal", "value": "<lex>", …}` with `datatype` for
@@ -745,7 +889,9 @@ fn encode_dict_term(term: &ResolvedTerm) -> Value {
         // per LLD §6.1. Blank-node identity carries through as the
         // dict-stored lexical value (which is what the parse-side
         // loader writes when it allocates a fresh `_:bN` label).
-        2 => json!({ "type": "bnode", "value": &term.lexical }),
+        // Variable-bound bnodes from WHERE flow through this path
+        // unchanged (slice 58 contract preserved by slice 57).
+        2 => encode_bnode_term(&term.lexical),
         // term_type::LITERAL — switch on language tag vs datatype.
         3 => encode_literal_term_parts(
             &term.lexical,
@@ -8133,8 +8279,8 @@ mod tests {
     // Slice 58 — variable substitution in template positions.
     // Constants flow through the slice-59 fast path; variables walk
     // the per-solution binding and resolve through the dictionary
-    // into the same structured term shape. Blank nodes in templates
-    // are STILL rejected — slice 57 lifts that.
+    // into the same structured term shape. Slice 57 (below) widens
+    // further to admit blank nodes in subject/object positions.
     // ─────────────────────────────────────────────────────────────
 
     /// Positive — variable in subject position. Three solutions
@@ -8215,6 +8361,129 @@ mod tests {
             "SELECT * FROM pgrdf.construct(
                'CONSTRUCT { ?s <http://example.com/t> ?missing } \
                  WHERE { ?s ?p ?o }')",
+        )
+        .unwrap();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Slice 57 — blank-node template support. `_:label` in template
+    // positions mints fresh labels per (solution, template-label)
+    // per W3C SPARQL 1.1 §16.2. Within-solution sameness preserved
+    // (same template label → same fresh label across positions of
+    // one solution); across-solution labels differ. Predicate
+    // position is illegal RDF: spargebra rejects at parse time, so
+    // the surface error is a parse error, not a construct semantic
+    // error. Multi-triple templates are out of scope until slice 56.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Positive — single bnode subject, single solution. Locks the
+    /// `{"type":"bnode","value":"<label>"}` shape and confirms the
+    /// surrounding template positions encode normally (constant +
+    /// constant in this case).
+    #[pg_test]
+    fn construct_bnode_subject_single_solution() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:s1 ex:p ex:o1 .',
+                9120)",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.construct(
+               'CONSTRUCT { _:newSubj <http://example.com/tag> \"hit\" } \
+                 WHERE { ?x <http://example.com/p> ?y }') LIMIT 1",
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        assert_eq!(v["subject"]["type"], "bnode");
+        // Fresh label is a non-empty string — we don't lock the
+        // exact text because the minter is implementation-defined.
+        let s_val = v["subject"]["value"]
+            .as_str()
+            .expect("subject value must be a string");
+        assert!(!s_val.is_empty(), "fresh bnode label must be non-empty");
+        // Surrounding positions are normal IRI / literal cells.
+        assert_eq!(v["predicate"]["type"], "iri");
+        assert_eq!(v["predicate"]["value"], "http://example.com/tag");
+        assert_eq!(v["object"]["type"], "literal");
+        assert_eq!(v["object"]["value"], "hit");
+    }
+
+    /// Positive — three solutions, fresh-per-solution distinctness.
+    /// Collect all three subject bnode labels and assert
+    /// `count(DISTINCT) == 3`. Locks the across-solution distinctness
+    /// invariant (W3C SPARQL 1.1 §16.2).
+    #[pg_test]
+    fn construct_bnode_subject_fresh_per_solution() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:b1 ex:p \"1\" .
+                 ex:b2 ex:p \"2\" .
+                 ex:b3 ex:p \"3\" .',
+                9121)",
+        )
+        .unwrap();
+
+        let n_distinct: i64 = Spi::get_one(
+            "SELECT count(DISTINCT j->'subject'->>'value')::BIGINT \
+               FROM pgrdf.construct(
+                 'CONSTRUCT { _:newSubj <http://example.com/tag> \"hit\" } \
+                   WHERE { ?x <http://example.com/p> ?y }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            n_distinct, 3,
+            "three solutions must mint three distinct bnode labels"
+        );
+    }
+
+    /// Positive — same template label in subject + object of the
+    /// same triple. Per W3C §16.2 within-solution sameness, both
+    /// positions resolve to the SAME fresh label within a row.
+    /// We assert by aggregating `subject.value = object.value`
+    /// across all rows and checking the AND is true.
+    #[pg_test]
+    fn construct_bnode_within_solution_label_sameness() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:c1 ex:p \"1\" .
+                 ex:c2 ex:p \"2\" .',
+                9122)",
+        )
+        .unwrap();
+
+        let all_equal: bool = Spi::get_one(
+            "SELECT bool_and((j->'subject'->>'value') = (j->'object'->>'value')) \
+               FROM pgrdf.construct(
+                 'CONSTRUCT { _:foo <http://example.com/linksTo> _:foo } \
+                   WHERE { ?x <http://example.com/p> ?y }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap_or(false);
+        assert!(
+            all_equal,
+            "same template bnode label in two positions → same fresh label per solution"
+        );
+    }
+
+    /// Negative — multi-triple template rejected (slice 56 territory).
+    /// Slice 57 narrows to single-triple templates; the cross-triple
+    /// blank-node label joining contract belongs to slice 56.
+    #[pg_test(
+        error = "pgrdf.construct: slice 57 supports single-triple templates; multi-triple lands in slice 56"
+    )]
+    fn construct_rejects_multi_triple_template() {
+        Spi::run(
+            "SELECT * FROM pgrdf.construct(
+               'CONSTRUCT { <http://example.com/a> <http://example.com/p> \"1\" . \
+                            <http://example.com/b> <http://example.com/q> \"2\" } \
+                 WHERE { ?x ?y ?z }')",
         )
         .unwrap();
     }

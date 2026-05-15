@@ -3,8 +3,10 @@
 -- Phase D slice 58 — `pgrdf.construct` template VARIABLE substitution.
 -- Slice 59 (`100-construct-foundation.sql`) shipped the constant-only
 -- foundation; slice 58 widens template positions to admit variables in
--- subject / predicate / object slots. Blank nodes in the template
--- still panic — slice 57 lifts that.
+-- subject / predicate / object slots. Slice 57 (file
+-- `102-construct-blank-node-templates.sql`) further widened the
+-- template to admit blank nodes with per-solution fresh-label
+-- minting.
 --
 -- Per-position semantics (LLD v0.4 §6.1 / §6.2):
 --
@@ -13,7 +15,7 @@
 --     through the dictionary into the structured term shape
 --     `{type, value, datatype, [language]}`. Term types covered:
 --     `iri`, `bnode`, `literal` (plain string, typed, language).
---   * Blank-node-in-template → panic with the slice-58 prefix.
+--   * Blank-node-in-template → fresh per-solution label (slice 57).
 --
 -- Invariants locked by this file:
 --
@@ -32,7 +34,7 @@
 --      tag and the `datatype` carries rdf:langString (RDF 1.1 §3.3).
 --   G. Unbound template variable rejection — `pgrdf.construct:
 --      unbound template variable ?missing`.
---   H. Blank-node-in-template still rejected — slice-58 prefix.
+--   H. Blank-node-in-template now admitted (slice 57 widened).
 --   I. Literal-in-subject still rejected — legal-RDF prefix.
 --   J. Mixed constant + variable template (single triple form).
 --      The constant positions encode identically to the slice-59
@@ -177,13 +179,17 @@ SELECT _check_error(
   $$pgrdf.construct: unbound template variable ?missing$$
 );
 
--- ─── Invariant H: blank-node-in-template still rejected ─────────
-SELECT _check_error(
-  'h-rejects-bnode-in-template',
-  $$SELECT * FROM pgrdf.construct(
-    'CONSTRUCT { <http://example.com/s> <http://example.com/p> _:b } WHERE { ?s ?p ?o }')$$,
-  $$pgrdf.construct: slice 58$$
-);
+-- ─── Invariant H: blank-node-in-template now admitted (slice 57) ─
+-- Slice 57 widened the template surface to admit blank nodes (with
+-- per-solution fresh-label minting). The slice-58 narrow-scope
+-- rejection is GONE; verify by confirming the call returns rows and
+-- the bnode position carries the `bnode` term-type. Detailed
+-- semantics covered in `102-construct-blank-node-templates.sql`.
+SELECT (j->'object'->>'type') AS h_object_type
+  FROM pgrdf.construct(
+    'CONSTRUCT { <http://example.com/s> <http://example.com/p> _:b } '
+    'WHERE { <http://example.com/a2> ?p ?o }') AS s(j)
+  LIMIT 1;
 
 -- ─── Invariant I: literal-in-subject still rejected ─────────────
 SELECT _check_error(

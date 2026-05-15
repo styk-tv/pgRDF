@@ -1,0 +1,19 @@
+
+0
+1
+1
+bnode|t|iri|http://example.com/tag|literal|hit
+3
+3
+3
+3
+t
+3
+2
+2
+2|2|http://example.com/relates_to|t|t
+e-rejects-multi-triple: t
+1
+bnode|t
+
+1

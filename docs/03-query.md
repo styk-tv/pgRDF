@@ -377,28 +377,40 @@ Concrete shape:
       (spargebra parser.rs §Add / §Move / §Copy) into compositions
       of `Drop + DeleteInsert` (or just `DeleteInsert` for ADD),
       so they ride the existing per-form dispatcher arms.
-- 🚧 `CONSTRUCT` (Phase D slice 58 — variable substitution) — sibling
-      UDF `pgrdf.construct(q TEXT) → SETOF JSONB`. Each row carries
-      `{"subject": …, "predicate": …, "object": …}` with structured
-      term cells `{"type": "iri"|"literal"|"bnode", "value": …,
-      "datatype"?: …, "language"?: …}` per LLD v0.4 §6.1. Templates
-      accept constants AND variables in subject / predicate / object
-      positions; per-solution substitution resolves each variable's
+- 🚧 `CONSTRUCT` (Phase D slice 57 — blank-node template support) —
+      sibling UDF `pgrdf.construct(q TEXT) → SETOF JSONB`. Each row
+      carries `{"subject": …, "predicate": …, "object": …}` with
+      structured term cells `{"type": "iri"|"literal"|"bnode",
+      "value": …, "datatype"?: …, "language"?: …}` per LLD v0.4 §6.1.
+      Templates accept constants, variables, AND blank-node labels
+      (`_:label`) in subject / object positions; blank nodes in
+      predicate position are illegal RDF (spargebra rejects at parse
+      time). Per-solution substitution resolves each variable's
       dict id through the dictionary into the same structured shape.
-      Typed and language-tagged literal bindings flow through with
-      full datatype IRI / `language` field preservation
-      (`rdf:langString` for tagged literals per RDF 1.1 §3.3). The
-      WHERE pattern accepts the full SELECT-side BGP / FILTER /
-      OPTIONAL / UNION / MINUS surface (translation reuses
+      Blank-node template positions mint a FRESH label per (solution,
+      template-label) pair per W3C SPARQL 1.1 §16.2 ("any blank
+      nodes in the template are replaced with new blank nodes" — one
+      fresh label per solution). The same template label appearing
+      in multiple positions of one triple within one solution
+      resolves to the SAME fresh label (within-solution sameness);
+      across solutions, fresh labels differ. Variable-bound blank
+      nodes from the WHERE pattern (the dictionary stored a bnode
+      via Turtle ingest) pass through with the dictionary-stored
+      label unchanged. Typed and language-tagged literal bindings
+      flow through with full datatype IRI / `language` field
+      preservation (`rdf:langString` for tagged literals per RDF 1.1
+      §3.3). The WHERE pattern accepts the full SELECT-side BGP /
+      FILTER / OPTIONAL / UNION / MINUS surface (translation reuses
       `parse_select` + `build_from_and_where`). Variables that the
       WHERE pattern does not bind panic with
-      `pgrdf.construct: unbound template variable ?X`. Blank nodes in
-      templates still panic with `pgrdf.construct: slice 58 supports
-      variables and constants; blank nodes land in slice 57` until
-      slice 57 widens. DISTINCT / ORDER BY / GROUP BY / aggregates on
-      CONSTRUCT are explicitly out of scope per W3C 1.1 §16.2 —
-      rejected with `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY
-      / aggregates not supported (W3C 1.1 §16.2)`.
+      `pgrdf.construct: unbound template variable ?X`. Multi-triple
+      templates (cross-triple blank-node label joining) land in
+      slice 56; today they panic with `pgrdf.construct: slice 57
+      supports single-triple templates; multi-triple lands in slice
+      56`. DISTINCT / ORDER BY / GROUP BY / aggregates on CONSTRUCT
+      are explicitly out of scope per W3C 1.1 §16.2 — rejected with
+      `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates
+      not supported (W3C 1.1 §16.2)`.
 - ⏳ `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4

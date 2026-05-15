@@ -6,8 +6,9 @@
 -- and emitting one structured-term row per (solution, template
 -- triple) pair. Slice 59 narrows to CONSTANT-ONLY templates;
 -- slice 58 (file `101-construct-variable-templates.sql`) widened to
--- variable substitution. Blank nodes in templates still panic until
--- slice 57.
+-- variable substitution; slice 57 (file `102-construct-blank-node-
+-- templates.sql`) further widened to admit blank nodes with
+-- per-solution fresh-label minting.
 --
 -- Output row shape (per LLD §6.1):
 --
@@ -31,9 +32,10 @@
 --   E. Reject non-CONSTRUCT — `pgrdf.construct('SELECT …')` panics
 --      with the stable `pgrdf.construct: not a CONSTRUCT query`
 --      prefix.
---   F. Reject blank node in template — slice 58 narrowed-scope
---      guard with `pgrdf.construct: slice 58 supports variables
---      and constants; blank nodes land in slice 57` prefix.
+--   F. Blank-node template position now admitted (slice 57 widened
+--      the surface). Detailed semantics — fresh-per-solution
+--      labels, within-solution sameness, predicate-position
+--      rejection — exercised in `102-construct-blank-node-templates.sql`.
 --   G. Reject literal in subject — `pgrdf.construct: literal not
 --      allowed in subject/predicate position` prefix (legal RDF).
 --   H. Reject DISTINCT/ORDER BY/aggregate wrapping on the WHERE —
@@ -139,13 +141,18 @@ SELECT _check_error(
   $$pgrdf.construct: not a CONSTRUCT query$$
 );
 
--- ─── Invariant F: reject blank node in template (slice 58 narrow) ─
-SELECT _check_error(
-  'f-rejects-bnode-in-template',
-  $$SELECT * FROM pgrdf.construct(
-    'CONSTRUCT { <http://example.com/s> <http://example.com/t> _:b } WHERE { ?s ?p ?o }')$$,
-  $$pgrdf.construct: slice 58 supports variables and constants; blank nodes land in slice 57$$
-);
+-- ─── Invariant F: blank node in object template (slice 57 admits) ─
+-- Slice 57 widened the template surface to admit blank nodes (with
+-- per-solution fresh-label minting). Verify the prior slice-58
+-- rejection is GONE by checking the call now returns rows; the
+-- detailed semantics (within-solution sameness, across-solution
+-- distinctness, etc.) are exercised in `102-construct-blank-node-
+-- templates.sql`.
+SELECT count(*)::bigint AS f_bnode_now_accepted
+  FROM pgrdf.construct(
+    'CONSTRUCT { <http://example.com/s> <http://example.com/t> _:b } '
+    'WHERE { ?s <http://example.com/k> ?o }'
+  ) AS s(j);
 
 -- ─── Invariant G: reject literal in subject (legal RDF) ─────────
 SELECT _check_error(
