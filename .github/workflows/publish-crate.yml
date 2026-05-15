@@ -1,0 +1,73 @@
+name: publish-crate
+
+# Publishes the pgRDF source crate to crates.io.
+#
+# Trigger: only fires when a GitHub Release is published (the existing
+# `release.yml` workflow builds the per-PG tarballs first; this workflow
+# is decoupled so a human still has to click "Publish release" before
+# anything lands on crates.io).
+#
+# Manual entry point: `workflow_dispatch` with `dry_run` lets you exercise
+# the pipeline (cargo publish --dry-run) without consuming a version slot.
+#
+# Token: requires repository secret `CARGO_REGISTRY_TOKEN` — a scoped
+# crates.io API token with "publish-update" permission, ideally restricted
+# to the `pgrdf` crate. Created at https://crates.io/settings/tokens and
+# stored at https://github.com/styk-tv/pgRDF/settings/secrets/actions.
+#
+# Why `--no-verify`: pgrx requires an explicit `pg14|pg15|pg16|pg17`
+# feature and a matching `pg_config` to compile. crates.io's verify step
+# runs a plain `cargo build` with no features, which fails by design
+# (see Cargo.toml comment above the `default = []` feature block). The
+# released tarballs from `release.yml` are the load-bearing build
+# verification.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run only (cargo publish --dry-run)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify tag matches Cargo.toml version
+        if: github.event_name == 'release'
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          MANIFEST="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["packages"][0]["version"])')"
+          echo "tag=$TAG  manifest=$MANIFEST"
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::Release tag v$TAG does not match Cargo.toml version $MANIFEST — aborting publish."
+            exit 1
+          fi
+
+      - name: cargo publish --dry-run
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'
+        run: cargo publish --dry-run --no-verify --allow-dirty
+
+      - name: cargo publish
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --no-verify

@@ -15,7 +15,10 @@ authors = ["Peter Styk <peter@styk.tv>"]
 description = "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning"
 repository = "https://github.com/styk-tv/pgRDF"
 homepage = "https://github.com/styk-tv/pgRDF"
+documentation = "https://docs.rs/pgrdf"
 readme = "README.md"
+keywords = ["postgres", "pgrx", "rdf", "sparql", "shacl"]
+categories = ["database", "database-implementations"]
 
 [lib]
 crate-type = ["cdylib", "lib"]
