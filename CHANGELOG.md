@@ -6,6 +6,96 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase B slice 99 — pgrdf.drop_graph lifecycle UDF
+
+Opens Phase B (lifecycle UDFs §5) toward v0.4.2.
+`pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE) →
+BIGINT` removes the LIST partition `_pgrdf_quads_g<id>` from the
+parent `_pgrdf_quads` via `ALTER TABLE ... DETACH PARTITION` +
+`DROP TABLE`, deletes the matching `_pgrdf_graphs` row, and
+returns the pre-drop triple count. `cascade => FALSE` errors with
+the stable `drop_graph: inferred rows present` prefix if any
+`is_inferred = TRUE` row exists; `cascade => TRUE` (the default)
+drops both base and inferred content. Default partition
+(`graph_id = 0`) rejected with `drop_graph: cannot drop default
+partition`; negative ids rejected with
+`drop_graph: graph_id must be >= 0`. Idempotent: dropping an
+absent graph returns 0 (no error) and also prunes any stranded
+`_pgrdf_graphs` row so the IRI mapping converges with reality on
+a crash-recovery code path. Post-drop, `pgrdf.graph_iri(id)` and
+`pgrdf.graph_id(iri)` both return NULL — closes the
+`_pgrdf_graphs` invalidation clause from LLD v0.4 §5.2.
+
+Implementation lands in `src/storage/graphs.rs` (the same module
+slice 120 introduced for graph-related UDFs). The partition-DDL
+metadata window takes an `ACCESS EXCLUSIVE` lock on
+`_pgrdf_quads` per Postgres's partition-management semantics —
+the user-facing tradeoff documented for the "long-running
+maintenance" workflow.
+
+Regression: `tests/regression/sql/88-drop-graph.sql` locks six
+invariants (idempotent absent, happy path with triple count,
+cascade-FALSE-inferred guard, cascade-TRUE-inferred override,
+default-partition guard, negative-id guard) via the `_check_error`
+plpgsql helper shared with `81-error-paths.sql`. Expected output
+hand-authored; never ACCEPT=1 baselined. Pgrx integration tests
+cover the absent + happy + cascade-FALSE + default-partition +
+negative-id paths under the `pg_test` harness, bypassing
+`add_graph` via manual partition + `_pgrdf_graphs` INSERT to
+avoid the documented pgrx-parallelism flake on partition DDL.
+
+LLD v0.4 §5.1 row marked `✅ slice 99`; §2 status row updated to
+reflect the `drop_graph` ✅ partial-completion of the
+lifecycle-UDFs track. `docs/02-storage.md` gains §2.4 covering
+the new `drop_graph` surface; `docs/10-roadmap.md` Track 3 picks
+up the slice 99 ✅ entry alongside slice 98.
+
+### Phase B slice 98 — `pgrdf.clear_graph` lifecycle UDF
+
+First landing of the LLD v0.4 §5 graph-level lifecycle UDF
+surface. `pgrdf.clear_graph(id BIGINT) → BIGINT` issues
+`TRUNCATE ONLY pgrdf._pgrdf_quads_g<id>` against the per-graph
+LIST partition and returns the rows-removed count (== the row
+count captured immediately before the TRUNCATE). Both base and
+inferred rows are wiped; the function is not
+`is_inferred`-discriminating per LLD §5.2.
+
+Contract details:
+
+- **Partition shell + IRI binding survive.** Unlike sibling
+  slice 99's `drop_graph(id)` (which DETACHes the partition,
+  DROPs it, and removes the `_pgrdf_graphs` row), `clear_graph`
+  leaves both intact. Subsequent inserts with the same
+  `graph_id` route into the same partition without falling
+  back to `_pgrdf_quads_default`, and `pgrdf.graph_iri(id)`
+  keeps resolving to the bound IRI.
+- **Idempotent on absent / empty graphs.** Calling against a
+  `graph_id` with no LIST partition returns 0 without erroring;
+  re-calling against an already-empty partition returns 0
+  again. Callers can `clear_graph` blindly during cleanup
+  workflows without first probing partition existence.
+- **`graph_id = 0` is permitted.** Unlike `drop_graph(0)` —
+  which would destroy the catch-all bucket every unrouted
+  `INSERT` depends on, hence its outright rejection in slice 99
+  — `clear_graph(0)` just empties the explicit `_pgrdf_quads_g0`
+  partition (if `add_graph(0)` was ever called) or returns 0
+  (idempotent miss path).
+- **Negative id panics** with the stable
+  `clear_graph: graph_id must be >= 0, got <N>` prefix —
+  matches the error-shape contract `add_graph(id BIGINT)`
+  (slice 119) already established.
+
+`TRUNCATE ONLY` (not bare `TRUNCATE`) is deliberate defence-in-
+depth: `ONLY` blocks cascade to any descendant partitions. The
+per-graph partitions have no children today, but `ONLY` future-
+proofs against a sub-partitioning slice silently widening the
+scope.
+
+Regression coverage: `tests/regression/sql/89-clear-graph.sql`
+locks all six contract invariants end-to-end. Three
+`#[pg_test]`s in `src/storage/graphs.rs` exercise the happy path,
+idempotent-absent, and clear-twice paths.
+
 ### Phase B slice 97 — pgrdf.copy_graph lifecycle UDF
 
 Continues the LLD v0.4 §5 graph-level lifecycle UDF surface.
@@ -85,6 +175,7 @@ lifecycle-UDFs track. `docs/02-storage.md` §2.2 gains a
 `#### copy_graph` subsection alongside the slice-98 `clear_graph`
 entry; `docs/10-roadmap.md` Track 3 picks up the slice 97 ✅
 entry alongside slices 98 + 99.
+
 ### Phase B slice 96 — pgrdf.move_graph lifecycle UDF
 
 Continues the LLD v0.4 §5 graph-level lifecycle UDF track.
@@ -159,95 +250,62 @@ deferred to v0.5. `docs/02-storage.md` gains the `move_graph`
 surface section in §2.4; `docs/10-roadmap.md` Track 3 picks up
 the slice 96 ✅ entry alongside slices 98 + 99.
 
-### Phase B slice 98 — `pgrdf.clear_graph` lifecycle UDF
+### Phase B slice 95 — lifecycle UDF end-to-end integration
 
-First landing of the LLD v0.4 §5 graph-level lifecycle UDF
-surface. `pgrdf.clear_graph(id BIGINT) → BIGINT` issues
-`TRUNCATE ONLY pgrdf._pgrdf_quads_g<id>` against the per-graph
-LIST partition and returns the rows-removed count (== the row
-count captured immediately before the TRUNCATE). Both base and
-inferred rows are wiped; the function is not
-`is_inferred`-discriminating per LLD §5.2.
+Wires the four §5 lifecycle UDFs together against a realistic
+load → mutate → verify flow.
+[`tests/regression/sql/92-lifecycle-end-to-end.sql`](tests/regression/sql/92-lifecycle-end-to-end.sql)
+locks five interaction-level invariants the per-UDF files cannot:
 
-Contract details:
+- **Load → copy → drop round-trip.** `parse_turtle` into g1,
+  `copy_graph(g1, g2)`, `drop_graph(g1)` — the dst graph still
+  answers the original BGP through `pgrdf.sparql`. Catches a
+  regression where the loader's side-effects (dict_cache,
+  hexastore, `_pgrdf_graphs`) get corrupted by a lifecycle UDF.
+- **`move_graph` is a faithful compose of copy + drop.** After
+  `move_graph(g1, g2)`, g1 answers like a freshly-dropped graph
+  (zero rows, `_pgrdf_graphs` row gone) and g2 answers like a
+  freshly-copied graph (rows present, synthetic IRI bound).
+- **`clear_graph` isolation under a shared dict.** Loading the
+  same vocabulary into g1 and g2 (so the dict cache is shared),
+  then clearing g1, must NOT touch g2 — at the row level OR at the
+  `_pgrdf_graphs` row level. Pins the per-partition routing
+  isolation even when the loader has fed both through the same
+  dict / hexastore.
+- **SPARQL `GRAPH <iri>` projection survives the lifecycle.** A
+  `GRAPH <urn:pgrdf:graph:N>` query against the synthetic IRI of
+  a moved-into destination returns the loaded triples — the
+  IRI rebinding + partition routing both hold through the move
+  step.
+- **Drop-then-rebind loop.** Drop a graph, re-add via the
+  IRI-keyed surface bound to a fresh IRI; `pgrdf.graph_id(new_iri)`
+  resolves. Catches a regression where stale `_pgrdf_graphs` state
+  would block re-allocation after a drop.
 
-- **Partition shell + IRI binding survive.** Unlike sibling
-  slice 99's `drop_graph(id)` (which DETACHes the partition,
-  DROPs it, and removes the `_pgrdf_graphs` row), `clear_graph`
-  leaves both intact. Subsequent inserts with the same
-  `graph_id` route into the same partition without falling
-  back to `_pgrdf_quads_default`, and `pgrdf.graph_iri(id)`
-  keeps resolving to the bound IRI.
-- **Idempotent on absent / empty graphs.** Calling against a
-  `graph_id` with no LIST partition returns 0 without erroring;
-  re-calling against an already-empty partition returns 0
-  again. Callers can `clear_graph` blindly during cleanup
-  workflows without first probing partition existence.
-- **`graph_id = 0` is permitted.** Unlike `drop_graph(0)` —
-  which would destroy the catch-all bucket every unrouted
-  `INSERT` depends on, hence its outright rejection in slice 99
-  — `clear_graph(0)` just empties the explicit `_pgrdf_quads_g0`
-  partition (if `add_graph(0)` was ever called) or returns 0
-  (idempotent miss path).
-- **Negative id panics** with the stable
-  `clear_graph: graph_id must be >= 0, got <N>` prefix —
-  matches the error-shape contract `add_graph(id BIGINT)`
-  (slice 119) already established.
+All expected values hand-computed against the loader semantics
+(`parse_turtle` returns the triple count) and the §5 UDF
+contracts; never ACCEPT=1 baselined. Regression bar: 53 → 54.
 
-`TRUNCATE ONLY` (not bare `TRUNCATE`) is deliberate defence-in-
-depth: `ONLY` blocks cascade to any descendant partitions. The
-per-graph partitions have no children today, but `ONLY` future-
-proofs against a sub-partitioning slice silently widening the
-scope.
+### Phase B slices 89-88 — docs sync for §5 lifecycle UDFs
 
-Regression coverage: `tests/regression/sql/89-clear-graph.sql`
-locks all six contract invariants end-to-end. Three
-`#[pg_test]`s in `src/storage/graphs.rs` exercise the happy path,
-idempotent-absent, and clear-twice paths.
+Documentation catches up with the v0.4.2 lifecycle surface ahead
+of cut:
 
-### Phase B slice 99 — pgrdf.drop_graph lifecycle UDF
+- `docs/02-storage.md` §2.4 status updated to **Phase B shipped —
+  v0.4.2**; the in-flight stub headings for slices 96/97 are
+  removed (all four UDFs ship via 99/98/97/96/95). A new
+  end-to-end lifecycle composition subsection points at
+  `tests/regression/sql/92-lifecycle-end-to-end.sql` (slice 95).
+- `guide/02-loading-rdf.md` — the legacy "DROP TABLE
+  pgrdf._pgrdf_quads_g<N>" recipe is replaced with
+  `SELECT pgrdf.drop_graph(<N>)`. A new "Graph lifecycle
+  (v0.4.2)" section enumerates the four UDFs with their stable
+  error-prefix contracts for downstream tooling.
+- `README` — test pill bumps from 118 pgrx + 49 regression to
+  127 pgrx + 54 regression; aggregate test bar 196 → 210. The
+  Status pill calls out Phase B (v0.4.2) shipped and drops
+  "lifecycle UDFs" from the deferred set.
 
-Opens Phase B (lifecycle UDFs §5) toward v0.4.2.
-`pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE) →
-BIGINT` removes the LIST partition `_pgrdf_quads_g<id>` from the
-parent `_pgrdf_quads` via `ALTER TABLE ... DETACH PARTITION` +
-`DROP TABLE`, deletes the matching `_pgrdf_graphs` row, and
-returns the pre-drop triple count. `cascade => FALSE` errors with
-the stable `drop_graph: inferred rows present` prefix if any
-`is_inferred = TRUE` row exists; `cascade => TRUE` (the default)
-drops both base and inferred content. Default partition
-(`graph_id = 0`) rejected with `drop_graph: cannot drop default
-partition`; negative ids rejected with
-`drop_graph: graph_id must be >= 0`. Idempotent: dropping an
-absent graph returns 0 (no error) and also prunes any stranded
-`_pgrdf_graphs` row so the IRI mapping converges with reality on
-a crash-recovery code path. Post-drop, `pgrdf.graph_iri(id)` and
-`pgrdf.graph_id(iri)` both return NULL — closes the
-`_pgrdf_graphs` invalidation clause from LLD v0.4 §5.2.
-
-Implementation lands in `src/storage/graphs.rs` (the same module
-slice 120 introduced for graph-related UDFs). The partition-DDL
-metadata window takes an `ACCESS EXCLUSIVE` lock on
-`_pgrdf_quads` per Postgres's partition-management semantics —
-the user-facing tradeoff documented for the "long-running
-maintenance" workflow.
-
-Regression: `tests/regression/sql/88-drop-graph.sql` locks six
-invariants (idempotent absent, happy path with triple count,
-cascade-FALSE-inferred guard, cascade-TRUE-inferred override,
-default-partition guard, negative-id guard) via the `_check_error`
-plpgsql helper shared with `81-error-paths.sql`. Expected output
-hand-authored; never ACCEPT=1 baselined. Pgrx integration tests
-cover the absent + happy + cascade-FALSE + default-partition +
-negative-id paths under the `pg_test` harness, bypassing
-`add_graph` via manual partition + `_pgrdf_graphs` INSERT to
-avoid the documented pgrx-parallelism flake on partition DDL.
-
-LLD v0.4 §5.1 row marked `✅ slice 99`; §2 status row updated to
-reflect the `drop_graph` ✅ partial-completion of the
-lifecycle-UDFs track. `docs/02-storage.md` gains §2.4 covering
-the new `drop_graph` surface; `docs/10-roadmap.md` Track 3 picks
-up the slice 99 ✅ entry alongside slice 98.
 
 ### Release ops — `publish-crate.yml` disabled until E-011 retires
 
