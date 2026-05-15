@@ -6,6 +6,22 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Release ops — `publish-crate.yml` disabled until E-011 retires
+
+`.github/workflows/publish-crate.yml` renamed to
+`.github/workflows/publish-crate.yml.disabled` so subsequent
+release-publication events stop attempting `cargo publish`. The
+v0.4.1 run already empirically confirmed `[patch.crates-io]` does
+not travel with `cargo publish` (the dep resolves against stock
+`reasonable 0.4.x`, which lacks the `rdf-12` passthrough feature).
+The workflow file is preserved verbatim — re-enable by reverting
+the rename when [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+merges and the `[patch.crates-io]` block drops. Until then, pgRDF
+distribution remains via prebuilt tarballs (`release.yml`) only;
+the existing crates.io `pgrdf 0.3.0` name-claim entry persists
+unchanged. Tracked at [`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md)
+E-011 step 6.
+
 ### Phase A countdown closed at slice 100 — v0.4.1 shipped
 
 Phase A (§3 named-graph) closed end-to-end. v0.4.1 cut on tag

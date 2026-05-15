@@ -143,6 +143,7 @@ locally via `[patch.crates-io]`; the PR can be filed.
 3. ~~Replace the `pgrdf.validate` stub in `src/validation/shacl.rs` with a real `shacl::GraphValidation`-backed body.~~ **Done — see [LLD.v0.4 §9](SPEC.pgRDF.LLD.v0.4.md).**
 4. ~~File the upstream PR using the held draft.~~ **Done 2026-05-15: <https://github.com/gtfierro/reasonable/pull/50>**.
 5. Once upstream merges, drop the `[patch.crates-io]` line and pin `reasonable = "0.4.2"` (or whatever lands). **Open — gated on maintainer review of (4).**
+6. **2026-05-15: `cargo publish` is structurally blocked while `[patch.crates-io]` is in place.** The patch entry does not travel with the published crate (`cargo publish` rejects + downstream consumers can't reproduce the override). v0.4.1 confirmed this empirically — `publish-crate.yml` errored with `failed to select a version for reasonable. package pgrdf depends on reasonable with feature rdf-12 but reasonable does not have that feature`. Action taken: **`/.github/workflows/publish-crate.yml` renamed to `.disabled`** so the workflow doesn't fire on subsequent releases. Re-enable by renaming back when step (5) lands. Until then, pgRDF distribution is via prebuilt tarballs (`release.yml`) only; the crates.io `pgrdf` 0.3.0 entry stays as the name-claim seed but won't auto-update through 0.4.x.
 
 This entry is updated as work progresses; final state is **resolved**
 once upstream merges and pgRDF pins the released `reasonable` version.
