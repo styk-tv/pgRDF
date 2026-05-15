@@ -239,6 +239,27 @@ interchangeable at the UDF boundary. `pgrdf.put_quad`,
     any graph" — same semantics as v0.3 (`pgrdf.sparql` over the
     union of all partitions).
 
+#### 3.3.1 W3C-shape conformance coverage (Phase A slice 111)
+
+The W3C-shape harness at `tests/w3c-sparql/` carries three §13.3
+fixtures landed in slice 111:
+
+| Test dir | Form | Spec | First green when |
+|---|---|---|---|
+| `24-graph-named-iri` | `GRAPH <iri>` literal | §13.3 | slice 114 (literal-IRI translator) |
+| `25-graph-var-projection` | `GRAPH ?g` projection | §13.3 | slice 113 (variable-form translator) |
+| `26-graph-var-groupby` | `GRAPH ?g` + `COUNT(*)` + `GROUP BY ?g` + `ORDER BY ?g` | §13.3 + §11 + §15.1 | slice 113 |
+
+Tests 25 + 26 are authored at slice 111 (parallel with slice 113);
+they pass once both 111 and 113 land on `main`. Slice 111 also
+extends `tests/w3c-sparql/run.sh` with optional per-test `setup.sql`
+support — needed because the default single-graph
+`add_graph(gid) + parse_turtle(data.ttl, gid)` path cannot express
+the multi-graph fixtures §13.3 requires. The extension is
+backward-compatible: tests 01–23 retain a non-empty `data.ttl` and
+no `setup.sql`, and their SQL stream is byte-identical pre/post the
+extension.
+
 ### 3.4 Acceptance criteria (v0.4 gate)
 
 - `SELECT ?s WHERE { GRAPH <http://example.org/g1> { ?s ?p ?o } }`

@@ -1,0 +1,2 @@
+PREFIX ex: <http://example.org/>
+SELECT ?name WHERE { GRAPH <http://example.org/g1> { ?s ex:name ?name } }

@@ -6,6 +6,42 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 111 — W3C-shape conformance for SPARQL GRAPH
+
+Three new W3C-shape fixtures under `tests/w3c-sparql/` covering the
+§13.3 `GRAPH { … }` surface:
+
+- `24-graph-named-iri/` — literal-IRI form `GRAPH <iri> { ?s ex:name ?name }`.
+  Two named graphs populated via `setup.sql`; query scopes to `g1`
+  only; expected single-row result `{"name": "Alice in g1"}`.
+- `25-graph-var-projection/` — variable form `GRAPH ?g { ?s ex:name ?name }`.
+  Same two-graph fixture; query projects `?g` as the IRI plus
+  `?name`; expected two rows.
+- `26-graph-var-groupby/` — variable form composed with `COUNT(*)` +
+  `GROUP BY ?g` + `ORDER BY ?g` (LLD v0.4 §3.4 acceptance criterion
+  2). Two graphs with 3 + 2 triples; expected
+  `{"g": "…/g1", "n": "3"}` / `{"g": "…/g2", "n": "2"}`.
+
+`tests/w3c-sparql/run.sh` gains optional per-test `setup.sql`
+support. The runner now:
+
+1. Accepts a test directory if it has EITHER `data.ttl` OR
+   `setup.sql` (or both); `query.rq` is still always required.
+2. Runs `setup.sql` (when present) after `CREATE EXTENSION pgrdf`
+   and before any `data.ttl` parse.
+3. Skips the default `add_graph(${gid}) + parse_turtle(data.ttl,
+   ${gid})` step entirely when `data.ttl` is missing or empty
+   (`-s` check).
+
+The extension is backward-compatible: tests 01–23 retain a
+non-empty `data.ttl` and no `setup.sql`, and their SQL stream is
+byte-identical pre/post the extension. The leading-scaffolding-row
+drop in the caller (`grep -E '^\{|^\['`) continues to strip
+function return values from any setup.sql calls.
+
+W3C-shape harness count: 23 → 26. All three fixtures pass against
+the merged state of parallel batch 1 (slices 111 + 113).
+
 ### Phase A slice 113 — SPARQL `GRAPH ?g { … }` variable form translation
 
 The SPARQL executor now handles variable-form `GRAPH ?g { … }`
@@ -35,6 +71,12 @@ the `unsupported_algebra` flip. Plus one pgrx test
 (`sparql_graph_variable_projects_iri`) exercising the same surface.
 `tests/regression/sql/80-unsupported-shapes.sql` retires the gap-4
 entry (variable-form GRAPH is no longer a gap).
+
+Slices 111 + 113 ship as the first **parallel batch** in the
+countdown — two worktree-isolated agents authored independent
+slices that converge on main via cherry-pick. See ERRATA.v0.4 for
+the multi-agent pattern. Tests 25 + 26 (slice 111) verify slice
+113's translation end-to-end.
 
 ### Phase A slice 114 — SPARQL `GRAPH <iri> { … }` translation (LLD v0.4 §3.3)
 

@@ -36,8 +36,14 @@ for dir in "${TESTS_DIR}"/*/; do
   case "${name}" in
     fixtures) continue ;;        # reserved for future W3C submodule
   esac
-  [ -f "${dir}data.ttl" ] || continue
+  # Phase A slice 111: a test directory is valid if it provides EITHER
+  # a `data.ttl` (the v0.3 single-graph default) OR a `setup.sql`
+  # (the slice-111 multi-graph extension for §13.3 GRAPH fixtures).
+  # `query.rq` is always required.
   [ -f "${dir}query.rq" ] || continue
+  if [ ! -f "${dir}data.ttl" ] && [ ! -f "${dir}setup.sql" ]; then
+    continue
+  fi
   if [ -z "${filter}" ] || [ "${name}" = "${filter}" ]; then
     tests+=("${name}")
   fi
@@ -70,35 +76,67 @@ graph_id_for() {
 
 # Run one query against a freshly-recreated extension. Returns the
 # raw sparql output (one JSON per line) on stdout.
+#
+# Phase A slice 111 — optional per-test `setup.sql` is supported for
+# W3C-shape conformance fixtures that need MULTIPLE named graphs (the
+# default single-graph `data.ttl` path can't express §13.3 `GRAPH ?g`
+# scoping). The runner builds a single SQL stream (DROP/CREATE/reset)
+# → optional setup.sql → optional parse_turtle of data.ttl → query
+# and feeds it through one psql invocation so semantics stay
+# deterministic and the leading-scaffolding-row drop in the caller
+# remains compatible (we still keep only lines starting with `{` or
+# `[` — function return values from setup.sql are stripped by the
+# same grep). Existing tests (01-23) have no `setup.sql` and a
+# non-empty `data.ttl`; their SQL stream is unchanged.
 run_one() {
-  local data="$1" query="$2" gid="$3"
-  local content
-  content=$(< "${data}")
+  local test_dir="$1" query="$2" gid="$3"
+  local data="${test_dir}/data.ttl"
+  local setup="${test_dir}/setup.sql"
   local q
   q=$(< "${query}")
   # Escape single quotes for SQL string literals.
-  local content_esc="${content//\'/\'\'}"
   local q_esc="${q//\'/\'\'}"
+
+  # Assemble the SQL stream. Always: DROP / CREATE / shmem_reset /
+  # plan_cache_clear. Then optionally setup.sql (for slice-111
+  # multi-graph fixtures). Then add_graph(${gid}) + parse_turtle ONLY
+  # if data.ttl exists AND is non-empty — keeps the 23 single-graph
+  # tests behaviour-identical while letting multi-graph tests opt
+  # out of the default graph entirely.
+  local sql
+  sql=$'DROP EXTENSION IF EXISTS pgrdf CASCADE;\n'
+  sql+=$'CREATE EXTENSION pgrdf;\n'
+  sql+=$'SELECT pgrdf.shmem_reset();\n'
+  sql+=$'SELECT pgrdf.plan_cache_clear();\n'
+
+  if [ -f "${setup}" ]; then
+    local setup_content
+    setup_content=$(< "${setup}")
+    sql+="${setup_content}"$'\n'
+  fi
+
+  if [ -f "${data}" ] && [ -s "${data}" ]; then
+    local content
+    content=$(< "${data}")
+    local content_esc="${content//\'/\'\'}"
+    sql+="SELECT pgrdf.add_graph(${gid});"$'\n'
+    sql+="SELECT pgrdf.parse_turtle('${content_esc}', ${gid});"$'\n'
+  fi
+
+  sql+="SELECT sparql::text FROM pgrdf.sparql('${q_esc}');"$'\n'
+
   "${RUNTIME}" exec -i "${CONTAINER}" \
     psql -U "${PSQL_USER}" -d "${PSQL_DB}" \
-    -X -A -t -q -v ON_ERROR_STOP=1 <<SQL
-DROP EXTENSION IF EXISTS pgrdf CASCADE;
-CREATE EXTENSION pgrdf;
-SELECT pgrdf.shmem_reset();
-SELECT pgrdf.plan_cache_clear();
-SELECT pgrdf.add_graph(${gid});
-SELECT pgrdf.parse_turtle('${content_esc}', ${gid});
-SELECT sparql::text FROM pgrdf.sparql('${q_esc}');
-SQL
+    -X -A -t -q -v ON_ERROR_STOP=1 <<<"${sql}"
 }
 
 for name in "${tests[@]}"; do
-  data="${TESTS_DIR}/${name}/data.ttl"
-  query="${TESTS_DIR}/${name}/query.rq"
-  expected="${TESTS_DIR}/${name}/expected.jsonl"
+  test_dir="${TESTS_DIR}/${name}"
+  query="${test_dir}/query.rq"
+  expected="${test_dir}/expected.jsonl"
   gid="$(graph_id_for "${name}")"
 
-  raw="$(run_one "${data}" "${query}" "${gid}")"
+  raw="$(run_one "${test_dir}" "${query}" "${gid}")"
   # Drop the three leading scaffolding rows (DROP EXTENSION's NOTICE,
   # plus pgrdf.shmem_reset / plan_cache_clear / add_graph / parse_turtle
   # return values — these show up because we set -q only suppresses

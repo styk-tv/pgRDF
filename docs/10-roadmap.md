@@ -494,8 +494,23 @@ not the integer. See
 - ⏳ Slice 112 — GRAPH composition with OPTIONAL / UNION / MINUS
   across different graph scopes (per-pattern constraint
   annotation).
-- ⏳ Slices 111-110 — W3C-shape regression for named-graph
-  scoping + remaining §3 surface.
+- ✅ **Slice 111 — W3C-shape conformance fixtures for `GRAPH { … }`.**
+  Three new directories under `tests/w3c-sparql/`:
+  [`24-graph-named-iri/`](../tests/w3c-sparql/24-graph-named-iri/)
+  (literal-IRI form, green against slice 114),
+  [`25-graph-var-projection/`](../tests/w3c-sparql/25-graph-var-projection/)
+  (variable form `?g` projection, green once slice 113 merges),
+  [`26-graph-var-groupby/`](../tests/w3c-sparql/26-graph-var-groupby/)
+  (variable form + `COUNT(*)` + `GROUP BY ?g` + `ORDER BY ?g`, also
+  gated on slice 113). Also extends
+  [`tests/w3c-sparql/run.sh`](../tests/w3c-sparql/run.sh) with optional
+  per-test `setup.sql` support — needed because the default
+  single-graph `add_graph(gid) + parse_turtle(data.ttl, gid)` path
+  cannot express §13.3's multi-graph fixtures. Backward-compatible:
+  tests 01–23 retain a non-empty `data.ttl` and no `setup.sql`, and
+  their SQL stream is unchanged.
+- ⏳ Slice 110 — remaining §3 surface (composition coverage that
+  depends on slice 112 landing).
 
 ### Track 2 — SPARQL UPDATE
 `INSERT DATA`, `DELETE DATA`, pattern-driven `INSERT/DELETE … WHERE`,

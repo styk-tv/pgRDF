@@ -9,6 +9,9 @@ is one test:
   query.rq       — SPARQL query executed via pgrdf.sparql
   expected.jsonl — one JSONB result row per line, lexicographically sorted
   description.md — optional prose explaining the W3C spec section exercised
+  setup.sql      — optional per-test SQL run BEFORE data.ttl (slice 111+);
+                   used by §13.3 GRAPH fixtures that need MULTIPLE named
+                   graphs. When present, data.ttl MAY be empty.
 ```
 
 **Phase 6 step 2 (v0.3) ships the runner + 5 starter tests.** The
@@ -79,8 +82,10 @@ against the W3C spec is the load-bearing part.
 | Numeric FILTER on `xsd:integer` | §17.3 | ✅ 21 |
 | Inline `HAVING(SUM(?v) > c)` | §11.5 | ✅ 22 |
 | Type-aware `MIN`/`MAX` over `xsd:numeric` | §17.4 | ✅ 23 |
+| `GRAPH <iri> { … }` literal-IRI form | §13.3 | ✅ 24 (lands with slice 114) |
+| `GRAPH ?g { … }` variable form — projection | §13.3 | ✅ 25 (lands with slices 111 + 113) |
+| `GRAPH ?g { … }` + `COUNT(*)` + `GROUP BY ?g` + `ORDER BY ?g` | §13.3 + §11 + §15.1 | ✅ 26 (lands with slices 111 + 113) |
 | Property paths beyond `:a/:b` sequence | §9 | ❌ deferred — see v0.4 |
-| GRAPH `{ … }` named-graph clause | §13 | ❌ deferred — needs storage schema work |
 | VALUES / FROM NAMED / CONSTRUCT / DESCRIBE | §10.2 / §13 / §16 | ❌ deferred — see v0.3 LLD §3 |
 
 ## See also
