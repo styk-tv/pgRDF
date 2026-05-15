@@ -4,11 +4,125 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is `v0.4.2`. Cargo.toml reads `version = "0.4.2"`
-(bumped from `0.4.1` during the v0.4.2 release pre-flight, Phase B
-countdown slice 85). See `CHANGELOG.md` for the running set of
+The current cut is `v0.4.3`. Cargo.toml reads `version = "0.4.3"`
+(bumped from `0.4.2` during the v0.4.3 release pre-flight, Phase C
+countdown slice 64). See `CHANGELOG.md` for the running set of
 `[Unreleased]` entries that move into the next `[N.M.P]` block at
 tag time.
+
+## v0.4.3 — 2026-05-15
+
+Phase C closes with seven countdown slices (84 → 78) shipping LLD
+v0.4 §4 (SPARQL UPDATE surface) end-to-end, plus a release
+preflight countdown (77 → 60). The marquee surface lands every
+documented UPDATE form on the SQL engine: `INSERT DATA`,
+`DELETE DATA`, `INSERT WHERE`, `DELETE WHERE` (and its shorthand),
+`DELETE+INSERT WHERE`, the `WITH <iri>` / `GRAPH <iri>` graph-
+scoped variants, and the `DROP / CLEAR / CREATE GRAPH` lifecycle
+algebra (with `DEFAULT / NAMED / ALL` targets and `SILENT`).
+
+### Engine surface delta vs v0.4.2
+
+- **Storage / OWL 2 RL inference / SHACL** — incrementally
+  extended; no breaking changes to existing surfaces.
+- **SPARQL UPDATE track (LLD v0.4 §4)** — **shipped end-to-end via
+  seven countdown slices (84 → 78)**. `pgrdf.sparql(q)` now
+  detects UPDATE queries via a try-parse-then-fallback strategy
+  (`parse_query` first, `parse_update` if that fails). UPDATE
+  forms return a single summary row of shape `{"_update": …}`
+  carrying `form`, `triples_inserted`, `triples_deleted`,
+  `graphs_touched`, and `elapsed_ms`. Per-form slices:
+    - slice 84 — `INSERT DATA` (default + named graph; auto-
+      allocates unknown IRIs via `pgrdf.add_graph`; idempotent
+      via `ON CONFLICT DO NOTHING`).
+    - slice 83 — `DELETE DATA` (ground quads only; lookup-only
+      dict path; spec-correct no-op on absent terms).
+    - slice 82 — `INSERT { template } WHERE { pattern }`.
+    - slice 81 — `DELETE { template } WHERE { pattern }` +
+      shorthand `DELETE WHERE`.
+    - slice 80 — `DELETE { … } INSERT { … } WHERE { … }` (atomic
+      modify; one WHERE-pattern evaluation feeds both halves).
+    - slice 79 — graph-scoped variants (`WITH <iri>`,
+      `GRAPH <iri>` in template / WHERE; cross-graph copy).
+    - slice 78 — lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`
+      + `DEFAULT / NAMED / ALL` + `SILENT`); routes through the
+      §5 lifecycle UDFs via SPI, not direct Rust calls.
+- **`pgrdf.sparql_parse` UPDATE detail** (slice 74) — per-op
+  enrichment surfaces `kind` (mirrors executor `_update.form`),
+  `template_graphs`, `with_graph`, and lifecycle `target`
+  labels.
+- **W3C-shape conformance harness** — three new UPDATE-form
+  fixtures (`tests/w3c-sparql/27-29`) plus `elapsed_ms`
+  normalisation in `run.sh`.
+
+### crates.io — not published
+
+v0.4.3 is **not** published to crates.io. The `[patch.crates-io]`
+block for `reasonable` (E-011) continues to block `cargo publish`.
+The `publish-crate.yml` workflow remains disabled per the v0.4.1
+post-release ops note; tag push fires `release.yml` only (8
+prebuilt tarballs + GH Release). Re-enables once upstream
+[gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+merges and the patch retires.
+
+### Test bar
+
+- 166 pgrx integration tests (`cargo pgrx test`, +33 vs v0.4.2)
+- 61 pg_regress golden tests (+7 vs v0.4.2 — files `93-99` per
+  UPDATE form plus the lifecycle-algebra regression)
+- 29 W3C-shape SPARQL conformance tests (+3 vs v0.4.2)
+- 3 LUBM-shape correctness tests (unchanged from v0.4.2)
+- Plus `tests/regression/scripts/pg-dump-roundtrip.sh` driving
+  `_pgrdf_graphs` pg_dump round-trip (binary mode, unchanged from
+  v0.4.2)
+
+Total: 259 automated tests + 1 round-trip gate.
+
+### Supported Postgres
+
+PG 14, 15, 16, 17 across {amd64, arm64} = 8 prebuilt tarballs.
+PG 18 deferred per [ERRATA E-006](../specs/ERRATA.v0.2.md).
+
+### Tarball layout
+
+Same as v0.4.2 — `lib/pgrdf.so`, `share/extension/{pgrdf.control,
+pgrdf--0.4.3.sql, pgrdf--0.4.2.sql, pgrdf--0.4.1.sql,
+pgrdf--0.4.0.sql}`, `LICENSE`, `NOTICE`. The `pgrdf--N.M.P.sql`
+files accumulate so a `CREATE EXTENSION pgrdf VERSION '0.4.2'`
+against a v0.4.3 install still resolves; only the version literal
+changes.
+
+### Known issues — carried from v0.4.2
+
+- **E-011** — `[patch.crates-io]` fork-dep for `reasonable` still
+  in place (carried). Drops once upstream PR
+  [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+  merges.
+- **E-006** — pgrx 0.18 / Postgres 18 deferred (carried).
+- **E-007** — `extension_control_path` GUC blocked by E-006
+  (carried).
+- **E-009** — original SHACL upstream-block resolved at the
+  validation-engine half (carried).
+- **E-010** — cargo audit informational advisories (carried).
+
+### v0.4.2-introduced — carried
+
+- **pgrx-tests parallelism flake on partition DDL.** Two Phase A
+  tests (`pg_add_graph_iri_idempotent`,
+  `pg_add_graph_id_iri_synthetic_upgrade`) occasionally race under
+  pgrx-tests 0.16's parallel scheduler. Pre-existing on v0.4.1
+  (verified empirically). CI re-runs absorb the noise.
+
+### What's deferred from the v0.4 LLD
+
+Still 🚧 in [`SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md):
+
+- CONSTRUCT (§6) — v0.4.4
+- Property paths (§7) — v0.4.5
+- SPARQL surface backlog — multi-triple OPTIONAL, VALUES,
+  BIND-downstream, aggregates over UNION, DESCRIBE (§11) — v0.4.6
+- `heap_multi_insert` / `COPY BINARY` ingest (§12 phase B)
+- W3C SPARQL 1.1 manifest runner (§13)
 
 ## v0.4.2 — 2026-05-15
 

@@ -6,6 +6,52 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-05-15
+
+**Marquee: SPARQL UPDATE surface complete.** Closes the LLD v0.4 §4
+UPDATE-form column by landing every documented variant end-to-end
+on the SQL engine: `INSERT DATA`, `DELETE DATA`, `INSERT { template }
+WHERE { pattern }`, `DELETE { template } WHERE { pattern }` (and the
+shorthand `DELETE WHERE`), and the atomic combined `DELETE … INSERT
+… WHERE … modify`. Every form is graph-scope-aware — `GRAPH <iri>`
+in the template / WHERE, the `WITH <iri>` shortcut, and cross-graph
+copy patterns all work. The lifecycle algebra (`DROP / CLEAR /
+CREATE GRAPH` with `DEFAULT / NAMED / ALL` targets and the `SILENT`
+modifier) routes through the existing §5 graph-management UDFs so
+the SPARQL surface and the SQL UDF surface stay as two consumers of
+the same partition-level primitives. `pgrdf.sparql_parse(q)`
+mirrors the executor's runtime classification on every UPDATE op,
+so callers can preview shape, target graphs, and routing inputs
+without running the query.
+
+Phase C slice attribution (countdown 84 → 60):
+
+  * 84 — foundation + `INSERT DATA` (`pgrdf.sparql` dispatch via
+    parse_query → parse_update fallback, `_update` summary row).
+  * 83 — `DELETE DATA`.
+  * 82 — `INSERT { template } WHERE { pattern }`.
+  * 81 — `DELETE { template } WHERE { pattern }` (and `DELETE WHERE`
+    shorthand).
+  * 80 — `DELETE { … } INSERT { … } WHERE { … }` (atomic modify).
+  * 79 — graph-scoped variants (`WITH <iri>` + `GRAPH <iri>` in
+    template / WHERE; cross-graph copy).
+  * 78 — lifecycle algebra (`DROP / CLEAR / CREATE GRAPH` +
+    `DEFAULT / NAMED / ALL` targets + `SILENT`).
+  * 77-75 — W3C-shape conformance fixtures (`tests/w3c-sparql/27-29`)
+    + harness `elapsed_ms` normalisation.
+  * 74 — `pgrdf.sparql_parse` UPDATE detail enrichment (`kind`
+    label, `with_graph` IRI, `template_graphs` array, lifecycle
+    `target` labels).
+  * 71-65 — docs + spec + README + CHANGELOG sync.
+  * 64-60 — version bump + RELEASE_NOTES + tag.
+
+Test bar:
+
+  pgrx integration   166  (was 159 at v0.4.2: +7 sparql_parse cases)
+  pg_regress          61  (was 54 at v0.4.2: +7 UPDATE-form regressions)
+  w3c-sparql          29  (was 26 at v0.4.2: +3 UPDATE-form fixtures)
+  LUBM-shape           3  (unchanged)
+
 ### Phase C slice 74 — `sparql_parse` UPDATE detail enrichment
 
 `pgrdf.sparql_parse(q)` now surfaces enough of the executor's

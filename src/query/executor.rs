@@ -105,6 +105,7 @@ use pgrx::iter::SetOfIterator;
 use pgrx::pg_sys::{Oid, PgBuiltInOids};
 use pgrx::prelude::*;
 use serde_json::{json, Map, Value};
+use spargebra::algebra::GraphTarget;
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, Function, GraphPattern, OrderExpression,
 };
@@ -112,7 +113,6 @@ use spargebra::term::{
     GraphName, GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern, Literal,
     NamedNode, NamedNodePattern, NamedOrBlankNode, QuadPattern, Term, TermPattern, TriplePattern,
 };
-use spargebra::algebra::GraphTarget;
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -3291,12 +3291,9 @@ fn execute_create(graph: &NamedNode, silent: bool, graphs_touched: &mut HashSet<
         graphs_touched.insert(existing);
         return;
     }
-    let allocated: i64 = Spi::get_one_with_args(
-        "SELECT pgrdf.add_graph($1::text)",
-        &[iri.into()],
-    )
-    .unwrap_or_else(|e| panic!("sparql: CREATE GRAPH <{iri}>: add_graph failed: {e}"))
-    .expect("sparql: CREATE GRAPH: add_graph returned NULL (impossible)");
+    let allocated: i64 = Spi::get_one_with_args("SELECT pgrdf.add_graph($1::text)", &[iri.into()])
+        .unwrap_or_else(|e| panic!("sparql: CREATE GRAPH <{iri}>: add_graph failed: {e}"))
+        .expect("sparql: CREATE GRAPH: add_graph returned NULL (impossible)");
     graphs_touched.insert(allocated);
 }
 
@@ -7265,11 +7262,10 @@ mod tests {
         )
         .unwrap();
 
-        let j: pgrx::JsonB = Spi::get_one(
-            "SELECT * FROM pgrdf.sparql('DROP GRAPH <http://example.org/g1>')",
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB =
+            Spi::get_one("SELECT * FROM pgrdf.sparql('DROP GRAPH <http://example.org/g1>')")
+                .unwrap()
+                .unwrap();
         let summary = &j.0["_update"];
         assert_eq!(summary["form"], "DROP");
         assert_eq!(
@@ -7279,10 +7275,8 @@ mod tests {
         assert_eq!(summary["triples_inserted"], 0);
 
         // Post-state: `_pgrdf_graphs` row is gone, lookup returns NULL.
-        let bound: Option<i64> = Spi::get_one(
-            "SELECT pgrdf.graph_id('http://example.org/g1')",
-        )
-        .unwrap();
+        let bound: Option<i64> =
+            Spi::get_one("SELECT pgrdf.graph_id('http://example.org/g1')").unwrap();
         assert!(
             bound.is_none(),
             "DROP must remove the _pgrdf_graphs row; got {bound:?}"
@@ -7306,11 +7300,10 @@ mod tests {
         )
         .unwrap();
 
-        let j: pgrx::JsonB = Spi::get_one(
-            "SELECT * FROM pgrdf.sparql('CLEAR GRAPH <http://example.org/g2>')",
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB =
+            Spi::get_one("SELECT * FROM pgrdf.sparql('CLEAR GRAPH <http://example.org/g2>')")
+                .unwrap()
+                .unwrap();
         let summary = &j.0["_update"];
         assert_eq!(summary["form"], "CLEAR");
         assert_eq!(summary["triples_deleted"], 2);
@@ -7337,11 +7330,10 @@ mod tests {
     #[pg_test]
     fn sparql_update_create_graph_idempotent_silent() {
         // Fresh IRI — CREATE allocates the binding.
-        let j: pgrx::JsonB = Spi::get_one(
-            "SELECT * FROM pgrdf.sparql('CREATE GRAPH <http://example.org/g3>')",
-        )
-        .unwrap()
-        .unwrap();
+        let j: pgrx::JsonB =
+            Spi::get_one("SELECT * FROM pgrdf.sparql('CREATE GRAPH <http://example.org/g3>')")
+                .unwrap()
+                .unwrap();
         let summary = &j.0["_update"];
         assert_eq!(summary["form"], "CREATE");
         assert_eq!(

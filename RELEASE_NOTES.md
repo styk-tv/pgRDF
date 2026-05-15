@@ -1,117 +1,201 @@
-# pgRDF v0.4.2
+# pgRDF v0.4.3
 
-Graph-level lifecycle UDFs ship. The §5 LLD surface lands four
-partition-level primitives — `pgrdf.drop_graph`, `clear_graph`,
-`copy_graph`, `move_graph` — that operate against `_pgrdf_quads`'s
-LIST partitioning rather than via N-row DELETE loops. Phase B closes
-in five countdown slices (99 → 95) on top of the v0.4.1 named-graph
-surface.
+**SPARQL UPDATE surface complete.** The LLD v0.4 §4 UPDATE-form
+column closes: every documented variant lands end-to-end on the
+SQL engine. Phase C closes in seven countdown slices (84 → 78) on
+top of v0.4.2's lifecycle-UDF surface, plus five docs/release
+slices (77 → 60).
 
-## Marquee — Lifecycle UDFs (LLD v0.4 §5)
+## Marquee — SPARQL UPDATE (LLD v0.4 §4)
 
-Partition-level primitives over `_pgrdf_quads`. Constant-time DDL
-where possible: `DETACH + DROP` for `drop_graph`, `TRUNCATE ONLY` for
-`clear_graph`, `INSERT INTO … SELECT` against the per-graph
-partitions for `copy_graph`, and a `copy + drop` compose for
-`move_graph`.
+`pgrdf.sparql(q)` accepts UPDATE queries alongside SELECT / ASK.
+The function detects the form via `parse_query` first; if that
+fails it falls back to `parse_update`. UPDATE forms return a
+single summary row of shape `{"_update": …}` carrying `form`,
+`triples_inserted`, `triples_deleted`, `graphs_touched`, and
+`elapsed_ms` — paralleling the v0.3 `_ask` sentinel for ASK
+queries.
 
-- **`pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE) →
-  BIGINT`** (slice 99) — removes the LIST partition
-  `_pgrdf_quads_g<id>` from `_pgrdf_quads` via `ALTER TABLE … DETACH
-  PARTITION` + `DROP TABLE`, deletes the matching `_pgrdf_graphs`
-  row, returns the pre-drop triple count. `cascade => FALSE` errors
-  with the stable `drop_graph: inferred rows present` prefix if any
-  `is_inferred = TRUE` row exists. Default partition (`graph_id =
-  0`) is rejected; idempotent on absent graphs (returns 0).
-- **`pgrdf.clear_graph(id BIGINT) → BIGINT`** (slice 98) — issues
-  `TRUNCATE ONLY pgrdf._pgrdf_quads_g<id>` against the per-graph
-  partition and returns the rows-removed count. Partition shell +
-  `_pgrdf_graphs` IRI binding survive (contrast with `drop_graph`).
-  `clear_graph(0)` is permitted (clears the explicit `g0` partition
-  only); negative ids rejected with the stable prefix.
-- **`pgrdf.copy_graph(src BIGINT, dst BIGINT) → BIGINT`** (slice
-  97) — `INSERT INTO _pgrdf_quads_g<dst> SELECT … FROM
-  _pgrdf_quads_g<src>`. Both base and `is_inferred = TRUE` rows
-  carry forward. Auto-creates the `dst` partition + IRI binding if
-  absent. Idempotent on absent src (returns 0 without erroring); a
-  pre-existing IRI binding on `dst` is preserved. The only
-  lifecycle UDF that touches every row — cost scales linearly with
-  source row count.
-- **`pgrdf.move_graph(src BIGINT, dst BIGINT) → BIGINT`** (slice
-  96) — `copy_graph(src, dst)` + `drop_graph(src, cascade => TRUE)`
-  compose. Both halves run in the calling statement's transaction
-  (rollback unwinds both). The LLD §5.2 "metadata-only
-  `DETACH/ATTACH` partition rebind" is aspirational for v0.4.2 —
-  a true constant-time rebind would need every row's `graph_id`
-  column updated to satisfy the post-rebind LIST constraint, itself
-  a row scan. Tractable metadata-only `move_graph` is flagged as a
-  v0.5 perf optimisation.
+### Per-form surface
+
+- **`INSERT DATA { … }`** (slice 84) — static ground-triple
+  block. Lands rows in the default graph by default, or in a
+  named graph if wrapped with `GRAPH <iri> { … }`. Unknown IRIs
+  auto-allocate a fresh `graph_id` via `pgrdf.add_graph(iri)`
+  (slice 118). Idempotent: repeat lands no duplicate rows via
+  `ON CONFLICT DO NOTHING`. `triples_inserted` reports ATTEMPTED
+  inserts (the template size), not net row delta.
+- **`DELETE DATA { … }`** (slice 83) — symmetric to INSERT DATA.
+  Ground quads only (no variables, no blank nodes — the latter
+  forbidden by W3C SPARQL 1.1 §4.1.2). Lookup-only dict path: if
+  any term in the triple is absent the delete is a spec-correct
+  no-op (never errors). `triples_deleted` counts ACTUAL rows
+  removed.
+- **`INSERT { template } WHERE { pattern }`** (slice 82) —
+  pattern-driven insert. Each solution of the WHERE clause
+  produces one concrete triple via the template. The WHERE
+  pattern accepts the same shape as a SELECT BGP (joins, FILTER,
+  OPTIONAL, UNION, MINUS, GRAPH, …). Template variables MUST be
+  bound by the WHERE BGP — unbound template variables panic with
+  the stable `INSERT WHERE template feature "unbound template
+  variable …"` prefix.
+- **`DELETE { template } WHERE { pattern }`** (slice 81) +
+  shorthand `DELETE WHERE { pattern }`. Spargebra models the
+  template as `Vec<GroundQuadPattern>`, baking the W3C SPARQL
+  1.1 §4.1.2 "no blank nodes in DELETE" rule into the AST. The
+  per-row delete uses the `WITH d AS (DELETE … RETURNING 1)
+  SELECT count(*)` idiom from slice 83's DELETE DATA, so
+  `triples_deleted` counts ACTUAL rows removed (not template
+  instantiations).
+- **`DELETE { … } INSERT { … } WHERE { … }`** (slice 80) — the
+  atomic modify form. Both halves resolve against the SAME WHERE
+  solutions snapshot: the executor evaluates the pattern exactly
+  once, projects every variable referenced by EITHER template,
+  and per-row applies DELETE then INSERT. Per W3C SPARQL 1.1
+  Update §3.1.3, the DELETE conceptually precedes the INSERT —
+  matters for status-flip patterns (`DELETE { ?x ex:status
+  "draft" } INSERT { ?x ex:status "published" } WHERE { ?x
+  ex:status "draft" }`). Atomicity is naturally provided by
+  Postgres — the whole UDF call is one transaction.
+
+### Graph-scoped variants (slice 79)
+
+Every pattern-driven form supports `GRAPH <iri> { … }` inside
+the template and/or the WHERE clause. The `WITH <iri>` shortcut
+selects `<iri>` as the default graph for BOTH the WHERE
+evaluation AND the template's quad routing — per W3C §3.1.3 ¶3,
+"If a USING clause is not provided and the WITH clause is
+provided, the default graph used to evaluate the WHERE clause
+will be the graph from the WITH clause." Spargebra desugars
+`WITH <iri>` into a `using: QueryDataset { default: [<iri>],
+named: None }` sentinel plus per-quad `graph_name = <iri>` on
+every default-graph template triple; the executor lifts the IRI
+out, wraps the WHERE pattern in `GraphPattern::Graph(<iri>, …)`
+for evaluation, and lets the per-quad routing already carry the
+template side.
+
+Cross-graph copy is straightforward — name both graphs
+explicitly:
+
+```sparql
+INSERT { GRAPH <http://example.org/g2> { ?s ?p ?o } }
+WHERE  { GRAPH <http://example.org/g1> { ?s ?p ?o } }
+```
+
+### Lifecycle algebra — `DROP / CLEAR / CREATE GRAPH` (slice 78)
+
+The lifecycle operations route to the v0.4.2 §5 graph-management
+UDFs (`pgrdf.drop_graph`, `pgrdf.clear_graph`, `pgrdf.add_graph`)
+via SPI rather than direct Rust calls. This keeps the SPARQL
+front-end and the SQL UDF front-end as two consumers of the same
+partition-level primitives — every existence check, partition-
+DDL window (`DETACH PARTITION` / `DROP TABLE` / `TRUNCATE ONLY`),
+inferred-row cascade guard, and `_pgrdf_graphs` binding update
+happens once in the UDFs, not twice.
+
+`spargebra::GraphTarget` enum coverage:
+
+- `GRAPH <iri>` → lookup `_pgrdf_graphs` for the bigint id;
+  panic with the stable `DROP GRAPH <iri>: graph not bound` (or
+  `CLEAR GRAPH <iri>: graph not bound`) prefix when absent,
+  unless `SILENT` was specified (no-op).
+- `DEFAULT` → direct partition-wide DELETE for both `CLEAR
+  DEFAULT` and `DROP DEFAULT`. Per W3C SPARQL 1.1 Update §3.1.3
+  ¶7, `DROP DEFAULT` is an "empty, not destroy"; this also
+  avoids the slice-99 `pgrdf.drop_graph(0)` panic guard (the
+  default catch-all partition is non-droppable).
+- `ALL` → enumerate every `graph_id` in `_pgrdf_graphs`
+  (including 0) and dispatch per-id.
+- `NAMED` → enumerate every `graph_id <> 0` (default excluded
+  per W3C §3.1.3).
+
+`CREATE GRAPH <iri>` errors when the IRI is already bound (W3C
+spec requirement) unless `SILENT` was specified. `SILENT`
+collapses the "already bound" path to a no-op; the existing
+binding survives, and the summary still records the touched
+graph_id for operator audit.
+
+**ADD / MOVE / COPY desugar at parse time.** Per spargebra-0.4.6
+parser.rs §Add / §Move / §Copy, the SPARQL surface keywords
+`ADD`, `MOVE`, `COPY` are NOT separate `GraphUpdateOperation`
+variants — they desugar at parse time into compositions of `Drop
++ DeleteInsert` (for COPY) / `Drop + DeleteInsert + Drop` (for
+MOVE) / a plain `DeleteInsert` (for ADD). Those compositions
+ride the existing per-form dispatcher arms already wired by
+slices 80 / 78. No new code path needed.
+
+### Conformance + preview surface (slices 77-74)
+
+Three new W3C-shape fixtures under `tests/w3c-sparql/27-29` lock
+the UPDATE surface through the conformance harness. The harness
+(`tests/w3c-sparql/run.sh`) gains a sed-based normalisation of
+`elapsed_ms: <N>` inside `_update` rows so bag-equivalence diffs
+stay stable across runs. Existing 26 fixtures (01-26) are
+behaviour-identical.
+
+`pgrdf.sparql_parse(q)` mirrors the executor's runtime
+classification on every UPDATE op (slice 74):
+
+```jsonc
+{
+  "form": "UPDATE",
+  "operations": [
+    {
+      "op": "DeleteInsert",
+      "kind": "INSERT_WHERE",           // mirrors _update.form
+      "delete_template_size": 0,
+      "insert_template_size": 1,
+      "where_pattern_size":   1,
+      "template_graphs":      ["http://example.org/dst"],
+      "with_graph":           "http://example.org/store"
+    }
+  ],
+  "unsupported_algebra": []
+}
+```
+
+Callers running multi-statement UPDATE preview translatability
+per op without executing.
 
 ### Error-prefix contract (stable for downstream tooling)
 
-Every lifecycle UDF surfaces validation failures with a UDF-name-
-prefixed panic message; tooling that parses error strings can
-route on the prefix without depending on the trailing detail:
+UPDATE-specific surfaces surface validation failures with
+form-prefixed panic messages:
 
 ```
-drop_graph: graph_id must be >= 0, got <N>
-drop_graph: cannot drop default partition (graph_id = 0)
-drop_graph: inferred rows present (graph_id = <N>); …
-clear_graph: graph_id must be >= 0, got <N>
-copy_graph: src and dst must differ (both = <N>)
-copy_graph: graph_id must be >= 0, got src=<S>, dst=<D>
-move_graph: src and dst must differ (both = <N>)
-move_graph: graph_id must be >= 0, got src=<S>, dst=<D>
-move_graph: dst graph_id <N> already has data (<M> rows); …
+INSERT WHERE template feature "unbound template variable: <name>"
+DELETE WHERE template feature "unbound template variable: <name>"
+DELETE/INSERT WHERE template feature "unbound template variable: <name>"
+CREATE GRAPH <iri>: graph already exists
+DROP GRAPH <iri>: graph not bound
+CLEAR GRAPH <iri>: graph not bound
+sparql: parse error: <…>           (unchanged from v0.3, covers malformed UPDATE)
 ```
-
-### End-to-end integration
-
-Slice 95 wires the four UDFs together against a realistic
-load → mutate → verify flow. The per-UDF regression files
-(`88-drop-graph.sql` / `89-clear-graph.sql` / `90-copy-graph.sql` /
-`91-move-graph.sql`) lock invariants in isolation; the new
-[`92-lifecycle-end-to-end.sql`](tests/regression/sql/92-lifecycle-end-to-end.sql)
-pins their interactions: load → copy → drop round-trip,
-`move_graph` as a faithful `copy + drop` compose, `clear_graph`
-isolation under a shared dictionary, SPARQL `GRAPH <iri>`
-projection survival across the lifecycle, and the drop-then-rebind
-loop.
-
-## SPARQL UPDATE wiring
-
-Deferred to v0.4.3 (Phase C). v0.4.2 ships the §5 lifecycle UDF
-surface only; the SPARQL UPDATE algebra (`DROP GRAPH <iri>`, `CLEAR
-GRAPH <iri>`, `COPY <src> TO <dst>`, `MOVE <src> TO <dst>`) lands
-on top in v0.4.3 by wiring the parser to dispatch into the existing
-UDFs.
 
 ## Test bar
 
-216 automated tests across four layers plus the pg_dump round-trip
-gate:
+259 automated tests across four layers plus the pg_dump
+round-trip gate:
 
-| Layer | Count | Δ from v0.4.1 |
+| Layer | Count | Δ from v0.4.2 |
 |---|---|---|
-| pgrx integration | 133 | +15 |
-| pg_regress golden | 54 | +5 |
-| W3C-shape SPARQL conformance | 26 | 0 |
+| pgrx integration | 166 | +33 |
+| pg_regress golden | 61 | +7 |
+| W3C-shape SPARQL conformance | 29 | +3 |
 | LUBM-shape correctness | 3 | 0 |
-| **Total** | **216** | **+20** |
+| **Total** | **259** | **+43** |
 
 Plus `tests/regression/scripts/pg-dump-roundtrip.sh` end-to-end
-round-trip gate on `_pgrdf_graphs`. The pgrx static `#[pg_test]`
-attribute count is 127; pgrx-tests 0.16 generates 6 additional
-harness wrappers — the runtime count is what callers see.
+round-trip gate on `_pgrdf_graphs`.
 
-## Install — prebuilt tarballs (same layout as v0.4.1)
+## Install — prebuilt tarballs (same layout as v0.4.2)
 
 ```bash
-curl -L -O https://github.com/styk-tv/pgRDF/releases/download/v0.4.2/pgrdf-0.4.2-pg17-glibc-amd64.tar.gz
-curl -L -O https://github.com/styk-tv/pgRDF/releases/download/v0.4.2/SHA256SUMS
+curl -L -O https://github.com/styk-tv/pgRDF/releases/download/v0.4.3/pgrdf-0.4.3-pg17-glibc-amd64.tar.gz
+curl -L -O https://github.com/styk-tv/pgRDF/releases/download/v0.4.3/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
-tar -xzf pgrdf-0.4.2-pg17-glibc-amd64.tar.gz
-cd pgrdf-0.4.2-pg17-glibc-amd64
+tar -xzf pgrdf-0.4.3-pg17-glibc-amd64.tar.gz
+cd pgrdf-0.4.3-pg17-glibc-amd64
 sudo cp lib/pgrdf.so $(pg_config --pkglibdir)/
 sudo cp share/extension/* $(pg_config --sharedir)/extension/
 ```
@@ -120,7 +204,7 @@ Then in psql:
 
 ```sql
 CREATE EXTENSION pgrdf;
-SELECT pgrdf.version();  -- → 0.4.2
+SELECT pgrdf.version();  -- → 0.4.3
 ```
 
 `shared_preload_libraries = 'pgrdf'` required (see
@@ -139,18 +223,18 @@ PG 18 deferred per
 
 ## crates.io
 
-v0.4.2 is **not** published to crates.io. The `[patch.crates-io]`
+v0.4.3 is **not** published to crates.io. The `[patch.crates-io]`
 block for `reasonable` (E-011) blocks `cargo publish`; the
 `publish-crate.yml` workflow remains disabled until upstream
 [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
-merges and the patch retires. The crate is registered on crates.io
-with v0.3.0 (pre-work seed); v0.4.1 + v0.4.2 binaries are available
-via the GitHub Release tarballs.
+merges and the patch retires. The crate is registered on
+crates.io with v0.3.0 (pre-work seed); v0.4.1 + v0.4.2 + v0.4.3
+binaries are available via the GitHub Release tarballs.
 
-## Known issues — carried from v0.4.1
+## Known issues — carried from v0.4.2
 
-- **E-011 — `[patch.crates-io]` fork-dep still in place.** Carried.
-  v0.4.2 continues to patch `reasonable` against
+- **E-011 — `[patch.crates-io]` fork-dep still in place.**
+  Carried. v0.4.3 continues to patch `reasonable` against
   [`styk-tv/reasonable@rdf12-passthrough`](https://github.com/styk-tv/reasonable/tree/rdf12-passthrough)
   for `TermRef::Triple(_)` coexistence with `shacl 0.3.x` under
   `oxrdf`'s `rdf-12` feature. The patch retires once
@@ -164,57 +248,55 @@ via the GitHub Release tarballs.
   `[patch.crates-io]` route until #50 merges (carried).
 - **E-010** — cargo audit informational advisories (carried).
 
-### v0.4.2-introduced
+### v0.4.2-introduced — carried
 
 - **pgrx-tests parallelism flake on partition DDL.** Two Phase A
   tests (`pg_add_graph_iri_idempotent`,
-  `pg_add_graph_id_iri_synthetic_upgrade`) occasionally race under
-  pgrx-tests 0.16's parallel scheduler because both exercise
-  partition DDL inside `add_graph(iri)` / `add_graph(id BIGINT)`
-  through SPI. Pre-existing on v0.4.1 (verified empirically); the
-  v0.4.2 Phase B test annotations were tightened to exact-match the
-  panic strings so the four lifecycle-UDF rejection-path tests are
-  now deterministic. Pgrx test bar is 133/133 green when this race
-  resolves; CI re-runs absorb the noise.
+  `pg_add_graph_id_iri_synthetic_upgrade`) occasionally race
+  under pgrx-tests 0.16's parallel scheduler because both
+  exercise partition DDL inside `add_graph(iri)` /
+  `add_graph(id BIGINT)` through SPI. Pre-existing on v0.4.1
+  (verified empirically). CI re-runs absorb the noise.
 
 See [`specs/ERRATA.v0.2.md`](specs/ERRATA.v0.2.md) and
-[`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md) for the full text.
+[`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md) for the full
+text.
 
 ## What's deferred from v0.4 LLD
 
 Still 🚧 in
 [`SPEC.pgRDF.LLD.v0.4.md`](specs/SPEC.pgRDF.LLD.v0.4.md):
 
-- SPARQL UPDATE (§4) — Phase C opens next (v0.4.3)
 - CONSTRUCT (§6) — v0.4.4
 - Property paths (§7) — v0.4.5
 - SPARQL surface backlog — multi-triple OPTIONAL, VALUES,
-  BIND-downstream, aggregates over UNION, DESCRIBE (§11) — v0.4.6
+  BIND-downstream, aggregates over UNION, DESCRIBE (§11) —
+  v0.4.6
 - `heap_multi_insert` / `COPY BINARY` ingest (§12 phase B)
 - W3C SPARQL 1.1 manifest runner (§13)
 
 These land in subsequent v0.4.x point releases or in a refreshed
 v0.5.0 cut.
 
-## Upgrading from v0.4.1
+## Upgrading from v0.4.2
 
 pgRDF v0.x reserves the right to break schema between minor
-releases. `ALTER EXTENSION pgrdf UPDATE` is not supported in v0.x.
-Drop and recreate:
+releases. `ALTER EXTENSION pgrdf UPDATE` is not supported in
+v0.x. Drop and recreate:
 
 ```sql
 -- Dump first if you care about your data
 DROP EXTENSION pgrdf CASCADE;
--- Install v0.4.2 artifacts
+-- Install v0.4.3 artifacts
 CREATE EXTENSION pgrdf;
 -- Re-ingest
 ```
 
 The schema is forward-compatible at the table-shape level
-(v0.4.1's `_pgrdf_graphs`, `_pgrdf_quads`, `_pgrdf_dictionary` are
-unchanged in v0.4.2); only new UDFs land. A `pg_dump` from v0.4.1
-will restore against a v0.4.2 install via the documented
-`DROP/CREATE EXTENSION; pg_restore` path. See
+(v0.4.2's `_pgrdf_graphs`, `_pgrdf_quads`, `_pgrdf_dictionary`
+are unchanged in v0.4.3); only new UDF dispatch arms land. A
+`pg_dump` from v0.4.2 will restore against a v0.4.3 install via
+the documented `DROP/CREATE EXTENSION; pg_restore` path. See
 [`docs/06-installation.md` § Upgrade between v0.x versions](docs/06-installation.md#upgrade-between-v0x-versions).
 
 ## License

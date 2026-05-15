@@ -173,7 +173,7 @@ just psql             # opens a psql shell to the pgrdf database
 # 2. Inside psql
 pgrdf=# CREATE EXTENSION pgrdf;
 pgrdf=# SELECT pgrdf.version();
-        --  → 0.4.1
+        --  → 0.4.3
 pgrdf=# SELECT pgrdf.parse_turtle('@prefix ex: <http://e.com/> . ex:a ex:p ex:b .', 1);
         --  → 1
 ```
