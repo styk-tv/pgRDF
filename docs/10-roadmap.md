@@ -589,6 +589,40 @@ summary row. See
   `_check_error` plpgsql helper. Eight pgrx integration tests cover
   the executor + parser paths under the `pg_test` harness.
 
+- ✅ **Slice 83 — SPARQL UPDATE DELETE DATA.** Symmetric companion
+  to slice 84's INSERT DATA: `DELETE DATA { … }` removes ground
+  quads (no variables, no WHERE clause) one-by-one from
+  `_pgrdf_quads`. spargebra emits
+  `GraphUpdateOperation::DeleteData { data: Vec<GroundQuad> }`;
+  each `GroundQuad` carries a `NamedNode` subject + `NamedNode`
+  predicate + `GroundTerm` object (no blank nodes — enforced by
+  spargebra at parse time) + `GraphName` scope. The dispatcher
+  walks each ground quad through a **lookup-only** dictionary
+  path (`lookup_iri_id` for subject/predicate, new
+  `lookup_ground_term_id` for object) — no interning. If any term
+  is missing from `_pgrdf_dictionary`, the quad cannot be in the
+  store, so the form is a spec-correct no-op (LLD v0.4 §4.1
+  set-semantics). Same for an unbound named-graph IRI: the
+  partition can't exist, so the operation produces zero rows.
+  Default-graph + `GRAPH <iri> { … }` inline graph scope both
+  supported; same-shape triples in a different graph are NOT
+  touched. Multi-op form discriminator: if every op in the Update
+  shares the same variant name, that name carries through to the
+  summary's `form` field; otherwise `form` collapses to
+  `"MIXED"` (forward-looking compatibility with a future
+  `DELETE DATA ; INSERT DATA` composition). The post-slice 84
+  panic test in `executor.rs` retargets to `DELETE/INSERT WHERE`
+  (slices 82-77); the corresponding regression assertion in
+  `93-update-insert-data.sql` is removed. Regression coverage:
+  `tests/regression/sql/94-update-delete-data.sql` locks six
+  invariants (default-graph removal, missing-term no-op, named-
+  graph scope, SELECT round-trip, idempotency on repeat, typed-
+  literal payload) plus one negative-path sample. Three new
+  `#[pg_test]`s in `src/query/executor.rs`
+  (`sparql_update_delete_data_removes_existing`,
+  `sparql_update_delete_data_missing_term_is_noop`,
+  `sparql_update_delete_data_named_graph`).
+
 ### Track 3 — Graph-level lifecycle UDFs (Phase B countdown 99 → 96)
 `pgrdf.drop_graph`, `clear_graph`, `copy_graph`, `move_graph` as
 partition-level primitives over `_pgrdf_quads` — constant-time

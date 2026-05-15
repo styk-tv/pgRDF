@@ -332,7 +332,7 @@ surface. 🚧
 | Form | Notes |
 |---|---|
 | `INSERT DATA { … }` | ✅ slice 84 — direct triple insertion (single triple or BGP-style block). Constants only — no variables. Default-graph + `GRAPH <iri> { … }` inline graph scope both supported; unknown IRIs auto-allocate via `pgrdf.add_graph(iri)`. Idempotent on repeat via `WHERE NOT EXISTS` guard (the `_pgrdf_quads` table carries no `UNIQUE` constraint, so `ON CONFLICT` is unavailable). |
-| `DELETE DATA { … }` | 🚧 slice 83 — direct triple removal. Constants only. |
+| `DELETE DATA { … }` | ✅ slice 83 — direct triple removal (ground quads only, no variables). Constants only. Default-graph + `GRAPH <iri> { … }` inline graph scope both supported. **Lookup-only** path against `_pgrdf_dictionary` — if any term is absent, the quad cannot be in `_pgrdf_quads`, so the operation is a spec-correct no-op (never errors). Repeated DELETE DATA against the same triple is idempotent (the second call deletes zero rows). |
 | `INSERT { template } WHERE { pattern }` | 🚧 slices 82-77 — pattern-driven insertion. Each solution of `WHERE` instantiates `template` once. |
 | `DELETE { template } WHERE { pattern }` | 🚧 slices 82-77 — pattern-driven removal. |
 | `DELETE { … } INSERT { … } WHERE { … }` | 🚧 slices 82-77 — atomic modify; both operations run against the same `WHERE` solutions snapshot. |
@@ -405,7 +405,8 @@ within a constant factor.
 strategy: `parse_query` first, `parse_update` on failure. UPDATE
 queries surface as `form: "UPDATE"` with a per-operation summary
 array. UPDATE operations that the executor doesn't translate yet
-(e.g. `DELETE DATA` until slice 83 ships) are NOT flagged in
+(e.g. `DELETE/INSERT WHERE` until slices 82-77 ship) are NOT
+flagged in
 `unsupported_algebra` — that array is reserved for genuinely-out-
 of-scope shapes (e.g. `LOAD <url>`, see §14). Sample JSONB shape
 for the slice-84-shipped INSERT DATA form:

@@ -1,0 +1,20 @@
+
+0
+3
+DELETE_DATA|0|1|["DEFAULT"]|t
+2
+2
+DELETE_DATA|0
+0
+1
+DELETE_DATA|1|["http://example.org/g1"]
+1
+0
+0
+0
+1
+1
+0
+update-delete-insert-where-lands-82-77: t
+
+3

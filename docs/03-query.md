@@ -245,10 +245,24 @@ Concrete shape:
       lands INSERT DATA end-to-end (default + named graph,
       multi-triple, idempotent on repeat via `WHERE NOT EXISTS`);
       other UPDATE forms panic with "lands in slice NN" pending
-      per-form follow-ups (DELETE DATA → 83, DELETE/INSERT WHERE →
-      82-77, CLEAR/CREATE/DROP GRAPH → 71/70/69).
-- ⏳ `DELETE DATA`, `INSERT/DELETE … WHERE`, lifecycle algebra
-      (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices 83 → 69.
+      per-form follow-ups (DELETE/INSERT WHERE → 82-77,
+      CLEAR/CREATE/DROP GRAPH → 71/70/69).
+- ✅ SPARQL UPDATE — `DELETE DATA { … }` (Phase C slice 83, LLD v0.4
+      §4). Symmetric to slice 84's INSERT DATA: ground quads only,
+      no variables. Default-graph + `GRAPH <iri> { … }` inline
+      graph scope both supported. The dispatcher routes through a
+      **lookup-only** dictionary path (no interning) — if any term
+      of the quad is missing from `_pgrdf_dictionary`, the quad
+      cannot exist in `_pgrdf_quads`, so the operation is a
+      spec-correct no-op rather than an error. Same-shape triples
+      in a different graph are NOT touched. Repeated DELETE against
+      the same quad is idempotent (the second call reports
+      `triples_deleted = 0`). When the Update carries multiple
+      operations of mixed kinds (e.g. a future
+      `DELETE DATA ; INSERT DATA`), the `form` field collapses to
+      `"MIXED"` and the per-op counters aggregate.
+- ⏳ `INSERT/DELETE … WHERE`, lifecycle algebra
+      (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices 82 → 69.
 - ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4

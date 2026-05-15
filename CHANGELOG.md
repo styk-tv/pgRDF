@@ -6,6 +6,83 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase C slice 83 — SPARQL UPDATE DELETE DATA
+
+Symmetric companion to slice 84's INSERT DATA: `DELETE DATA { … }`
+removes ground quads (no variables, no WHERE clause) from
+`_pgrdf_quads`. spargebra emits
+`GraphUpdateOperation::DeleteData { data: Vec<GroundQuad> }`; each
+`GroundQuad` carries a `NamedNode` subject + `NamedNode` predicate
++ `GroundTerm` object (no blank nodes — enforced by spargebra at
+parse time) + `GraphName` scope.
+
+The executor dispatches each ground quad through a **lookup-only**
+dictionary path (`lookup_iri_id` for subject/predicate, new
+`lookup_ground_term_id` helper for object) — never interning.
+Rationale: DELETE DATA is set-semantic per LLD v0.4 §4. If any
+term of the quad is missing from `_pgrdf_dictionary`, the quad
+cannot possibly be in `_pgrdf_quads`, so the operation is a
+spec-correct no-op rather than an "allocate and then fail to
+delete" round-trip. Same for an unbound named-graph IRI: the
+partition can't exist, the operation produces zero rows.
+
+- **Default graph** — `DELETE DATA { <s> <p> <o> }` removes the
+  quad from `_pgrdf_quads_g0` (when present) and reports
+  `triples_deleted = 1`, `graphs_touched: ["DEFAULT"]`.
+- **Named graph** — `DELETE DATA { GRAPH <iri> { … } }` scopes the
+  removal to that partition only; a same-shape quad in the
+  default graph is NOT touched. `graphs_touched` carries the IRI.
+- **No-op on missing terms** — DELETE DATA referencing IRIs never
+  interned (or a quad whose individual terms exist but never
+  appeared together) returns `triples_deleted = 0` without
+  erroring.
+- **Idempotency on repeat** — deleting the same quad twice
+  reports `triples_deleted = 1` the first time and
+  `triples_deleted = 0` the second time.
+- **Typed-literal payload** — `lookup_ground_term_id` composes
+  with the existing `lookup_literal_id` so DELETE DATA can target
+  a literal-bearing triple (datatype IRI lookup + value lookup
+  match the insert side).
+
+**Multi-op form discriminator.** The summary's `form` field now
+collapses to `"MIXED"` when an Update carries operations of more
+than one variant kind (e.g. a future
+`DELETE DATA { … } ; INSERT DATA { … }` composition). For
+single-variant Updates the slice 84 behaviour is preserved
+(`"INSERT_DATA"`, `"DELETE_DATA"`, etc.). Forward-looking
+compatibility — no caller-visible shape change for slice 84
+queries.
+
+**Dispatcher cleanup.** The slice-84 panic for `DELETE DATA`
+(`UPDATE form 'DELETE DATA' lands in slice 83`) is removed; the
+matching regression assertion in
+`tests/regression/sql/93-update-insert-data.sql` is dropped from
+the negative-path table and its line in the expected output is
+removed. The remaining unimplemented variants
+(`DELETE/INSERT WHERE`, `CLEAR/CREATE/DROP GRAPH`, `LOAD`) still
+panic with their stable "lands in slice NN" prefixes; the
+`sparql_update_form_dispatch_panics_for_unimplemented` pgrx test
+retargets to `DELETE/INSERT WHERE`.
+
+**Test coverage.**
+- `tests/regression/sql/94-update-delete-data.sql` locks six
+  invariants (default-graph removal, missing-term no-op,
+  named-graph scope, SELECT round-trip, idempotency on repeat,
+  typed-literal payload) plus one negative-path "lands in slice
+  NN" prefix sample. Hand-authored expected output; never
+  ACCEPT=1 baselined.
+- Three `#[pg_test]`s in `src/query/executor.rs`
+  (`sparql_update_delete_data_removes_existing`,
+  `sparql_update_delete_data_missing_term_is_noop`,
+  `sparql_update_delete_data_named_graph`).
+
+Test bar after slice 83: +3 pgrx integration + 1 pg_regress.
+
+LLD v0.4 §4.1 row table updated — `DELETE DATA` marked
+`✅ slice 83`. `docs/03-query.md` "Surface today" gains a
+DELETE-DATA row beside the existing INSERT-DATA row;
+`docs/10-roadmap.md` Track 2 picks up the slice 83 ✅ entry.
+
 ### Phase C slice 84 — SPARQL UPDATE foundation + INSERT DATA
 
 Opens Phase C (LLD v0.4 §4 — SPARQL UPDATE) toward v0.4.3.

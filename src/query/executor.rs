@@ -109,7 +109,8 @@ use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, Function, GraphPattern, OrderExpression,
 };
 use spargebra::term::{
-    GraphName, Literal, NamedNodePattern, NamedOrBlankNode, Term, TermPattern, TriplePattern,
+    GraphName, GroundTerm, Literal, NamedNodePattern, NamedOrBlankNode, Term, TermPattern,
+    TriplePattern,
 };
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 use std::cell::RefCell;
@@ -2490,6 +2491,26 @@ fn lookup_graph_id(iri: &str) -> Option<i64> {
     .flatten()
 }
 
+/// Dictionary lookup (no interning) for a `spargebra::term::GroundTerm`.
+/// Returns the existing dictionary id, or `None` if the term has never
+/// been written. Used by `DELETE DATA` (slice 83) where the absence of
+/// any term is a spec-correct no-op rather than an "allocate and then
+/// fail to delete" round-trip.
+///
+/// `GroundTerm::Triple` (RDF-star, gated behind spargebra's
+/// `sparql-12` feature) is unreachable in this build — the variant
+/// only exists when the feature is enabled, which our Cargo.toml does
+/// not turn on. Listed here for grep-completeness should the feature
+/// ever come on.
+fn lookup_ground_term_id(t: &GroundTerm) -> Option<i64> {
+    match t {
+        GroundTerm::NamedNode(n) => lookup_iri_id(n.as_str()),
+        GroundTerm::Literal(lit) => lookup_literal_id(lit),
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
+}
+
 fn lookup_literal_id(lit: &Literal) -> Option<i64> {
     let value = lit.value();
     if let Some(lang) = lit.language() {
@@ -2595,20 +2616,25 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
 fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
     let start = std::time::Instant::now();
     let mut triples_inserted: i64 = 0;
-    // INSERT DATA never deletes; the field is kept in scope so the
-    // summary JSONB shape stays uniform across forms (DELETE DATA in
-    // slice 83 will start incrementing it).
-    let triples_deleted: i64 = 0;
+    let mut triples_deleted: i64 = 0;
     let mut graphs_touched: HashSet<i64> = HashSet::new();
-    // First-operation form, used as the summary's `form` label. Multi-
-    // operation UPDATEs (sequenced with `;`) collapse to the first op
-    // for slice 84 — the LLD v0.4 §4.2 example shows a single-form
-    // shape; multi-op nuance is a follow-up cosmetic.
+    // Form discriminator strategy: if every operation in the Update
+    // shares the same variant name, the summary's `form` field carries
+    // that name (the single-form case — INSERT DATA, DELETE DATA, etc.).
+    // If two or more variants appear (e.g. a future
+    // `DELETE DATA { … } ; INSERT DATA { … }` composition), `form`
+    // collapses to `"MIXED"` so callers know they need to look at the
+    // per-op detail (today via `pgrdf.sparql_parse(q)`; a richer
+    // per-op summary array is a v0.4.4+ follow-up). EMPTY when there
+    // are no operations at all (degenerate but well-formed).
     let mut form: &'static str = "EMPTY";
 
     for (i, op) in update.operations.iter().enumerate() {
+        let op_name = update_op_name(op);
         if i == 0 {
-            form = update_op_name(op);
+            form = op_name;
+        } else if form != op_name {
+            form = "MIXED";
         }
         match op {
             GraphUpdateOperation::InsertData { data } => {
@@ -2622,8 +2648,65 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     graphs_touched.insert(g_id);
                 }
             }
-            GraphUpdateOperation::DeleteData { .. } => {
-                panic!("sparql: UPDATE form 'DELETE DATA' lands in slice 83")
+            GraphUpdateOperation::DeleteData { data } => {
+                // DELETE DATA — ground quads, no variables. Per LLD
+                // v0.4 §4.1 the form is set-semantic: removing a
+                // triple that isn't in the store is a spec-correct
+                // no-op (not an error). We honour that by looking up
+                // each term in the dictionary WITHOUT interning. If
+                // any of (subject, predicate, object) is missing
+                // from `_pgrdf_dictionary`, the quad cannot possibly
+                // be present in `_pgrdf_quads` — skip it. Same for an
+                // unbound named graph IRI: the partition wouldn't
+                // exist anyway, so the DELETE produces zero rows.
+                //
+                // `graphs_touched` records the graph EVEN ON NO-OP —
+                // it carries the operator's INTENT, mirroring how
+                // INSERT DATA reports a graph it just allocated even
+                // if the quad was already present (idempotent path).
+                // The triple-count counter is the source of truth
+                // for "did anything change"; `graphs_touched` is the
+                // scope summary.
+                for ground_quad in data {
+                    let g_id = match &ground_quad.graph_name {
+                        GraphName::DefaultGraph => Some(0_i64),
+                        GraphName::NamedNode(n) => lookup_graph_id(n.as_str()),
+                    };
+                    let Some(g_id) = g_id else {
+                        // Named graph IRI not bound — nothing to delete.
+                        continue;
+                    };
+                    // GroundQuad.subject is `NamedNode` (no blank
+                    // nodes in DELETE DATA per the SPARQL 1.1 grammar
+                    // — spargebra enforces this at parse time). Same
+                    // for predicate. Object can be NamedNode or
+                    // Literal (Triple is sparql-12-feature, off by
+                    // default in our spargebra build).
+                    let s_id = lookup_iri_id(ground_quad.subject.as_str());
+                    let p_id = lookup_iri_id(ground_quad.predicate.as_str());
+                    let o_id = lookup_ground_term_id(&ground_quad.object);
+                    let (Some(s), Some(p), Some(o)) = (s_id, p_id, o_id) else {
+                        // At least one term not in the dictionary —
+                        // the quad cannot exist. Spec-correct no-op.
+                        graphs_touched.insert(g_id);
+                        continue;
+                    };
+                    let n: i64 = Spi::get_one_with_args(
+                        "WITH d AS (
+                            DELETE FROM pgrdf._pgrdf_quads
+                             WHERE subject_id   = $1
+                               AND predicate_id = $2
+                               AND object_id    = $3
+                               AND graph_id     = $4
+                           RETURNING 1)
+                         SELECT count(*)::bigint FROM d",
+                        &[s.into(), p.into(), o.into(), g_id.into()],
+                    )
+                    .unwrap_or_else(|e| panic!("sparql: UPDATE: DELETE quad failed: {e}"))
+                    .unwrap_or(0);
+                    triples_deleted += n;
+                    graphs_touched.insert(g_id);
+                }
             }
             GraphUpdateOperation::DeleteInsert { .. } => {
                 panic!("sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slices 82-77")
@@ -5056,16 +5139,177 @@ mod tests {
         assert_eq!(n, 1, "INSERT DATA must be set-semantic (no duplicates)");
     }
 
-    /// DELETE DATA isn't wired yet — slice 83 lands it. Until then,
-    /// the dispatcher panics with the documented "lands in slice NN"
-    /// message so callers know the per-form work is tracked.
-    #[pg_test(error = "sparql: UPDATE form 'DELETE DATA' lands in slice 83")]
+    /// The next-in-line unimplemented variant after slice 83 is
+    /// `DELETE/INSERT WHERE` (slices 82-77). The dispatcher panics
+    /// with the documented "lands in slice NN" message so callers
+    /// know the per-form work is tracked.
+    #[pg_test(error = "sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slices 82-77")]
     fn sparql_update_form_dispatch_panics_for_unimplemented() {
         let _: Option<pgrx::JsonB> = Spi::get_one(
             "SELECT * FROM pgrdf.sparql(\
-               'DELETE DATA { <http://example.org/a> <http://example.org/b> <http://example.org/c> }')",
+               'DELETE { ?s ?p ?o } INSERT { ?s ?p \"new\" } WHERE { ?s ?p ?o }')",
         )
         .ok()
         .flatten();
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Phase C slice 83 — SPARQL UPDATE DELETE DATA
+    // ─────────────────────────────────────────────────────────────────
+
+    /// `DELETE DATA { … }` removes an existing triple from the default
+    /// graph. The `_update` summary reports `triples_deleted = 1`,
+    /// `form = "DELETE_DATA"`, and the post-delete SELECT count drops
+    /// by one.
+    #[pg_test]
+    fn sparql_update_delete_data_removes_existing() {
+        // Seed three triples via INSERT DATA so we can verify both
+        // the count of deletions and the count of survivors.
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { \
+                  <http://example.org/a> <http://example.org/p> <http://example.org/v1> . \
+                  <http://example.org/a> <http://example.org/p> <http://example.org/v2> . \
+                  <http://example.org/a> <http://example.org/p> <http://example.org/v3> . \
+                }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'DELETE DATA { <http://example.org/a> <http://example.org/p> <http://example.org/v2> }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DELETE_DATA");
+        assert_eq!(summary["triples_inserted"], 0);
+        assert_eq!(summary["triples_deleted"], 1);
+        let graphs = summary["graphs_touched"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(graphs[0], "DEFAULT");
+
+        let remaining: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'SELECT ?o WHERE { <http://example.org/a> <http://example.org/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(remaining, 2, "the two un-deleted triples must still be queryable");
+
+        // Same triple deleted twice — the second call is a no-op.
+        let j2: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'DELETE DATA { <http://example.org/a> <http://example.org/p> <http://example.org/v2> }')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(j2.0["_update"]["triples_deleted"], 0);
+    }
+
+    /// DELETE DATA against a triple whose terms aren't in the
+    /// dictionary at all — spec-correct no-op, never errors.
+    #[pg_test]
+    fn sparql_update_delete_data_missing_term_is_noop() {
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'DELETE DATA { <http://example.org/never> <http://example.org/seen> <http://example.org/before> }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DELETE_DATA");
+        assert_eq!(summary["triples_deleted"], 0);
+        assert_eq!(summary["triples_inserted"], 0);
+
+        // Mixed case — half the terms exist (from a prior insert),
+        // the other half don't. Still no-op (the full quad isn't
+        // in `_pgrdf_quads`).
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { <http://example.org/a> <http://example.org/p> <http://example.org/b> }')",
+        )
+        .unwrap();
+        let j2: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'DELETE DATA { <http://example.org/a> <http://example.org/p> <http://example.org/c> }')",
+        )
+        .unwrap()
+        .unwrap();
+        // <http://example.org/a> and <http://example.org/p> are in
+        // the dictionary; <http://example.org/c> is NOT — full quad
+        // therefore can't exist, no-op.
+        assert_eq!(j2.0["_update"]["triples_deleted"], 0);
+
+        // The original triple still survives the no-op attempt.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'SELECT ?o WHERE { <http://example.org/a> <http://example.org/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 1, "the original quad must survive a no-op DELETE");
+    }
+
+    /// `DELETE DATA { GRAPH <iri> { … } }` scopes the removal to the
+    /// named graph: a same-shape triple in the default graph is NOT
+    /// touched, and the per-graph partition row count drops.
+    #[pg_test]
+    fn sparql_update_delete_data_named_graph() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { \
+                  <http://example.org/a> <http://example.org/p> <http://example.org/b> . \
+                  GRAPH <http://example.org/g1> { \
+                    <http://example.org/a> <http://example.org/p> <http://example.org/b> \
+                  } \
+                }')",
+        )
+        .unwrap();
+
+        // Both partitions carry one row.
+        let before_default: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads WHERE graph_id = 0",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let before_g1: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
+               WHERE graph_id = pgrdf.graph_id('http://example.org/g1')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(before_default, 1);
+        assert_eq!(before_g1, 1);
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'DELETE DATA { GRAPH <http://example.org/g1> { \
+                  <http://example.org/a> <http://example.org/p> <http://example.org/b> \
+                } }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DELETE_DATA");
+        assert_eq!(summary["triples_deleted"], 1);
+        let graphs = summary["graphs_touched"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(graphs[0], "http://example.org/g1");
+
+        // Default graph row untouched; named graph drops to zero.
+        let after_default: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads WHERE graph_id = 0",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        let after_g1: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
+               WHERE graph_id = pgrdf.graph_id('http://example.org/g1')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(after_default, 1, "default-graph copy survives a named-graph DELETE");
+        assert_eq!(after_g1, 0, "the named-graph copy is gone");
     }
 }

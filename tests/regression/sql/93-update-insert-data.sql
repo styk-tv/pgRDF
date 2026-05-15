@@ -36,10 +36,12 @@
 --      `form: "UPDATE"`, per-op `op: "InsertData"`, and an empty
 --      `unsupported_algebra`.
 --
--- Negative paths — the per-form follow-up slices (83 / 82-77 / 71 /
+-- Negative paths — the per-form follow-up slices (82-77 / 71 /
 -- 70 / 69) panic with a stable "lands in slice NN" prefix until they
 -- ship. We lock the prefix so downstream tooling can route on
 -- partial-translatability without depending on the volatile tail.
+-- Slice 83 lands `DELETE DATA`; its panic assertion moves to
+-- 94-update-delete-data.sql as a positive-path round-trip.
 --
 -- All expected values hand-computed; never ACCEPT=1 baselined.
 
@@ -193,12 +195,6 @@ SELECT jsonb_array_length(
 -- ─── Negative paths: per-form panics ─────────────────────────────
 -- Each unimplemented variant panics with its documented "lands in
 -- slice NN" prefix so callers can preview the rollout schedule.
-
-SELECT _check_error(
-  'update-delete-data-lands-83',
-  $$SELECT * FROM pgrdf.sparql('DELETE DATA { <http://x/a> <http://x/b> <http://x/c> }')$$,
-  $$UPDATE form 'DELETE DATA' lands in slice 83$$
-);
 
 SELECT _check_error(
   'update-delete-insert-where-lands-82-77',
