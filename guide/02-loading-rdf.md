@@ -107,14 +107,17 @@ explicitly `add_graph`'d sends the tuples to the default partition;
 that still works, you just lose the ability to drop the graph in
 one DDL.
 
-To drop a whole named graph cheaply:
+To drop a whole named graph cheaply, use the lifecycle UDF — it
+removes both the partition and the `_pgrdf_graphs` row in one call:
 
 ```sql
-DROP TABLE pgrdf._pgrdf_quads_g100;
+SELECT pgrdf.drop_graph(100);
+--  → 4321   (count of triples that were in the graph)
 ```
 
-This is constant-time, no `DELETE` scan, no autovacuum churn. The
-partition is gone and the parent table reflects the new state.
+This is partition-DDL-bounded, no `DELETE` scan, no autovacuum churn.
+The partition is detached + dropped and the `_pgrdf_graphs` mapping
+row is removed in the same transaction.
 
 ### Named graphs by IRI
 
@@ -199,6 +202,37 @@ SELECT graph_id, iri FROM pgrdf._pgrdf_graphs ORDER BY graph_id;
 Once a graph is allocated, scope SPARQL queries to it with
 `GRAPH <iri> { … }` or `GRAPH ?g { … }` — see
 [03-querying.md → Named graphs](03-querying.md#named-graphs).
+
+### Graph lifecycle (v0.4.2)
+
+Four partition-level lifecycle UDFs live alongside `add_graph` — all
+return `BIGINT` row counts and are idempotent on absent / empty
+sources:
+
+```sql
+-- Drop a graph entirely: detaches the partition, deletes the
+-- _pgrdf_graphs row, returns the pre-drop triple count.
+SELECT pgrdf.drop_graph(100);                           -- → N
+SELECT pgrdf.drop_graph(100, cascade => false);         -- errors if inferred rows present
+
+-- Wipe rows but keep the partition + IRI binding.
+SELECT pgrdf.clear_graph(100);                          -- → N (rows removed)
+
+-- Copy all rows from src to dst. Auto-creates dst partition + IRI
+-- if absent. Both base and inferred rows carry forward.
+SELECT pgrdf.copy_graph(100, 200);                      -- → N (rows copied)
+
+-- Move = copy + drop src. The dst partition can't pre-hold data.
+SELECT pgrdf.move_graph(100, 300);                      -- → N (rows moved)
+```
+
+Stable error prefixes for downstream tooling:
+`drop_graph: cannot drop default partition`,
+`drop_graph: inferred rows present`,
+`copy_graph: src and dst must differ`,
+`move_graph: dst graph_id <N> already has data`, and the shared
+`{drop,clear,copy,move}_graph: graph_id must be >= 0` shape.
+Full reference: [docs/02-storage.md §2.4](../docs/02-storage.md#24-graph-level-lifecycle-udfs-lld-v04-5-phase-b-shipped--v042).
 
 ## Counts + sanity checks
 

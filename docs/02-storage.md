@@ -449,13 +449,14 @@ default partition; subsequent `add_graph(g)` calls don't move
 them — the partition-creation order is the caller's
 responsibility.
 
-## 2.4 Graph-level lifecycle UDFs (LLD v0.4 §5, **Phase B in flight — slice 99 → v0.4.2**)
+## 2.4 Graph-level lifecycle UDFs (LLD v0.4 §5, **Phase B shipped — v0.4.2**)
 
 Partition-level primitives over `_pgrdf_quads`. Constant-time DDL
 where possible (DETACH/DROP for `drop_graph`, TRUNCATE for
 `clear_graph`, DETACH/ATTACH metadata swap for `move_graph`). All
-four UDFs land across the Phase B countdown (slices 99 → 96) toward
-the v0.4.2 cut.
+four UDFs landed across the Phase B countdown (slices 99 → 96), and
+slice 95 wires the end-to-end integration test. The full surface
+ships in **v0.4.2**.
 
 ### `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE) → BIGINT` (**shipped — Phase B slice 99**)
 
@@ -518,15 +519,11 @@ paths under the pgrx `pg_test` harness.
 
 Spec: [LLD v0.4 §5.1 / §5.2](../specs/SPEC.pgRDF.LLD.v0.4.md#5-graph-level-lifecycle-udfs-new).
 
-### `pgrdf.clear_graph` / `copy_graph` (✅ slices 98 + 97) / `move_graph` (🚧 slice 96)
+### `pgrdf.clear_graph` / `copy_graph` (✅ slices 98 + 97)
 
-`clear_graph` (slice 98) and `copy_graph` (slice 97) both ship; see
-the `#### clear_graph` and `#### copy_graph` subsections under §2.2
-above for the row-touching pair. `move_graph` (slice 96, the
-constant-time metadata-only re-association swap via DETACH/ATTACH
-on the partition's `FOR VALUES IN (…)` clause) carries forward —
-see LLD v0.4 §5.1 for the signature and §5.2 for the partition-DDL
-idiom.
+Both ship; see the `#### clear_graph` and `#### copy_graph`
+subsections under §2.2 above for the row-touching pair.
+
 ### `pgrdf.move_graph(src BIGINT, dst BIGINT) → BIGINT` (**shipped — Phase B slice 96**)
 
 Migrates every quad in graph `src` to graph `dst` and removes the
@@ -592,10 +589,16 @@ slice 97's `copy_graph` at runtime; the standalone shape tests
 
 Spec: [LLD v0.4 §5.1 / §5.2](../specs/SPEC.pgRDF.LLD.v0.4.md#5-graph-level-lifecycle-udfs-new).
 
-### `pgrdf.copy_graph` (🚧 slice 97)
+### End-to-end lifecycle composition (✅ slice 95)
 
-Carries forward in the Phase B countdown — see LLD v0.4 §5.1 for
-the signature and §5.2 for the row-copy idiom.
+The four §5 UDFs compose cleanly under the loader / dict / hexastore
+they all sit on top of:
+[`tests/regression/sql/92-lifecycle-end-to-end.sql`](../tests/regression/sql/92-lifecycle-end-to-end.sql)
+covers the load → copy → drop round-trip, `move_graph` as a faithful
+`copy_graph + drop_graph` compose, `clear_graph` isolation across a
+shared dictionary, SPARQL `GRAPH <iri>` projection survival post-copy,
+and the drop-then-rebind loop. Per-UDF files (88/89/90/91) lock each
+UDF's invariants in isolation; slice 95 pins their interactions.
 
 ## 2.5 What's NOT in storage
 
