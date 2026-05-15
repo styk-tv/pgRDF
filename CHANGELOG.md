@@ -85,6 +85,79 @@ lifecycle-UDFs track. `docs/02-storage.md` §2.2 gains a
 `#### copy_graph` subsection alongside the slice-98 `clear_graph`
 entry; `docs/10-roadmap.md` Track 3 picks up the slice 97 ✅
 entry alongside slices 98 + 99.
+### Phase B slice 96 — pgrdf.move_graph lifecycle UDF
+
+Continues the LLD v0.4 §5 graph-level lifecycle UDF track.
+`pgrdf.move_graph(src BIGINT, dst BIGINT) → BIGINT` migrates every
+quad in graph `src` to graph `dst`, removes the `src` partition,
+and returns the count of triples moved (== the `src` row count
+at copy time).
+
+**Implementation strategy — compose over siblings.** The v0.4.2
+implementation is `pgrdf.copy_graph(src, dst)` (slice 97, parallel
+batch) followed by `pgrdf.drop_graph(src, cascade => TRUE)`
+(slice 99). Both halves run in the calling statement's
+transaction, so a rollback unwinds both. Semantically equivalent
+to the LLD §5.2 "DETACH partition + rebind `FOR VALUES IN(<dst>)`
++ ATTACH" path, but tractable without the partition-constraint
+dance that a true metadata-only swap would require (every row's
+`graph_id` column would need updating to satisfy the post-rebind
+LIST constraint check — itself a row scan). The §5.2
+"metadata-only" claim is therefore aspirational; downgraded to a
+v0.5 perf optimisation in this slice's spec sweep. Both the
+spec table at §5.1 and the §5.3 acceptance criteria reflect this
+correction.
+
+Contract details:
+
+- **Idempotent on absent src.** When `src`'s partition does not
+  exist, `move_graph` returns 0 without erroring — short-circuit
+  on the `pg_class` existence check, no compose invocation. Same
+  shape contract as `drop_graph` / `clear_graph`.
+- **`src == dst` rejected** with stable
+  `move_graph: src and dst must differ (both = <N>)` prefix.
+  A self-move would copy-then-drop the destination — destructive.
+- **`dst` non-empty rejected** with stable
+  `move_graph: dst graph_id <N> already has data (<M> rows);
+  clear or drop it first` prefix. An empty pre-existing dst
+  partition is fine (the copy step inserts into it); the dst
+  guard runs the pg_class existence check + row count *before*
+  invoking the compose.
+- **Negative id rejected** with stable
+  `move_graph: graph_id must be >= 0` prefix — matches the
+  sibling lifecycle UDFs.
+- **`_pgrdf_graphs` invalidation** inherits the compose: drop
+  step removes the `src` row; copy step allocates the `dst` row
+  with the synthetic IRI `urn:pgrdf:graph:{dst}` if `dst` was
+  unbound. A pre-existing IRI binding on `dst` is preserved
+  (slice 97 must not clobber it).
+
+**Runtime dependency on slice 97.** `pgrdf.copy_graph` is
+referenced by SQL string (not Rust symbol). The build succeeds
+standalone — pgrx generates the `#[pg_extern]` SQL declaration
+from the Rust signature, and the inner `SELECT pgrdf.copy_graph
+(...)` resolves at runtime. Calls to `move_graph`'s happy path
+therefore FAIL at runtime until slice 97 (Phase B `copy_graph`)
+lands in the parent merge. The standalone shape tests
+(self-move, negative-id, dst-has-data, absent-src) are
+independent and run green in this slice's worktree.
+
+Regression coverage:
+[`tests/regression/sql/91-move-graph.sql`](tests/regression/sql/91-move-graph.sql)
+locks five invariants (happy path with row count, idempotent
+absent, src==dst rejection, dst-has-data rejection, negative-id
+rejection) via the `_check_error` plpgsql helper. Expected output
+hand-authored; never ACCEPT=1 baselined. Five `#[pg_test]`s in
+`src/storage/graphs.rs` exercise the same paths under the pgrx
+test harness; the happy-path test is documented as
+slice-97-dependent.
+
+LLD v0.4 §5.1 `move_graph` row marked ✅ slice 96; §2 status row
+updated; §5.2 partition-DDL note rewritten to acknowledge the
+compose strategy; §5.3 "constant-time move" acceptance criterion
+deferred to v0.5. `docs/02-storage.md` gains the `move_graph`
+surface section in §2.4; `docs/10-roadmap.md` Track 3 picks up
+the slice 96 ✅ entry alongside slices 98 + 99.
 
 ### Phase B slice 98 — `pgrdf.clear_graph` lifecycle UDF
 

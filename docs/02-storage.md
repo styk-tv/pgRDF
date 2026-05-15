@@ -527,6 +527,75 @@ constant-time metadata-only re-association swap via DETACH/ATTACH
 on the partition's `FOR VALUES IN (…)` clause) carries forward —
 see LLD v0.4 §5.1 for the signature and §5.2 for the partition-DDL
 idiom.
+### `pgrdf.move_graph(src BIGINT, dst BIGINT) → BIGINT` (**shipped — Phase B slice 96**)
+
+Migrates every quad in graph `src` to graph `dst` and removes the
+`src` partition. Returns the count of triples moved (== the row
+count of `src` at copy time).
+
+**Implementation strategy — compose over siblings.** The v0.4.2
+implementation is `pgrdf.copy_graph(src, dst)` followed by
+`pgrdf.drop_graph(src, cascade => TRUE)`. Both halves run in the
+calling statement's transaction, so a rollback unwinds both.
+Semantically equivalent to the LLD §5.2 "DETACH partition + rebind
+`FOR VALUES IN (<dst>)` + ATTACH" path, but tractable without the
+partition-constraint dance that a true metadata-only swap would
+require (every row's `graph_id` column would need updating to
+satisfy the post-rebind LIST constraint, which itself is a row
+scan). The §5.2 "metadata-only" claim is therefore aspirational
+for v0.4.2; flagged as a v0.5 perf optimisation. For small-graph
+workloads the compose is fast; for very large graphs it scans
+twice (once during copy, once during drop's pre-count).
+
+Guards (stable error prefixes per the error-message contract):
+
+```
+move_graph: graph_id must be >= 0                              -- negative id
+move_graph: src and dst must differ (both = <N>)               -- self-move
+move_graph: dst graph_id <N> already has data (<M> rows); …    -- dst non-empty
+```
+
+Idempotent: when `src` partition is absent, `move_graph` returns
+0 without erroring (short-circuit on the existence check; the
+compose's copy/drop steps are never invoked). The dst-has-data
+guard runs the pg_class existence check + row count *before*
+invoking the compose, so a caller probing the workflow with an
+empty pre-built dst sees the move succeed and the data routed in.
+
+`_pgrdf_graphs` invalidation: the compose inherits slice 99's
+behaviour — the `src` row is removed (drop step), and the `dst`
+row is allocated if absent (copy step's responsibility per
+slice 97). If `dst` was already bound to a different IRI, that
+binding is preserved (slice 97 must not clobber a pre-existing
+binding).
+
+```sql
+-- Move every quad in graph 42 to graph 43, return the count.
+SELECT pgrdf.move_graph(42, 43);
+
+-- Idempotent — moving an absent src is a 0-return.
+SELECT pgrdf.move_graph(9999, 100);  -- → 0
+
+-- Self-move is rejected (would be destructive).
+SELECT pgrdf.move_graph(42, 42);
+--  ERROR:  move_graph: src and dst must differ (both = 42)
+```
+
+Regression coverage: `tests/regression/sql/91-move-graph.sql` locks
+the full surface (happy path with row count, idempotent absent,
+src==dst rejection, dst-has-data rejection, negative-id rejection).
+Pgrx integration tests in `src/storage/graphs.rs` cover the happy
+path + absent-src + self-move + negative-id + dst-has-data shapes
+under the pgrx `pg_test` harness. The happy path depends on
+slice 97's `copy_graph` at runtime; the standalone shape tests
+(self-move, negative, dst-has-data, absent) are independent.
+
+Spec: [LLD v0.4 §5.1 / §5.2](../specs/SPEC.pgRDF.LLD.v0.4.md#5-graph-level-lifecycle-udfs-new).
+
+### `pgrdf.copy_graph` (🚧 slice 97)
+
+Carries forward in the Phase B countdown — see LLD v0.4 §5.1 for
+the signature and §5.2 for the row-copy idiom.
 
 ## 2.5 What's NOT in storage
 

@@ -112,7 +112,7 @@ Capability matrix for the v0.4 target:
 | IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | ✅ slices 120-115 |
 | SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | §4 | 🚧 |
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | 🚧 |
-| `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | 🚧 (`drop_graph` ✅ slice 99; `clear_graph` ✅ slice 98; `copy_graph` ✅ slice 97) |
+| `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | ✅ all four shipped (slices 99 / 98 / 97 / 96) |
 | `CONSTRUCT` | ⏳ deferred | §6 | 🚧 |
 | Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | 🚧 |
 | Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | 🚧 |
@@ -459,7 +459,7 @@ partitioning. 🚧
 | `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE)` | ✅ slice 99 | `BIGINT` | Removes the partition entirely; returns the count of triples that were in it. `cascade => FALSE` errors if inferred rows are present. |
 | `pgrdf.clear_graph(id BIGINT)` | ✅ slice 98 | `BIGINT` | `TRUNCATE ONLY` the partition; the partition itself is preserved (so subsequent inserts route normally). Returns triples removed. |
 | `pgrdf.copy_graph(src BIGINT, dst BIGINT)` | ✅ slice 97 | `BIGINT` | Copies all quads from `src` to `dst`. Creates the `dst` partition if absent. Returns triples copied. |
-| `pgrdf.move_graph(src BIGINT, dst BIGINT)` | new | `BIGINT` | Atomic association swap: the `src` partition's `FOR VALUES IN (...)` clause rebinds to the new id. Returns triples moved (== row count at swap time). |
+| `pgrdf.move_graph(src BIGINT, dst BIGINT)` | ✅ slice 96 | `BIGINT` | Migrates every quad from `src` to `dst`, removes `src`. v0.4.2 implementation is a compose: `pgrdf.copy_graph(src, dst)` then `pgrdf.drop_graph(src, cascade => TRUE)`. Returns triples moved (== row count at copy time). The §5.2 "metadata-only DETACH/ATTACH rebind" claim is aspirational; tractable metadata-only is a v0.5 perf optimisation. |
 
 IRI overloads (`pgrdf.drop_graph(iri TEXT)`, etc.) deferred to
 [`v0.5-FUTURE §7`](SPEC.pgRDF.LLD.v0.5-FUTURE.md); in v0.4 callers
@@ -474,11 +474,21 @@ route IRI input through `pgrdf.graph_id(iri)` explicitly.
     `DROP TABLE`. The detach is metadata-only; the subsequent drop
     drops the partition table's own row storage and indexes. Cost
     is independent of row count (modulo btree page release).
-  - `move_graph` is also metadata-only: rebind the partition's
-    `FOR VALUES IN (<old_id>)` clause to `FOR VALUES IN (<new_id>)`.
-    Postgres requires DETACH + ATTACH for this; the DETACH/ATTACH
-    pair runs under an `ACCESS EXCLUSIVE` lock on the parent for a
-    bounded window. Backing rows do not move.
+  - `move_graph` was specified as metadata-only — rebind the
+    partition's `FOR VALUES IN (<old_id>)` clause to
+    `FOR VALUES IN (<new_id>)` under an `ACCESS EXCLUSIVE` lock
+    on the parent. In practice the LIST partition constraint
+    requires every row's `graph_id` column to match the bound
+    value, so the rebind needs an interim UPDATE of every row —
+    a row scan, not metadata-only. The **v0.4.2 implementation
+    (slice 96)** therefore composes `copy_graph(src, dst)` +
+    `drop_graph(src, cascade => TRUE)` instead, which is
+    correctness-preserving but scans the rows twice. A truly
+    metadata-only swap is flagged as a v0.5 perf optimisation
+    (drop the `graph_id` column from `_pgrdf_quads` and key
+    routing purely on the partition association would make the
+    rebind free — at the cost of losing the column-level
+    `graph_id` reference for downstream filters).
   - `clear_graph` is `TRUNCATE ONLY` on the partition — bulk row
     discard with the partition shell preserved.
   - `copy_graph` is the only one that touches every row:
@@ -508,10 +518,14 @@ route IRI input through `pgrdf.graph_id(iri)` explicitly.
 
 - **Idempotency.** Re-calling any of the four UDFs with the same
   input is a no-op and returns `0`.
-- **Constant-time move.** `pgrdf.move_graph(src, dst)` execution
-  time is independent of `_pgrdf_quads` row count in `src`
-  (measured: < 100 ms for a graph of 1 000 000 quads; covered by a
-  performance regression fixture).
+- **Constant-time move (deferred to v0.5).** Originally specified
+  as `pgrdf.move_graph(src, dst)` execution time independent of
+  `_pgrdf_quads` row count in `src`. The v0.4.2 implementation
+  (slice 96) is a `copy_graph + drop_graph` compose — O(N) in the
+  src row count, not metadata-only. Tractable constant-time move
+  is a v0.5 perf optimisation that drops the `graph_id` column
+  from `_pgrdf_quads` and keys routing on partition association
+  alone.
 - **Cascade guard.** `pgrdf.drop_graph(id, cascade => FALSE)`
   errors with prefix `drop_graph: inferred rows present` if any
   `is_inferred = TRUE` row exists in the graph.

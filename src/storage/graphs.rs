@@ -76,6 +76,31 @@
 //! graph is a 0-return no-op (idempotent). Opens Phase B (lifecycle
 //! UDFs §5) toward v0.4.2.
 //!
+//! Slice 96 (Phase B) — `pgrdf.move_graph(src BIGINT, dst BIGINT) →
+//! BIGINT` ([`move_graph`]). Migrates every quad in graph `src` to
+//! graph `dst`, returning the count of triples moved. The v0.4.2
+//! implementation is a **compose** over the sibling primitives:
+//! `pgrdf.copy_graph(src, dst)` (slice 97) then
+//! `pgrdf.drop_graph(src, cascade => TRUE)` (slice 99). Semantically
+//! equivalent to the LLD §5.2 "metadata-only DETACH/ATTACH partition
+//! rebind" — but tractable without the partition-constraint dance
+//! around updating every row's `graph_id` column. The §5.2 claim that
+//! `move_graph` is metadata-only is aspirational; flagged as a v0.5
+//! perf optimisation. Slice 97's `copy_graph` is a runtime dependency
+//! (referenced by SQL string, not Rust symbol) — the build succeeds
+//! standalone, but `move_graph` calls FAIL at runtime until slice 97
+//! lands in the parent merge.
+//!
+//! Guards:
+//! - `src < 0 || dst < 0` panics with the stable
+//!   `move_graph: graph_id must be >= 0` prefix.
+//! - `src == dst` panics with `move_graph: src and dst must differ`.
+//! - `dst` partition already holds rows → panics with
+//!   `move_graph: dst graph_id <N> already has data`.
+//!
+//! Idempotency:
+//! - `src` partition absent → returns 0, no error (LLD §5.2).
+//!
 //! Slice 98 (Phase B) — `pgrdf.clear_graph(id BIGINT) → BIGINT`
 //! lifecycle UDF ([`clear_graph`]). Per LLD v0.4 §5.1 the function
 //! `TRUNCATE ONLY`s the per-graph LIST partition
@@ -261,6 +286,146 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
     .unwrap_or_else(|e| panic!("drop_graph: _pgrdf_graphs row cleanup failed: {e}"));
 
     total
+}
+
+/// Migrate every quad from graph `src` to graph `dst` and remove
+/// `src` afterwards. Returns the number of triples moved (the row
+/// count of `src` at copy time).
+///
+/// **Implementation strategy — compose over siblings.** v0.4.2
+/// implements `move_graph` as `pgrdf.copy_graph(src, dst)` followed
+/// by `pgrdf.drop_graph(src, cascade => TRUE)`. Both halves run in
+/// the calling statement's transaction, so a rollback unwinds both.
+/// Semantically equivalent to the LLD §5.2 "DETACH partition +
+/// rebind `FOR VALUES IN(<dst>)` + ATTACH" path, but tractable
+/// without the partition-constraint check requiring an UPDATE of
+/// every row's `graph_id` column. The metadata-only claim in
+/// §5.2 is aspirational; flagged as a v0.5 perf optimisation.
+///
+/// **Runtime dependency on slice 97.** `pgrdf.copy_graph` is
+/// referenced by SQL string (not Rust symbol). The build is fine
+/// standalone — pgrx generates `#[pg_extern]` SQL declarations from
+/// Rust signatures, and the inner `SELECT pgrdf.copy_graph(...)`
+/// resolves at runtime. Calls to `move_graph` therefore FAIL at
+/// runtime until slice 97 (Phase B `copy_graph`) lands in the
+/// parent merge. Tests that exercise the runtime path are written
+/// in this slice anyway; they go green on merge.
+///
+/// Guards:
+/// - `src < 0 || dst < 0` panics with the stable
+///   `move_graph: graph_id must be >= 0` prefix (matches the
+///   shape of `drop_graph` / `clear_graph` / `add_graph(g BIGINT)`).
+/// - `src == dst` panics with `move_graph: src and dst must differ`.
+///   A self-move is meaningless (and the compose would drop the
+///   graph after copying it to itself — destructive). Explicit
+///   rejection is safer than a no-op.
+/// - `dst` partition already holds rows → panics with
+///   `move_graph: dst graph_id <N> already has data (<M> rows);
+///   clear or drop it first`. Stable prefix routing.
+///
+/// Idempotency: when `src` partition is absent, returns 0 without
+/// erroring (LLD §5.2 idempotency invariant for the whole
+/// lifecycle-UDF family). The compose short-circuits before
+/// invoking `copy_graph` / `drop_graph` to avoid the second pass
+/// failing — slice 99's `drop_graph` is already idempotent on the
+/// absent path, but the explicit early return keeps the return
+/// value at 0 (which is what callers expect when they're routing
+/// `move_graph` into a cleanup workflow without first probing
+/// partition existence).
+///
+/// `_pgrdf_graphs` invalidation: the compose inherits slice 99's
+/// behaviour — the `src` row is removed (drop step), and the `dst`
+/// row is allocated if absent (copy step's responsibility per
+/// slice 97). If `dst` was already bound to a different IRI, that
+/// binding is preserved (slice 97 must not clobber a pre-existing
+/// binding).
+///
+/// SQL surface: `pgrdf.move_graph(src BIGINT, dst BIGINT) → BIGINT`.
+/// Per LLD v0.4 §5.1.
+#[pg_extern]
+fn move_graph(src: i64, dst: i64) -> i64 {
+    if src < 0 || dst < 0 {
+        panic!("move_graph: graph_id must be >= 0, got src={src}, dst={dst}");
+    }
+    if src == dst {
+        panic!("move_graph: src and dst must differ (both = {src})");
+    }
+
+    // Idempotent miss: src partition absent → 0 return, no error.
+    // The compose's `copy_graph` step would also short-circuit on an
+    // absent src, but we want the explicit early return so the
+    // sibling `drop_graph(src)` step isn't invoked needlessly (it'd
+    // be a no-op too, but the symmetry with the other lifecycle
+    // UDFs is clearer this way).
+    let src_name = format!("_pgrdf_quads_g{src}");
+    let src_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(
+            SELECT 1 FROM pg_class
+            WHERE relnamespace = 'pgrdf'::regnamespace AND relname = $1
+         )",
+        &[src_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("move_graph: src existence check failed: {e}"))
+    .unwrap_or(false);
+
+    if !src_exists {
+        return 0;
+    }
+
+    // Dst guard: if the dst partition already exists AND holds rows,
+    // refuse to clobber. An empty existing partition (e.g. a prior
+    // `add_graph(dst)` with no inserts) is fine — the copy step
+    // inserts into it. A pre-bound IRI on dst is preserved.
+    let dst_name = format!("_pgrdf_quads_g{dst}");
+    let dst_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(
+            SELECT 1 FROM pg_class
+            WHERE relnamespace = 'pgrdf'::regnamespace AND relname = $1
+         )",
+        &[dst_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("move_graph: dst existence check failed: {e}"))
+    .unwrap_or(false);
+
+    if dst_exists {
+        // `dst_name` is built from a validated non-negative BIGINT,
+        // no user input in identifier position — same safe-format
+        // convention as `drop_graph` / `clear_graph`.
+        let dst_count: i64 = Spi::get_one(&format!(
+            "SELECT count(*)::bigint FROM pgrdf.{dst_name}"
+        ))
+        .unwrap_or_else(|e| panic!("move_graph: dst count failed: {e}"))
+        .unwrap_or(0);
+        if dst_count > 0 {
+            panic!(
+                "move_graph: dst graph_id {dst} already has data ({dst_count} rows); \
+                 clear or drop it first"
+            );
+        }
+    }
+
+    // Compose step 1: copy src → dst. Slice 97's `copy_graph`
+    // returns the row count copied — that's our return value.
+    // Runtime dependency: this SELECT errors until slice 97 lands.
+    let copied: i64 = Spi::get_one_with_args(
+        "SELECT pgrdf.copy_graph($1::bigint, $2::bigint)",
+        &[src.into(), dst.into()],
+    )
+    .unwrap_or_else(|e| panic!("move_graph: copy_graph step failed: {e}"))
+    .unwrap_or(0);
+
+    // Compose step 2: drop src. `cascade => true` so any inferred
+    // rows in src (already copied across to dst above) come away
+    // with the partition. The drop's return value is discarded —
+    // we report `copied` as the move count, which is the row count
+    // at copy time.
+    Spi::run_with_args(
+        "SELECT pgrdf.drop_graph($1::bigint, true)",
+        &[src.into()],
+    )
+    .unwrap_or_else(|e| panic!("move_graph: drop_graph step failed: {e}"));
+
+    copied
 }
 
 /// Truncate every row in graph `id`'s LIST partition
@@ -1151,5 +1316,115 @@ mod tests {
     #[pg_test(error = "copy_graph: src and dst must differ (both = 5)")]
     fn copy_graph_src_eq_dst_rejected() {
         Spi::run("SELECT pgrdf.copy_graph(5::bigint, 5::bigint)").unwrap();
+    }
+
+    /// Slice 96 — `pgrdf.move_graph(src, dst)` happy path. Load N
+    /// quads into `src`, run the move, observe (a) return value is
+    /// N, (b) `src` partition gone, (c) `dst` partition holds N rows,
+    /// (d) `_pgrdf_graphs` bindings rotated (src unbound; dst bound).
+    ///
+    /// **Runtime dependency on slice 97's `copy_graph`.** This test
+    /// is written ahead of slice 97 landing; it FAILs in the slice-96
+    /// worktree because `pgrdf.copy_graph` does not yet exist. It
+    /// goes green at parent-merge time, when slice 97 lands the
+    /// `copy_graph` UDF.
+    #[pg_test]
+    fn move_graph_happy_path() {
+        // Build src + populate with 3 base + 1 inferred row. Direct
+        // INSERT pattern (same partition-DDL-flake mitigation as the
+        // sibling slices: build the partition via `add_graph(id)`,
+        // then INSERT directly into `_pgrdf_quads`).
+        Spi::run("SELECT pgrdf.add_graph(9601::bigint)").expect("add_graph(9601) failed");
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_quads \
+             (subject_id, predicate_id, object_id, graph_id, is_inferred) VALUES \
+             (1001, 1002, 1003, 9601, false), \
+             (2001, 2002, 2003, 9601, false), \
+             (3001, 3002, 3003, 9601, false), \
+             (4001, 4002, 4003, 9601, true)",
+        )
+        .expect("seed src quads failed");
+
+        let moved: Option<i64> =
+            Spi::get_one("SELECT pgrdf.move_graph(9601::bigint, 9602::bigint)")
+                .expect("move_graph(9601, 9602) failed");
+        assert_eq!(moved, Some(4), "move must return the src row count");
+
+        // src partition gone (drop_graph step removed it).
+        let src_exists: bool = Spi::get_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_class \
+                           WHERE relnamespace = 'pgrdf'::regnamespace \
+                             AND relname = '_pgrdf_quads_g9601')",
+        )
+        .expect("pg_class probe failed")
+        .unwrap_or(false);
+        assert!(!src_exists, "src partition must be gone post-move");
+
+        // dst partition holds the rows.
+        let dst_count: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 9602",
+        )
+        .expect("dst count failed")
+        .expect("dst count returned NULL");
+        assert_eq!(dst_count, 4, "dst must hold the moved rows");
+
+        // _pgrdf_graphs invalidation: src unbound, dst bound.
+        let src_iri: Option<String> =
+            Spi::get_one("SELECT pgrdf.graph_iri(9601::bigint)").expect("src iri lookup failed");
+        assert_eq!(src_iri, None, "src IRI binding must be removed");
+        let dst_iri: Option<String> =
+            Spi::get_one("SELECT pgrdf.graph_iri(9602::bigint)").expect("dst iri lookup failed");
+        assert_eq!(
+            dst_iri.as_deref(),
+            Some("urn:pgrdf:graph:9602"),
+            "dst must receive the synthetic IRI binding from copy_graph"
+        );
+    }
+
+    /// Slice 96 — idempotent absent: `move_graph` on a non-existent
+    /// src returns 0 without erroring. No call to `copy_graph` is
+    /// made (we short-circuit on the existence check) so this test
+    /// is independent of slice 97 and can run green standalone.
+    #[pg_test]
+    fn move_graph_absent_src_returns_zero() {
+        let moved: Option<i64> =
+            Spi::get_one("SELECT pgrdf.move_graph(9603::bigint, 9604::bigint)")
+                .expect("move_graph on absent src failed");
+        assert_eq!(moved, Some(0), "absent src must return 0");
+    }
+
+    /// Slice 96 — src == dst rejection. Self-move would be a copy
+    /// followed by a drop of the destination, which is destructive.
+    /// Explicit panic with the stable prefix is safer than a no-op.
+    /// Independent of slice 97.
+    #[pg_test(error = "move_graph: src and dst must differ")]
+    fn move_graph_self_move_rejected() {
+        Spi::run("SELECT pgrdf.move_graph(9605::bigint, 9605::bigint)").unwrap();
+    }
+
+    /// Slice 96 — negative-id guard mirrors `drop_graph` /
+    /// `clear_graph` / `add_graph(g BIGINT)`. Independent of
+    /// slice 97.
+    #[pg_test(error = "move_graph: graph_id must be >= 0")]
+    fn move_graph_negative_id_rejected() {
+        Spi::run("SELECT pgrdf.move_graph(-1::bigint, 9606::bigint)").unwrap();
+    }
+
+    /// Slice 96 — dst-has-data rejection. Build src + dst, both
+    /// populated; move panics with the stable prefix. Note this
+    /// path runs the dst existence + count check (which does NOT
+    /// depend on slice 97), so it passes standalone in this
+    /// worktree.
+    #[pg_test(error = "move_graph: dst graph_id 9608 already has data")]
+    fn move_graph_dst_has_data_rejected() {
+        Spi::run("SELECT pgrdf.add_graph(9607::bigint)").expect("add_graph(9607) failed");
+        Spi::run("SELECT pgrdf.add_graph(9608::bigint)").expect("add_graph(9608) failed");
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_quads \
+             (subject_id, predicate_id, object_id, graph_id) VALUES \
+             (1, 1, 1, 9607), (2, 2, 2, 9608)",
+        )
+        .expect("seed quads failed");
+        Spi::run("SELECT pgrdf.move_graph(9607::bigint, 9608::bigint)").unwrap();
     }
 }

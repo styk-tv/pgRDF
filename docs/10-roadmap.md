@@ -614,25 +614,28 @@ table.
   Both `is_inferred = FALSE` and `is_inferred = TRUE` rows carry
   forward verbatim — entailment state is preserved per LLD v0.4
   §5.2. Destination partition auto-created via
-  `pgrdf.add_graph(dst)` if absent (synthetic
-  `urn:pgrdf:graph:{dst}` IRI bound alongside per slice 119).
-  Idempotent on absent src (returns 0, dst NOT auto-created on
-  this short-circuit). Re-call duplicates — callers needing
-  re-call idempotency clear dst first. `src == dst` rejected with
-  stable `copy_graph: src and dst must differ` prefix; negative
-  ids rejected with stable `copy_graph: graph_id must be >= 0,
-  got src=<S>, dst=<D>` prefix. Regression coverage:
-  [`tests/regression/sql/90-copy-graph.sql`](../tests/regression/sql/90-copy-graph.sql)
-  locks seven invariants (absent-src no-op + no dst auto-create,
-  load + copy returns count + dst auto-created + graph_iri
-  resolves, `is_inferred` preserved, src untouched, re-call
-  duplicates + clear-then-copy round-trip, `src == dst` rejected,
-  negative ids rejected). Three `#[pg_test]`s in
-  `src/storage/graphs.rs` exercise the happy path, absent-src
-  short-circuit, and `src == dst` rejection paths.
+  `pgrdf.add_graph(dst)` if absent. Idempotent on absent src
+  (returns 0). `src == dst` rejected with stable
+  `copy_graph: src and dst must differ` prefix.
 
-- 🚧 Slice 96: `move_graph` — constant-time metadata-only swap
-  via DETACH/ATTACH on the partition's `FOR VALUES IN (…)` clause.
+- ✅ **Slice 96 — `pgrdf.move_graph(src BIGINT, dst BIGINT) →
+  BIGINT`.** Migrates every quad in `src` to `dst` and removes
+  `src`. v0.4.2 implementation composes slices 97 + 99:
+  `pgrdf.copy_graph(src, dst)` then
+  `pgrdf.drop_graph(src, cascade => TRUE)`. Returns rows moved
+  (== src row count at copy time). The LLD §5.2 "metadata-only
+  DETACH/ATTACH rebind" spec turned out to require an interim
+  UPDATE of every row's `graph_id` column (the LIST partition
+  constraint demands it), so the metadata-only claim is
+  aspirational and downgraded to a v0.5 perf optimisation. Guards:
+  `src == dst`, `dst` non-empty, negative id all rejected with
+  stable prefixes. Idempotent: absent `src` returns 0. Regression:
+  `91-move-graph.sql` locks five invariants; five `#[pg_test]`s
+  exercise the same paths.
+
+**Phase B §5 lifecycle UDF surface complete** at slice 96. The
+SPARQL UPDATE lifecycle algebra (`DROP/CLEAR/CREATE/COPY/MOVE/ADD
+GRAPH`) wiring lands in Phase C's SPARQL UPDATE track.
 
 ### Track 4 — CONSTRUCT
 `pgrdf.construct(q TEXT) → SETOF JSONB` returning structured
