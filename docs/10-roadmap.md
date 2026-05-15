@@ -555,6 +555,64 @@ to dispatch by query form; UPDATE forms return an `_update` JSONB
 summary row. See
 [LLD v0.4 §4](../specs/SPEC.pgRDF.LLD.v0.4.md#4-sparql-update-new).
 
+- ✅ **Slice 79 — SPARQL UPDATE graph-scoped variants (`WITH <iri>` +
+  `GRAPH <iri> { … }` in template / WHERE).** Closes the graph-aware
+  loop for pattern-driven UPDATEs. Spargebra-0.4.6 desugars
+  `WITH <iri>` at parse time (parser.rs §Modify) into (a) per-quad
+  `graph_name` injection on every default-graph template
+  QuadPattern/GroundQuadPattern AND (b) a
+  `using: Some(QueryDataset { default: [<iri>], named: None })`
+  sentinel on the DeleteInsert operation. The per-row instantiators
+  `instantiate_template_quad` / `instantiate_ground_template_quad`
+  already routed `GraphNamePattern::NamedNode` into the right
+  partition since slices 80/81/82 — that half was a free regression
+  test. (b) is new: the slice-79 dispatcher (in
+  `src/query/executor.rs::execute_update`'s three DeleteInsert
+  arms) calls a small `with_iri_from_using(using, form_label)`
+  helper that returns `Some(iri)` for the single-default-graph
+  WITH-injected shape, panics on multi-default-or-USING-NAMED with
+  the stable `'USING / USING NAMED' not yet supported` prefix, and
+  returns `None` for `using.is_none()`. When `Some(iri)` is
+  returned, `scope_pattern_to_graph(pattern, iri)` wraps the WHERE
+  pattern in `GraphPattern::Graph { name: NamedNodePattern::
+  NamedNode(iri), inner: Box::new(pattern) }` before passing it to
+  `execute_*_where`. The slice-112 walker then scopes every
+  emergent BGP triple (incl. via OPTIONAL/UNION/MINUS) to `<iri>`,
+  and nested explicit `GRAPH <other> { … }` overrides per W3C
+  §13.3. The `GRAPH <iri> { … }` in WHERE pattern path was already
+  supported (slice 112); the `GRAPH <iri> { … }` in template halves
+  was already wired through the per-quad `graph_name` branches in
+  slices 80/81/82. Cross-graph copy
+  (`INSERT { GRAPH <g2> { … } } WHERE { GRAPH <g1> { … } }`),
+  scoped wipe (`DELETE { GRAPH <g> { … } } WHERE { GRAPH <g> { … } }`),
+  and scoped atomic modify
+  (`WITH <g> DELETE { … } INSERT { … } WHERE { … }`) are now
+  first-class. Limitations: proper `USING <iri>` /
+  `USING NAMED <iri>` clauses (distinct from the WITH-injected
+  sentinel — i.e. multi-default-graph or USING NAMED) panic with
+  `'USING / USING NAMED' not yet supported`. Regression coverage:
+  `tests/regression/sql/98-update-graph-scoped.sql` locks six
+  invariants — GRAPH-in-data partition isolation, cross-graph
+  INSERT WHERE counter (3 inserts ⇒ all in `<g2>`), DELETE WHERE
+  scoped to `<g1>` leaves the default partition intact,
+  `WITH <g1> INSERT WHERE` shrinks the WHERE matches from 4
+  (bare-BGP global) to 2 (g1-only) — the load-bearing proof that
+  the pattern-wrapping took effect, `WITH <g1> DELETE+INSERT
+  WHERE` flips two g1 rows draft→approved without touching the
+  default-graph draft, and `DELETE DATA { GRAPH <g2> { … } }`
+  scoped removal. Hand-authored expected output. Three `#[pg_test]`s
+  in `src/query/executor.rs`
+  (`sparql_update_with_insert_where_scopes_both_halves`,
+  `sparql_update_cross_graph_insert_where`,
+  `sparql_update_with_delete_insert_where_scopes_modify`) bypass
+  the parallel-`add_graph` deadlock flake by routing graph
+  allocation through `INSERT DATA { GRAPH <g> { … } }` calls
+  (single-step quad+graph allocation) and inspecting the named
+  partitions directly via `pgrdf.graph_id(<iri>)`.
+  Test bar after slice 79: 156 pgrx integration + 60 pg_regress +
+  26 W3C-shape + 3 LUBM-shape = 245 automated tests (up from 241
+  at slice 80: +3 pgrx, +1 pg_regress).
+
 - ✅ **Slice 80 — SPARQL UPDATE DELETE+INSERT WHERE (combined modify).**
   The atomic "modify" form. The DeleteInsert dispatcher arm
   `(true, true)` now routes through `execute_delete_insert_where`

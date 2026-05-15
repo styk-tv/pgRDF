@@ -110,7 +110,7 @@ use spargebra::algebra::{
 };
 use spargebra::term::{
     GraphName, GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern, Literal,
-    NamedNodePattern, NamedOrBlankNode, QuadPattern, Term, TermPattern, TriplePattern,
+    NamedNode, NamedNodePattern, NamedOrBlankNode, QuadPattern, Term, TermPattern, TriplePattern,
 };
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 use std::cell::RefCell;
@@ -2737,14 +2737,26 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                         // (e.g. same predicate, different object) —
                         // the DELETE removes the old row, the INSERT
                         // adds the new row.
-                        if using.is_some() {
-                            panic!(
-                                "sparql: DELETE/INSERT WHERE template feature \
-                                 'USING / USING NAMED' not yet supported"
-                            );
-                        }
+                        //
+                        // Slice 79: a `WITH <iri>` prefix surfaces here
+                        // as `using: Some(QueryDataset { default:
+                        // [<iri>], named: None })` and template-side
+                        // graph_name injection on every DefaultGraph
+                        // quad (spargebra parser.rs §Modify). We lift
+                        // the IRI out and wrap the WHERE pattern in a
+                        // `GraphPattern::Graph` so its BGP triples also
+                        // scope to `<iri>` — the slice-112 walker
+                        // handles nested override correctly.
+                        let with_iri = with_iri_from_using(using, "DELETE/INSERT WHERE");
+                        let scoped_pattern;
+                        let pattern_ref: &GraphPattern = if let Some(iri) = &with_iri {
+                            scoped_pattern = scope_pattern_to_graph(pattern, iri);
+                            &scoped_pattern
+                        } else {
+                            pattern
+                        };
                         let (n_del, n_ins, graphs) =
-                            execute_delete_insert_where(delete, insert, pattern);
+                            execute_delete_insert_where(delete, insert, pattern_ref);
                         triples_deleted += n_del;
                         triples_inserted += n_ins;
                         for g in graphs {
@@ -2763,13 +2775,19 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                         // any term is absent the row cannot exist, so
                         // we skip — same spec-correct no-op posture as
                         // DELETE DATA (slice 83).
-                        if using.is_some() {
-                            panic!(
-                                "sparql: DELETE WHERE template feature 'USING / USING NAMED' \
-                                 not yet supported"
-                            );
-                        }
-                        let (n_deleted, graphs) = execute_delete_where(delete, pattern);
+                        //
+                        // Slice 79: WITH-injection handled the same
+                        // way as the combined form — wrap the WHERE
+                        // pattern so the BGP triples inherit the scope.
+                        let with_iri = with_iri_from_using(using, "DELETE WHERE");
+                        let scoped_pattern;
+                        let pattern_ref: &GraphPattern = if let Some(iri) = &with_iri {
+                            scoped_pattern = scope_pattern_to_graph(pattern, iri);
+                            &scoped_pattern
+                        } else {
+                            pattern
+                        };
+                        let (n_deleted, graphs) = execute_delete_where(delete, pattern_ref);
                         triples_deleted += n_deleted;
                         for g in graphs {
                             graphs_touched.insert(g);
@@ -2777,13 +2795,18 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     }
                     (false, true) => {
                         // Pure INSERT WHERE — slice 82.
-                        if using.is_some() {
-                            panic!(
-                                "sparql: INSERT WHERE template feature 'USING / USING NAMED' \
-                                 not yet supported"
-                            );
-                        }
-                        let (n_inserted, graphs) = execute_insert_where(insert, pattern);
+                        //
+                        // Slice 79: WITH-injection — see DELETE/INSERT
+                        // arm above for the wrapping rationale.
+                        let with_iri = with_iri_from_using(using, "INSERT WHERE");
+                        let scoped_pattern;
+                        let pattern_ref: &GraphPattern = if let Some(iri) = &with_iri {
+                            scoped_pattern = scope_pattern_to_graph(pattern, iri);
+                            &scoped_pattern
+                        } else {
+                            pattern
+                        };
+                        let (n_inserted, graphs) = execute_insert_where(insert, pattern_ref);
                         triples_inserted += n_inserted;
                         for g in graphs {
                             graphs_touched.insert(g);
@@ -2858,6 +2881,76 @@ fn update_op_name(op: &GraphUpdateOperation) -> &'static str {
         GraphUpdateOperation::Clear { .. } => "CLEAR",
         GraphUpdateOperation::Create { .. } => "CREATE",
         GraphUpdateOperation::Drop { .. } => "DROP",
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SPARQL UPDATE — graph-scoped variants: WITH / GRAPH (Phase C slice 79)
+//
+// The W3C SPARQL 1.1 Update §3.1.3 `WITH <iri>` form is a syntactic
+// shortcut: `WITH <g> DELETE { … } INSERT { … } WHERE { … }` desugars
+// (per spargebra-0.4.6 parser.rs §Modify) to
+//   1. every template triple whose `graph_name == DefaultGraph` becomes
+//      `NamedNode(<g>)` (already handled by the per-quad
+//      `instantiate_template_quad` / `instantiate_ground_template_quad`
+//      helpers — they branch on `GraphNamePattern`);
+//   2. a `using: Some(QueryDataset { default: vec![<g>], named: None })`
+//      sentinel on the DeleteInsert operation that signals "the active
+//      default graph for the WHERE pattern is `<g>`".
+//
+// (1) is already correct in slices 80/81/82. (2) is what slice 79
+// implements: we lift the `using.default` IRI back out, wrap the
+// WHERE pattern in a `GraphPattern::Graph { name, inner }` scoped to
+// that IRI, and re-use the slice-112 `parse_select` machinery — every
+// BGP triple emerging from the walk inherits the graph scope, and any
+// nested explicit `GRAPH <other> { … }` overrides per W3C §13.3.
+//
+// `GRAPH <iri> { … }` in the WHERE pattern itself is already supported
+// (slice 112). `GRAPH <iri> { … }` in the template halves is the per-
+// quad path covered by (1) above — spargebra builds `QuadPattern` with
+// `graph_name = NamedNode(<iri>)` directly from the surface syntax, so
+// the existing instantiators route it correctly.
+//
+// What's deliberately NOT supported in slice 79:
+//   - `USING <iri> [USING <iri>]*` and `USING NAMED <iri>` — those are
+//     real USING semantics distinct from WITH (multiple default graphs
+//     RDF-merged, named-graph routing). Detected by: `using.default`
+//     has length != 1, or `using.named.is_some()` with a non-empty
+//     `Vec`. Spec-clear panic, no silent misbehaviour.
+//   - WITH combined with explicit USING — disambiguating which IRI
+//     wins is out of scope and would mask bugs.
+// ─────────────────────────────────────────────────────────────────────
+
+/// If `using` is the spargebra WITH-desugaring sentinel
+/// (`Some(QueryDataset { default: vec![<single iri>], named: None })`)
+/// return the IRI; otherwise return `None`. A `Some(QueryDataset)` that
+/// is NOT the WITH shape (multi-default, USING NAMED) panics with a
+/// stable "USING / USING NAMED" prefix — same gate the slice 80/81/82
+/// dispatchers used before slice 79, just lifted into one place.
+fn with_iri_from_using(
+    using: &Option<spargebra::algebra::QueryDataset>,
+    form_label: &str,
+) -> Option<NamedNode> {
+    let Some(ds) = using else {
+        return None;
+    };
+    let named_empty = ds.named.as_ref().map(|v| v.is_empty()).unwrap_or(true);
+    if ds.default.len() == 1 && named_empty {
+        return Some(ds.default[0].clone());
+    }
+    panic!("sparql: {form_label} template feature 'USING / USING NAMED' not yet supported");
+}
+
+/// Wrap a WHERE pattern in `GraphPattern::Graph { name: <iri>, inner }`
+/// so the slice-112 `parse_select` walker scopes every emergent BGP
+/// triple to `<iri>` — except where the user explicitly nests another
+/// `GRAPH <other> { … }` inside (W3C §13.3 nesting override). This is
+/// the single-line equivalent of the WITH-injection spargebra applies
+/// to template QuadPatterns, but for the WHERE side.
+fn scope_pattern_to_graph(pattern: &GraphPattern, iri: &NamedNode) -> GraphPattern {
+    GraphPattern::Graph {
+        name: NamedNodePattern::NamedNode(iri.clone()),
+        inner: Box::new(pattern.clone()),
     }
 }
 
@@ -3024,10 +3117,7 @@ fn lookup_graph_iri(g: i64) -> Option<String> {
 /// Translate + execute one `INSERT { template } WHERE { pattern }`
 /// operation. Returns `(triples_inserted, graphs_touched)` so the
 /// caller can fold into the `_update` summary row.
-fn execute_insert_where(
-    template: &[QuadPattern],
-    pattern: &GraphPattern,
-) -> (i64, HashSet<i64>) {
+fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i64, HashSet<i64>) {
     // Collect template-referenced variables so we know which columns
     // the WHERE-SELECT must return as dict ids.
     let template_vars = collect_template_vars(template);
@@ -3119,8 +3209,7 @@ fn execute_insert_where(
     let mut graphs_touched: HashSet<i64> = HashSet::new();
 
     Spi::connect_mut(|client| {
-        let arg_oids: Vec<PgOid> =
-            vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let arg_oids: Vec<PgOid> = vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
         let prepared = client
             .prepare(sql.as_str(), &arg_oids)
             .expect("sparql: INSERT WHERE: prepare failed");
@@ -3144,10 +3233,7 @@ fn execute_insert_where(
             let mut skip_row = false;
             for (i, var) in col_order.iter().enumerate() {
                 // SPI is 1-based on column index.
-                let v: Option<i64> = row
-                    .get::<i64>(i + 1)
-                    .ok()
-                    .flatten();
+                let v: Option<i64> = row.get::<i64>(i + 1).ok().flatten();
                 if v.is_none() {
                     // Template variable unbound in this solution —
                     // skip the entire row's instantiation. This
@@ -3162,8 +3248,7 @@ fn execute_insert_where(
                 continue;
             }
             for qp in template {
-                let (s_id, p_id, o_id, g_id) =
-                    instantiate_template_quad(qp, &binding);
+                let (s_id, p_id, o_id, g_id) = instantiate_template_quad(qp, &binding);
                 insert_quad(s_id, p_id, o_id, g_id);
                 triples_inserted += 1;
                 graphs_touched.insert(g_id);
@@ -3215,12 +3300,12 @@ fn instantiate_template_quad(
     binding: &HashMap<&str, Option<i64>>,
 ) -> (i64, i64, i64, i64) {
     let s_id = match &qp.subject {
-        TermPattern::Variable(v) => binding
-            .get(v.as_str())
-            .and_then(|x| *x)
-            .unwrap_or_else(|| {
-                panic!("sparql: INSERT WHERE: subject variable ?{} unbound (internal)", v.as_str())
-            }),
+        TermPattern::Variable(v) => binding.get(v.as_str()).and_then(|x| *x).unwrap_or_else(|| {
+            panic!(
+                "sparql: INSERT WHERE: subject variable ?{} unbound (internal)",
+                v.as_str()
+            )
+        }),
         TermPattern::NamedNode(n) => intern_named_node(n.as_str()),
         TermPattern::BlankNode(b) => {
             // Per SPARQL UPDATE §4.1.3, every blank node in an INSERT
@@ -3242,21 +3327,23 @@ fn instantiate_template_quad(
         other => panic!("sparql: INSERT WHERE template: unsupported subject term {other:?}"),
     };
     let p_id = match &qp.predicate {
-        NamedNodePattern::Variable(v) => binding
-            .get(v.as_str())
-            .and_then(|x| *x)
-            .unwrap_or_else(|| {
-                panic!("sparql: INSERT WHERE: predicate variable ?{} unbound (internal)", v.as_str())
-            }),
+        NamedNodePattern::Variable(v) => {
+            binding.get(v.as_str()).and_then(|x| *x).unwrap_or_else(|| {
+                panic!(
+                    "sparql: INSERT WHERE: predicate variable ?{} unbound (internal)",
+                    v.as_str()
+                )
+            })
+        }
         NamedNodePattern::NamedNode(n) => intern_named_node(n.as_str()),
     };
     let o_id = match &qp.object {
-        TermPattern::Variable(v) => binding
-            .get(v.as_str())
-            .and_then(|x| *x)
-            .unwrap_or_else(|| {
-                panic!("sparql: INSERT WHERE: object variable ?{} unbound (internal)", v.as_str())
-            }),
+        TermPattern::Variable(v) => binding.get(v.as_str()).and_then(|x| *x).unwrap_or_else(|| {
+            panic!(
+                "sparql: INSERT WHERE: object variable ?{} unbound (internal)",
+                v.as_str()
+            )
+        }),
         TermPattern::NamedNode(n) => intern_named_node(n.as_str()),
         TermPattern::BlankNode(b) => {
             panic!(
@@ -3270,7 +3357,9 @@ fn instantiate_template_quad(
     };
     let g_id = match &qp.graph_name {
         GraphNamePattern::DefaultGraph => 0,
-        GraphNamePattern::NamedNode(n) => resolve_or_allocate_graph(&GraphName::NamedNode(n.clone())),
+        GraphNamePattern::NamedNode(n) => {
+            resolve_or_allocate_graph(&GraphName::NamedNode(n.clone()))
+        }
         GraphNamePattern::Variable(v) => {
             panic!(
                 "sparql: INSERT WHERE template feature 'variable GRAPH ?{}' not yet supported \
@@ -3404,8 +3493,7 @@ fn execute_delete_where(
     let mut graphs_touched: HashSet<i64> = HashSet::new();
 
     Spi::connect_mut(|client| {
-        let arg_oids: Vec<PgOid> =
-            vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let arg_oids: Vec<PgOid> = vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
         let prepared = client
             .prepare(sql.as_str(), &arg_oids)
             .expect("sparql: DELETE WHERE: prepare failed");
@@ -3423,10 +3511,7 @@ fn execute_delete_where(
             let mut binding: HashMap<&str, Option<i64>> = HashMap::new();
             let mut skip_row = false;
             for (i, var) in col_order.iter().enumerate() {
-                let v: Option<i64> = row
-                    .get::<i64>(i + 1)
-                    .ok()
-                    .flatten();
+                let v: Option<i64> = row.get::<i64>(i + 1).ok().flatten();
                 if v.is_none() {
                     // Unbound template variable on this solution row —
                     // the resulting "triple" has no concrete subject /
@@ -3464,9 +3549,7 @@ fn execute_delete_where(
                      SELECT count(*)::bigint FROM d",
                     &[s_id.into(), p_id.into(), o_id.into(), g_id.into()],
                 )
-                .unwrap_or_else(|e| {
-                    panic!("sparql: DELETE WHERE: per-row DELETE failed: {e}")
-                })
+                .unwrap_or_else(|e| panic!("sparql: DELETE WHERE: per-row DELETE failed: {e}"))
                 .unwrap_or(0);
                 triples_deleted += n;
                 // Always record the graph — operator intent matches
@@ -3523,15 +3606,14 @@ fn instantiate_ground_template_quad(
     binding: &HashMap<&str, Option<i64>>,
 ) -> Option<(i64, i64, i64, i64)> {
     let s_id = match &gqp.subject {
-        GroundTermPattern::Variable(v) => binding
-            .get(v.as_str())
-            .and_then(|x| *x)
-            .unwrap_or_else(|| {
+        GroundTermPattern::Variable(v) => {
+            binding.get(v.as_str()).and_then(|x| *x).unwrap_or_else(|| {
                 panic!(
                     "sparql: DELETE WHERE: subject variable ?{} unbound (internal)",
                     v.as_str()
                 )
-            }),
+            })
+        }
         GroundTermPattern::NamedNode(n) => lookup_iri_id(n.as_str())?,
         GroundTermPattern::Literal(_) => {
             // RDF disallows a literal in subject position; spargebra's
@@ -3544,27 +3626,25 @@ fn instantiate_ground_template_quad(
         other => panic!("sparql: DELETE WHERE template: unsupported subject term {other:?}"),
     };
     let p_id = match &gqp.predicate {
-        NamedNodePattern::Variable(v) => binding
-            .get(v.as_str())
-            .and_then(|x| *x)
-            .unwrap_or_else(|| {
+        NamedNodePattern::Variable(v) => {
+            binding.get(v.as_str()).and_then(|x| *x).unwrap_or_else(|| {
                 panic!(
                     "sparql: DELETE WHERE: predicate variable ?{} unbound (internal)",
                     v.as_str()
                 )
-            }),
+            })
+        }
         NamedNodePattern::NamedNode(n) => lookup_iri_id(n.as_str())?,
     };
     let o_id = match &gqp.object {
-        GroundTermPattern::Variable(v) => binding
-            .get(v.as_str())
-            .and_then(|x| *x)
-            .unwrap_or_else(|| {
+        GroundTermPattern::Variable(v) => {
+            binding.get(v.as_str()).and_then(|x| *x).unwrap_or_else(|| {
                 panic!(
                     "sparql: DELETE WHERE: object variable ?{} unbound (internal)",
                     v.as_str()
                 )
-            }),
+            })
+        }
         GroundTermPattern::NamedNode(n) => lookup_iri_id(n.as_str())?,
         GroundTermPattern::Literal(lit) => lookup_literal_id(lit)?,
         #[allow(unreachable_patterns)]
@@ -3677,9 +3757,7 @@ fn execute_delete_insert_where(
         );
     }
     if !ps.union_branches.is_empty() {
-        panic!(
-            "sparql: DELETE/INSERT WHERE template feature 'UNION in WHERE' not yet supported"
-        );
+        panic!("sparql: DELETE/INSERT WHERE template feature 'UNION in WHERE' not yet supported");
     }
     if ps.bgp.is_empty() {
         panic!("sparql: DELETE/INSERT WHERE requires a non-empty WHERE pattern");
@@ -3745,8 +3823,7 @@ fn execute_delete_insert_where(
     let mut graphs_touched: HashSet<i64> = HashSet::new();
 
     Spi::connect_mut(|client| {
-        let arg_oids: Vec<PgOid> =
-            vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let arg_oids: Vec<PgOid> = vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
         let prepared = client
             .prepare(sql.as_str(), &arg_oids)
             .expect("sparql: DELETE/INSERT WHERE: prepare failed");
@@ -3764,10 +3841,7 @@ fn execute_delete_insert_where(
             let mut binding: HashMap<&str, Option<i64>> = HashMap::new();
             let mut skip_row = false;
             for (i, var) in col_order.iter().enumerate() {
-                let v: Option<i64> = row
-                    .get::<i64>(i + 1)
-                    .ok()
-                    .flatten();
+                let v: Option<i64> = row.get::<i64>(i + 1).ok().flatten();
                 if v.is_none() {
                     // Unbound (e.g. OPTIONAL didn't match) — skip the
                     // whole row's instantiation per the same W3C §4.2
@@ -3808,8 +3882,7 @@ fn execute_delete_insert_where(
 
             // INSERT half — interning path, set-semantic guard.
             for qp in insert {
-                let (s_id, p_id, o_id, g_id) =
-                    instantiate_template_quad(qp, &binding);
+                let (s_id, p_id, o_id, g_id) = instantiate_template_quad(qp, &binding);
                 insert_quad(s_id, p_id, o_id, g_id);
                 triples_inserted += 1;
                 graphs_touched.insert(g_id);
@@ -6118,7 +6191,10 @@ mod tests {
         )
         .unwrap()
         .unwrap_or(0);
-        assert_eq!(remaining, 2, "the two un-deleted triples must still be queryable");
+        assert_eq!(
+            remaining, 2,
+            "the two un-deleted triples must still be queryable"
+        );
 
         // Same triple deleted twice — the second call is a no-op.
         let j2: pgrx::JsonB = Spi::get_one(
@@ -6191,11 +6267,10 @@ mod tests {
         .unwrap();
 
         // Both partitions carry one row.
-        let before_default: i64 = Spi::get_one(
-            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads WHERE graph_id = 0",
-        )
-        .unwrap()
-        .unwrap_or(0);
+        let before_default: i64 =
+            Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads WHERE graph_id = 0")
+                .unwrap()
+                .unwrap_or(0);
         let before_g1: i64 = Spi::get_one(
             "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
                WHERE graph_id = pgrdf.graph_id('http://example.org/g1')",
@@ -6221,18 +6296,20 @@ mod tests {
         assert_eq!(graphs[0], "http://example.org/g1");
 
         // Default graph row untouched; named graph drops to zero.
-        let after_default: i64 = Spi::get_one(
-            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads WHERE graph_id = 0",
-        )
-        .unwrap()
-        .unwrap_or(0);
+        let after_default: i64 =
+            Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads WHERE graph_id = 0")
+                .unwrap()
+                .unwrap_or(0);
         let after_g1: i64 = Spi::get_one(
             "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
                WHERE graph_id = pgrdf.graph_id('http://example.org/g1')",
         )
         .unwrap()
         .unwrap_or(0);
-        assert_eq!(after_default, 1, "default-graph copy survives a named-graph DELETE");
+        assert_eq!(
+            after_default, 1,
+            "default-graph copy survives a named-graph DELETE"
+        );
         assert_eq!(after_g1, 0, "the named-graph copy is gone");
     }
 
@@ -6295,10 +6372,9 @@ mod tests {
                'INSERT DATA { <http://example.org/a> <http://example.org/b> \"hi\" }')",
         )
         .unwrap();
-        let before: i64 =
-            Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads")
-                .unwrap()
-                .unwrap_or(-1);
+        let before: i64 = Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads")
+            .unwrap()
+            .unwrap_or(-1);
 
         let j: pgrx::JsonB = Spi::get_one(
             "SELECT * FROM pgrdf.sparql(\
@@ -6636,10 +6712,9 @@ mod tests {
                'INSERT DATA { <http://example.org/a> <http://example.org/b> \"hi\" }')",
         )
         .unwrap();
-        let before: i64 =
-            Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads")
-                .unwrap()
-                .unwrap_or(-1);
+        let before: i64 = Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads")
+            .unwrap()
+            .unwrap_or(-1);
 
         let j: pgrx::JsonB = Spi::get_one(
             "SELECT * FROM pgrdf.sparql(\
@@ -6659,5 +6734,196 @@ mod tests {
             before, after,
             "DELETE WHERE with no matches must not touch the quads table"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Phase C slice 79 — SPARQL UPDATE graph-scoped variants (WITH /
+    // GRAPH in template / GRAPH in WHERE).
+    //
+    // Spargebra desugars `WITH <iri>` into (a) per-quad graph_name
+    // injection on every default-graph template QuadPattern (handled
+    // by the existing `instantiate_template_quad` /
+    // `instantiate_ground_template_quad` helpers — slice 80/81/82),
+    // and (b) a `using: Some(QueryDataset { default: [<iri>], named:
+    // None })` sentinel on the DeleteInsert operation. Slice 79 lifts
+    // the IRI out of (b) and wraps the WHERE pattern in
+    // `GraphPattern::Graph` so the slice-112 walker scopes its BGP to
+    // the same graph — both halves end up consistent with the W3C
+    // SPARQL 1.1 Update §3.1.3 semantics.
+    //
+    // `GRAPH <iri> { … }` in the WHERE pattern was already supported
+    // (slice 112); `GRAPH <iri> { … }` in the template halves was
+    // already supported by the per-quad graph_name branches. These
+    // tests lock the WITH-side of the contract specifically.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// WITH <g> INSERT WHERE — the WHERE pattern must evaluate against
+    /// `<g>` only, even when the WHERE BGP has no explicit GRAPH
+    /// wrapper. Without slice 79 the WHERE would run with bare-BGP
+    /// semantics (scan every partition) and pull in default-graph
+    /// matches, leading to extra spurious template instantiations.
+    #[pg_test]
+    fn sparql_update_with_insert_where_scopes_both_halves() {
+        // Seed 2 ex:p rows in <g1>, 1 ex:p in the default graph. The
+        // default-graph row MUST stay out of the WHERE solutions.
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { \
+                  GRAPH <http://example.org/g1> { \
+                    <http://example.org/a> <http://example.org/p> \"in-g1-a\" . \
+                    <http://example.org/b> <http://example.org/p> \"in-g1-b\" \
+                  } . \
+                  <http://example.org/c> <http://example.org/p> \"in-default\" \
+                }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'WITH <http://example.org/g1> \
+                INSERT { ?x <http://example.org/tag> \"t\" } \
+                WHERE  { ?x <http://example.org/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "INSERT_WHERE");
+        assert_eq!(
+            summary["triples_inserted"], 2,
+            "WITH-WHERE must scope to <g1>: 2 matches (NOT 3 — the default-graph row stays out)"
+        );
+        let graphs = summary["graphs_touched"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(graphs[0], "http://example.org/g1");
+
+        // Direct partition probe: the default partition (graph_id = 0)
+        // still has exactly 1 row (the seeded ex:c ex:p), and the new
+        // ex:tag rows landed in <g1>'s partition only.
+        let n_in_default: i64 =
+            Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads WHERE graph_id = 0")
+                .unwrap()
+                .unwrap_or(-1);
+        assert_eq!(
+            n_in_default, 1,
+            "default-graph partition untouched by WITH <g1>"
+        );
+
+        let n_in_g1: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
+               WHERE graph_id = pgrdf.graph_id('http://example.org/g1')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            n_in_g1, 4,
+            "<g1> grew from 2 ex:p rows to 4 (2 ex:p + 2 ex:tag)"
+        );
+    }
+
+    /// Cross-graph INSERT WHERE — `INSERT { GRAPH <g2> { … } } WHERE
+    /// { GRAPH <g1> { … } }` copies bindings from g1 to g2. The
+    /// template's per-quad graph_name (NamedNode<g2>) routes the
+    /// inserts into <g2>'s partition; the WHERE's `GraphPattern::Graph`
+    /// (slice 112) scopes the source to <g1>.
+    #[pg_test]
+    fn sparql_update_cross_graph_insert_where() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { \
+                  GRAPH <http://example.org/g1> { \
+                    <http://example.org/a> <http://example.org/p> \"a\" . \
+                    <http://example.org/b> <http://example.org/p> \"b\" \
+                  } \
+                }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT { GRAPH <http://example.org/g2> { ?x <http://example.org/tag> \"t\" } } \
+                WHERE  { GRAPH <http://example.org/g1> { ?x <http://example.org/p> ?o } }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "INSERT_WHERE");
+        assert_eq!(summary["triples_inserted"], 2);
+        let graphs = summary["graphs_touched"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(
+            graphs[0], "http://example.org/g2",
+            "template scoped to <g2>"
+        );
+
+        let n_in_g2: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
+               WHERE graph_id = pgrdf.graph_id('http://example.org/g2')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n_in_g2, 2);
+
+        // <g1> source partition kept its 2 ex:p rows and gained nothing
+        // (no ex:tag bled across — the template's GRAPH <g2> dominated
+        // the per-quad graph_name).
+        let n_in_g1: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
+               WHERE graph_id = pgrdf.graph_id('http://example.org/g1')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n_in_g1, 2);
+    }
+
+    /// WITH <g> DELETE+INSERT WHERE — the atomic modify form scoped to
+    /// a named graph. Same status-flip semantics as slice 80, but the
+    /// WHERE/template both scope to <g> via WITH. Default-graph rows
+    /// with the matching `ex:status "draft"` MUST be left untouched.
+    #[pg_test]
+    fn sparql_update_with_delete_insert_where_scopes_modify() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { \
+                  GRAPH <http://example.org/g1> { \
+                    <http://example.org/a> <http://example.org/status> \"draft\" . \
+                    <http://example.org/b> <http://example.org/status> \"draft\" \
+                  } . \
+                  <http://example.org/c> <http://example.org/status> \"draft\" \
+                }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'WITH <http://example.org/g1> \
+                DELETE { ?x <http://example.org/status> \"draft\" } \
+                INSERT { ?x <http://example.org/status> \"approved\" } \
+                WHERE  { ?x <http://example.org/status> \"draft\" }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DELETE_INSERT_WHERE");
+        assert_eq!(summary["triples_deleted"], 2);
+        assert_eq!(summary["triples_inserted"], 2);
+        let graphs = summary["graphs_touched"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(graphs[0], "http://example.org/g1");
+
+        // <g1> flipped both rows draft → approved (2 rows total).
+        let n_in_g1: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads \
+               WHERE graph_id = pgrdf.graph_id('http://example.org/g1')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n_in_g1, 2, "g1 still has 2 status rows (the flipped pair)");
+
+        // The default-graph draft row (ex:c) is intact.
+        let n_in_default: i64 =
+            Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads WHERE graph_id = 0")
+                .unwrap()
+                .unwrap_or(-1);
+        assert_eq!(n_in_default, 1, "default-graph draft untouched");
     }
 }

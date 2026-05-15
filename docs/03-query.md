@@ -315,6 +315,32 @@ Concrete shape:
       be bound by the WHERE BGP; variable GRAPH in either template
       panics with the slice-76 prefix; `USING / USING NAMED` not yet
       supported.
+- ✅ SPARQL UPDATE — graph-scoped variants (`WITH <iri>` +
+      `GRAPH <iri> { … }` in template / WHERE) (Phase C slice 79,
+      LLD v0.4 §4.1). Closes the graph-aware loop for pattern-driven
+      UPDATEs. Spargebra desugars `WITH <iri>` at parse time into
+      (a) per-quad `graph_name` injection on every default-graph
+      template QuadPattern (the per-row instantiators
+      `instantiate_template_quad` / `instantiate_ground_template_quad`
+      already routed `GraphNamePattern::NamedNode` into the right
+      partition since slices 80/81/82) and (b) a
+      `using: Some(QueryDataset { default: [<iri>], named: None })`
+      sentinel on the DeleteInsert operation. The slice-79 dispatcher
+      lifts the IRI from (b) and wraps the WHERE pattern in
+      `GraphPattern::Graph { name, inner }` before passing it to
+      `execute_*_where` — the slice-112 walker then scopes every
+      emergent BGP triple to `<iri>` (nested explicit
+      `GRAPH <other> { … }` still overrides per W3C §13.3). The
+      `GRAPH <iri> { … }` in WHERE pattern path was already supported
+      (slice 112); the `GRAPH <iri> { … }` in template halves was
+      already wired through the per-quad `graph_name` branches in
+      slices 80/81/82. Cross-graph copy
+      (`INSERT { GRAPH <g2> { … } } WHERE { GRAPH <g1> { … } }`) and
+      scoped modify (`WITH <g1> DELETE { … } INSERT { … } WHERE { … }`)
+      are now first-class. Limitations: proper `USING <iri>` /
+      `USING NAMED <iri>` clauses (distinct from the WITH-injected
+      sentinel — i.e. multi-default-graph or USING NAMED) panic with
+      `'USING / USING NAMED' not yet supported`.
 - ⏳ Lifecycle algebra (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices
       71 → 69.
 - ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
