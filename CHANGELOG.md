@@ -6,6 +6,71 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-05-15
+
+**Marquee: SPARQL 1.1 CONSTRUCT surface complete.** Closes the LLD
+v0.4 §6 CONSTRUCT column by landing the full query form end-to-end
+on the SQL engine. `pgrdf.construct(q TEXT) → SETOF JSONB` is a
+sibling UDF to `pgrdf.sparql` (callers signal intent at the SQL
+boundary): it evaluates the WHERE pattern through the existing
+SELECT-side translator (`parse_select` → `build_bgp_sql` →
+`execute`), then instantiates the template once per solution and
+emits one JSONB row per template triple. Constant, variable, and
+blank-node template positions are all supported; blank-node labels
+mint fresh per solution and join to the same fresh label across
+positions (single-triple) and across all N triples within a
+multi-triple template (same solution). The `CONSTRUCT WHERE {
+pattern }` shorthand (W3C SPARQL 1.1 §16.2.4) and GRAPH-scoped
+WHERE (`GRAPH <iri>` literal + `GRAPH ?g` variable, §13.3) compose
+with every template surface. Round-trip is closed:
+`pgrdf.put_construct_row` / `put_construct_rows` re-ingest any
+construct rowset back into the hexastore, preserving typed
+literals, language tags, and within-batch blank-node joining
+idempotently (LLD v0.4 §6.3). `pgrdf.sparql_parse(q)` mirrors the
+executor's CONSTRUCT classification (`form: "CONSTRUCT"`, `template`
++ `where_shape` blocks, `shorthand` flag, `unsupported_algebra`)
+so callers can preview translatability without executing.
+
+Phase D slice attribution (countdown 59 → 50):
+
+  * 59 — `pgrdf.construct(q)` foundation, constant-only templates
+    per W3C 1.1 §16.2; structured term shape `{type, value,
+    datatype?, language?}` per LLD v0.4 §6.1.
+  * 58 — template variable substitution (subject / predicate /
+    object positions; typed + language-tagged literals carry full
+    structured shape).
+  * 57 — blank-node templates, fresh-per-solution labels with
+    within-solution label sameness (single-triple scope).
+  * 56 — multi-triple templates (N triples emit N rows per
+    solution; blank-node labels shared across the N triples within
+    one solution; empty templates reject).
+  * 55 — GRAPH-scoped WHERE (`GRAPH <iri>` + `GRAPH ?g`; default-
+    graph quads excluded per §13.3 — also corrected a latent
+    slice-79 / slice-87 SELECT-side bleed).
+  * 54 — `CONSTRUCT WHERE { pattern }` shorthand (§16.2.4; pure-
+    BGP, blank-node-free).
+  * 53 — round-trip ingest (`pgrdf.put_construct_row` /
+    `put_construct_rows`), closing §6.3.
+  * 52 — `pgrdf.sparql_parse` CONSTRUCT shape enrichment.
+  * 51 — W3C-shape CONSTRUCT conformance fixtures 30-35 + docs /
+    spec / guide coherence sweep.
+  * 50 — version bump + RELEASE_NOTES + tag (this cut).
+
+CI-perf hardening (landed alongside Phase D): the partition-DDL
+window in SPARQL UPDATE / lifecycle paths now takes a statement-
+outermost transaction advisory lock, so the default parallel
+pgrx-test scheduler no longer flakes on concurrent partition DDL —
+parallel test threads are restored (no `--test-threads=1`).
+
+Test bar:
+
+  pgrx integration  194  (was 166 at v0.4.3)
+  pg_regress         69  (was  61 at v0.4.3)
+  w3c-sparql         35  (was  29 at v0.4.3)
+  LUBM-shape          3  (unchanged)
+
+  Total: 301 green.
+
 ### Added
 
 - `pgrdf.sparql_parse` CONSTRUCT support — Phase D slice 52. Returns `form: "CONSTRUCT"` with `template` shape (triple count, has_variables, has_blank_nodes, has_constants_only, variables) and `where_shape` (kind, triple_count, named_graphs_used, variables). Detects shorthand (`CONSTRUCT WHERE { ... }`) form via `shorthand` flag. Flags `Distinct`/`OrderBy`/`Group`/`Aggregate` wrappings as `unsupported_algebra` (will panic at execute time per LLD §6.2).

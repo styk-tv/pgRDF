@@ -4,11 +4,141 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is `v0.4.3`. Cargo.toml reads `version = "0.4.3"`
-(bumped from `0.4.2` during the v0.4.3 release pre-flight, Phase C
-countdown slice 64). See `CHANGELOG.md` for the running set of
+The current cut is `v0.4.4`. Cargo.toml reads `version = "0.4.4"`
+(bumped from `0.4.3` during the v0.4.4 release pre-flight, Phase D
+countdown slice 50). See `CHANGELOG.md` for the running set of
 `[Unreleased]` entries that move into the next `[N.M.P]` block at
 tag time.
+
+## v0.4.4 — 2026-05-15
+
+Phase D closes with nine countdown slices (59 → 51) shipping LLD
+v0.4 §6 (SPARQL 1.1 CONSTRUCT) end-to-end, plus the release cut
+(slice 50). The marquee surface lands the full CONSTRUCT query
+form on the SQL engine via the sibling UDF `pgrdf.construct(q
+TEXT) → SETOF JSONB`: constant / variable / blank-node /
+multi-triple templates, the `CONSTRUCT WHERE { pattern }`
+shorthand, GRAPH-scoped WHERE (`GRAPH <iri>` literal + `GRAPH ?g`
+variable), round-trip ingest (`pgrdf.put_construct_row` /
+`put_construct_rows`), and `pgrdf.sparql_parse` CONSTRUCT
+classification.
+
+### Engine surface delta vs v0.4.3
+
+- **Storage / OWL 2 RL inference / SHACL / SPARQL UPDATE** —
+  incrementally extended; no breaking changes to existing
+  surfaces.
+- **SPARQL CONSTRUCT track (LLD v0.4 §6)** — **shipped end-to-end
+  via nine countdown slices (59 → 51)**. `pgrdf.construct(q)` is
+  a sibling UDF to `pgrdf.sparql` (intent signalled at the SQL
+  boundary). It evaluates the WHERE pattern through the existing
+  SELECT-side translator, instantiates the template once per
+  solution, and emits one structured-term JSONB row per template
+  triple. Per-slice:
+    - slice 59 — foundation, constant-only templates (W3C §16.2;
+      DISTINCT / ORDER BY / GROUP BY / aggregate rejected at
+      execute time per LLD §6.2).
+    - slice 58 — template variable substitution (subject /
+      predicate / object; full structured-term shape for typed +
+      language-tagged literals; unbound vars panic).
+    - slice 57 — blank-node templates (fresh-per-solution labels;
+      within-solution label sameness; predicate-position bnodes
+      reject at parse).
+    - slice 56 — multi-triple templates (N triples → N rows per
+      solution; blank-node labels shared across the N triples
+      within one solution; empty template rejects).
+    - slice 55 — GRAPH-scoped WHERE (`GRAPH <iri>` + `GRAPH ?g`;
+      default-graph quads excluded per §13.3 — also corrected a
+      latent slice-79 / slice-87 SELECT-side bleed).
+    - slice 54 — `CONSTRUCT WHERE { pattern }` shorthand (§16.2.4;
+      pure-BGP, blank-node-free).
+    - slice 53 — round-trip ingest (`pgrdf.put_construct_row` /
+      `put_construct_rows`), closing §6.3 (typed literals, lang
+      tags, within-batch bnode joining preserved; idempotent;
+      NULL-array no-op).
+    - slice 52 — `pgrdf.sparql_parse` CONSTRUCT enrichment
+      (`form: "CONSTRUCT"`, `template` + `where_shape` blocks,
+      `shorthand` flag, `unsupported_algebra`).
+    - slice 51 — six W3C-shape CONSTRUCT conformance fixtures
+      (`tests/w3c-sparql/30-35`) + per-fixture `kind: construct`
+      harness selector + docs / spec / guide coherence sweep.
+- **CI-perf hardening** — the partition-DDL window in the SPARQL
+  UPDATE / lifecycle paths takes a statement-outermost
+  transaction advisory lock, so the default parallel pgrx-test
+  scheduler no longer flakes on concurrent partition DDL. Parallel
+  test threads restored (test bar verified without
+  `--test-threads=1`).
+
+### crates.io — not published
+
+v0.4.4 is **not** published to crates.io. The `[patch.crates-io]`
+block for `reasonable` (E-011) continues to block `cargo publish`.
+The `publish-crate.yml` workflow remains disabled per the v0.4.1
+post-release ops note; tag push fires `release.yml` only (8
+prebuilt tarballs + GH Release). Re-enables once upstream
+[gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+merges and the patch retires.
+
+### Test bar
+
+- 194 pgrx integration tests (`cargo pgrx test`, +28 vs v0.4.3)
+- 69 pg_regress golden tests (+8 vs v0.4.3 — CONSTRUCT per-form
+  regressions plus the round-trip / sparql_parse files)
+- 35 W3C-shape SPARQL conformance tests (+6 vs v0.4.3 — fixtures
+  30-35)
+- 3 LUBM-shape correctness tests (unchanged from v0.4.3)
+- Plus `tests/regression/scripts/pg-dump-roundtrip.sh` driving
+  `_pgrdf_graphs` pg_dump round-trip (binary mode, unchanged from
+  v0.4.3)
+
+Total: 301 automated tests + 1 round-trip gate.
+
+### Supported Postgres
+
+PG 14, 15, 16, 17 across {amd64, arm64} = 8 prebuilt tarballs.
+PG 18 deferred per [ERRATA E-006](../specs/ERRATA.v0.2.md).
+
+### Tarball layout
+
+Same as v0.4.3 — `lib/pgrdf.so`, `share/extension/{pgrdf.control,
+pgrdf--0.4.4.sql, pgrdf--0.4.3.sql, pgrdf--0.4.2.sql,
+pgrdf--0.4.1.sql, pgrdf--0.4.0.sql}`, `LICENSE`, `NOTICE`. The
+`pgrdf--N.M.P.sql` files accumulate so a `CREATE EXTENSION pgrdf
+VERSION '0.4.3'` against a v0.4.4 install still resolves; only the
+version literal changes.
+
+### Known issues — carried from v0.4.3
+
+- **E-011** — `[patch.crates-io]` fork-dep for `reasonable` still
+  in place (carried). Drops once upstream PR
+  [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+  merges.
+- **E-006** — pgrx 0.18 / Postgres 18 deferred (carried).
+- **E-007** — `extension_control_path` GUC blocked by E-006
+  (carried).
+- **E-009** — original SHACL upstream-block resolved at the
+  validation-engine half (carried).
+- **E-010** — cargo audit informational advisories (carried).
+
+### v0.4.2-introduced — resolved in v0.4.4
+
+- **pgrx-tests parallelism flake on partition DDL.** The two
+  Phase A tests (`pg_add_graph_iri_idempotent`,
+  `pg_add_graph_id_iri_synthetic_upgrade`) that occasionally raced
+  under pgrx-tests 0.16's parallel scheduler are now stable — the
+  partition-DDL window takes a statement-outermost transaction
+  advisory lock (CI-perf hardening, this release); parallel test
+  threads restored.
+
+### What's deferred from the v0.4 LLD
+
+Still 🚧 in [`SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md):
+
+- Property paths (§7) — v0.4.5
+- SPARQL surface backlog — multi-triple OPTIONAL, VALUES,
+  BIND-downstream, aggregates over UNION, DESCRIBE (§11) — v0.4.6
+- `heap_multi_insert` / `COPY BINARY` ingest (§12 phase B)
+- W3C SPARQL 1.1 manifest runner (§13)
 
 ## v0.4.3 — 2026-05-15
 
