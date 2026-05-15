@@ -455,9 +455,37 @@ Concrete shape:
       explicit `CONSTRUCT { } WHERE { … }` empty-template form
       continues to reject with `pgrdf.construct: empty template`
       (slice-56 contract preserved — the shorthand detection branch
-      does not swallow the explicit-empty case). Round-trip
-      preservation (slice 53) and `sparql_parse` enrichment (slice
-      50) still pending. DISTINCT / ORDER BY /
+      does not swallow the explicit-empty case). **Round-trip
+      ingest (slice 53)** lands the pairing
+      `pgrdf.put_construct_row(row JSONB, graph_id BIGINT DEFAULT 0)`
+      and `pgrdf.put_construct_rows(rows JSONB[], graph_id BIGINT
+      DEFAULT 0)`: any rowset emitted by `pgrdf.construct(q)` can be
+      re-ingested to reproduce the original graph state per LLD v0.4
+      §6.3 (modulo dict id reshuffles). The plural form is the
+      recommended surface — it maintains a per-call
+      `HashMap<String, i64>` of blank-node labels so repeated bnode
+      references within one batch resolve to a single stored blank
+      node, preserving the slice 56 / 57 within-solution joining
+      across round-trip. Typed literals (`xsd:integer`,
+      `xsd:dateTime`, …) round-trip with their datatype IRI verbatim;
+      language-tagged literals carry both the `language` field and
+      the implicit `rdf:langString` datatype per RDF 1.1 §3.3; plain
+      strings carry the explicit `xsd:string` datatype that the
+      construct emitter writes (slice 59 contract). Re-ingestion is
+      idempotent via `WHERE NOT EXISTS` (set semantics matching
+      `executor::insert_quad`), and a NULL input array (from
+      `array_agg` over a zero-row construct) is a no-op. Literals in
+      subject/predicate position panic with the stable
+      `pgrdf.put_construct_row:` prefix. The canonical idiom is:
+      ```sql
+      SELECT pgrdf.put_construct_rows(
+        (SELECT array_agg(j) FROM pgrdf.construct(
+          'CONSTRUCT { ?s ?p ?o } '
+          'WHERE { GRAPH <urn:src> { ?s ?p ?o } }') AS t(j)),
+        dst_graph_id);
+      ```
+      `sparql_parse` enrichment for CONSTRUCT (slice 50) still
+      pending. DISTINCT / ORDER BY /
       GROUP BY / aggregates on CONSTRUCT are explicitly out of scope
       per W3C 1.1 §16.2 — rejected with `pgrdf.construct: DISTINCT /
       ORDER BY / GROUP BY / aggregates not supported (W3C 1.1

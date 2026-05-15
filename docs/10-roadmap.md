@@ -190,7 +190,16 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
       reuses the multi-triple emission path; composite patterns
       (FILTER/OPTIONAL/UNION/MINUS/GRAPH/BIND/VALUES) reject at parse
       time, blank nodes reject semantically with the W3C-citing
-      message). Round-trip preservation (slice 53) and
+      message). ✅ slice 53 landed (**round-trip preservation**:
+      `pgrdf.put_construct_row(row JSONB, graph_id BIGINT DEFAULT 0)`
+      and `pgrdf.put_construct_rows(rows JSONB[], graph_id BIGINT
+      DEFAULT 0)` re-ingest captured construct rowsets into the
+      hexastore, closing LLD v0.4 §6.3's round-trip acceptance
+      criterion; typed literals, language tags, and within-batch
+      blank-node label joining are all preserved; re-ingestion is
+      idempotent via `WHERE NOT EXISTS`; NULL array input is a no-op
+      so the `(SELECT array_agg(j) FROM pgrdf.construct(...))`
+      idiom works for empty-result queries too).
       `pgrdf.sparql_parse` enrichment (slice 50) still pending.
       `DESCRIBE` carried forward. (`ASK` shipped step 12.) LLD v0.4
       §6.

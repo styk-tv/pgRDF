@@ -8,13 +8,18 @@
 //!   * [`hexastore`] — partitioned `_pgrdf_quads` CRUD + `add_graph`.
 //!   * [`loader`] — Turtle ingest with per-call cache + batched
 //!     prepared INSERTs (LLD §4.3 phase A).
+//!   * [`construct_ingest`] — round-trip pair for `pgrdf.construct`:
+//!     `put_construct_row` / `put_construct_rows` decode structured
+//!     JSONB rows back into the dictionary + hexastore (LLD v0.4 §6.3;
+//!     Phase D slice 53).
 //!   * [`shmem_cache`] — cross-backend dict cache in Postgres shmem
 //!     (LLD §4.1).
 //!   * [`stats`] — `pgrdf.stats()` + `pgrdf.shmem_reset()` UDFs.
 //!
 //! Reference: SPEC.pgRDF.LLD.v0.2 §3, §4.1, §4.3, SPEC.pgRDF.LLD.v0.4
-//! §3, and `docs/02-storage.md`.
+//! §3, §6.3, and `docs/02-storage.md`.
 
+pub mod construct_ingest;
 pub mod dict;
 pub mod graphs;
 pub mod hexastore;

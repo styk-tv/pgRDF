@@ -114,7 +114,7 @@ Capability matrix for the v0.4 target:
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | ✅ slice 79 |
 | Lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / ALL / NAMED`) | not yet | §4.4 | ✅ slice 78 |
 | `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | ✅ all four shipped (slices 99 / 98 / 97 / 96) |
-| `CONSTRUCT` | ⏳ deferred | §6 | 🚧 (slice 54: variables + constants + blank-node templates + N-triple templates (with cross-triple bnode label joining) + GRAPH-scoped WHERE (literal-IRI and variable form, W3C §13.3 named-graph-only) + WHERE shorthand (W3C SPARQL 1.1 §16.2.4, pure BGP only, no blank nodes); round-trip / `sparql_parse` pending) |
+| `CONSTRUCT` | ⏳ deferred | §6 | 🚧 (slice 53: variables + constants + blank-node templates + N-triple templates (with cross-triple bnode label joining) + GRAPH-scoped WHERE (literal-IRI and variable form, W3C §13.3 named-graph-only) + WHERE shorthand (W3C SPARQL 1.1 §16.2.4, pure BGP only, no blank nodes) + **round-trip ingest via `pgrdf.put_construct_row` / `pgrdf.put_construct_rows`** (slice 53; preserves typed literals, language tags, and within-solution bnode joining; idempotent re-ingest); `sparql_parse` enrichment (slice 50) still pending) |
 | Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | 🚧 |
 | Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | 🚧 |
 | Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | 🚧 |
@@ -598,8 +598,15 @@ NEW fresh label. Empty `{ }` templates reject with
 template support (single-triple); slice 58 admitted variable
 substitution; slice 59 was constant-only foundation. Blank nodes in
 predicate position are illegal RDF — spargebra rejects at parse
-time. Round-trip (slice 53) and `sparql_parse` enrichment (slice
-50) still pending.)
+time. Slice 53 lands the round-trip ingest pair
+`pgrdf.put_construct_row` / `pgrdf.put_construct_rows` —
+captured construct rowsets re-ingest into a fresh graph with
+typed literals, language tags, and within-solution bnode
+joining preserved; the plural form maintains a per-call bnode
+label map so labels shared across multiple template-triple
+rows resolve to one stored blank node. Re-ingestion is
+idempotent via `WHERE NOT EXISTS`. `sparql_parse` enrichment
+(slice 50) still pending.)
 
 ### 6.1 Surface decision
 
@@ -657,9 +664,19 @@ Reuse of v0.3 machinery:
 - `CONSTRUCT { ?s ex:tag "x" } WHERE { ?s rdf:type ex:Item }`
   returns one row per matched subject, each row carrying the
   fully-instantiated triple.
-- **Round-trip.** `pgrdf.construct(q)` followed by re-inserting the
-  rows via `pgrdf.put_quad` produces the same graph state (modulo
-  dictionary id reshuffles, which are not user-visible).
+- **Round-trip.** ✅ shipped — slice 53. `pgrdf.construct(q)` followed
+  by re-inserting the rows via `pgrdf.put_construct_rows(rows JSONB[],
+  graph_id BIGINT)` produces the same graph state (modulo dictionary
+  id reshuffles, which are not user-visible). The plural-form UDF is
+  the recommended pairing; the single-row primitive
+  `pgrdf.put_construct_row(row JSONB, graph_id BIGINT)` lives
+  alongside for callers that handle batch coordination themselves.
+  Within-batch blank-node joining is preserved via a per-call
+  `HashMap<String, i64>` so the within-solution sameness from slices
+  56 / 57 survives the round-trip. Re-ingest is idempotent via
+  `WHERE NOT EXISTS` (set semantics matching the SPARQL UPDATE path
+  in `executor::insert_quad`). NULL array input (from `array_agg`
+  on an empty rowset) is a no-op.
 - Constant-only templates resolve dictionary ids once, not per row
   (verified by `pgrdf.stats() → dict_db_calls` not increasing
   monotonically with output cardinality).
