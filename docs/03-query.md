@@ -245,8 +245,23 @@ Concrete shape:
       lands INSERT DATA end-to-end (default + named graph,
       multi-triple, idempotent on repeat via `WHERE NOT EXISTS`);
       other UPDATE forms panic with "lands in slice NN" pending
-      per-form follow-ups (DELETE/INSERT WHERE → 82-77,
-      CLEAR/CREATE/DROP GRAPH → 71/70/69).
+      per-form follow-ups (DELETE WHERE → 78,
+      DELETE/INSERT WHERE → 77, CLEAR/CREATE/DROP GRAPH → 71/70/69).
+- ✅ SPARQL UPDATE — `INSERT { template } WHERE { pattern }` (Phase C
+      slice 82, LLD v0.4 §4.1). Pattern-driven insertion: the WHERE
+      pattern goes through the v0.3 `parse_select` walker (sharing the
+      BGP/FILTER/OPTIONAL/MINUS algebra with SELECT), emits a custom
+      SQL that returns each template-referenced variable's **dict id**
+      (BIGINT, not lexical text — lossless internment), and Rust
+      iterates the binding rows, materialises each `QuadPattern` in
+      the template, and routes through the shared `insert_quad` helper
+      (same `WHERE NOT EXISTS` guard as INSERT DATA, set-semantic on
+      re-issue). The `_update` summary reports `form: "INSERT_WHERE"`
+      so callers can discriminate from `INSERT_DATA`. Limitations
+      locked for slice 82: WHERE may not carry aggregates / GROUP BY /
+      UNION; template variables MUST be bound by the WHERE BGP
+      (fail-fast rather than silent-skip); variable GRAPH in template
+      panics (lands with slice 76 graph-scoped INSERT WHERE).
 - ✅ SPARQL UPDATE — `DELETE DATA { … }` (Phase C slice 83, LLD v0.4
       §4). Symmetric to slice 84's INSERT DATA: ground quads only,
       no variables. Default-graph + `GRAPH <iri> { … }` inline
@@ -261,8 +276,9 @@ Concrete shape:
       operations of mixed kinds (e.g. a future
       `DELETE DATA ; INSERT DATA`), the `form` field collapses to
       `"MIXED"` and the per-op counters aggregate.
-- ⏳ `INSERT/DELETE … WHERE`, lifecycle algebra
-      (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices 82 → 69.
+- ⏳ `DELETE { … } WHERE`, `DELETE { … } INSERT { … } WHERE`,
+      lifecycle algebra (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices
+      78 / 77 / 71 → 69.
 - ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4

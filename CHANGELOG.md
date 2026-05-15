@@ -6,6 +6,115 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase C slice 82 — SPARQL UPDATE INSERT WHERE (pattern-driven)
+
+Builds on slice 84's UPDATE foundation to land
+`INSERT { template } WHERE { pattern }` end-to-end (LLD v0.4 §4.1
+row "INSERT { template } WHERE { pattern }"). Toward v0.4.3.
+
+**Strategy.** The WHERE pattern goes through the v0.3
+`parse_select` walker — sharing the BGP/FILTER/OPTIONAL/MINUS
+algebra with SELECT — and a custom projection emits each
+template-referenced variable's **dict id** (BIGINT, not lexical
+text) one row per solution. Rust then iterates the binding rows
+via SPI's prepared-statement path and materialises each
+`QuadPattern` in the template per row, routing through the
+shared `insert_quad` helper with the same `WHERE NOT EXISTS`
+set-semantic guard slice 84 installed for INSERT DATA. Returning
+dict ids (rather than lexical strings) keeps internment
+lossless — the binding's `term_type` / `datatype_iri_id` /
+`language_tag` stay attached to the existing dictionary row, so
+typed literals and language-tagged literals round-trip through
+INSERT WHERE without re-internment overhead.
+
+**Surface.**
+
+- `INSERT { ?x ex:tag "person" } WHERE { ?x rdf:type ex:Person }`
+  — each `rdf:type ex:Person` solution row instantiates one
+  template quad; 2 rows ⇒ 2 inserted triples.
+- Multi-triple template — N solutions × M template quads = N×M
+  inserted triples; both the summary counter and the table count
+  agree.
+- Zero-match no-op — a WHERE that returns no solutions reports
+  `triples_inserted = 0` and the quads table is unchanged.
+- Set-semantics on re-issue — same INSERT WHERE issued twice
+  still reports the attempted-insert counter per template
+  instance, but the table stays at the same row count via the
+  existing `WHERE NOT EXISTS` guard.
+
+**Summary discriminator.** The `_update` summary's `form` field
+reports `"INSERT_WHERE"` (distinct from slice 84's
+`"INSERT_DATA"`) so callers can route on which UPDATE variant
+ran. `update_op_name` widens the `DeleteInsert` arm to split by
+template-half presence: pure-INSERT → `INSERT_WHERE`, pure-DELETE
+→ `DELETE_WHERE` (when slice 78 ships), combined modify form →
+`DELETE_INSERT_WHERE` (slice 77).
+
+**Limitations locked for slice 82.**
+
+- WHERE pattern may NOT carry aggregates / GROUP BY / UNION —
+  those would produce variable scopes outside the §4.1 INSERT
+  WHERE intent. Panics with a stable
+  `INSERT WHERE template feature '<X>' not yet supported`
+  prefix.
+- Template variables MUST be bound by the WHERE BGP — an unbound
+  template variable (`?z` in `INSERT { ?x ex:tag ?z } WHERE
+  { ?x ?p ?o }`) panics with the same stable prefix. This is
+  fail-fast rather than the W3C §4.2 "Template Group" spec's
+  silent-skip; the spec-conformant skip lands later as an
+  enhancement when CONSTRUCT does (Track 4).
+- Variable GRAPH in template (`INSERT { GRAPH ?g { … } }`)
+  panics with the slice-76 prefix (graph-scoped INSERT WHERE
+  lands in slice 76). A LITERAL graph IRI
+  (`INSERT { GRAPH <iri> { … } }`) is admissible and routes
+  through the existing `resolve_or_allocate_graph` helper.
+- Blank-node terms in the template panic — fresh blank-label
+  semantics per W3C §4.1.3 needs its own slice.
+
+**Per-form dispatch panic refinement.** The slice-84 dispatcher
+collapsed every `DeleteInsert` variant onto one panic with
+prefix `UPDATE form 'DELETE/INSERT WHERE' lands in slices 82-77`.
+Slice 82 splits this:
+
+- Pure INSERT WHERE: implemented (this slice).
+- Pure DELETE WHERE: panics with
+  `UPDATE form 'DELETE WHERE' (without INSERT) lands in slice 78`.
+- Combined DELETE+INSERT WHERE (modify): panics with
+  `UPDATE form 'DELETE/INSERT WHERE' lands in slice 77 (combined
+  modify form)` — the contiguous substring
+  `UPDATE form 'DELETE/INSERT WHERE' lands` is preserved so
+  slice 84's regression `tests/regression/sql/93-update-insert-
+  data.sql` substring-match expectation
+  (`update-delete-insert-where-lands-82-77`) still holds.
+
+**Test coverage.**
+
+- `tests/regression/sql/95-update-insert-where.sql` locks five
+  happy-path invariants (form discriminator, multi-row template
+  instantiation, zero-match no-op, multi-triple template, set-
+  semantics on re-issue) plus four negative-path "lands in slice
+  NN" / "not yet supported" prefix locks (unbound template var,
+  variable GRAPH in template, combined modify form deferred to
+  77, pure DELETE WHERE deferred to 78). Hand-authored expected
+  output; never ACCEPT=1 baselined.
+- Five `#[pg_test]`s in `src/query/executor.rs`
+  (`sparql_update_insert_where_happy_path`,
+  `sparql_update_insert_where_zero_match_noop`,
+  `sparql_update_insert_where_multi_triple_template`,
+  `sparql_update_insert_where_unbound_template_var_panics`,
+  `sparql_update_delete_insert_combined_still_panics`).
+
+Test bar after slice 82: 146 pgrx integration + 56 pg_regress +
+26 W3C-shape + 3 LUBM-shape = 231 automated tests across all
+four layers (up from 225 at slice 84: +5 pgrx + 1 pg_regress).
+
+LLD v0.4 §4.1 row table updated — `INSERT { template } WHERE
+{ pattern }` marked `✅ slice 82`; `INSERT { GRAPH <iri> { … } }`
+WHERE-driven variant marked `✅ slice 82` (literal IRI form),
+variable form deferred to slice 76. `docs/03-query.md` Surface
+today gains an INSERT WHERE row; `docs/10-roadmap.md` Track 2
+picks up the slice 82 ✅ entry.
+
 ### Phase C slice 83 — SPARQL UPDATE DELETE DATA
 
 Symmetric companion to slice 84's INSERT DATA: `DELETE DATA { … }`

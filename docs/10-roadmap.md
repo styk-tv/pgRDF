@@ -555,6 +555,42 @@ to dispatch by query form; UPDATE forms return an `_update` JSONB
 summary row. See
 [LLD v0.4 §4](../specs/SPEC.pgRDF.LLD.v0.4.md#4-sparql-update-new).
 
+- ✅ **Slice 82 — SPARQL UPDATE INSERT WHERE (pattern-driven).**
+  Builds on slice 84's UPDATE foundation to land
+  `INSERT { template } WHERE { pattern }` end-to-end. Strategy:
+  the WHERE pattern goes through the v0.3 `parse_select` walker
+  (sharing BGP/FILTER/OPTIONAL/MINUS algebra with SELECT); a
+  custom projection returns each template-referenced variable's
+  **dict id** (BIGINT, not lexical text — keeps internment
+  lossless so the binding's term_type / datatype / language tag
+  stay attached to the existing dict row); Rust iterates the
+  binding rows via SPI and materialises each template QuadPattern
+  per row, routing through the shared `insert_quad` helper with
+  the same `WHERE NOT EXISTS` set-semantic guard as INSERT DATA.
+  The `_update` summary reports `form: "INSERT_WHERE"` (not
+  `INSERT_DATA`) so callers can discriminate which UPDATE variant
+  ran. Slice-82 limitations locked: WHERE may not carry
+  aggregates / GROUP BY / UNION (the SQL builder's output shape
+  doesn't carry dict ids in those branches); template variables
+  MUST be bound by the WHERE BGP — an unbound template variable
+  panics with the stable `INSERT WHERE template feature 'unbound
+  template variable` prefix (fail-fast rather than the spec's
+  silent-skip, which lands later as an enhancement when CONSTRUCT
+  ships); a variable GRAPH in the template
+  (`INSERT { GRAPH ?g { … } }`) panics with the slice-76 prefix.
+  Per-form panic table updated for slice 84's siblings: pure
+  DELETE WHERE → slice 78, combined DELETE+INSERT WHERE → slice
+  77 (the contiguous substring `UPDATE form 'DELETE/INSERT WHERE'
+  lands` is preserved across the new dispatcher so slice 84's
+  regression locks still hold). Regression coverage:
+  `tests/regression/sql/95-update-insert-where.sql` locks five
+  happy-path invariants (form discriminator, multi-row template
+  instantiation, zero-match no-op, multi-triple template, set-
+  semantics on re-issue) plus three negative-path "INSERT WHERE
+  template feature 'X' not yet supported" prefix locks. Five
+  pgrx integration tests in `src/query/executor.rs` cover the
+  executor path under the `pg_test` harness.
+
 - ✅ **Slice 84 — SPARQL UPDATE foundation + INSERT DATA.** Opens
   Phase C toward v0.4.3. `pgrdf.sparql(q)` now detects UPDATE
   queries via a **try-parse-then-fallback** at the entry point:

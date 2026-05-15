@@ -333,12 +333,12 @@ surface. 🚧
 |---|---|
 | `INSERT DATA { … }` | ✅ slice 84 — direct triple insertion (single triple or BGP-style block). Constants only — no variables. Default-graph + `GRAPH <iri> { … }` inline graph scope both supported; unknown IRIs auto-allocate via `pgrdf.add_graph(iri)`. Idempotent on repeat via `WHERE NOT EXISTS` guard (the `_pgrdf_quads` table carries no `UNIQUE` constraint, so `ON CONFLICT` is unavailable). |
 | `DELETE DATA { … }` | ✅ slice 83 — direct triple removal (ground quads only, no variables). Constants only. Default-graph + `GRAPH <iri> { … }` inline graph scope both supported. **Lookup-only** path against `_pgrdf_dictionary` — if any term is absent, the quad cannot be in `_pgrdf_quads`, so the operation is a spec-correct no-op (never errors). Repeated DELETE DATA against the same triple is idempotent (the second call deletes zero rows). |
-| `INSERT { template } WHERE { pattern }` | 🚧 slices 82-77 — pattern-driven insertion. Each solution of `WHERE` instantiates `template` once. |
-| `DELETE { template } WHERE { pattern }` | 🚧 slices 82-77 — pattern-driven removal. |
-| `DELETE { … } INSERT { … } WHERE { … }` | 🚧 slices 82-77 — atomic modify; both operations run against the same `WHERE` solutions snapshot. |
-| `WITH <iri> …` | 🚧 slices 82-77 — graph scope for the surrounding INSERT/DELETE/WHERE. |
-| `INSERT { GRAPH <iri> { … } }` | ✅ slice 84 (for the `INSERT DATA` variant) — inline graph scope on the template. WHERE-driven variant 🚧 slices 82-77. |
-| `DELETE { GRAPH <iri> { … } }` | 🚧 slices 82-77 — inline graph scope on the template. |
+| `INSERT { template } WHERE { pattern }` | ✅ slice 82 — pattern-driven insertion. Each solution row of `WHERE` instantiates `template` once. The WHERE pattern goes through `parse_select` (sharing BGP/FILTER/OPTIONAL/MINUS algebra with SELECT); a custom projection returns each template-referenced variable's dict id (BIGINT, not text — lossless internment); per-row template materialisation routes through the shared `insert_quad` helper with the same `WHERE NOT EXISTS` set-semantic guard as INSERT DATA. Slice-82 limitations: WHERE may not carry aggregates / GROUP BY / UNION; template variables MUST be bound by the WHERE BGP (fail-fast); variable GRAPH in template panics (lands with slice 76). |
+| `DELETE { template } WHERE { pattern }` | 🚧 slice 78 — pattern-driven removal. |
+| `DELETE { … } INSERT { … } WHERE { … }` | 🚧 slice 77 — atomic modify; both operations run against the same `WHERE` solutions snapshot. |
+| `WITH <iri> …` | 🚧 slice 76 — graph scope for the surrounding INSERT/DELETE/WHERE. |
+| `INSERT { GRAPH <iri> { … } }` | ✅ slice 84 (for the `INSERT DATA` variant); ✅ slice 82 for the `INSERT … WHERE` variant with a **literal** IRI graph scope. The `INSERT { GRAPH ?g { … } }` variable-graph variant lands with slice 76. |
+| `DELETE { GRAPH <iri> { … } }` | 🚧 slices 78 / 77 — inline graph scope on the template. |
 
 The graph-scoped variants compose with §3's IRI mapping: every
 `<iri>` resolves to a `graph_id` via `_pgrdf_graphs.iri`. Unknown

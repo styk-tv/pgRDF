@@ -109,8 +109,8 @@ use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, Function, GraphPattern, OrderExpression,
 };
 use spargebra::term::{
-    GraphName, GroundTerm, Literal, NamedNodePattern, NamedOrBlankNode, Term, TermPattern,
-    TriplePattern,
+    GraphName, GraphNamePattern, GroundTerm, Literal, NamedNodePattern, NamedOrBlankNode,
+    QuadPattern, Term, TermPattern, TriplePattern,
 };
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 use std::cell::RefCell;
@@ -2708,8 +2708,53 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     graphs_touched.insert(g_id);
                 }
             }
-            GraphUpdateOperation::DeleteInsert { .. } => {
-                panic!("sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slices 82-77")
+            GraphUpdateOperation::DeleteInsert {
+                delete,
+                insert,
+                using,
+                pattern,
+            } => {
+                // Triage by which template halves are present. spargebra
+                // 0.4.6 models `delete` and `insert` as Vec<…> (not
+                // Option<Vec<…>>) so an absent half is the empty vec.
+                let has_delete = !delete.is_empty();
+                let has_insert = !insert.is_empty();
+                match (has_delete, has_insert) {
+                    (true, true) => {
+                        // Combined DELETE … INSERT … WHERE — the
+                        // "modify" form. The substring `UPDATE form
+                        // 'DELETE/INSERT WHERE' lands` is the locked
+                        // prefix scraped by slice 84's regression
+                        // (test 93's `update-delete-insert-where-lands`
+                        // expectation). Keep the substring contiguous.
+                        panic!(
+                            "sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slice 77 \
+                             (combined modify form)"
+                        )
+                    }
+                    (true, false) => {
+                        panic!("sparql: UPDATE form 'DELETE WHERE' (without INSERT) lands in slice 78")
+                    }
+                    (false, true) => {
+                        // Pure INSERT WHERE — slice 82.
+                        if using.is_some() {
+                            panic!(
+                                "sparql: INSERT WHERE template feature 'USING / USING NAMED' \
+                                 not yet supported"
+                            );
+                        }
+                        let (n_inserted, graphs) = execute_insert_where(insert, pattern);
+                        triples_inserted += n_inserted;
+                        for g in graphs {
+                            graphs_touched.insert(g);
+                        }
+                    }
+                    (false, false) => {
+                        // spargebra never emits an empty `DeleteInsert`
+                        // — the parser would reject it as a syntax
+                        // error. Treat as a no-op for completeness.
+                    }
+                }
             }
             GraphUpdateOperation::Load { .. } => {
                 panic!("sparql: UPDATE form 'LOAD' is out of scope for v0.4 (see LLD v0.4 §14)")
@@ -2757,7 +2802,18 @@ fn update_op_name(op: &GraphUpdateOperation) -> &'static str {
     match op {
         GraphUpdateOperation::InsertData { .. } => "INSERT_DATA",
         GraphUpdateOperation::DeleteData { .. } => "DELETE_DATA",
-        GraphUpdateOperation::DeleteInsert { .. } => "DELETE_INSERT_WHERE",
+        // Slice 82 narrows the DeleteInsert label by template-half
+        // presence: pure-INSERT-WHERE reports `INSERT_WHERE`, pure-
+        // DELETE-WHERE will report `DELETE_WHERE` once slice 78 ships,
+        // and the combined modify form keeps the legacy
+        // `DELETE_INSERT_WHERE` discriminator for slice 77.
+        GraphUpdateOperation::DeleteInsert { delete, insert, .. } => {
+            match (!delete.is_empty(), !insert.is_empty()) {
+                (false, true) => "INSERT_WHERE",
+                (true, false) => "DELETE_WHERE",
+                _ => "DELETE_INSERT_WHERE",
+            }
+        }
         GraphUpdateOperation::Load { .. } => "LOAD",
         GraphUpdateOperation::Clear { .. } => "CLEAR",
         GraphUpdateOperation::Create { .. } => "CREATE",
@@ -2881,6 +2937,309 @@ fn lookup_graph_iri(g: i64) -> Option<String> {
     )
     .ok()
     .flatten()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SPARQL UPDATE — INSERT { template } WHERE { pattern } (Phase C slice 82)
+//
+// Pattern-driven insertion. For each solution row of the WHERE pattern
+// the template's variables substitute and the resulting concrete quads
+// land in `_pgrdf_quads`.
+//
+// Strategy A (per slice 82 brief — single-pass via SPI):
+//   1. parse_select(pattern) — re-uses the v0.3 SELECT walker, gets us
+//      a `ParsedSelect` with the BGP, FILTERs, OPTIONALs, MINUSes, and
+//      (implicitly via SELECT *) the full set of bound variables.
+//   2. Build a custom SELECT SQL that returns each template-referenced
+//      variable as a `BIGINT` (the q{N}.{subject_id|predicate_id|
+//      object_id} dict id), NOT a TEXT lexical. This keeps internment
+//      lossless — the binding's term_type / datatype / lang stay
+//      attached to the existing dict row.
+//   3. For each binding row, instantiate the template's `QuadPattern`s:
+//      constants intern through the existing helpers; variable refs
+//      resolve via the per-row BIGINT map. Each instantiated quad goes
+//      through `insert_quad` (the same WHERE NOT EXISTS guard slice 84
+//      installed for INSERT DATA's set-semantics).
+//
+// Limitations locked for slice 82 (deferred to follow-up slices):
+//   - Template GRAPH scope: the `QuadPattern.graph_name` must be
+//     `GraphNamePattern::DefaultGraph` OR a literal `NamedNode`. A
+//     variable graph (e.g. `INSERT { GRAPH ?g { … } }`) panics with
+//     the stable `INSERT WHERE template feature` prefix — that variant
+//     lands with slice 76 (graph-scoped INSERT WHERE).
+//   - Template variables MUST be bound by the WHERE pattern; an
+//     unbound variable in the template panics with the same stable
+//     prefix. SPARQL spec says unbound vars yield no triple for that
+//     solution, but slice 82 trades silent-skip for fail-fast so
+//     authoring mistakes surface early; the spec-conformant skip
+//     lands as an enhancement when CONSTRUCT does (Track 4).
+//   - Aggregates / GROUP BY / SELECT-modifiers in the WHERE pattern
+//     are syntactically valid SPARQL but produce variable scoping
+//     that's outside the §4.1 INSERT WHERE intent — `parse_select`
+//     happily walks them, but the SQL builder would emit columns
+//     that don't carry a dict id. Slice 82 panics on the aggregate
+//     case via the same stable prefix.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Translate + execute one `INSERT { template } WHERE { pattern }`
+/// operation. Returns `(triples_inserted, graphs_touched)` so the
+/// caller can fold into the `_update` summary row.
+fn execute_insert_where(
+    template: &[QuadPattern],
+    pattern: &GraphPattern,
+) -> (i64, HashSet<i64>) {
+    // Collect template-referenced variables so we know which columns
+    // the WHERE-SELECT must return as dict ids.
+    let template_vars = collect_template_vars(template);
+
+    // Re-use the SELECT walker for the WHERE pattern. The walker
+    // populates ps.bgp + ps.filters + ps.optionals + ps.minuses (and
+    // any UNION branches) — exactly the §13 algebra we need.
+    params_clear();
+    let mut ps = parse_select(pattern);
+    if !ps.aggregates.is_empty() || !ps.group_vars.is_empty() {
+        panic!(
+            "sparql: INSERT WHERE template feature 'aggregate/GROUP BY in WHERE' not yet supported"
+        );
+    }
+    if !ps.union_branches.is_empty() {
+        // UNION in WHERE produces solutions from disjoint branches —
+        // the SQL shape (UNION ALL of per-branch SELECTs) doesn't
+        // share anchor aliases across branches, which would force
+        // per-branch template instantiation. Out of scope for 82.
+        panic!("sparql: INSERT WHERE template feature 'UNION in WHERE' not yet supported");
+    }
+    if ps.bgp.is_empty() {
+        panic!("sparql: INSERT WHERE requires a non-empty WHERE pattern");
+    }
+    // We don't honour DISTINCT / ORDER BY / LIMIT / OFFSET from the
+    // walker (the spec doesn't admit them on WHERE-of-UPDATE), but
+    // parse_select happily picks them up if a user wraps the pattern
+    // in solution modifiers. Strip them so the emitted SQL stays a
+    // pure FROM+WHERE shape.
+    ps.distinct = false;
+    ps.order_by.clear();
+    ps.limit = None;
+    ps.offset = 0;
+    ps.projected.clear();
+    ps.binds.clear();
+
+    // Emit FROM + WHERE; keep the anchors map so we know which q{N}.col
+    // each variable resolved to.
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    let (from_sql, where_clauses, _plan) = build_from_and_where(
+        &ps.bgp,
+        &ps.filters,
+        &ps.optionals,
+        &ps.minuses,
+        &mut anchors,
+        0,
+    );
+
+    // Build the projection: one column per template variable, casting
+    // through the anchored q{N}.{col} so the row hands back BIGINTs we
+    // can feed straight to insert_quad without re-internment.
+    let mut select_clauses: Vec<String> = Vec::new();
+    let mut col_order: Vec<String> = Vec::new();
+    for var in &template_vars {
+        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+            panic!(
+                "sparql: INSERT WHERE template feature 'unbound template variable ?{var}' \
+                 not yet supported (every template variable must appear in the WHERE BGP)"
+            )
+        });
+        select_clauses.push(format!(
+            "q{alias_idx}.{col} AS {alias_v}",
+            alias_v = quote_identifier(var),
+        ));
+        col_order.push(var.clone());
+    }
+    // Fallback when the template has no variables at all (degenerate
+    // — equivalent to INSERT DATA gated by a WHERE existence check).
+    // SELECT a constant so the binding count still drives the
+    // per-row insert.
+    if select_clauses.is_empty() {
+        select_clauses.push("1 AS _pgrdf_unit".to_string());
+    }
+
+    let mut sql = format!(
+        "SELECT {sel} FROM {from_sql}",
+        sel = select_clauses.join(", "),
+    );
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+
+    let params = params_take();
+
+    // Resolve template constants once — the dict id stays stable
+    // across binding rows. Variables resolve per row.
+    let mut triples_inserted: i64 = 0;
+    let mut graphs_touched: HashSet<i64> = HashSet::new();
+
+    Spi::connect_mut(|client| {
+        let arg_oids: Vec<PgOid> =
+            vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let prepared = client
+            .prepare(sql.as_str(), &arg_oids)
+            .expect("sparql: INSERT WHERE: prepare failed");
+        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+        // SAFETY: every WHERE-SELECT param is a dict id (i64) — see
+        // params_push / id_placeholder. The (value, type-oid) pair
+        // is well-formed by construction.
+        let datums: Vec<DatumWithOid<'_>> = params
+            .iter()
+            .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
+            .collect();
+        let table = client
+            .select(&prepared, None, &datums)
+            .expect("sparql: INSERT WHERE: WHERE-SELECT failed");
+        for row in table {
+            // Build the (var → dict-id) map for this binding. NULL
+            // bindings (an OPTIONAL that didn't match for a template
+            // var) skip the insert — spec-conformant "no triple
+            // emitted for unbound template vars in that solution".
+            let mut binding: HashMap<&str, Option<i64>> = HashMap::new();
+            let mut skip_row = false;
+            for (i, var) in col_order.iter().enumerate() {
+                // SPI is 1-based on column index.
+                let v: Option<i64> = row
+                    .get::<i64>(i + 1)
+                    .ok()
+                    .flatten();
+                if v.is_none() {
+                    // Template variable unbound in this solution —
+                    // skip the entire row's instantiation. This
+                    // matches the W3C §4.2 "Template Group" rule:
+                    // "if any binding is missing for a template
+                    // variable, no triple is added for that group".
+                    skip_row = true;
+                }
+                binding.insert(var.as_str(), v);
+            }
+            if skip_row {
+                continue;
+            }
+            for qp in template {
+                let (s_id, p_id, o_id, g_id) =
+                    instantiate_template_quad(qp, &binding);
+                insert_quad(s_id, p_id, o_id, g_id);
+                triples_inserted += 1;
+                graphs_touched.insert(g_id);
+            }
+        }
+    });
+
+    (triples_inserted, graphs_touched)
+}
+
+/// Walk the template QuadPatterns and collect every Variable name
+/// referenced across subject / predicate / object / graph_name slots.
+/// Order is first-appearance (stable across runs) so SQL columns are
+/// reproducible; HashSet would be order-randomised.
+fn collect_template_vars(template: &[QuadPattern]) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    let push = |name: &str, out: &mut Vec<String>, seen: &mut HashSet<String>| {
+        if seen.insert(name.to_string()) {
+            out.push(name.to_string());
+        }
+    };
+    for qp in template {
+        if let TermPattern::Variable(v) = &qp.subject {
+            push(v.as_str(), &mut out, &mut seen);
+        }
+        if let NamedNodePattern::Variable(v) = &qp.predicate {
+            push(v.as_str(), &mut out, &mut seen);
+        }
+        if let TermPattern::Variable(v) = &qp.object {
+            push(v.as_str(), &mut out, &mut seen);
+        }
+        if let GraphNamePattern::Variable(v) = &qp.graph_name {
+            push(v.as_str(), &mut out, &mut seen);
+        }
+    }
+    out
+}
+
+/// Resolve a template `QuadPattern` to `(s, p, o, g)` concrete dict
+/// ids by combining (a) constants interned through the existing
+/// helpers and (b) variables looked up in the per-row binding.
+///
+/// Unbound variables panic before reaching here — the WHERE-SELECT
+/// row-loop screens for them via `skip_row` so a real solution row
+/// is always fully bound across template vars.
+fn instantiate_template_quad(
+    qp: &QuadPattern,
+    binding: &HashMap<&str, Option<i64>>,
+) -> (i64, i64, i64, i64) {
+    let s_id = match &qp.subject {
+        TermPattern::Variable(v) => binding
+            .get(v.as_str())
+            .and_then(|x| *x)
+            .unwrap_or_else(|| {
+                panic!("sparql: INSERT WHERE: subject variable ?{} unbound (internal)", v.as_str())
+            }),
+        TermPattern::NamedNode(n) => intern_named_node(n.as_str()),
+        TermPattern::BlankNode(b) => {
+            // Per SPARQL UPDATE §4.1.3, every blank node in an INSERT
+            // template introduces a FRESH node for each solution row.
+            // We synthesise a unique label per (binding-row, blank-
+            // label) pair so set-semantics still applies but distinct
+            // template invocations don't collapse onto the same node.
+            // For slice 82 we render that as `<original>:<row-uuid>`
+            // — except we don't have a row uuid handy, and the
+            // semantic is delicate enough to warrant its own slice.
+            // Defer.
+            panic!(
+                "sparql: INSERT WHERE template feature 'blank node in template ({})' \
+                 not yet supported",
+                b.as_str()
+            )
+        }
+        TermPattern::Literal(_) => panic!("sparql: literal subject is invalid in RDF"),
+        other => panic!("sparql: INSERT WHERE template: unsupported subject term {other:?}"),
+    };
+    let p_id = match &qp.predicate {
+        NamedNodePattern::Variable(v) => binding
+            .get(v.as_str())
+            .and_then(|x| *x)
+            .unwrap_or_else(|| {
+                panic!("sparql: INSERT WHERE: predicate variable ?{} unbound (internal)", v.as_str())
+            }),
+        NamedNodePattern::NamedNode(n) => intern_named_node(n.as_str()),
+    };
+    let o_id = match &qp.object {
+        TermPattern::Variable(v) => binding
+            .get(v.as_str())
+            .and_then(|x| *x)
+            .unwrap_or_else(|| {
+                panic!("sparql: INSERT WHERE: object variable ?{} unbound (internal)", v.as_str())
+            }),
+        TermPattern::NamedNode(n) => intern_named_node(n.as_str()),
+        TermPattern::BlankNode(b) => {
+            panic!(
+                "sparql: INSERT WHERE template feature 'blank node in template ({})' \
+                 not yet supported",
+                b.as_str()
+            )
+        }
+        TermPattern::Literal(lit) => intern_object(&Term::Literal(lit.clone())),
+        other => panic!("sparql: INSERT WHERE template: unsupported object term {other:?}"),
+    };
+    let g_id = match &qp.graph_name {
+        GraphNamePattern::DefaultGraph => 0,
+        GraphNamePattern::NamedNode(n) => resolve_or_allocate_graph(&GraphName::NamedNode(n.clone())),
+        GraphNamePattern::Variable(v) => {
+            panic!(
+                "sparql: INSERT WHERE template feature 'variable GRAPH ?{}' not yet supported \
+                 (lands with slice 76 graph-scoped INSERT WHERE)",
+                v.as_str()
+            )
+        }
+    };
+    (s_id, p_id, o_id, g_id)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -5139,20 +5498,6 @@ mod tests {
         assert_eq!(n, 1, "INSERT DATA must be set-semantic (no duplicates)");
     }
 
-    /// The next-in-line unimplemented variant after slice 83 is
-    /// `DELETE/INSERT WHERE` (slices 82-77). The dispatcher panics
-    /// with the documented "lands in slice NN" message so callers
-    /// know the per-form work is tracked.
-    #[pg_test(error = "sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slices 82-77")]
-    fn sparql_update_form_dispatch_panics_for_unimplemented() {
-        let _: Option<pgrx::JsonB> = Spi::get_one(
-            "SELECT * FROM pgrdf.sparql(\
-               'DELETE { ?s ?p ?o } INSERT { ?s ?p \"new\" } WHERE { ?s ?p ?o }')",
-        )
-        .ok()
-        .flatten();
-    }
-
     // ─────────────────────────────────────────────────────────────────
     // Phase C slice 83 — SPARQL UPDATE DELETE DATA
     // ─────────────────────────────────────────────────────────────────
@@ -5311,5 +5656,162 @@ mod tests {
         .unwrap_or(0);
         assert_eq!(after_default, 1, "default-graph copy survives a named-graph DELETE");
         assert_eq!(after_g1, 0, "the named-graph copy is gone");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Phase C slice 82 — SPARQL UPDATE INSERT WHERE pattern-driven
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Happy path. Seed two `rdf:type ex:Person` triples via INSERT
+    /// DATA, then `INSERT { ?x ex:tag "person" } WHERE { ?x rdf:type
+    /// ex:Person }` — exactly two new triples land, one per solution.
+    #[pg_test]
+    fn sparql_update_insert_where_happy_path() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex:  <http://example.org/> \
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+                INSERT DATA { \
+                  ex:alice rdf:type ex:Person . \
+                  ex:bob   rdf:type ex:Person \
+                }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex:  <http://example.org/> \
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+                INSERT { ?x ex:tag \"person\" } WHERE { ?x rdf:type ex:Person }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "INSERT_WHERE");
+        assert_eq!(
+            summary["triples_inserted"], 2,
+            "two solution rows ⇒ two template instantiations"
+        );
+        assert_eq!(summary["triples_deleted"], 0);
+
+        // Verify the new triples are queryable. Both subjects should
+        // carry the new ex:tag "person" assertion.
+        let tagged: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?s WHERE { ?s ex:tag \"person\" }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(tagged, 2, "both subjects should carry the new tag");
+    }
+
+    /// Zero-match no-op. INSERT WHERE against a pattern that returns
+    /// no solutions reports `triples_inserted = 0` and the table
+    /// remains empty of the template-produced rows.
+    #[pg_test]
+    fn sparql_update_insert_where_zero_match_noop() {
+        // Seed one unrelated triple so the database isn't pristine.
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { <http://example.org/a> <http://example.org/b> \"hi\" }')",
+        )
+        .unwrap();
+        let before: i64 =
+            Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads")
+                .unwrap()
+                .unwrap_or(-1);
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/> \
+                PREFIX ex:   <http://example.org/> \
+                INSERT { ?x ex:name ?n } WHERE { ?x foaf:name ?n }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "INSERT_WHERE");
+        assert_eq!(summary["triples_inserted"], 0);
+        let after: i64 = Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads")
+            .unwrap()
+            .unwrap_or(-1);
+        assert_eq!(
+            before, after,
+            "INSERT WHERE with no matches must not touch the quads table"
+        );
+    }
+
+    /// Multi-triple template + multi-row solution. Two solution rows
+    /// × three template quads = six new triples. Lock the cross-
+    /// product so set-semantics on the WHERE NOT EXISTS guard
+    /// doesn't accidentally swallow distinct rows.
+    #[pg_test]
+    fn sparql_update_insert_where_multi_triple_template() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex:  <http://example.org/> \
+                INSERT DATA { ex:a ex:label \"A\" . ex:b ex:label \"B\" }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                INSERT { ?s ex:tag1 \"t1\" . ?s ex:tag2 \"t2\" . ?s ex:lbl ?l } \
+                WHERE  { ?s ex:label ?l }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(
+            summary["triples_inserted"], 6,
+            "2 rows × 3 template quads = 6 inserted"
+        );
+        // Round-trip the two ?l bindings projected via the template.
+        let bound_labels: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?s ?l WHERE { ?s ex:lbl ?l }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(bound_labels, 2);
+    }
+
+    /// Negative — unbound template variable panics with the stable
+    /// `INSERT WHERE template feature 'unbound template variable` prefix.
+    /// Downstream tooling routes on this for partial-translatability.
+    #[pg_test(
+        error = "sparql: INSERT WHERE template feature 'unbound template variable ?z' not yet supported"
+    )]
+    fn sparql_update_insert_where_unbound_template_var_panics() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { <http://example.org/a> <http://example.org/b> <http://example.org/c> }')",
+        )
+        .unwrap();
+        let _: Option<pgrx::JsonB> = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                INSERT { ?x ex:tag ?z } WHERE { ?x ?p ?o }')",
+        )
+        .ok()
+        .flatten();
+    }
+
+    /// Negative — combined DELETE+INSERT WHERE still panics with the
+    /// slice-77 prefix (the contiguous substring slice 84's regression
+    /// test 93 locks must still appear post-slice-82).
+    #[pg_test(
+        error = "sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slice 77"
+    )]
+    fn sparql_update_delete_insert_combined_still_panics() {
+        let _: Option<pgrx::JsonB> = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'DELETE { ?s ?p ?o } INSERT { ?s ?p \"new\" } WHERE { ?s ?p ?o }')",
+        )
+        .ok()
+        .flatten();
     }
 }
