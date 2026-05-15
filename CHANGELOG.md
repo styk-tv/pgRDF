@@ -6,6 +6,38 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A countdown closed at slice 100 — v0.4.1 shipped
+
+Phase A (§3 named-graph) closed end-to-end. v0.4.1 cut on tag
+`v0.4.1` (commit `e917be7`) ships 8 prebuilt tarballs (PG 14-17 ×
+{amd64, arm64}) + aggregate `SHA256SUMS` via release.yml run
+[25911623612](https://github.com/styk-tv/pgRDF/actions/runs/25911623612),
+green end-to-end. GitHub Release:
+[v0.4.1](https://github.com/styk-tv/pgRDF/releases/tag/v0.4.1).
+Tarball smoke verified: aggregate SHA256 OK, internal SHA256SUMS OK,
+layout includes `lib/pgrdf.so`, `share/extension/{pgrdf.control,
+pgrdf--0.4.1.sql}`, `LICENSE`, `NOTICE`.
+
+crates.io first-publish for v0.4.1 deferred — `publish-crate.yml`
+workflow_dispatch run
+[25912526300](https://github.com/styk-tv/pgRDF/actions/runs/25912526300)
+failed at `cargo publish` with `failed to select a version for
+reasonable` (the `[patch.crates-io]` block does not travel with
+`cargo publish`, so the `rdf-12` feature is unavailable on the
+crates.io-published `reasonable 0.4.x`). Publish unblocks once
+[gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+merges and the patch retires; see ERRATA.v0.4 E-011. The crate is
+registered on crates.io with v0.3.0 (pre-work seed); v0.4.1 binaries
+remain available via the GitHub Release tarballs.
+
+The GitHub Release `release: published` event did not auto-trigger
+`publish-crate.yml` — `softprops/action-gh-release@v2` writing
+releases under `GITHUB_TOKEN` does not recursively fire workflow
+events by default. Manual workflow_dispatch with `dry_run=false` is
+the current entry point.
+
+Phase B (lifecycle UDFs §5) opens next at slice 99.
+
 ## [0.4.1] — 2026-05-15
 
 Phase A closes with thirteen countdown slices (120 → 108) shipping
