@@ -469,11 +469,28 @@ not the integer. See
   Slice-114 limitation: a single graph constraint covers the
   entire single-branch BGP — composition with OPTIONAL / UNION /
   MINUS that span different scopes is slice 112.
-- ⏳ Slice 113 — SPARQL `GRAPH ?g { … }` variable form.
-  Will project `?g` as a `NamedNode` JSONB term via JOIN against
-  `_pgrdf_graphs`. Today the executor panics with the stable
-  "GRAPH ?g { ... } (variable form) not yet supported — see slice
-  113" prefix.
+- ✅ **Slice 113 — SPARQL `GRAPH ?g { … }` variable form
+  translation.** The executor's pattern walk now handles
+  `GraphPattern::Graph { Variable(?g), inner }` by recording the
+  variable name in `ParsedSelect.graph_var` (or
+  `UnionBranch.graph_var`) and threading it into
+  `build_from_and_where`, which appends an
+  `INNER JOIN pgrdf._pgrdf_graphs g0 ON g0.graph_id = q1.graph_id`
+  (exactly one per inner BGP) and adds `qN.graph_id = q1.graph_id`
+  for every additional mandatory / OPTIONAL / MINUS alias inside
+  the GRAPH block — so a multi-triple inner BGP cannot stitch
+  triples from different graphs together. The projection layer
+  emits `g0.iri` for the graph var (IRI string, not the integer
+  id). INNER JOIN matches W3C SPARQL 1.1 §13.3: only graphs present
+  in the IRI mapping bind ?g. The parser's `unsupported_algebra`
+  walk drops the "Graph (variable IRI; slice 113)" tag and walks
+  `inner` like the literal-IRI form. Regression coverage:
+  [`tests/regression/sql/79-sparql-graph-variable.sql`](../tests/regression/sql/79-sparql-graph-variable.sql)
+  + one `#[pg_test]` (`sparql_graph_variable_projects_iri` in
+  [`src/query/executor.rs`](../src/query/executor.rs)). Slice-113
+  limitation matches slice 114's: a single graph var covers the
+  entire single-branch BGP — composition with OPTIONAL / UNION /
+  MINUS that spans DIFFERENT GRAPH scopes is slice 112.
 - ⏳ Slice 112 — GRAPH composition with OPTIONAL / UNION / MINUS
   across different graph scopes (per-pattern constraint
   annotation).

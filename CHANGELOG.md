@@ -6,6 +6,36 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 113 — SPARQL `GRAPH ?g { … }` variable form translation
+
+The SPARQL executor now handles variable-form `GRAPH ?g { … }`
+blocks. At translate time, the graph variable name is recorded on
+`ParsedSelect.graph_var` (or `UnionBranch.graph_var`) and threaded
+through `build_from_and_where`, which appends an
+`INNER JOIN pgrdf._pgrdf_graphs g0 ON g0.graph_id = q1.graph_id`
+(exactly one such JOIN per inner BGP) and adds
+`qN.graph_id = q1.graph_id` for every additional mandatory /
+OPTIONAL / MINUS alias inside the GRAPH block — so a multi-triple
+inner BGP cannot stitch triples from different graphs together.
+
+The projection layer emits `g0.iri` whenever the projected variable
+matches `graph_var`, so the JSONB row carries the IRI string rather
+than the integer graph_id. INNER JOIN matches W3C SPARQL 1.1 §13.3:
+only graphs present in the IRI mapping bind ?g.
+
+`pgrdf.sparql_parse` no longer flags `GRAPH ?g { … }` under
+`unsupported_algebra` — the parser walks `inner` like the literal-IRI
+form. Composition with OPTIONAL / UNION / MINUS that spans DIFFERENT
+GRAPH scopes is slice 112.
+
+Regression: `tests/regression/sql/79-sparql-graph-variable.sql`
+verifies per-row IRI projection, COUNT + GROUP BY ?g, the
+multi-triple shared-graph constraint (no cross-graph stitches), and
+the `unsupported_algebra` flip. Plus one pgrx test
+(`sparql_graph_variable_projects_iri`) exercising the same surface.
+`tests/regression/sql/80-unsupported-shapes.sql` retires the gap-4
+entry (variable-form GRAPH is no longer a gap).
+
 ### Phase A slice 114 — SPARQL `GRAPH <iri> { … }` translation (LLD v0.4 §3.3)
 
 The SPARQL executor now handles literal-IRI `GRAPH { … }` blocks.

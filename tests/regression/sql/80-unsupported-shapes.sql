@@ -98,24 +98,16 @@ SELECT _check_gap(
   'sparql: unsupported algebra'
 );
 
--- ─── Gap 4: GRAPH ?g { … } variable form ─────────────────────────
--- W3C §13.3 — the literal-IRI form (`GRAPH <iri> { … }`) is now
--- supported as of Phase A slice 114 (LLD v0.4 §3.3): the executor
--- resolves the IRI to a `graph_id` via `_pgrdf_graphs.iri` at
--- translate time and emits `qN.graph_id = <id>` on each pattern.
--- Positive coverage lives in
--- `tests/regression/sql/78-sparql-graph-literal-iri.sql`.
---
--- The variable form (`GRAPH ?g { … }`) is still 🚧 — slice 113
--- adds projection of `?g` as an IRI via JOIN against
--- `_pgrdf_graphs`. Until then the executor panics with the stable
--- "GRAPH ?g { ... } (variable form) not yet supported" prefix.
-SELECT _check_gap(
-  'gap-4 GRAPH ?g variable form',
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?g WHERE { GRAPH ?g { ?s foaf:name ?n } }',
-  'sparql: GRAPH ?g { ... } (variable form) not yet supported'
-);
+-- ─── Gap 4 (RETIRED): GRAPH ?g { … } variable form ──────────────
+-- W3C §13.3 — both literal-IRI (`GRAPH <iri> { … }`, slice 114) and
+-- variable (`GRAPH ?g { … }`, slice 113) forms are now supported.
+-- The variable form JOINs `_pgrdf_graphs` to project ?g as the
+-- IRI string. Positive coverage:
+--   * `tests/regression/sql/78-sparql-graph-literal-iri.sql`
+--   * `tests/regression/sql/79-sparql-graph-variable.sql`
+-- This gap entry is intentionally removed — the executor no longer
+-- panics on the variable form, so a `_check_gap` here would emit
+-- `!!! unexpected success !!!`.
 
 -- ─── Gap 5: CONSTRUCT query form ─────────────────────────────────
 -- W3C §16.2 — CONSTRUCT returns an RDF graph; pgrdf.sparql returns

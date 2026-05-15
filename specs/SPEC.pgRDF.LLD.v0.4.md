@@ -94,7 +94,7 @@ Capability matrix for the v0.4 target:
 | Capability | v0.3 status | v0.4 target | v0.4 status |
 |---|---|---|---|
 | `GRAPH <iri> { … }` | ⏳ deferred | §3.3 | ✅ slice 114 |
-| `GRAPH ?g { … }` | ⏳ deferred | §3.3 | 🚧 slice 113 |
+| `GRAPH ?g { … }` | ⏳ deferred | §3.3 | ✅ slice 113 |
 | IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | 🚧 |
 | SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | §4 | 🚧 |
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | 🚧 |
@@ -201,14 +201,31 @@ interchangeable at the UDF boundary. `pgrdf.put_quad`,
   Slice-114 limitation: a single graph constraint covers the entire
   single-branch BGP — composition with OPTIONAL / UNION / MINUS that
   span different scopes is slice 112 (per-pattern annotation).
-- **`GRAPH ?g { … }`** 🚧 pending slice 113. Will project `?g` as
-  the **IRI** (NOT the integer id) via JOIN against `_pgrdf_graphs`.
-  Today the executor panics with the stable
-  `sparql: GRAPH ?g { ... } (variable form) not yet supported — see slice 113`
-  prefix; the parser flags it as `"Graph (variable IRI; slice 113)"`
-  in `unsupported_algebra`. Locked in
-  [`tests/regression/sql/80-unsupported-shapes.sql`](../tests/regression/sql/80-unsupported-shapes.sql)
-  gap-4.
+- **`GRAPH ?g { … }`** ✅ landed (Phase A countdown slice 113). The
+  executor records the variable name on `ParsedSelect.graph_var`
+  (or `UnionBranch.graph_var`) during the algebra walk; in
+  `build_from_and_where` the inner BGP gains an `INNER JOIN
+  pgrdf._pgrdf_graphs g0 ON g0.graph_id = q{first}.graph_id`
+  (exactly one such JOIN per inner BGP) — INNER matches W3C SPARQL
+  1.1 §13.3, so only graphs present in the IRI mapping bind ?g.
+  Triples 2..N inside the GRAPH block carry an additional
+  `qN.graph_id = q{first}.graph_id` so a multi-triple inner BGP
+  cannot stitch triples from different graphs together; the same
+  shared-graph predicate flows into OPTIONAL aliases and MINUS
+  sub-patterns nested under the variable-form GRAPH. The projection
+  layer emits `g0.iri` whenever the projected variable matches
+  `graph_var` — the JSONB row value is the IRI string (NOT the
+  integer id). `SELECT *` adds the graph var to the projected list
+  even when no inner triple anchors it. The parser's
+  `unsupported_algebra` list no longer carries the
+  "Graph (variable IRI; slice 113)" tag — slice 113 walks `inner`
+  like the literal-IRI form. Regression:
+  [`tests/regression/sql/79-sparql-graph-variable.sql`](../tests/regression/sql/79-sparql-graph-variable.sql)
+  + one `#[pg_test]` (`sparql_graph_variable_projects_iri`).
+  Slice-113 limitation matches slice 114's: a single graph
+  variable / constraint covers the entire single-branch BGP —
+  composition with OPTIONAL / UNION / MINUS that spans DIFFERENT
+  GRAPH scopes is slice 112 (per-pattern annotation).
 - Composition discipline:
   - `GRAPH { … }` composes inside `OPTIONAL`, `UNION`, and `MINUS`
     blocks. Translation reuses the v0.3 `build_from_and_where`

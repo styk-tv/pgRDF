@@ -146,19 +146,15 @@ fn walk(
             // Slice 114: `GRAPH <iri> { … }` (literal-IRI form) is
             // supported by the executor — translate-time resolution
             // against `_pgrdf_graphs.iri` flows a per-pattern graph
-            // constraint into the BGP SQL. Walk `inner` so the parser
-            // still counts the triples it carries.
+            // constraint into the BGP SQL.
             //
-            // Slice 113 will replace the panic below; until then,
-            // `GRAPH ?g { … }` (variable form) remains flagged.
-            match name {
-                NamedNodePattern::NamedNode(_) => {
-                    walk(inner, vars, bgp, unsupported);
-                }
-                NamedNodePattern::Variable(_) => {
-                    unsupported.push("Graph (variable IRI; slice 113)");
-                }
-            }
+            // Slice 113: `GRAPH ?g { … }` (variable form) is now
+            // supported too — the executor JOINs `_pgrdf_graphs` to
+            // bind ?g to the IRI string. Both arms walk `inner` so
+            // the contained BGP's triples are still counted; neither
+            // adds an `unsupported_algebra` tag.
+            let _ = name;
+            walk(inner, vars, bgp, unsupported);
         }
         GraphPattern::Group { inner, .. } => {
             // Aggregates — supported by the executor. Walk the inner
