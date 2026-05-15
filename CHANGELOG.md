@@ -6,6 +6,41 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 110 — pg_dump round-trip for `_pgrdf_graphs`
+
+LLD v0.4 §3.1 carries an explicit acceptance criterion: "`pg_dump`
+of a pgRDF database carrying the mapping round-trips the mapping
+verbatim". Slice 110 wires the end-to-end regression that proves it.
+
+New shell-orchestrated test
+`tests/regression/scripts/pg-dump-roundtrip.sh` (cannot live as a
+plain `.sql` fixture because `pg_dump` is an external binary, not a
+`psql` builtin) drives a three-step sequence against the compose
+Postgres:
+
+1. Drop + recreate the extension; seed two known IRI bindings via
+   `pgrdf.add_graph(101::bigint, 'http://example.org/rt-1')` and
+   `pgrdf.add_graph(102::bigint, 'http://example.org/rt-2')`.
+2. Run `pg_dump` to a tmpfile inside the container; grep the dump
+   for both IRI strings as a fast canary on whether row data was
+   serialised at all.
+3. Drop the extension (wiping the rows), restore from the dump,
+   then verify the two rows survived (count check on
+   `pgrdf._pgrdf_graphs WHERE iri IN (…)` plus a symmetric
+   `pgrdf.graph_iri(101::bigint)` lookup).
+
+Two new Justfile recipes: `just test-pg-dump-roundtrip` is the
+direct entry point; `just test-conformance` now lists it as the
+fourth prerequisite alongside `test-regression`, `test-w3c`, and
+`test-lubm` so the broader compose-based sweep (and `smoke-cold`)
+catches it on every cold boot.
+
+`sql/schema_v0_4_0_graphs.sql` gains a
+`SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', '');`
+registration so the table's row data is included by `pg_dump` rather
+than treated as extension-managed DDL. Without this call, the seed
++ user-bound IRI rows would be silently dropped on restore.
+
 ### Phase A slice 112 — SPARQL GRAPH composition with OPTIONAL/UNION/MINUS
 
 The SPARQL executor's GRAPH constraint moves from PER-QUERY to

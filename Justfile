@@ -84,13 +84,20 @@ test-w3c:
 test-lubm:
     PGRDF_RUNTIME={{RUN}} bash tests/perf/lubm-shape/run.sh
 
+# pg_dump round-trip verification for `_pgrdf_graphs` (LLD v0.4 §3.1
+# acceptance criterion). Boots a clean state, seeds two IRI bindings,
+# pg_dumps, drops + restores, then re-queries to verify the mapping
+# survived. Requires the compose stack to be up and idle.
+test-pg-dump-roundtrip:
+    PGRDF_RUNTIME={{RUN}} bash tests/regression/scripts/pg-dump-roundtrip.sh
+
 # Full local test bar: container-based pgrx tests + compose regression.
 # Kept narrow for back-compat; `just test-everything` is the broader sweep.
 test-all: test test-regression
 
 # Every test layer that runs against the live compose Postgres
 # (no pgrx framework needed — the compose runtime is the only dep).
-test-conformance: test-regression test-w3c test-lubm
+test-conformance: test-regression test-w3c test-lubm test-pg-dump-roundtrip
 
 # Every test layer end-to-end: pgrx integration + every compose-based harness.
 test-everything: test test-conformance

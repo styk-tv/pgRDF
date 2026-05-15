@@ -159,6 +159,13 @@ CREATE TABLE _pgrdf_graphs (
   retroactively.
 - **pg_dump round-trip:** the table is `pg_dump`-included
   unconditionally; the mapping survives backup and restore.
+  Acceptance criterion in §3 verified end-to-end by
+  [`tests/regression/scripts/pg-dump-roundtrip.sh`](../tests/regression/scripts/pg-dump-roundtrip.sh)
+  (Phase A countdown slice 110): the script seeds two IRI
+  bindings, runs `pg_dump`, drops the extension, restores from
+  the dump, and verifies both rows + a symmetric `graph_iri(id)`
+  lookup survive. Wired into `just test-pg-dump-roundtrip` and
+  `just test-conformance`.
 - **Default partition** retains `graph_id = 0` semantics from v0.3
   (catch-all for un-IRI-bound writes). Synthetic IRI:
   `urn:pgrdf:graph:0`.

@@ -529,8 +529,20 @@ not the integer. See
   cannot express §13.3's multi-graph fixtures. Backward-compatible:
   tests 01–23 retain a non-empty `data.ttl` and no `setup.sql`, and
   their SQL stream is unchanged.
-- ⏳ Slice 110 — remaining §3 surface (composition coverage that
-  depends on slice 112 landing).
+- ✅ **Slice 110 — pg_dump round-trip for `_pgrdf_graphs`.** New
+  shell-orchestrated regression
+  [`tests/regression/scripts/pg-dump-roundtrip.sh`](../tests/regression/scripts/pg-dump-roundtrip.sh)
+  verifies LLD v0.4 §3.1's acceptance criterion ("`pg_dump` of a
+  pgRDF database round-trips the IRI mapping verbatim") end-to-end:
+  seed two `add_graph(id::bigint, iri)` bindings, `pg_dump` the
+  database, drop + restore, then re-query `_pgrdf_graphs` plus a
+  symmetric `pgrdf.graph_iri(101)` lookup. Cannot live as a plain
+  `.sql` fixture because `pg_dump` is an external binary not
+  callable from `psql -c`. New `just test-pg-dump-roundtrip` recipe;
+  folded into `just test-conformance` so cold-compose sweeps catch
+  it. Empirical verification deferred to the parent merge agent
+  (compose-stack contention with the parallel slice-112 worktree
+  during the slice's authorship).
 
 ### Track 2 — SPARQL UPDATE
 `INSERT DATA`, `DELETE DATA`, pattern-driven `INSERT/DELETE … WHERE`,

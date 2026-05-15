@@ -90,6 +90,30 @@ fixture and **never use ACCEPT for new query coverage** — that defeats
 the empirical-verification goal. ACCEPT is reserved for unrelated
 output-format churn (e.g. a Postgres minor-version output change).
 
+### `pg_dump` round-trip
+
+`tests/regression/scripts/pg-dump-roundtrip.sh` exercises the LLD
+v0.4 §3.1 acceptance criterion "`pg_dump` of a pgRDF database
+round-trips the IRI mapping verbatim". It cannot live as a
+plain `.sql` file because `pg_dump` is an external binary, not a
+`psql` builtin. The script orchestrates a three-step sequence
+against the compose Postgres:
+
+1. Drop + recreate the extension, seed two known IRI bindings via
+   `pgrdf.add_graph(id::bigint, iri)`.
+2. `pg_dump` the database into a tmpfile; grep for the seeded
+   IRI strings as a fast canary on whether row data was emitted.
+3. Drop the extension, restore from the dump, then verify the two
+   rows survived (count check + symmetric `pgrdf.graph_iri(id)`
+   lookup).
+
+Driven by `just test-pg-dump-roundtrip`; folded into
+`just test-conformance` so the cold-compose sweep catches it.
+
+```bash
+just test-pg-dump-roundtrip
+```
+
 ## Layer 3.5 — ontology smoke (manual)
 
 `tests/perf/smoke-ontologies.sh` loads each TTL under
