@@ -1,0 +1,24 @@
+
+0
+3
+3
+http://example.com/a,http://example.com/b,http://example.com/c
+1|1
+1,2,3
+1|http://www.w3.org/2001/XMLSchema#string
+2
+http://example.com/p1,http://example.com/p2
+1
+iri|http://example.com/d_s|iri|http://example.com/d_p|literal|d_o|http://www.w3.org/2001/XMLSchema#string
+1
+42|http://www.w3.org/2001/XMLSchema#integer
+1
+Alice|en|http://www.w3.org/1999/02/22-rdf-syntax-ns#langString
+g-rejects-unbound-template-var: t
+h-rejects-bnode-in-template: t
+i-rejects-literal-in-subject: t
+2
+2
+http://example.com/j1,http://example.com/j2|http://example.com/p_const|obj_const|http://www.w3.org/2001/XMLSchema#string
+
+1

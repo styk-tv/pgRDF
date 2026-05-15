@@ -19,6 +19,17 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   than overloading `pgrdf.sparql` so callers signal intent at the
   SQL boundary. WHERE pattern reuses the full SELECT-side translator
   (`parse_select` → `build_bgp_sql` → `execute`).
+- `pgrdf.construct` template variable substitution — Phase D slice 58.
+  Variables in subject, predicate, and object positions are resolved
+  per solution. Unbound template variables panic with
+  `unbound template variable ?X`. Blank nodes still rejected (lands in
+  slice 57). Typed and language-tagged literals carry full structured
+  shape `{type, value, datatype, [language]}` — language-tagged
+  literals carry both the `language` field AND the implicit
+  `rdf:langString` datatype IRI per RDF 1.1 §3.3. Blank-node bindings
+  the WHERE pattern surfaces shape as `{"type":"bnode","value":"_:b…"}`
+  via the dictionary-driven term resolver. Variable predicates are
+  legal (RDF admits variable predicates in templates).
 
 ## [0.4.3] — 2026-05-15
 

@@ -5,8 +5,9 @@
 -- routing CONSTRUCT through the existing SELECT-side BGP translator
 -- and emitting one structured-term row per (solution, template
 -- triple) pair. Slice 59 narrows to CONSTANT-ONLY templates;
--- variables and blank nodes panic with a stable slice 59 prefix
--- until slices 58 / 57 widen the surface (LLD §6.2).
+-- slice 58 (file `101-construct-variable-templates.sql`) widened to
+-- variable substitution. Blank nodes in templates still panic until
+-- slice 57.
 --
 -- Output row shape (per LLD §6.1):
 --
@@ -30,10 +31,11 @@
 --   E. Reject non-CONSTRUCT — `pgrdf.construct('SELECT …')` panics
 --      with the stable `pgrdf.construct: not a CONSTRUCT query`
 --      prefix.
---   F. Reject variable in template — slice 59 narrow-scope guard
---      with `pgrdf.construct: slice 59 supports constant-only
---      templates` prefix.
---   G. Reject blank node in template — same panic family as F.
+--   F. Reject blank node in template — slice 58 narrowed-scope
+--      guard with `pgrdf.construct: slice 58 supports variables
+--      and constants; blank nodes land in slice 57` prefix.
+--   G. Reject literal in subject — `pgrdf.construct: literal not
+--      allowed in subject/predicate position` prefix (legal RDF).
 --   H. Reject DISTINCT/ORDER BY/aggregate wrapping on the WHERE —
 --      stable `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY /
 --      aggregates not supported (W3C 1.1 §16.2)` prefix family.
@@ -137,20 +139,20 @@ SELECT _check_error(
   $$pgrdf.construct: not a CONSTRUCT query$$
 );
 
--- ─── Invariant F: reject variable in template (slice 59 narrow) ──
+-- ─── Invariant F: reject blank node in template (slice 58 narrow) ─
 SELECT _check_error(
-  'f-rejects-variable-in-template',
-  $$SELECT * FROM pgrdf.construct(
-    'CONSTRUCT { ?s <http://example.com/t> "x" } WHERE { ?s ?p ?o }')$$,
-  $$pgrdf.construct: slice 59 supports constant-only templates$$
-);
-
--- ─── Invariant G: reject blank node in template (slice 59 narrow) ─
-SELECT _check_error(
-  'g-rejects-bnode-in-template',
+  'f-rejects-bnode-in-template',
   $$SELECT * FROM pgrdf.construct(
     'CONSTRUCT { <http://example.com/s> <http://example.com/t> _:b } WHERE { ?s ?p ?o }')$$,
-  $$pgrdf.construct: slice 59 supports constant-only templates$$
+  $$pgrdf.construct: slice 58 supports variables and constants; blank nodes land in slice 57$$
+);
+
+-- ─── Invariant G: reject literal in subject (legal RDF) ─────────
+SELECT _check_error(
+  'g-rejects-literal-in-subject',
+  $$SELECT * FROM pgrdf.construct(
+    'CONSTRUCT { "lit" <http://example.com/p> "x" } WHERE { ?s ?p ?o }')$$,
+  $$pgrdf.construct: literal not allowed in subject/predicate position$$
 );
 
 -- ─── Invariant H: reject DISTINCT/ORDER BY/aggregate on WHERE ────

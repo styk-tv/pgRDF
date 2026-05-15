@@ -228,16 +228,16 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 //
 // The slice 59 NARROW SCOPE — constant-only templates. Variables and
 // blank nodes in the template panic with the stable
-// `pgrdf.construct: slice 59 supports constant-only templates`
-// prefix; slices 58 / 57 will widen to variable substitution +
-// per-solution fresh blank-node minting (LLD §6.2). The WHERE pattern
-// itself accepts the full SELECT-side BGP / FILTER / OPTIONAL /
-// UNION / MINUS surface — translation reuses `parse_select` +
-// `build_bgp_sql` + `execute` end-to-end. Because the template is
-// constant for slice 59, each solution emits an identical
-// `template.len()`-row burst — but per W3C SPARQL 1.1 §16.2 the
-// solution sequence's multiplicity is the BGP's, so we MUST still
-// emit one burst per solution (no implicit DISTINCT).
+// `pgrdf.construct: slice 58 supports variables and constants; blank
+// nodes land in slice 57` prefix (slice 58 widened the surface from
+// constant-only by adding per-solution variable substitution; the
+// remaining blank-node template position ships in slice 57). The
+// WHERE pattern itself accepts the full SELECT-side BGP / FILTER /
+// OPTIONAL / UNION / MINUS surface — translation reuses
+// `parse_select` + `build_from_and_where` end-to-end, then projects
+// the dict ids of every template variable so per-row substitution
+// resolves them through the dictionary into the structured term shape
+// (LLD §6.1).
 //
 // Out of scope on CONSTRUCT per W3C 1.1 §16.2: DISTINCT / ORDER BY /
 // GROUP BY / aggregates. We detect by inspecting the inner `pattern`
@@ -249,10 +249,14 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 /// `(solution, template-triple)` pair. Each row carries the shape
 /// `{"subject": <term>, "predicate": <term>, "object": <term>}`, with
 /// each term encoded as `{"type": "iri"|"literal"|"bnode", "value": …,
-/// "datatype"?: …, "language"?: …}`. Slice 59 (foundation) supports
-/// constant-only templates; variables and blank nodes in the template
-/// panic with a stable "slice 59 supports constant-only templates"
-/// prefix until slices 58 / 57 widen the surface.
+/// "datatype"?: …, "language"?: …}`. Slice 58 (variables) widens the
+/// slice-59 foundation by resolving template variables against the
+/// per-solution dict-id projection. Constants flow through the
+/// slice-59 `encode_constant_template_*` helpers unchanged; variables
+/// flow through `encode_dict_term` after a single dict resolve.
+/// Blank nodes in template positions still panic with a stable
+/// `pgrdf.construct: slice 58 supports variables and constants; blank
+/// nodes land in slice 57` prefix.
 ///
 /// SQL: `pgrdf.construct(q TEXT) → SETOF JSONB`.
 #[pg_extern]
@@ -279,93 +283,357 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // way down to the BGP.
     reject_construct_modifiers(&pattern);
 
-    // Slice 59 — template must be constant-only (no variables, no
-    // blank nodes in any triple position). Encode each template
-    // triple eagerly into JSONB term cells; we reuse the cells for
-    // every solution burst since they don't depend on the row.
-    let template_rows: Vec<Value> = template
+    // Slice 58 — classify every template triple position into a
+    // ConstructTermSlot (constant value pre-encoded once, or variable
+    // name resolved per row). Blank nodes in any position still
+    // panic with the slice-58 prefix. Literals/blank-nodes in subject
+    // or predicate positions panic with the legal-RDF prefix.
+    let slots: Vec<TemplateTripleSlots> = template
         .iter()
-        .map(encode_constant_template_triple)
+        .map(classify_template_triple_slots)
         .collect();
 
+    // Collect the set of template variable names. We need them for
+    // the unbound-variable check AND for the SQL projection list.
+    let template_vars = collect_construct_template_vars(&slots);
+
     // Walk the WHERE pattern through the existing SELECT pipeline.
-    // SELECT-* equivalence: `parse_select` auto-fills `projected`
-    // with every variable the BGP binds, so the executor pulls a
-    // row per solution even though we don't consume the values
-    // (slice 59 templates are constant). An empty BGP panics —
-    // a CONSTRUCT with no WHERE is degenerate; reject cleanly.
+    // An empty BGP panics — a CONSTRUCT with no WHERE is degenerate;
+    // reject cleanly.
     let ps = parse_select(&pattern);
     if ps.bgp.is_empty() && ps.union_branches.is_empty() {
         panic!("pgrdf.construct: empty WHERE pattern");
     }
-    // For solution-cardinality counting we just need SOME projection
-    // (the row count is what matters). If the BGP binds no variables
-    // at all — exotic but possible (`WHERE { <s> <p> <o> }` with all
-    // constants) — synthesise a single dummy projection that yields
-    // exactly one row per match.
-    if ps.projected.is_empty() {
-        // Build a probe-style SQL via build_ask_probe_sql which
-        // returns `SELECT 1 …` over the same FROM/WHERE — but we
-        // need every match (not just one), so we want a full table
-        // scan instead. Fall through to the standard build path
-        // with a synthetic projection: parse_select already widens
-        // projected to all BGP vars; an all-constants BGP yields
-        // an empty `projected` and the SELECT-clause builder
-        // would emit `SELECT  FROM …` which is invalid. Insert a
-        // literal `1` so the row stream is well-formed.
-        // This branch is rare; covered by an executor test for
-        // a constant-only WHERE.
-        let probe = build_construct_constant_where_sql(&ps);
-        let params = params_take();
-        let solutions = execute_count_only(&probe, &params);
+
+    // Validate every template variable is BGP-bound. ps.projected
+    // (after parse_select's SELECT-* expansion) carries every variable
+    // the WHERE binds; references outside that set are unbound.
+    for v in &template_vars {
+        if !ps.projected.contains(v) {
+            panic!("pgrdf.construct: unbound template variable ?{v}");
+        }
+    }
+
+    // Fast path: constant-only template (no variables anywhere).
+    // Pre-encode each triple ONCE and emit `n_solutions` clones —
+    // identical to the slice-59 behaviour, no per-row resolve cost.
+    if template_vars.is_empty() {
+        let template_rows: Vec<Value> = slots.iter().map(encode_constant_slots).collect();
+        // For solution-cardinality counting we just need SOME
+        // projection (the row count is what matters). If the BGP
+        // binds no variables at all — exotic but possible
+        // (`WHERE { <s> <p> <o> }` with all constants) — synthesise a
+        // single dummy projection that yields exactly one row per
+        // match.
+        if ps.projected.is_empty() {
+            let probe = build_construct_constant_where_sql(&ps);
+            let params = params_take();
+            let solutions = execute_count_only(&probe, &params);
+            let rows = expand_template_per_solution(&template_rows, solutions);
+            return SetOfIterator::new(rows.into_iter());
+        }
+        let sql = build_bgp_sql(&ps);
+        let plan = ExecPlan {
+            projected: ps.projected,
+            sql,
+            params: params_take(),
+        };
+        let solutions = execute(&plan).len();
         let rows = expand_template_per_solution(&template_rows, solutions);
         return SetOfIterator::new(rows.into_iter());
     }
 
-    let sql = build_bgp_sql(&ps);
-    let plan = ExecPlan {
-        projected: ps.projected,
-        sql,
-        params: params_take(),
-    };
-    let solutions = execute(&plan).len();
-    let rows = expand_template_per_solution(&template_rows, solutions);
+    // Variable path (slice 58). Build a custom SELECT that projects
+    // each template variable's dict-id as BIGINT, resolve per-row
+    // against the dictionary, and emit one row per (solution × triple).
+    let rows = execute_construct_variable_path(&ps, &slots, &template_vars);
     SetOfIterator::new(rows.into_iter())
 }
 
-/// Encode a constant-only template triple into a JSONB value of shape
-/// `{"subject": <term>, "predicate": <term>, "object": <term>}`. Each
-/// term cell is a structured object per LLD v0.4 §6.1. Panics with
-/// the slice 59 prefix if the triple carries a variable or blank node
-/// in any position.
-fn encode_constant_template_triple(tp: &TriplePattern) -> Value {
-    let s = match &tp.subject {
-        TermPattern::NamedNode(n) => encode_iri_term(n.as_str()),
+/// Build + run the variable-substitution path. Mirrors the
+/// INSERT-WHERE projection pattern (see `execute_insert_where`):
+/// project each template variable as `q{N}.{col} AS "<var>"`, so each
+/// row hands back a BIGINT dict id per template var. We then resolve
+/// each unique dict id once via a per-call cache and shape the
+/// structured term cells.
+fn execute_construct_variable_path(
+    ps: &ParsedSelect,
+    slots: &[TemplateTripleSlots],
+    template_vars: &[String],
+) -> Vec<pgrx::JsonB> {
+    // Build FROM + WHERE the same way SELECT does, but project the
+    // raw dict ids (not lexical_value) so the row carries enough info
+    // to shape structured terms.
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    let (from_sql, where_clauses, plan) = build_from_and_where(
+        &ps.bgp,
+        &ps.filters,
+        &ps.optionals,
+        &ps.minuses,
+        &mut anchors,
+        0,
+    );
+
+    let mut select_clauses: Vec<String> = Vec::new();
+    let mut col_order: Vec<String> = Vec::new();
+    for var in template_vars {
+        // Slice 112 graph-scope variables bind to a `g{S}.iri` join
+        // column — that's a TEXT IRI, not a dict id. The construct
+        // path expects BIGINT dict ids per variable, so resolve the
+        // IRI back to a dict id via a scalar subselect. This keeps the
+        // row-iteration loop uniform (every column is `Option<i64>`).
+        if let Some(scope_id) = plan.projection_scope(var) {
+            select_clauses.push(format!(
+                "(SELECT id FROM pgrdf._pgrdf_dictionary \
+                   WHERE term_type = 1 AND lexical_value = g{scope_id}.iri \
+                     AND datatype_iri_id IS NULL AND language_tag IS NULL) AS {alias_v}",
+                alias_v = quote_identifier(var),
+            ));
+            col_order.push(var.clone());
+            continue;
+        }
+        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+            // Shouldn't fire — we validated against ps.projected
+            // above. Defensive: surface the unbound-variable panic
+            // with the slice-58 prefix.
+            panic!("pgrdf.construct: unbound template variable ?{var}")
+        });
+        select_clauses.push(format!(
+            "q{alias_idx}.{col} AS {alias_v}",
+            alias_v = quote_identifier(var),
+        ));
+        col_order.push(var.clone());
+    }
+    if select_clauses.is_empty() {
+        // Defensive: template_vars non-empty implies select_clauses
+        // non-empty, but keep the SQL well-formed for the cold path.
+        select_clauses.push("1 AS _pgrdf_unit".to_string());
+    }
+
+    let mut sql = format!(
+        "SELECT {sel} FROM {from_sql}",
+        sel = select_clauses.join(", "),
+    );
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+
+    let params = params_take();
+
+    // Per-call dict-resolve cache. Each unique dict id resolves once,
+    // even when the same value binds across multiple rows / triples.
+    let mut dict_cache: HashMap<i64, ResolvedTerm> = HashMap::new();
+    let mut out: Vec<pgrx::JsonB> = Vec::new();
+
+    Spi::connect_mut(|client| {
+        let arg_oids: Vec<PgOid> = vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let prepared = client
+            .prepare(sql.as_str(), &arg_oids)
+            .expect("pgrdf.construct: WHERE-SELECT prepare failed");
+        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+        let datums: Vec<DatumWithOid<'_>> = params
+            .iter()
+            .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
+            .collect();
+        let table = client
+            .select(&prepared, None, &datums)
+            .expect("pgrdf.construct: WHERE-SELECT failed");
+        for row in table {
+            // Pull each template var's dict id for this binding.
+            let mut binding: HashMap<&str, Option<i64>> = HashMap::new();
+            for (i, var) in col_order.iter().enumerate() {
+                let v: Option<i64> = row.get::<i64>(i + 1).ok().flatten();
+                binding.insert(var.as_str(), v);
+            }
+            // For each template triple, shape every position. Per W3C
+            // §16.2 (template instantiation), if any template variable
+            // is unbound for this solution (e.g. via OPTIONAL), the
+            // entire triple-group MUST be omitted for that solution.
+            for slot in slots {
+                if construct_slot_has_unbound(slot, &binding) {
+                    continue;
+                }
+                let row_val = encode_template_triple_for_solution(slot, &binding, &mut dict_cache);
+                out.push(pgrx::JsonB(row_val));
+            }
+        }
+    });
+
+    out
+}
+
+/// True if any variable position in `slot` is unbound in this row's
+/// binding map. Matches the SPARQL §16.2 rule: "template variable
+/// unbound for a solution → omit the entire template group".
+fn construct_slot_has_unbound(
+    slot: &TemplateTripleSlots,
+    binding: &HashMap<&str, Option<i64>>,
+) -> bool {
+    construct_position_unbound(&slot.subject, binding)
+        || construct_position_unbound(&slot.predicate, binding)
+        || construct_position_unbound(&slot.object, binding)
+}
+
+fn construct_position_unbound(
+    slot: &ConstructTermSlot,
+    binding: &HashMap<&str, Option<i64>>,
+) -> bool {
+    matches!(
+        slot,
+        ConstructTermSlot::Variable(v) if binding.get(v.as_str()).copied().flatten().is_none()
+    )
+}
+
+/// Shape one template triple into its `{"subject", "predicate",
+/// "object"}` row by walking each position's slot and resolving
+/// variable bindings through the dictionary.
+fn encode_template_triple_for_solution(
+    slot: &TemplateTripleSlots,
+    binding: &HashMap<&str, Option<i64>>,
+    dict_cache: &mut HashMap<i64, ResolvedTerm>,
+) -> Value {
+    let s = encode_template_position(&slot.subject, binding, dict_cache);
+    let p = encode_template_position(&slot.predicate, binding, dict_cache);
+    let o = encode_template_position(&slot.object, binding, dict_cache);
+    json!({ "subject": s, "predicate": p, "object": o })
+}
+
+fn encode_template_position(
+    slot: &ConstructTermSlot,
+    binding: &HashMap<&str, Option<i64>>,
+    dict_cache: &mut HashMap<i64, ResolvedTerm>,
+) -> Value {
+    match slot {
+        ConstructTermSlot::Iri(iri) => encode_iri_term(iri),
+        ConstructTermSlot::Literal(value, datatype, language) => {
+            encode_literal_term_parts(value, datatype.as_deref(), language.as_deref())
+        }
+        ConstructTermSlot::Variable(name) => {
+            // construct_slot_has_unbound is the gate — this row is
+            // guaranteed Some(id). Defensive unwrap with a clear
+            // message if the invariant ever slips.
+            let id = binding
+                .get(name.as_str())
+                .copied()
+                .flatten()
+                .expect("pgrdf.construct: variable binding vanished after unbound-check");
+            let term = resolve_dict_term(id, dict_cache);
+            encode_dict_term(&term)
+        }
+    }
+}
+
+/// Per-position classification of a template triple's subject /
+/// predicate / object slot. The slot can be a constant IRI / literal
+/// (encoded once, cloned per row), or a variable name (resolved
+/// per-solution against the dict cache in
+/// `encode_template_position`).
+///
+/// Blank nodes don't land here — `classify_template_triple_slots`
+/// panics with the slice-58 prefix before constructing the slot. The
+/// language tag in `ConstructTermSlot::Literal` is `None` for plain
+/// strings; the datatype is `None` exactly when a language tag is
+/// present (RDF 1.1 §3.3 — a `rdf:langString` carries the language and
+/// the datatype IRI is implicit).
+#[derive(Clone)]
+enum ConstructTermSlot {
+    Iri(String),
+    Literal(String, Option<String>, Option<String>),
+    Variable(String),
+}
+
+#[derive(Clone)]
+struct TemplateTripleSlots {
+    subject: ConstructTermSlot,
+    predicate: ConstructTermSlot,
+    object: ConstructTermSlot,
+}
+
+/// Classify a template triple's three positions into structured
+/// slots. Panics with the slice-58 prefix on blank nodes (slice 57
+/// will land them) and with the legal-RDF prefix on literals or
+/// blank nodes in subject/predicate position.
+fn classify_template_triple_slots(tp: &TriplePattern) -> TemplateTripleSlots {
+    let subject = match &tp.subject {
+        TermPattern::NamedNode(n) => ConstructTermSlot::Iri(n.as_str().to_string()),
+        TermPattern::Variable(v) => ConstructTermSlot::Variable(v.as_str().to_string()),
         TermPattern::Literal(_) => panic!(
-            "pgrdf.construct: literal in subject position is not legal RDF (SPARQL 1.1 §16.2)"
+            "pgrdf.construct: literal not allowed in subject/predicate position (SPARQL 1.1 §16.2)"
         ),
-        TermPattern::Variable(_) | TermPattern::BlankNode(_) => panic!(
-            "pgrdf.construct: slice 59 supports constant-only templates (variables / blank nodes ship in slices 58 / 57)"
+        TermPattern::BlankNode(_) => panic!(
+            "pgrdf.construct: slice 58 supports variables and constants; blank nodes land in slice 57"
         ),
         #[allow(unreachable_patterns)]
         _ => panic!("pgrdf.construct: unsupported subject term shape"),
     };
-    let p = match &tp.predicate {
-        NamedNodePattern::NamedNode(n) => encode_iri_term(n.as_str()),
-        NamedNodePattern::Variable(_) => panic!(
-            "pgrdf.construct: slice 59 supports constant-only templates (variables / blank nodes ship in slices 58 / 57)"
-        ),
+    let predicate = match &tp.predicate {
+        NamedNodePattern::NamedNode(n) => ConstructTermSlot::Iri(n.as_str().to_string()),
+        NamedNodePattern::Variable(v) => ConstructTermSlot::Variable(v.as_str().to_string()),
     };
-    let o = match &tp.object {
-        TermPattern::NamedNode(n) => encode_iri_term(n.as_str()),
-        TermPattern::Literal(lit) => encode_literal_term(lit),
-        TermPattern::Variable(_) | TermPattern::BlankNode(_) => panic!(
-            "pgrdf.construct: slice 59 supports constant-only templates (variables / blank nodes ship in slices 58 / 57)"
+    let object = match &tp.object {
+        TermPattern::NamedNode(n) => ConstructTermSlot::Iri(n.as_str().to_string()),
+        TermPattern::Variable(v) => ConstructTermSlot::Variable(v.as_str().to_string()),
+        TermPattern::Literal(lit) => {
+            let value = lit.value().to_string();
+            if let Some(lang) = lit.language() {
+                ConstructTermSlot::Literal(value, None, Some(lang.to_string()))
+            } else {
+                ConstructTermSlot::Literal(value, Some(lit.datatype().as_str().to_string()), None)
+            }
+        }
+        TermPattern::BlankNode(_) => panic!(
+            "pgrdf.construct: slice 58 supports variables and constants; blank nodes land in slice 57"
         ),
         #[allow(unreachable_patterns)]
         _ => panic!("pgrdf.construct: unsupported object term shape"),
     };
+    TemplateTripleSlots {
+        subject,
+        predicate,
+        object,
+    }
+}
+
+/// Walk classified template slots and collect every variable name
+/// referenced across subject / predicate / object slots. Order is
+/// first-appearance (stable) so the SQL projection column ordering is
+/// reproducible.
+fn collect_construct_template_vars(slots: &[TemplateTripleSlots]) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for s in slots {
+        for pos in [&s.subject, &s.predicate, &s.object] {
+            if let ConstructTermSlot::Variable(v) = pos {
+                if seen.insert(v.clone()) {
+                    out.push(v.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Encode a fully-constant template triple (no variables) into the
+/// per-row JSONB cell shape. Slice-59 fast path.
+fn encode_constant_slots(slot: &TemplateTripleSlots) -> Value {
+    let s = encode_constant_position(&slot.subject);
+    let p = encode_constant_position(&slot.predicate);
+    let o = encode_constant_position(&slot.object);
     json!({ "subject": s, "predicate": p, "object": o })
+}
+
+fn encode_constant_position(slot: &ConstructTermSlot) -> Value {
+    match slot {
+        ConstructTermSlot::Iri(iri) => encode_iri_term(iri),
+        ConstructTermSlot::Literal(value, datatype, language) => {
+            encode_literal_term_parts(value, datatype.as_deref(), language.as_deref())
+        }
+        ConstructTermSlot::Variable(_) => {
+            // Callers gate this branch behind `template_vars.is_empty()`.
+            panic!("pgrdf.construct: constant-fast-path called on variable slot (internal)")
+        }
+    }
 }
 
 /// `{"type": "iri", "value": "<iri>"}` — shape contract per LLD §6.1.
@@ -378,19 +646,117 @@ fn encode_iri_term(iri: &str) -> Value {
 /// strings carry the `xsd:string` datatype IRI explicitly so callers
 /// don't have to special-case the absence-of-tag form (W3C 1.1
 /// §16.2 / RDF 1.1 §3.3 — `xsd:string` is the lexical default).
-fn encode_literal_term(lit: &Literal) -> Value {
+/// Language-tagged literals carry BOTH a `language` field AND the
+/// implicit `rdf:langString` datatype IRI per RDF 1.1 §3.3 so
+/// callers don't have to special-case the absence of `datatype`.
+fn encode_literal_term_parts(
+    value: &str,
+    datatype: Option<&str>,
+    language: Option<&str>,
+) -> Value {
     let mut obj = Map::new();
     obj.insert("type".into(), Value::String("literal".into()));
-    obj.insert("value".into(), Value::String(lit.value().to_string()));
-    if let Some(lang) = lit.language() {
+    obj.insert("value".into(), Value::String(value.to_string()));
+    if let Some(lang) = language {
         obj.insert("language".into(), Value::String(lang.to_string()));
+        // RDF 1.1 §3.3: language-tagged literals have the implicit
+        // datatype `rdf:langString`. Emit it explicitly so consumers
+        // can switch on a single field.
+        obj.insert(
+            "datatype".into(),
+            Value::String("http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into()),
+        );
+    } else if let Some(dt) = datatype {
+        obj.insert("datatype".into(), Value::String(dt.to_string()));
     } else {
         obj.insert(
             "datatype".into(),
-            Value::String(lit.datatype().as_str().to_string()),
+            Value::String("http://www.w3.org/2001/XMLSchema#string".into()),
         );
     }
     Value::Object(obj)
+}
+
+/// Resolved (type, lexical, datatype-IRI, language-tag) tuple for a
+/// dict id. Filled in once per id via `resolve_dict_term`; the
+/// per-call cache hands the same `ResolvedTerm` back to every
+/// template position that references it.
+#[derive(Clone)]
+struct ResolvedTerm {
+    term_type: i16,
+    lexical: String,
+    datatype_iri: Option<String>,
+    language: Option<String>,
+}
+
+/// Resolve a dict id into a `ResolvedTerm` via a single SPI call.
+/// The datatype IRI (if present) is resolved through one additional
+/// dict lookup chained inside the same query so we pay one SPI
+/// round-trip per unique id. Repeats hit the per-call cache.
+fn resolve_dict_term(id: i64, cache: &mut HashMap<i64, ResolvedTerm>) -> ResolvedTerm {
+    if let Some(hit) = cache.get(&id) {
+        return hit.clone();
+    }
+    let row = Spi::connect(|client| -> Option<(i16, String, Option<String>, Option<String>)> {
+        let prepared = client
+            .prepare(
+                "SELECT d.term_type, d.lexical_value, dt.lexical_value, d.language_tag
+                   FROM pgrdf._pgrdf_dictionary d
+                   LEFT JOIN pgrdf._pgrdf_dictionary dt
+                     ON dt.id = d.datatype_iri_id
+                  WHERE d.id = $1",
+                &[PgOid::BuiltIn(PgBuiltInOids::INT8OID)],
+            )
+            .expect("pgrdf.construct: dict resolve prepare failed");
+        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+        let datum = unsafe { DatumWithOid::new(id, int8_oid) };
+        let table = client
+            .select(&prepared, Some(1), &[datum])
+            .expect("pgrdf.construct: dict resolve select failed");
+        for r in table {
+            let term_type: i16 = r.get::<i16>(1).ok().flatten()?;
+            let lex: String = r.get::<String>(2).ok().flatten()?;
+            let dt: Option<String> = r.get::<String>(3).ok().flatten();
+            let lang: Option<String> = r.get::<String>(4).ok().flatten();
+            return Some((term_type, lex, dt, lang));
+        }
+        None
+    })
+    .unwrap_or_else(|| {
+        panic!("pgrdf.construct: dict id {id} not found (corrupted projection)")
+    });
+    let term = ResolvedTerm {
+        term_type: row.0,
+        lexical: row.1,
+        datatype_iri: row.2,
+        language: row.3,
+    };
+    cache.insert(id, term.clone());
+    term
+}
+
+/// Shape a resolved dict term into the structured JSONB cell per
+/// LLD §6.1. Switches on `term_type` (URI=1, BLANK=2, LITERAL=3).
+fn encode_dict_term(term: &ResolvedTerm) -> Value {
+    match term.term_type {
+        // term_type::URI
+        1 => encode_iri_term(&term.lexical),
+        // term_type::BLANK_NODE — `{"type":"bnode","value":"<label>"}`
+        // per LLD §6.1. Blank-node identity carries through as the
+        // dict-stored lexical value (which is what the parse-side
+        // loader writes when it allocates a fresh `_:bN` label).
+        2 => json!({ "type": "bnode", "value": &term.lexical }),
+        // term_type::LITERAL — switch on language tag vs datatype.
+        3 => encode_literal_term_parts(
+            &term.lexical,
+            term.datatype_iri.as_deref(),
+            term.language.as_deref(),
+        ),
+        other => panic!(
+            "pgrdf.construct: unknown dict term_type {other} (lex={lex})",
+            lex = term.lexical
+        ),
+    }
 }
 
 /// Walk past Project / Slice wrappers and refuse to translate a
@@ -7636,11 +8002,13 @@ mod tests {
 
     // ─── Phase D slice 59 — pgrdf.construct foundation ──────────────
     //
-    // Constant-only templates per W3C SPARQL 1.1 §16.2. Each solution
-    // emits one row per template triple, all rows carrying the same
-    // pre-encoded structured term cells. Variables / blank nodes in
-    // the template panic with the slice 59 prefix until slices 58 / 57
-    // widen the surface.
+    // Constant-only templates per W3C SPARQL 1.1 §16.2 (slice 59
+    // foundation) — each solution emits one row per template triple,
+    // all rows carrying the same pre-encoded structured term cells.
+    // Slice 58 widens to variables: each variable in the template
+    // resolves per-solution against the dictionary and emits a
+    // structured `{type, value, datatype, [language]}` cell. Blank
+    // nodes in the template still panic until slice 57.
 
     /// Positive path — one solution, one template triple, one row.
     /// Locks the structured-term shape `{"type":"iri","value":...}`
@@ -7764,16 +8132,91 @@ mod tests {
         Spi::run("SELECT * FROM pgrdf.construct('SELECT ?s WHERE { ?s ?p ?o }')").unwrap();
     }
 
-    /// Negative — variable in template position rejected with the
-    /// stable slice 59 prefix (substring match, not exact: the tail
-    /// carries the next-slice signpost).
-    #[pg_test(
-        error = "pgrdf.construct: slice 59 supports constant-only templates (variables / blank nodes ship in slices 58 / 57)"
-    )]
-    fn construct_rejects_variable_in_template() {
+    // ─────────────────────────────────────────────────────────────
+    // Slice 58 — variable substitution in template positions.
+    // Constants flow through the slice-59 fast path; variables walk
+    // the per-solution binding and resolve through the dictionary
+    // into the same structured term shape. Blank nodes in templates
+    // are STILL rejected — slice 57 lifts that.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Positive — variable in subject position. Three solutions
+    /// each carry a distinct subject IRI; the predicate and object
+    /// stay constant (slice-59 path) across rows.
+    #[pg_test]
+    fn construct_variable_subject_three_solutions() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p \"1\" .
+                 ex:b ex:p \"2\" .
+                 ex:c ex:p \"3\" .',
+                9103)",
+        )
+        .unwrap();
+
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/tag> \"hit\" } \
+                 WHERE { ?s <http://example.com/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(n, 3, "three solutions × one template triple → three rows");
+
+        // Each row carries the right subject IRI shape. Collect the
+        // three subject IRIs via SQL aggregation so test ordering
+        // doesn't matter.
+        let collected: String = Spi::get_one(
+            "SELECT string_agg(j->'subject'->>'value', ',' ORDER BY j->'subject'->>'value') \
+               FROM pgrdf.construct(
+                 'CONSTRUCT { ?s <http://example.com/tag> \"hit\" } \
+                   WHERE { ?s <http://example.com/p> ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            collected, "http://example.com/a,http://example.com/b,http://example.com/c",
+            "every row's subject must reflect the per-solution binding"
+        );
+    }
+
+    /// Positive — variable in predicate position. The predicate IRI
+    /// varies per row; subject and object are constants.
+    #[pg_test]
+    fn construct_variable_predicate_two_solutions() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p1 \"x\" .
+                 ex:a ex:p2 \"y\" .',
+                9104)",
+        )
+        .unwrap();
+
+        let collected: String = Spi::get_one(
+            "SELECT string_agg(j->'predicate'->>'value', ',' \
+                               ORDER BY j->'predicate'->>'value') \
+               FROM pgrdf.construct(
+                 'CONSTRUCT { <http://example.com/a> ?p \"tagged\" } \
+                   WHERE { <http://example.com/a> ?p ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            collected, "http://example.com/p1,http://example.com/p2",
+            "predicate variable substitutes per solution"
+        );
+    }
+
+    /// Negative — referencing a template variable that the WHERE
+    /// pattern doesn't bind panics with the stable
+    /// `unbound template variable ?missing` prefix.
+    #[pg_test(error = "pgrdf.construct: unbound template variable ?missing")]
+    fn construct_rejects_unbound_template_variable() {
         Spi::run(
             "SELECT * FROM pgrdf.construct(
-               'CONSTRUCT { ?s <http://example.com/t> \"x\" } \
+               'CONSTRUCT { ?s <http://example.com/t> ?missing } \
                  WHERE { ?s ?p ?o }')",
         )
         .unwrap();
