@@ -25,8 +25,8 @@
 
 use pgrx::prelude::*;
 use serde_json::{json, Value};
-use spargebra::algebra::GraphPattern;
-use spargebra::term::{GraphName, NamedNodePattern, TermPattern, TriplePattern};
+use spargebra::algebra::{GraphPattern, QueryDataset};
+use spargebra::term::{GraphName, GraphNamePattern, NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 
 /// Parse a SPARQL query (or UPDATE) and return a JSONB describing its
@@ -90,12 +90,27 @@ fn serialize_query(q: &Query) -> Value {
 
 /// Walk an `spargebra::Update` and report its top-level shape. The
 /// `form` is uniformly `"UPDATE"` regardless of which operations are
-/// inside; per-op detail lives under `operations[]`. For slice 84 the
-/// per-op shape is intentionally minimal — INSERT_DATA gets its triple
-/// + graph counts, the others get the variant name only so callers
-/// can preview which sub-slice (83/82/…) will translate them. Forms
-/// the parser parses but the executor doesn't translate yet are NOT
-/// flagged in `unsupported_algebra` — that array is reserved for
+/// inside; per-op detail lives under `operations[]`.
+///
+/// Phase C slice 74 enrichment — per-op detail surfaces enough of the
+/// executor's routing inputs that callers can preview an UPDATE's
+/// effect without running it:
+///
+///   * `InsertData` — `triples` + `graphs` (DEFAULT and/or IRIs from
+///     the per-quad `graph_name`).
+///   * `DeleteData` — same shape as `InsertData` (slice 74 promoted
+///     `graphs` here so the surface is symmetric).
+///   * `DeleteInsert` — narrows to a `kind` label aligning with the
+///     executor's runtime `form` (`INSERT_WHERE`, `DELETE_WHERE`, or
+///     `DELETE_INSERT_WHERE`); surfaces template-side graph IRIs
+///     extracted from the `Vec<QuadPattern>` / `Vec<GroundQuadPattern>`
+///     templates, and the WITH-iri from `using` (when present).
+///   * `Clear` / `Create` / `Drop` — surface the `target` (DEFAULT /
+///     NAMED <iri> / NAMED_ALL / ALL) so callers can preview which
+///     partition the lifecycle UDF will touch.
+///
+/// Forms the parser parses but the executor doesn't translate yet are
+/// NOT flagged in `unsupported_algebra` — that array is reserved for
 /// algebra shapes we can't even parse-walk (e.g. `LOAD` is out of
 /// scope per LLD v0.4 §14).
 fn serialize_update(u: &Update) -> Value {
@@ -106,19 +121,7 @@ fn serialize_update(u: &Update) -> Value {
             GraphUpdateOperation::InsertData { data } => {
                 let mut graphs: Vec<String> = Vec::new();
                 for q in data {
-                    match &q.graph_name {
-                        GraphName::DefaultGraph => {
-                            if !graphs.iter().any(|g| g == "DEFAULT") {
-                                graphs.push("DEFAULT".to_string());
-                            }
-                        }
-                        GraphName::NamedNode(n) => {
-                            let s = n.as_str().to_string();
-                            if !graphs.contains(&s) {
-                                graphs.push(s);
-                            }
-                        }
-                    }
+                    push_graph_name(&q.graph_name, &mut graphs);
                 }
                 ops.push(json!({
                     "op":      "InsertData",
@@ -127,31 +130,80 @@ fn serialize_update(u: &Update) -> Value {
                 }));
             }
             GraphUpdateOperation::DeleteData { data } => {
+                let mut graphs: Vec<String> = Vec::new();
+                for q in data {
+                    push_graph_name(&q.graph_name, &mut graphs);
+                }
                 ops.push(json!({
                     "op":      "DeleteData",
                     "triples": data.len(),
+                    "graphs":  graphs,
                 }));
             }
             GraphUpdateOperation::DeleteInsert {
                 delete,
                 insert,
+                using,
                 pattern,
-                ..
             } => {
-                ops.push(json!({
+                // Narrow to match the executor's runtime form labels
+                // (`INSERT_WHERE` / `DELETE_WHERE` / `DELETE_INSERT_WHERE`)
+                // so sparql_parse callers can route on the same key the
+                // _update summary row emits.
+                let has_delete = !delete.is_empty();
+                let has_insert = !insert.is_empty();
+                let kind = match (has_delete, has_insert) {
+                    (true, true) => "DELETE_INSERT_WHERE",
+                    (true, false) => "DELETE_WHERE",
+                    (false, true) => "INSERT_WHERE",
+                    // spargebra parser never emits an empty DeleteInsert;
+                    // surface a stable label rather than panic so
+                    // sparql_parse stays infallible on every parsed AST.
+                    (false, false) => "DELETE_INSERT_WHERE",
+                };
+                // Template-side graphs: union of GroundQuadPattern.graph_name
+                // (delete) and QuadPattern.graph_name (insert). Variable
+                // graph names are surfaced as "?var" sentinels — the
+                // executor handles them via `GraphPattern::Graph` scoping.
+                let mut tmpl_graphs: Vec<String> = Vec::new();
+                for q in delete {
+                    push_graph_name_pattern(&q.graph_name, &mut tmpl_graphs);
+                }
+                for q in insert {
+                    push_graph_name_pattern(&q.graph_name, &mut tmpl_graphs);
+                }
+                let mut entry = json!({
                     "op": "DeleteInsert",
+                    "kind": kind,
                     "delete_template_size": delete.len(),
                     "insert_template_size": insert.len(),
                     "where_pattern_size":   bgp_count(pattern),
-                }));
+                    "template_graphs":      tmpl_graphs,
+                });
+                if let Some(with_iri) = with_iri_from_using(using) {
+                    entry["with_graph"] = Value::String(with_iri);
+                }
+                ops.push(entry);
             }
             GraphUpdateOperation::Load { .. } => {
                 ops.push(json!({ "op": "Load" }));
                 unsupported.push("Load (URL fetch out of v0.4 scope)");
             }
-            GraphUpdateOperation::Clear { .. } => ops.push(json!({ "op": "Clear" })),
-            GraphUpdateOperation::Create { .. } => ops.push(json!({ "op": "Create" })),
-            GraphUpdateOperation::Drop { .. } => ops.push(json!({ "op": "Drop" })),
+            GraphUpdateOperation::Clear { graph, silent } => ops.push(json!({
+                "op": "Clear",
+                "target": graph_target_label(graph),
+                "silent": *silent,
+            })),
+            GraphUpdateOperation::Create { graph, silent } => ops.push(json!({
+                "op": "Create",
+                "target": format!("NAMED <{}>", graph.as_str()),
+                "silent": *silent,
+            })),
+            GraphUpdateOperation::Drop { graph, silent } => ops.push(json!({
+                "op": "Drop",
+                "target": graph_target_label(graph),
+                "silent": *silent,
+            })),
         }
     }
     json!({
@@ -159,6 +211,67 @@ fn serialize_update(u: &Update) -> Value {
         "operations":          ops,
         "unsupported_algebra": unsupported,
     })
+}
+
+/// Append a `GraphName` (used by `Quad` in INSERT DATA / DELETE DATA)
+/// to `graphs`, deduplicating against existing entries. `DefaultGraph`
+/// surfaces as the literal token `"DEFAULT"`; named-node graphs
+/// surface as their absolute IRI string.
+fn push_graph_name(g: &GraphName, graphs: &mut Vec<String>) {
+    let label = match g {
+        GraphName::DefaultGraph => "DEFAULT".to_string(),
+        GraphName::NamedNode(n) => n.as_str().to_string(),
+    };
+    if !graphs.iter().any(|existing| existing == &label) {
+        graphs.push(label);
+    }
+}
+
+/// Append a `GraphNamePattern` (used by `QuadPattern` /
+/// `GroundQuadPattern` in DeleteInsert templates) to `graphs`,
+/// deduplicating. Variable graph names surface as `?var` so callers
+/// can detect dynamic routing; `DefaultGraph` surfaces as `"DEFAULT"`
+/// (consistent with the executor's `graphs_touched` reporting).
+fn push_graph_name_pattern(g: &GraphNamePattern, graphs: &mut Vec<String>) {
+    let label = match g {
+        GraphNamePattern::DefaultGraph => "DEFAULT".to_string(),
+        GraphNamePattern::NamedNode(n) => n.as_str().to_string(),
+        GraphNamePattern::Variable(v) => format!("?{}", v.as_str()),
+    };
+    if !graphs.iter().any(|existing| existing == &label) {
+        graphs.push(label);
+    }
+}
+
+/// Extract the WITH-graph IRI from a `using:` field — mirrors
+/// `executor.rs::with_iri_from_using` but tolerates the multi-IRI /
+/// USING NAMED forms by returning `None` instead of panicking. That
+/// keeps `sparql_parse` infallible on every parsed AST even when the
+/// query carries shapes the executor will later reject (the rejection
+/// is the executor's job; the parser only describes).
+fn with_iri_from_using(using: &Option<QueryDataset>) -> Option<String> {
+    let ds = using.as_ref()?;
+    let named_empty = ds.named.as_ref().map(|v| v.is_empty()).unwrap_or(true);
+    if ds.default.len() == 1 && named_empty {
+        Some(ds.default[0].as_str().to_string())
+    } else {
+        None
+    }
+}
+
+/// Render a lifecycle algebra target (`CLEAR` / `DROP` argument):
+///   * `GraphTarget::NamedNode(<iri>)` → `"NAMED <iri>"`
+///   * `GraphTarget::DefaultGraph`     → `"DEFAULT"`
+///   * `GraphTarget::NamedGraphs`      → `"NAMED_ALL"`
+///   * `GraphTarget::AllGraphs`        → `"ALL"`
+fn graph_target_label(t: &spargebra::algebra::GraphTarget) -> String {
+    use spargebra::algebra::GraphTarget;
+    match t {
+        GraphTarget::NamedNode(n) => format!("NAMED <{}>", n.as_str()),
+        GraphTarget::DefaultGraph => "DEFAULT".to_string(),
+        GraphTarget::NamedGraphs => "NAMED_ALL".to_string(),
+        GraphTarget::AllGraphs => "ALL".to_string(),
+    }
 }
 
 /// Best-effort BGP-pattern count inside a `WHERE` clause — used by
@@ -543,6 +656,155 @@ mod tests {
         // genuinely-out-of-scope shapes (e.g. LOAD).
         let unsupported = v["unsupported_algebra"].as_array().unwrap();
         assert!(unsupported.is_empty());
+    }
+
+    /// Phase C slice 74 — `DeleteInsert` ops surface a `kind` label
+    /// that mirrors the executor's runtime `_update.form` (one of
+    /// `INSERT_WHERE` / `DELETE_WHERE` / `DELETE_INSERT_WHERE`) plus
+    /// a `template_graphs` array and (when WITH is present) a
+    /// `with_graph` IRI. Pure INSERT WHERE — no DELETE template —
+    /// narrows to `kind: "INSERT_WHERE"`.
+    #[pg_test]
+    fn sparql_parse_update_insert_where_kind() {
+        let q = "PREFIX ex: <http://example.org/> \
+                 INSERT { ?s ex:tagged \"y\" } WHERE { ?s ex:p ?o }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        let ops = v["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["op"], "DeleteInsert");
+        assert_eq!(ops[0]["kind"], "INSERT_WHERE");
+        assert_eq!(ops[0]["delete_template_size"], 0);
+        assert_eq!(ops[0]["insert_template_size"], 1);
+        // No WITH — the field is absent (NOT null).
+        assert!(ops[0].get("with_graph").is_none());
+    }
+
+    /// Pure DELETE WHERE narrows to `kind: "DELETE_WHERE"`.
+    #[pg_test]
+    fn sparql_parse_update_delete_where_kind() {
+        let q = "PREFIX ex: <http://example.org/> \
+                 DELETE { ?s ex:p ?o } WHERE { ?s ex:p ?o }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        let ops = v["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["kind"], "DELETE_WHERE");
+        assert_eq!(ops[0]["delete_template_size"], 1);
+        assert_eq!(ops[0]["insert_template_size"], 0);
+    }
+
+    /// Combined DELETE + INSERT WHERE narrows to
+    /// `kind: "DELETE_INSERT_WHERE"`.
+    #[pg_test]
+    fn sparql_parse_update_delete_insert_where_kind() {
+        let q = "PREFIX ex: <http://example.org/> \
+                 DELETE { ?s ex:p ?o } INSERT { ?s ex:p \"new\" } WHERE { ?s ex:p ?o }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        let ops = v["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["kind"], "DELETE_INSERT_WHERE");
+        assert_eq!(ops[0]["delete_template_size"], 1);
+        assert_eq!(ops[0]["insert_template_size"], 1);
+    }
+
+    /// `WITH <g>` surfaces as `with_graph: "<iri>"` on the
+    /// DeleteInsert op so callers can preview the routing.
+    #[pg_test]
+    fn sparql_parse_update_with_graph_surfaces_iri() {
+        let q = "PREFIX ex: <http://example.org/> \
+                 WITH <http://example.org/store> \
+                 INSERT { ?s ex:t \"y\" } WHERE { ?s ex:p ?o }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        let ops = v["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["with_graph"], "http://example.org/store");
+    }
+
+    /// Template-side `GRAPH <iri> { … }` blocks surface in
+    /// `template_graphs`. Default-graph quads surface as `"DEFAULT"`.
+    #[pg_test]
+    fn sparql_parse_update_template_graphs_surfaced() {
+        let q = "PREFIX ex: <http://example.org/> \
+                 INSERT { GRAPH <http://example.org/dst> { ?s ex:copied \"y\" } } \
+                 WHERE { ?s ex:src ?o }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        let ops = v["operations"].as_array().unwrap();
+        let tmpl = ops[0]["template_graphs"].as_array().unwrap();
+        assert_eq!(tmpl.len(), 1);
+        assert_eq!(tmpl[0], "http://example.org/dst");
+    }
+
+    /// DELETE DATA now surfaces `graphs` like INSERT DATA (slice 74).
+    #[pg_test]
+    fn sparql_parse_update_delete_data_graphs() {
+        let q = "DELETE DATA { GRAPH <http://example.org/g1> { \
+                   <http://x/a> <http://x/b> <http://x/c> } }";
+        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let v = &j.0;
+        let ops = v["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["op"], "DeleteData");
+        let graphs = ops[0]["graphs"].as_array().unwrap();
+        assert_eq!(graphs.len(), 1);
+        assert_eq!(graphs[0], "http://example.org/g1");
+    }
+
+    /// CLEAR / DROP / CREATE lifecycle ops surface a `target` label
+    /// describing which partition the executor will touch.
+    #[pg_test]
+    fn sparql_parse_update_lifecycle_targets() {
+        // CLEAR DEFAULT
+        let j: pgrx::JsonB =
+            Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &["CLEAR DEFAULT".into()])
+                .unwrap()
+                .unwrap();
+        let ops = j.0["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["op"], "Clear");
+        assert_eq!(ops[0]["target"], "DEFAULT");
+        assert_eq!(ops[0]["silent"], false);
+
+        // DROP GRAPH <iri>
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.sparql_parse($1)",
+            &["DROP GRAPH <http://example.org/g1>".into()],
+        )
+        .unwrap()
+        .unwrap();
+        let ops = j.0["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["op"], "Drop");
+        assert_eq!(ops[0]["target"], "NAMED <http://example.org/g1>");
+
+        // CREATE GRAPH <iri> SILENT  (SILENT keyword precedes GRAPH)
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.sparql_parse($1)",
+            &["CREATE SILENT GRAPH <http://example.org/g2>".into()],
+        )
+        .unwrap()
+        .unwrap();
+        let ops = j.0["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["op"], "Create");
+        assert_eq!(ops[0]["target"], "NAMED <http://example.org/g2>");
+        assert_eq!(ops[0]["silent"], true);
+
+        // DROP ALL — multi-graph target
+        let j: pgrx::JsonB =
+            Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &["DROP ALL".into()])
+                .unwrap()
+                .unwrap();
+        let ops = j.0["operations"].as_array().unwrap();
+        assert_eq!(ops[0]["op"], "Drop");
+        assert_eq!(ops[0]["target"], "ALL");
     }
 
     #[pg_test]
