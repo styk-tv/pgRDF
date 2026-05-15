@@ -412,8 +412,25 @@ not the integer. See
   `add_graph_id_iri_synthetic_upgrade`,
   `add_graph_id_iri_id_conflict`,
   `add_graph_id_iri_iri_conflict`).
-- ⏳ Slices 116-115 — remaining UDF surface (`pgrdf.graph_id(iri)`,
-  `pgrdf.graph_iri(id)`).
+- ✅ **Slice 116 — `pgrdf.graph_id(iri TEXT) → BIGINT` lookup.**
+  Read-only resolution of an IRI back to its integer `graph_id`
+  in `_pgrdf_graphs`, or `NULL` when the IRI is not bound. Marked
+  `#[pg_extern(strict)]` so a NULL argument short-circuits to NULL
+  output without invoking the function body; the `&str` body
+  therefore never observes a NULL input. The scalar-subquery
+  `SELECT (subquery)` wrapper keeps SPI on the "exactly one row"
+  path (NULL on miss, id otherwise), the same idiom the IRI-keyed
+  `add_graph` overload uses to dodge the
+  `SpiTupleTable positioned before the start` empty-result trip.
+  No panic on miss — NULL is the documented lookup-miss signal
+  (LLD v0.4 §3.2). Regression coverage:
+  [`tests/regression/sql/76-graph-id-lookup.sql`](../tests/regression/sql/76-graph-id-lookup.sql)
+  + four `#[pg_test]`s in
+  [`src/storage/graphs.rs`](../src/storage/graphs.rs)
+  (`graph_id_seed_lookup`, `graph_id_after_iri_add`,
+  `graph_id_miss_returns_null`,
+  `graph_id_null_input_null_output`).
+- ⏳ Slice 115 — remaining UDF surface (`pgrdf.graph_iri(id)`).
 - ⏳ Slices 111-110 — SPARQL `GRAPH { … }` translation
   (resolution against `_pgrdf_graphs.iri`, projection of `?g` as
   IRI).

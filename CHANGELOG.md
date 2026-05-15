@@ -6,6 +6,20 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 116 — `pgrdf.graph_id(iri)` lookup
+
+Read-only `pgrdf.graph_id(iri TEXT) → BIGINT` returns the integer
+`graph_id` bound to the given IRI in `_pgrdf_graphs`, or NULL if
+unbound. Marked STRICT so NULL input → NULL output without an SPI
+round trip.
+
+Regression: `tests/regression/sql/76-graph-id-lookup.sql` covers
+seed, post-IRI-add, post-(id,iri)-add, post-integer-add (synthetic
+binding), miss, empty-input, and NULL-input cases. Plus four pgrx
+tests in `src/storage/graphs.rs` covering seed lookup, post-add
+lookup, miss, and NULL input. Test bar: 106 pgrx + 45 pg_regress +
+23 W3C + 3 LUBM = 177 green.
+
 ### Phase A slice 117 — `pgrdf.add_graph(id BIGINT, iri TEXT)` explicit binding
 
 Third `pgrdf.add_graph` overload landing. Caller specifies both id

@@ -172,10 +172,23 @@ serialised by the same
 overload takes. Negative `id` and empty/whitespace-only `iri` panic
 with the stable prefixes shared with the other two overloads.
 
-The remaining IRI-keyed UDF surface (`pgrdf.graph_id(iri)`,
-`pgrdf.graph_iri(id)`) lands in subsequent Phase A slices; SPARQL
-`GRAPH { … }` translation lands later in Phase A. Spec:
-SPEC.pgRDF.LLD.v0.4 §3.
+**Slice 116** adds the read-only lookup
+`pgrdf.graph_id(iri TEXT) → BIGINT`. Returns the integer `graph_id`
+bound to the given IRI in `_pgrdf_graphs`, or `NULL` if the IRI is
+not bound. No side effects, no panic on miss — NULL is the
+lookup-miss signal, distinct from an actual SPI error which still
+propagates with the stable `graph_id:` prefix. Marked
+`#[pg_extern(strict)]` so Postgres short-circuits a NULL argument
+to NULL output without invoking the function; the `&str` body
+therefore never sees a NULL input. Internally the lookup wraps its
+`SELECT graph_id … WHERE iri = $1 LIMIT 1` in a scalar subquery so
+SPI always returns "exactly one row" (NULL or the id), the same
+idiom the IRI-keyed `add_graph` overload uses to avoid the
+`SpiTupleTable positioned before the start` empty-result trip.
+
+The remaining IRI-keyed UDF surface (`pgrdf.graph_iri(id)`) lands
+in the next Phase A slice; SPARQL `GRAPH { … }` translation lands
+later in Phase A. Spec: SPEC.pgRDF.LLD.v0.4 §3.
 
 ## 2.3 Bulk loader (`src/storage/loader.rs`)
 

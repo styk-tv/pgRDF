@@ -23,7 +23,42 @@
 //! signature, same return value, same idempotency — the new INSERT
 //! is wrapped in `ON CONFLICT (graph_id) DO NOTHING`.
 //!
-//! Reference: SPEC.pgRDF.LLD.v0.4 §3.1.
+//! Slice 116 — `pgrdf.graph_id(iri TEXT) → BIGINT` lookup
+//! ([`graph_id`]). Read-only resolution of an IRI back to its
+//! integer `graph_id` in `_pgrdf_graphs`, or `NULL` when the IRI is
+//! not bound. Marked `#[pg_extern(strict)]` so a NULL input short-
+//! circuits to NULL output without an SPI round trip; the `&str`
+//! body therefore never sees a NULL argument. No panic on miss —
+//! NULL is the lookup-miss signal, distinct from an actual SPI
+//! error which still propagates.
+//!
+//! Reference: SPEC.pgRDF.LLD.v0.4 §3.1, §3.2.
+
+use pgrx::prelude::*;
+
+/// Look up the integer `graph_id` bound to an IRI in
+/// `_pgrdf_graphs`. Returns `NULL` if the IRI is not bound.
+///
+/// Read-only — no side effects, no panic on miss. Marked `strict`
+/// so Postgres short-circuits a NULL argument to NULL output
+/// without invoking the function (hence the `&str` body never sees
+/// a NULL input). The inner `SELECT (subquery)` idiom keeps SPI on
+/// the "exactly one row" path: NULL when the IRI is unbound, the
+/// id otherwise — avoiding the `SpiTupleTable positioned before the
+/// start` empty-result trip that a bare `SELECT … WHERE iri = $1`
+/// would cause. Same wrapper trick as the IRI-keyed `add_graph`
+/// overload in [`super::hexastore::add_graph_iri`].
+///
+/// SQL surface: `pgrdf.graph_id(iri TEXT) → BIGINT`. Per LLD v0.4
+/// §3.2.
+#[pg_extern(strict)]
+fn graph_id(iri: &str) -> Option<i64> {
+    Spi::get_one_with_args(
+        "SELECT (SELECT graph_id FROM pgrdf._pgrdf_graphs WHERE iri = $1 LIMIT 1)",
+        &[iri.into()],
+    )
+    .unwrap_or_else(|e| panic!("graph_id: lookup failed: {e}"))
+}
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
@@ -201,5 +236,65 @@ mod tests {
         Spi::run("SELECT pgrdf.add_graph(80::bigint, 'http://example.org/shared')")
             .expect("first add_graph(80, iri) failed");
         Spi::run("SELECT pgrdf.add_graph(81::bigint, 'http://example.org/shared')").unwrap();
+    }
+
+    /// Slice 116 — seed row `(0, 'urn:pgrdf:graph:0')` is reachable
+    /// via `pgrdf.graph_id('urn:pgrdf:graph:0')` immediately after
+    /// `CREATE EXTENSION`. Anchors the default-partition IRI as a
+    /// stable lookup target across the rest of Phase A.
+    #[pg_test]
+    fn graph_id_seed_lookup() {
+        let id: Option<i64> = Spi::get_one("SELECT pgrdf.graph_id('urn:pgrdf:graph:0')")
+            .expect("seed graph_id lookup failed");
+        assert_eq!(id, Some(0));
+    }
+
+    /// Slice 116 — given a binding pre-existing in `_pgrdf_graphs`,
+    /// `pgrdf.graph_id(iri)` returns the bound id. The lookup is
+    /// the IRI → id inverse of the IRI-keyed `add_graph` round trip.
+    ///
+    /// Bypasses the `add_graph(…)` overloads and INSERTs directly
+    /// into `_pgrdf_graphs`. The `add_graph` family CREATEs a LIST
+    /// partition of `_pgrdf_quads`, which takes an
+    /// AccessExclusiveLock on the parent partitioned table; pgrx
+    /// runs `#[pg_test]`s in parallel, so two such tests in the
+    /// same suite can deadlock on the parent lock regardless of
+    /// which partition value they pick. The `graph_id` UDF only
+    /// reads `_pgrdf_graphs`, so a direct INSERT exercises the
+    /// real code path while keeping this test partition-DDL-free.
+    /// The IRI is unique to this slice (`/lookup116`) so concurrent
+    /// workers don't collide on the row either.
+    #[pg_test]
+    fn graph_id_after_iri_add() {
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (116116, 'http://example.org/lookup116')",
+        )
+        .expect("seed _pgrdf_graphs row failed");
+        let looked_up: Option<i64> =
+            Spi::get_one("SELECT pgrdf.graph_id('http://example.org/lookup116')")
+                .expect("graph_id lookup failed");
+        assert_eq!(looked_up, Some(116116));
+    }
+
+    /// Slice 116 — lookup miss returns NULL rather than panicking.
+    /// NULL is the documented lookup-miss signal per LLD v0.4 §3.2.
+    #[pg_test]
+    fn graph_id_miss_returns_null() {
+        let id: Option<i64> =
+            Spi::get_one("SELECT pgrdf.graph_id('http://example.org/never-bound')")
+                .expect("graph_id lookup failed");
+        assert_eq!(id, None);
+    }
+
+    /// Slice 116 — `#[pg_extern(strict)]` makes Postgres skip the
+    /// function entirely on a NULL argument and emit NULL directly.
+    /// The Rust `&str` body therefore never observes a NULL input;
+    /// callers passing `NULL::text` get `NULL` back.
+    #[pg_test]
+    fn graph_id_null_input_null_output() {
+        let id: Option<i64> = Spi::get_one("SELECT pgrdf.graph_id(NULL::text)")
+            .expect("graph_id(NULL) lookup failed");
+        assert_eq!(id, None);
     }
 }
