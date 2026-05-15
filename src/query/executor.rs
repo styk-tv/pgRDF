@@ -76,16 +76,20 @@
 //!   * `GRAPH <iri> { … }` — literal-IRI named-graph scope.
 //!     Translate-time IRI → `graph_id` resolution via
 //!     `_pgrdf_graphs.iri`; unresolved IRI binds to the sentinel
-//!     `-1` (zero rows, spec-correct "no solutions"). Slice 114
-//!     restriction: the entire single-branch BGP carries one
-//!     graph constraint — composition with OPTIONAL / UNION /
-//!     MINUS that span different scopes is slice 112.
-//!   * `GRAPH ?g { … }` — variable named-graph scope (slice 113).
-//!     `build_from_and_where` JOINs `_pgrdf_graphs g0 ON g0.graph_id
-//!     = q1.graph_id` and constrains every additional triple alias
-//!     (qN, N≥2) to `q1.graph_id`; the projection emits `g0.iri`
-//!     for the graph var. INNER JOIN matches W3C SPARQL 1.1 §13.3
+//!     `-1` (zero rows, spec-correct "no solutions").
+//!   * `GRAPH ?g { … }` — variable named-graph scope.
+//!     `build_from_and_where` JOINs `_pgrdf_graphs g{scope_id}` and
+//!     constrains every triple alias inside the GRAPH block to that
+//!     join's `graph_id`. INNER JOIN matches W3C SPARQL 1.1 §13.3
 //!     semantics — only graphs in the IRI mapping bind ?g.
+//!   * GRAPH composition (slice 112). The graph constraint is
+//!     PER-PATTERN, not per-query. A `GraphScope` is attached to each
+//!     triple pattern, each OPTIONAL triple, and each MINUS block.
+//!     GRAPH inside OPTIONAL / UNION / MINUS scopes only those
+//!     triples; OPTIONAL / MINUS inside a GRAPH inherits the outer
+//!     scope. Distinct GRAPH blocks get distinct scope ids; multiple
+//!     blocks binding the same `?g` variable are tied together with a
+//!     `graph_id` equality so the projected variable stays consistent.
 //!   * Property paths, inline VALUES, SERVICE remain unsupported
 //!     (paths in v0.4 §7; VALUES + DESCRIBE in §4-deferred backlog).
 //!
@@ -184,11 +188,57 @@ struct ExecPlan {
     params: Vec<i64>,
 }
 
+/// Slice 112: per-pattern graph scope. A `GraphScope` decorates each
+/// triple pattern, each OPTIONAL triple, and each MINUS block so the
+/// SQL builder can emit the correct `graph_id` constraint for that
+/// alias independently — composing GRAPH with OPTIONAL / UNION /
+/// MINUS arrives by attaching the scope at the triple level rather
+/// than the query level.
+///
+/// `Literal(id)` is the literal-IRI form (slice 114): the graph_id
+/// resolved at translate time via `_pgrdf_graphs.iri`. Each triple
+/// in scope gets `qN.graph_id = $K`.
+///
+/// `Variable { name, scope_id }` is the variable form (slice 113):
+/// `name` is the SPARQL variable bound to the graph IRI, and
+/// `scope_id` is a fresh integer per GRAPH block instance. Triples
+/// in the same scope share a JOIN to `pgrdf._pgrdf_graphs g{scope_id}`
+/// and equate their `graph_id` to that join's `graph_id`. Multiple
+/// scopes binding the same variable name get tied together with
+/// `g{scope_a}.graph_id = g{scope_b}.graph_id` so the projected
+/// `?g` is consistent across them.
+#[derive(Clone, Debug)]
+enum GraphScope {
+    Literal(i64),
+    Variable { name: String, scope_id: usize },
+}
+
+/// A triple pattern with optional graph scope. Used by mandatory
+/// BGPs (one per alias) and by the MINUS triple list (one per
+/// triple — the GRAPH block can wrap part of the MINUS body).
+#[derive(Clone)]
+struct ScopedTriple {
+    triple: TriplePattern,
+    scope: Option<GraphScope>,
+}
+
+/// A MINUS block — a list of triples plus the (shared, since MINUS
+/// today is a single inner BGP) graph scope. When the entire MINUS
+/// sits inside a `GRAPH <iri> { MINUS { … } }`, every triple in the
+/// block inherits the scope. The block-level field is the form
+/// slice 112 needs; the per-triple form will only diverge when MINUS
+/// admits nested GRAPH blocks (deferred).
+#[derive(Clone)]
+struct MinusBlock {
+    triples: Vec<TriplePattern>,
+    scope: Option<GraphScope>,
+}
+
 #[derive(Default)]
 struct ParsedSelect {
     projected: Vec<String>,
     // Single-branch state. Empty when union_branches is populated.
-    bgp: Vec<TriplePattern>,
+    bgp: Vec<ScopedTriple>,
     filters: Vec<Expression>,
     /// Each OPTIONAL block — a single triple pattern plus its
     /// optional FILTER. Multiple chained OPTIONALs land here in
@@ -198,7 +248,7 @@ struct ParsedSelect {
     /// to `WHERE NOT EXISTS (SELECT 1 FROM q_min_1, q_min_2, …
     /// WHERE join-shared-vars AND inner-pattern-predicates)`.
     /// Elided if there are no shared vars (SPARQL no-op).
-    minuses: Vec<Vec<TriplePattern>>,
+    minuses: Vec<MinusBlock>,
     /// GROUP BY variables. Empty when the query has aggregates but
     /// no GROUP BY (the entire result is a single aggregate row),
     /// or when there are no aggregates at all.
@@ -230,34 +280,13 @@ struct ParsedSelect {
     order_by: Vec<(String, bool)>,
     limit: Option<usize>,
     offset: usize,
-    /// Resolved `_pgrdf_graphs.graph_id` for the enclosing
-    /// `GRAPH <iri> { … }` block, if any. `None` ⇒ no graph
-    /// constraint (legacy v0.3 behaviour: scan every partition).
-    /// `Some(-1)` is the sentinel for an unresolved IRI, which
-    /// reliably produces zero rows because no real partition uses
-    /// `graph_id = -1`. Threaded down into `build_from_and_where`
-    /// where it adds `qN.graph_id = $K` to every mandatory BGP,
-    /// OPTIONAL, and MINUS triple alias inside the block.
-    ///
-    /// Slice-114 limitation: a single constraint applies to the
-    /// entire (single-branch) BGP. Composition with OPTIONAL /
-    /// UNION / MINUS that span different GRAPH scopes is slice 112
-    /// — it will move to per-pattern or per-block annotation.
-    graph_id_constraint: Option<i64>,
-    /// Slice 113: the SPARQL variable name (without leading `?`) that
-    /// the enclosing `GRAPH ?g { … }` block binds to the named graph's
-    /// IRI. When set, `build_from_and_where` JOINs `_pgrdf_graphs g0`
-    /// on `g0.graph_id = q1.graph_id` and constrains every additional
-    /// BGP alias (`qN`, `N≥2`) to the same `q1.graph_id` — so a
-    /// multi-triple inner BGP cannot stitch triples from different
-    /// graphs together. The projection path emits `g0.iri` when the
-    /// projected variable name matches `graph_var`.
-    ///
-    /// Mutually exclusive with `graph_id_constraint` per W3C SPARQL
-    /// §13.3 — a `GRAPH` clause uses either a literal IRI (resolved
-    /// at translate time) or a variable (resolved at run time), never
-    /// both.
-    graph_var: Option<String>,
+    /// Slice 112: monotonically-increasing scope-id counter used to
+    /// mint a fresh `Variable { scope_id }` whenever the walk enters
+    /// a new `GRAPH ?g { … }` block. Held at the query level so the
+    /// alias numbering inside `build_from_and_where` is stable per
+    /// parse — every Variable scope across UNION branches, OPTIONAL,
+    /// and MINUS blocks gets a distinct integer.
+    graph_scope_counter: usize,
 }
 
 struct OptionalBlock {
@@ -266,6 +295,13 @@ struct OptionalBlock {
     /// Translated into the LEFT JOIN's ON clause so rejected rows
     /// still survive with the optional variables NULL.
     filter: Option<Expression>,
+    /// Slice 112: graph scope that applies to this OPTIONAL's
+    /// triple alias. `None` (= scan every partition) when the
+    /// OPTIONAL sits outside any GRAPH; carries the scope of the
+    /// enclosing `GRAPH <iri> { … }` or `GRAPH ?g { … }` when the
+    /// OPTIONAL nests inside one, OR a brand-new scope when the
+    /// OPTIONAL itself is `OPTIONAL { GRAPH … { … } }`.
+    scope: Option<GraphScope>,
 }
 
 struct BindSpec {
@@ -314,20 +350,10 @@ enum AggregateFn {
 
 #[derive(Default)]
 struct UnionBranch {
-    bgp: Vec<TriplePattern>,
+    bgp: Vec<ScopedTriple>,
     filters: Vec<Expression>,
     optionals: Vec<OptionalBlock>,
-    minuses: Vec<Vec<TriplePattern>>,
-    /// Per-branch graph constraint — set when a UNION branch sits
-    /// inside `GRAPH <iri> { … }`. Same semantics as the
-    /// `ParsedSelect::graph_id_constraint` above.
-    graph_id_constraint: Option<i64>,
-    /// Per-branch graph variable — set when a UNION branch sits inside
-    /// `GRAPH ?g { … }`. Same semantics as
-    /// `ParsedSelect::graph_var` above (JOIN against `_pgrdf_graphs`,
-    /// shared-graph constraint across multi-triple BGPs, IRI
-    /// projection via `g0.iri`).
-    graph_var: Option<String>,
+    minuses: Vec<MinusBlock>,
 }
 
 fn translate(q: &Query) -> ExecPlan {
@@ -390,15 +416,13 @@ fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
             .iter()
             .map(|b| {
                 let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-                let (from_sql, where_clauses) = build_from_and_where(
+                let (from_sql, where_clauses, _plan) = build_from_and_where(
                     &b.bgp,
                     &b.filters,
                     &b.optionals,
                     &b.minuses,
                     &mut anchors,
                     0,
-                    b.graph_id_constraint,
-                    b.graph_var.as_deref(),
                 );
                 let mut sql = format!("SELECT 1 FROM {from_sql}");
                 if !where_clauses.is_empty() {
@@ -411,15 +435,13 @@ fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
         return branch_sqls.join(" UNION ALL ");
     }
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-    let (from_sql, where_clauses) = build_from_and_where(
+    let (from_sql, where_clauses, _plan) = build_from_and_where(
         &ps.bgp,
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
         &mut anchors,
         0,
-        ps.graph_id_constraint,
-        ps.graph_var.as_deref(),
     );
     let mut sql = format!("SELECT 1 FROM {from_sql}");
     if !where_clauses.is_empty() {
@@ -464,38 +486,53 @@ fn parse_select(p: &GraphPattern) -> ParsedSelect {
         // when no `Project` wrapper sets an explicit projection.
         if !ps.union_branches.is_empty() {
             for branch in &ps.union_branches {
-                for tp in &branch.bgp {
-                    push_unique(&mut ps.projected, tp_subject_var(tp));
-                    push_unique(&mut ps.projected, tp_predicate_var(tp));
-                    push_unique(&mut ps.projected, tp_object_var(tp));
+                for st in &branch.bgp {
+                    push_unique(&mut ps.projected, tp_subject_var(&st.triple));
+                    push_unique(&mut ps.projected, tp_predicate_var(&st.triple));
+                    push_unique(&mut ps.projected, tp_object_var(&st.triple));
+                    // Slice 112: SELECT * surfaces the graph var
+                    // bound by any Variable scope inside the branch,
+                    // even when the inner BGP never anchors it.
+                    push_unique(&mut ps.projected, scope_var_name(&st.scope));
                 }
                 for opt in &branch.optionals {
                     push_unique(&mut ps.projected, tp_subject_var(&opt.triple));
                     push_unique(&mut ps.projected, tp_predicate_var(&opt.triple));
                     push_unique(&mut ps.projected, tp_object_var(&opt.triple));
+                    push_unique(&mut ps.projected, scope_var_name(&opt.scope));
                 }
-                // Slice 113: SELECT * surfaces the graph var even when
-                // the inner BGP never mentions it — `GRAPH ?g { … }`
-                // binds ?g whether or not it is one of the triple
-                // anchors.
-                push_unique(&mut ps.projected, branch.graph_var.clone());
+                for m in &branch.minuses {
+                    push_unique(&mut ps.projected, scope_var_name(&m.scope));
+                }
             }
         } else {
-            for tp in &ps.bgp {
-                push_unique(&mut ps.projected, tp_subject_var(tp));
-                push_unique(&mut ps.projected, tp_predicate_var(tp));
-                push_unique(&mut ps.projected, tp_object_var(tp));
+            for st in &ps.bgp {
+                push_unique(&mut ps.projected, tp_subject_var(&st.triple));
+                push_unique(&mut ps.projected, tp_predicate_var(&st.triple));
+                push_unique(&mut ps.projected, tp_object_var(&st.triple));
+                push_unique(&mut ps.projected, scope_var_name(&st.scope));
             }
             for opt in &ps.optionals {
                 push_unique(&mut ps.projected, tp_subject_var(&opt.triple));
                 push_unique(&mut ps.projected, tp_predicate_var(&opt.triple));
                 push_unique(&mut ps.projected, tp_object_var(&opt.triple));
+                push_unique(&mut ps.projected, scope_var_name(&opt.scope));
             }
-            // Slice 113: same logic at the single-branch level.
-            push_unique(&mut ps.projected, ps.graph_var.clone());
+            for m in &ps.minuses {
+                push_unique(&mut ps.projected, scope_var_name(&m.scope));
+            }
         }
     }
     ps
+}
+
+/// Return the SPARQL variable name bound by a Variable scope, if any.
+/// Helper for the SELECT * projection enrichment in `parse_select`.
+fn scope_var_name(scope: &Option<GraphScope>) -> Option<String> {
+    match scope {
+        Some(GraphScope::Variable { name, .. }) => Some(name.clone()),
+        _ => None,
+    }
 }
 
 /// Translate a BIND expression into a SQL fragment that yields a
@@ -614,44 +651,102 @@ fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec 
     }
 }
 
-/// Walk a left-leaning Union tree, pushing each leaf branch.
-fn collect_union_branches(p: &GraphPattern, out: &mut Vec<UnionBranch>) {
-    match p {
-        GraphPattern::Union { left, right } => {
-            collect_union_branches(left, out);
-            collect_union_branches(right, out);
-        }
-        _ => out.push(walk_union_branch(p)),
-    }
-}
-
-/// Walk a single UNION branch, capturing its BGP, filters, and
-/// OPTIONALs. Solution modifiers (DISTINCT, ORDER BY, LIMIT, OFFSET)
-/// belong on the outer SELECT, not inside a branch — so they aren't
-/// expected here.
-fn walk_union_branch(p: &GraphPattern) -> UnionBranch {
-    let mut ub = UnionBranch::default();
-    walk_branch(p, &mut ub);
-    ub
-}
-
-fn walk_branch(p: &GraphPattern, ub: &mut UnionBranch) {
+/// Walk a single UNION branch. `current_scope` is the GRAPH scope in
+/// effect for triples discovered at this level (inherited from an
+/// enclosing GRAPH block, if any) — `None` at the branch root.
+fn walk_branch(
+    p: &GraphPattern,
+    ub: &mut UnionBranch,
+    current_scope: Option<&GraphScope>,
+    scope_counter: &mut usize,
+) {
     match p {
         GraphPattern::Bgp { patterns } => {
-            ub.bgp = patterns.clone();
+            for tp in patterns {
+                ub.bgp.push(ScopedTriple {
+                    triple: tp.clone(),
+                    scope: current_scope.cloned(),
+                });
+            }
         }
         GraphPattern::Filter { expr, inner } => {
             ub.filters.push(expr.clone());
-            walk_branch(inner, ub);
+            walk_branch(inner, ub, current_scope, scope_counter);
         }
         GraphPattern::LeftJoin {
             left,
             right,
             expression,
         } => {
-            walk_branch(left, ub);
-            let triple = match right.as_ref() {
-                GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns[0].clone(),
+            walk_branch(left, ub, current_scope, scope_counter);
+            // The right arm of OPTIONAL today is a single triple, OR
+            // a single GRAPH wrapping a single triple (slice 112).
+            let (triple, opt_scope) = extract_optional_triple(right, current_scope, scope_counter);
+            ub.optionals.push(OptionalBlock {
+                triple,
+                filter: expression.clone(),
+                scope: opt_scope,
+            });
+        }
+        GraphPattern::Minus { left, right } => {
+            walk_branch(left, ub, current_scope, scope_counter);
+            let (triples, minus_scope) =
+                extract_minus_triples(right, current_scope, scope_counter);
+            ub.minuses.push(MinusBlock {
+                triples,
+                scope: minus_scope,
+            });
+        }
+        GraphPattern::Graph { name, inner } => {
+            // `GRAPH` block inside a UNION branch. Mint a scope and
+            // walk the inner with it bound — every triple discovered
+            // inside this block carries the scope. Note: the inner
+            // may itself contain LeftJoin / Minus, in which case the
+            // OPTIONAL / MINUS triples inherit this scope (W3C §13.3).
+            let scope = make_scope(name, scope_counter);
+            walk_branch(inner, ub, Some(&scope), scope_counter);
+        }
+        other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
+    }
+}
+
+/// Mint a GraphScope from a SPARQL `GraphPattern::Graph` name. Literal
+/// IRI → translate-time resolution to a `graph_id`; variable → a fresh
+/// scope_id paired with the variable name.
+fn make_scope(name: &NamedNodePattern, scope_counter: &mut usize) -> GraphScope {
+    match name {
+        NamedNodePattern::NamedNode(node) => {
+            let iri = node.as_str().to_string();
+            let resolved = lookup_graph_id(&iri).unwrap_or(-1);
+            GraphScope::Literal(resolved)
+        }
+        NamedNodePattern::Variable(v) => {
+            *scope_counter += 1;
+            GraphScope::Variable {
+                name: v.as_str().to_string(),
+                scope_id: *scope_counter,
+            }
+        }
+    }
+}
+
+/// Extract the single triple of an OPTIONAL's right arm, peeling off
+/// a wrapping `GRAPH` to produce the triple's scope. The wrapping
+/// scope (if any) wins over the surrounding `current_scope` — that's
+/// the `OPTIONAL { GRAPH <g> { ?s :p ?o } }` shape.
+fn extract_optional_triple(
+    right: &GraphPattern,
+    current_scope: Option<&GraphScope>,
+    scope_counter: &mut usize,
+) -> (TriplePattern, Option<GraphScope>) {
+    match right {
+        GraphPattern::Graph { name, inner } => {
+            let scope = make_scope(name, scope_counter);
+            // Inner of an `OPTIONAL { GRAPH … { … } }` is a single-triple BGP.
+            match inner.as_ref() {
+                GraphPattern::Bgp { patterns } if patterns.len() == 1 => {
+                    (patterns[0].clone(), Some(scope))
+                }
                 GraphPattern::Bgp { patterns } => panic!(
                     "sparql: OPTIONAL today only supports a single triple pattern (got {} triples)",
                     patterns.len()
@@ -659,67 +754,70 @@ fn walk_branch(p: &GraphPattern, ub: &mut UnionBranch) {
                 other => panic!(
                     "sparql: OPTIONAL today only supports a single triple pattern (got {other:?})"
                 ),
-            };
-            ub.optionals.push(OptionalBlock {
-                triple,
-                filter: expression.clone(),
-            });
-        }
-        GraphPattern::Minus { left, right } => {
-            walk_branch(left, ub);
-            let triples = match right.as_ref() {
-                GraphPattern::Bgp { patterns } => patterns.clone(),
-                _ => panic!("sparql: MINUS right side must be a BGP"),
-            };
-            ub.minuses.push(triples);
-        }
-        GraphPattern::Graph { name, inner } => {
-            // Same shape as `walk_select`'s GRAPH arm — literal-IRI
-            // form resolves to a per-branch `graph_id_constraint`;
-            // variable form (slice 113) records `graph_var` so the
-            // branch SQL JOINs `_pgrdf_graphs` and projects `?g` as
-            // its IRI.
-            match name {
-                NamedNodePattern::NamedNode(node) => {
-                    let iri = node.as_str().to_string();
-                    let resolved = lookup_graph_id(&iri).unwrap_or(-1);
-                    ub.graph_id_constraint = Some(resolved);
-                    walk_branch(inner, ub);
-                }
-                NamedNodePattern::Variable(v) => {
-                    ub.graph_var = Some(v.as_str().to_string());
-                    walk_branch(inner, ub);
-                }
             }
         }
-        other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
+        GraphPattern::Bgp { patterns } if patterns.len() == 1 => {
+            (patterns[0].clone(), current_scope.cloned())
+        }
+        GraphPattern::Bgp { patterns } => panic!(
+            "sparql: OPTIONAL today only supports a single triple pattern (got {} triples)",
+            patterns.len()
+        ),
+        other => panic!(
+            "sparql: OPTIONAL today only supports a single triple pattern (got {other:?})"
+        ),
+    }
+}
+
+/// Extract the triple list of a MINUS's right arm, peeling off a
+/// wrapping `GRAPH` to produce the block's scope. As with OPTIONAL,
+/// `MINUS { GRAPH <g> { … } }` overrides the surrounding scope.
+fn extract_minus_triples(
+    right: &GraphPattern,
+    current_scope: Option<&GraphScope>,
+    scope_counter: &mut usize,
+) -> (Vec<TriplePattern>, Option<GraphScope>) {
+    match right {
+        GraphPattern::Graph { name, inner } => {
+            let scope = make_scope(name, scope_counter);
+            match inner.as_ref() {
+                GraphPattern::Bgp { patterns } => (patterns.clone(), Some(scope)),
+                _ => panic!("sparql: MINUS right side must be a BGP"),
+            }
+        }
+        GraphPattern::Bgp { patterns } => (patterns.clone(), current_scope.cloned()),
+        _ => panic!("sparql: MINUS right side must be a BGP"),
     }
 }
 
 fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
+    walk_select_scoped(p, ps, None);
+}
+
+/// Walk the SELECT pattern with the GRAPH scope currently in effect
+/// (inherited from an enclosing `GRAPH … { … }`, if any). The scope
+/// is `None` at the query root and propagates down through Filter /
+/// LeftJoin's left arm / Minus's left arm / etc.
+fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Option<&GraphScope>) {
     match p {
         GraphPattern::Project { inner, variables } => {
             if ps.projected.is_empty() {
                 ps.projected = variables.iter().map(|v| v.as_str().to_string()).collect();
             }
-            walk_select(inner, ps);
+            walk_select_scoped(inner, ps, current_scope);
         }
         GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => {
-            // REDUCED is a "duplicates may or may not be removed"
-            // hint. Implementing it as DISTINCT is a safe
-            // over-approximation — the spec allows it.
             ps.distinct = true;
-            walk_select(inner, ps);
+            walk_select_scoped(inner, ps, current_scope);
         }
         GraphPattern::Slice {
             inner,
             start,
             length,
         } => {
-            // Slice is OFFSET (start) + LIMIT (length).
             ps.offset = *start;
             ps.limit = *length;
-            walk_select(inner, ps);
+            walk_select_scoped(inner, ps, current_scope);
         }
         GraphPattern::OrderBy { inner, expression } => {
             for oe in expression {
@@ -736,11 +834,11 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
                     ),
                 }
             }
-            walk_select(inner, ps);
+            walk_select_scoped(inner, ps, current_scope);
         }
         GraphPattern::Filter { expr, inner } => {
             ps.filters.push(expr.clone());
-            walk_select(inner, ps);
+            walk_select_scoped(inner, ps, current_scope);
         }
         GraphPattern::LeftJoin {
             left,
@@ -749,37 +847,48 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
         } => {
             // Walk the left arm first — it may itself be another
             // LeftJoin (chained OPTIONALs) or a Filter wrapping a BGP.
-            walk_select(left, ps);
-            // The right arm is the OPTIONAL group. Today only a
-            // single-triple BGP is accepted.
-            let triple = match right.as_ref() {
-                GraphPattern::Bgp { patterns } if patterns.len() == 1 => patterns[0].clone(),
-                GraphPattern::Bgp { patterns } => panic!(
-                    "sparql: OPTIONAL today only supports a single triple pattern (got {} triples)",
-                    patterns.len()
-                ),
-                other => panic!(
-                    "sparql: OPTIONAL today only supports a single triple pattern (got {other:?})"
-                ),
-            };
+            walk_select_scoped(left, ps, current_scope);
+            // OPTIONAL's right arm: peel a wrapping GRAPH to get the
+            // optional's effective scope. `OPTIONAL { GRAPH … { … } }`
+            // overrides the outer scope; plain `OPTIONAL { … }`
+            // inherits `current_scope` (W3C §13.3).
+            let (triple, opt_scope) = extract_optional_triple(
+                right,
+                current_scope,
+                &mut ps.graph_scope_counter,
+            );
             ps.optionals.push(OptionalBlock {
                 triple,
                 filter: expression.clone(),
+                scope: opt_scope,
             });
         }
         GraphPattern::Union { left, right } => {
             // Chained `A UNION B UNION C` arrives as a left-leaning
             // Union tree; flatten so every leaf becomes its own branch.
-            collect_union_branches(left, &mut ps.union_branches);
-            collect_union_branches(right, &mut ps.union_branches);
+            // Each branch carries its own scope state — when the UNION
+            // sits INSIDE a GRAPH the scope inherits into every branch.
+            collect_union_branches_scoped(
+                left,
+                &mut ps.union_branches,
+                current_scope,
+                &mut ps.graph_scope_counter,
+            );
+            collect_union_branches_scoped(
+                right,
+                &mut ps.union_branches,
+                current_scope,
+                &mut ps.graph_scope_counter,
+            );
         }
         GraphPattern::Minus { left, right } => {
-            walk_select(left, ps);
-            let triples = match right.as_ref() {
-                GraphPattern::Bgp { patterns } => patterns.clone(),
-                other => panic!("sparql: MINUS right side must be a BGP (got {other:?})"),
-            };
-            ps.minuses.push(triples);
+            walk_select_scoped(left, ps, current_scope);
+            let (triples, minus_scope) =
+                extract_minus_triples(right, current_scope, &mut ps.graph_scope_counter);
+            ps.minuses.push(MinusBlock {
+                triples,
+                scope: minus_scope,
+            });
         }
         GraphPattern::Group {
             inner,
@@ -793,23 +902,14 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
                 ps.aggregates
                     .push(parse_aggregate(synth_var.as_str(), agg_expr));
             }
-            walk_select(inner, ps);
+            walk_select_scoped(inner, ps, current_scope);
         }
         GraphPattern::Extend {
             inner,
             variable,
             expression,
         } => {
-            // Walk inner FIRST so any Group below has populated
-            // ps.aggregates by the time we decide what kind of
-            // Extend this is.
-            walk_select(inner, ps);
-            // Two kinds of Extend matter today:
-            //   1) Aggregate rename — `(EXPR AS ?v)` lowers to Extend
-            //      wrapping Group, with `expression == Variable($agg_N)`.
-            //      Match and rename the matching AggregateSpec.
-            //   2) General BIND — `BIND(expr AS ?v)` or `(EXPR AS ?v)`
-            //      on a non-aggregate expression. Capture as a BindSpec.
+            walk_select_scoped(inner, ps, current_scope);
             let new_name = variable.as_str().to_string();
             if let Expression::Variable(v) = expression {
                 let synth = v.as_str();
@@ -824,47 +924,44 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
             });
         }
         GraphPattern::Bgp { patterns } => {
-            ps.bgp = patterns.clone();
-        }
-        GraphPattern::Graph { name, inner } => {
-            // `GRAPH <iri> { … }` — literal-IRI form (slice 114).
-            // Resolve `<iri>` against `_pgrdf_graphs.iri` at translate
-            // time; unresolved IRI binds to `-1` so the generated SQL
-            // produces zero rows (spec-correct "no solutions" — same
-            // trick the constant-term path uses for unknown dictionary
-            // entries). The constraint flows through to
-            // `build_from_and_where` and is applied as
-            // `qN.graph_id = $K` on every triple alias inside.
-            //
-            // `GRAPH ?g { … }` — variable form (slice 113). Record
-            // `graph_var` so `build_from_and_where` JOINs
-            // `_pgrdf_graphs g0 ON g0.graph_id = q1.graph_id` and
-            // constrains every additional triple alias (qN, N≥2) to
-            // the same `q1.graph_id` — multi-triple inner BGPs cannot
-            // stitch across graphs. Projection emits `g0.iri` for the
-            // graph var.
-            //
-            // Composition with OPTIONAL / UNION / MINUS that span
-            // different graph scopes is slice 112 — today the
-            // entire single-branch BGP shares one constraint.
-            match name {
-                NamedNodePattern::NamedNode(node) => {
-                    let iri = node.as_str().to_string();
-                    let resolved = lookup_graph_id(&iri).unwrap_or(-1);
-                    // Nested GRAPH blocks: innermost wins (W3C
-                    // SPARQL 1.1 §13.3). Per-pattern scope arrives
-                    // in slice 112; today the latest assignment is
-                    // the single constraint applied to the BGP.
-                    ps.graph_id_constraint = Some(resolved);
-                    walk_select(inner, ps);
-                }
-                NamedNodePattern::Variable(v) => {
-                    ps.graph_var = Some(v.as_str().to_string());
-                    walk_select(inner, ps);
-                }
+            for tp in patterns {
+                ps.bgp.push(ScopedTriple {
+                    triple: tp.clone(),
+                    scope: current_scope.cloned(),
+                });
             }
         }
+        GraphPattern::Graph { name, inner } => {
+            // Slice 112: a GRAPH block mints a scope and walks
+            // `inner` with that scope bound — every triple emerging
+            // from the walk carries the scope, including triples
+            // inside an OPTIONAL / MINUS that is itself inside the
+            // GRAPH block. Nested GRAPH blocks override per W3C §13.3.
+            let scope = make_scope(name, &mut ps.graph_scope_counter);
+            walk_select_scoped(inner, ps, Some(&scope));
+        }
         other => panic!("sparql: unsupported algebra in select wrapper: {other:?}"),
+    }
+}
+
+/// Union flattener that propagates the GRAPH scope down to each
+/// branch (so `GRAPH <g> { { ... } UNION { ... } }` works).
+fn collect_union_branches_scoped(
+    p: &GraphPattern,
+    out: &mut Vec<UnionBranch>,
+    current_scope: Option<&GraphScope>,
+    scope_counter: &mut usize,
+) {
+    match p {
+        GraphPattern::Union { left, right } => {
+            collect_union_branches_scoped(left, out, current_scope, scope_counter);
+            collect_union_branches_scoped(right, out, current_scope, scope_counter);
+        }
+        _ => {
+            let mut ub = UnionBranch::default();
+            walk_branch(p, &mut ub, current_scope, scope_counter);
+            out.push(ub);
+        }
     }
 }
 
@@ -933,15 +1030,13 @@ fn build_bgp_sql(ps: &ParsedSelect) -> String {
 /// even when they aren't projected (via hidden trailing columns).
 fn build_single_branch_outer(ps: &ParsedSelect) -> String {
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-    let (from_sql, where_clauses) = build_from_and_where(
+    let (from_sql, where_clauses, plan) = build_from_and_where(
         &ps.bgp,
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
         &mut anchors,
         0,
-        ps.graph_id_constraint,
-        ps.graph_var.as_deref(),
     );
 
     // Project: each projected var → its anchor alias.column → dict
@@ -963,10 +1058,12 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
             select_clauses.push(format!("{expr_sql} AS {}", quote_identifier(var)));
             continue;
         }
-        // Slice 113: a projected ?g bound by `GRAPH ?g { … }` emits
-        // the IRI from the `g0` JOIN added in build_from_and_where.
-        if ps.graph_var.as_deref() == Some(var.as_str()) {
-            select_clauses.push(format!("g0.iri AS {}", quote_identifier(var)));
+        // Slice 112: a projected variable bound by `GRAPH ?g { … }`
+        // emits the IRI from the `g{scope_id}` JOIN added in
+        // build_from_and_where. The anchor scope is the FIRST scope
+        // (mandatory before optional) that binds the variable.
+        if let Some(scope_id) = plan.projection_scope(var) {
+            select_clauses.push(format!("g{scope_id}.iri AS {}", quote_identifier(var)));
             continue;
         }
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
@@ -991,10 +1088,10 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
                      clause when DISTINCT is used"
                 );
             }
-            // Slice 113: ORDER BY ?g on a graph-var emits a hidden
-            // trailing column pulling g0.iri.
-            if ps.graph_var.as_deref() == Some(var.as_str()) {
-                select_clauses.push(format!("g0.iri AS _pgrdf_order_{idx}"));
+            // Slice 112: ORDER BY ?g on a graph-var emits a hidden
+            // trailing column pulling the anchor scope's g{S}.iri.
+            if let Some(scope_id) = plan.projection_scope(var) {
+                select_clauses.push(format!("g{scope_id}.iri AS _pgrdf_order_{idx}"));
                 select_clauses.len()
             } else {
                 let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
@@ -1037,26 +1134,25 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
 /// + aggregate values (cast to TEXT for consistent JSONB output).
 fn build_aggregate_sql(ps: &ParsedSelect) -> String {
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-    let (from_sql, where_clauses) = build_from_and_where(
+    let (from_sql, where_clauses, plan) = build_from_and_where(
         &ps.bgp,
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
         &mut anchors,
         0,
-        ps.graph_id_constraint,
-        ps.graph_var.as_deref(),
     );
 
     // Pre-compute SQL expressions per group variable so SELECT and
     // GROUP BY use the same string (Postgres accepts either repeated
     // expression or an ordinal; we use the expression here).
-    // Slice 113: a GROUP BY ?g where ?g is the GRAPH var resolves
-    // to `g0.iri` rather than a dict lookup.
+    // Slice 112: a GROUP BY ?g where ?g is the variable bound by a
+    // `GRAPH ?g { … }` block resolves to that scope's `g{S}.iri`
+    // rather than a dict lookup.
     let mut group_exprs: Vec<(String, String)> = Vec::new(); // (var, sql-expr)
     for var in &ps.group_vars {
-        if ps.graph_var.as_deref() == Some(var.as_str()) {
-            group_exprs.push((var.clone(), "g0.iri".to_string()));
+        if let Some(scope_id) = plan.projection_scope(var) {
+            group_exprs.push((var.clone(), format!("g{scope_id}.iri")));
             continue;
         }
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
@@ -1364,25 +1460,24 @@ fn build_union_sql(ps: &ParsedSelect) -> String {
 /// other branch's row shape (required for `UNION ALL`).
 fn build_branch_sql(branch: &UnionBranch, projected: &[String]) -> String {
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-    let (from_sql, where_clauses) = build_from_and_where(
+    let (from_sql, where_clauses, plan) = build_from_and_where(
         &branch.bgp,
         &branch.filters,
         &branch.optionals,
         &branch.minuses,
         &mut anchors,
         0,
-        branch.graph_id_constraint,
-        branch.graph_var.as_deref(),
     );
 
     let mut select_clauses: Vec<String> = Vec::new();
     for var in projected {
-        // Slice 113: ?g bound by `GRAPH ?g { … }` projects from g0.iri.
-        // Branches that don't bind ?g (legitimate per-branch shape
-        // for `{ GRAPH ?g {…} } UNION { ?s ?p ?o }`) emit NULL::TEXT,
+        // Slice 112: ?g bound by a Variable scope in this branch
+        // projects from that scope's g{S}.iri. Branches that don't
+        // bind ?g (legitimate per-branch shape for
+        // `{ GRAPH ?g {…} } UNION { ?s ?p ?o }`) emit NULL::TEXT,
         // which the outer UNION ALL row reconciles.
-        let part = if branch.graph_var.as_deref() == Some(var.as_str()) {
-            format!("g0.iri AS {}", quote_identifier(var))
+        let part = if let Some(scope_id) = plan.projection_scope(var) {
+            format!("g{scope_id}.iri AS {}", quote_identifier(var))
         } else if let Some(&(alias_idx, col)) = anchors.get(var) {
             format!(
                 "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary
@@ -1406,51 +1501,167 @@ fn build_branch_sql(branch: &UnionBranch, projected: &[String]) -> String {
     sql
 }
 
+/// Per-Variable-scope state tracked across BGP / OPTIONAL / MINUS
+/// during one call to `build_from_and_where`. The set of unique
+/// `scope_id`s that need a JOIN to `_pgrdf_graphs g{scope_id}` is
+/// determined by scanning the mandatory BGP + OPTIONALs; MINUS
+/// scopes stay internal to their NOT EXISTS subquery.
+///
+/// `name_anchor` maps the variable name to the FIRST scope_id seen
+/// in this builder's context. The projection layer uses that anchor
+/// to render `?g` as `g{anchor_scope_id}.iri`; later scopes binding
+/// the same name emit a `g{later}.graph_id = g{anchor}.graph_id`
+/// equality so the projected value is consistent.
+#[derive(Default)]
+struct ScopePlan {
+    /// Scope ids that have at least one mandatory-BGP triple — these
+    /// get an `INNER JOIN _pgrdf_graphs g{S}` JOIN anchored on the
+    /// first BGP alias that carries this scope.
+    mandatory_join_ids: Vec<usize>,
+    /// Scope ids that ONLY appear inside OPTIONALs — these get a
+    /// `LEFT JOIN _pgrdf_graphs g{S}` JOIN, so an unmatched OPTIONAL
+    /// leaves `?g` unbound (NULL) rather than dropping the outer row.
+    optional_join_ids: Vec<usize>,
+    /// scope_id → first BGP alias (qN) carrying that scope. The
+    /// `_pgrdf_graphs g{S}` join anchors on `q{first_qi}.graph_id`,
+    /// and every other triple alias in scope S equates its
+    /// `graph_id` to the same anchor — so the JOIN's textual order
+    /// (graphs joined AFTER mandatory triples) is unambiguous.
+    mandatory_first_qi: HashMap<usize, usize>,
+    /// scope_id → opt-triple alias (qOPT_i) for scopes born inside
+    /// an OPTIONAL. The LEFT JOIN to `_pgrdf_graphs g{S}` anchors on
+    /// this alias.
+    optional_first_qi: HashMap<usize, usize>,
+    /// Maps variable name to its anchor scope_id (the first scope_id
+    /// in this context binding that name). Used both for projection
+    /// and for consistency equality between sibling scopes.
+    name_anchor: HashMap<String, usize>,
+    /// (scope_id, anchor_scope_id) pairs that need
+    /// `g{scope_id}.graph_id = g{anchor_scope_id}.graph_id` so two
+    /// GRAPH blocks binding the same `?g` agree on which graph wins.
+    /// Only emitted for non-anchor scopes (scope_id != anchor).
+    cross_scope_consistency: Vec<(usize, usize)>,
+}
+
+impl ScopePlan {
+    /// Build the plan by scanning every BGP + OPTIONAL scope. MINUS
+    /// scopes are handled inside `translate_minus`.
+    fn build(
+        bgp: &[ScopedTriple],
+        optionals: &[OptionalBlock],
+        alias_offset: usize,
+    ) -> Self {
+        let mut plan = ScopePlan::default();
+        // Mandatory-BGP scopes first so the "first scope binding ?g
+        // wins" rule favours the mandatory side.
+        for (i, st) in bgp.iter().enumerate() {
+            let qi = alias_offset + i + 1;
+            if let Some(GraphScope::Variable { name, scope_id }) = &st.scope {
+                plan.register_mandatory(name.clone(), *scope_id, qi);
+            }
+        }
+        let first_opt_qi = alias_offset + bgp.len() + 1;
+        for (i, opt) in optionals.iter().enumerate() {
+            let this_qi = first_opt_qi + i;
+            if let Some(GraphScope::Variable { name, scope_id }) = &opt.scope {
+                plan.register_optional(name.clone(), *scope_id, this_qi);
+            }
+        }
+        plan
+    }
+
+    fn register_mandatory(&mut self, name: String, scope_id: usize, qi: usize) {
+        if !self.mandatory_join_ids.contains(&scope_id) {
+            self.mandatory_join_ids.push(scope_id);
+            self.mandatory_first_qi.insert(scope_id, qi);
+        }
+        self.register_name(name, scope_id);
+    }
+
+    fn register_optional(&mut self, name: String, scope_id: usize, qi: usize) {
+        // Skip if already counted as mandatory (i.e. an OPTIONAL
+        // inheriting the outer mandatory scope).
+        if self.mandatory_join_ids.contains(&scope_id) {
+            return;
+        }
+        if !self.optional_join_ids.contains(&scope_id) {
+            self.optional_join_ids.push(scope_id);
+            self.optional_first_qi.insert(scope_id, qi);
+        }
+        self.register_name(name, scope_id);
+    }
+
+    fn register_name(&mut self, name: String, scope_id: usize) {
+        match self.name_anchor.get(&name).copied() {
+            Some(anchor) if anchor != scope_id => {
+                if !self
+                    .cross_scope_consistency
+                    .iter()
+                    .any(|&(s, a)| s == scope_id && a == anchor)
+                {
+                    self.cross_scope_consistency.push((scope_id, anchor));
+                }
+            }
+            Some(_) => {} // same scope already anchored.
+            None => {
+                self.name_anchor.insert(name, scope_id);
+            }
+        }
+    }
+
+    /// Look up the scope_id whose JOIN's `g{S}.iri` column should be
+    /// the projection value for a given SPARQL variable name. Returns
+    /// the anchor scope_id if `name` is bound by any Variable scope
+    /// in this builder context.
+    fn projection_scope(&self, name: &str) -> Option<usize> {
+        self.name_anchor.get(name).copied()
+    }
+
+    /// First BGP alias for a Variable scope_id, used as the anchor
+    /// for both the `_pgrdf_graphs` JOIN and the per-triple graph_id
+    /// equality on the second-and-later triples of the same scope.
+    fn first_qi_for(&self, scope_id: usize) -> Option<usize> {
+        self.mandatory_first_qi
+            .get(&scope_id)
+            .or_else(|| self.optional_first_qi.get(&scope_id))
+            .copied()
+    }
+}
+
 /// Shared FROM/WHERE builder used by both the single-branch and
 /// per-UNION-branch paths. Emits explicit `INNER JOIN`s for
 /// mandatory patterns after the first, `LEFT JOIN`s for each
 /// OPTIONAL block, and ANDs every filter into the returned
 /// `where_clauses` vec. The caller layers SELECT + modifiers.
 ///
-/// Slice-113 addition: when `graph_var` is `Some(_)`, an additional
-/// `INNER JOIN pgrdf._pgrdf_graphs g0 ON g0.graph_id = q1.graph_id`
-/// is appended (so only graphs present in the IRI mapping bind ?g —
-/// W3C SPARQL 1.1 §13.3 semantics). Every BGP alias after `q1` also
-/// gets `qN.graph_id = q1.graph_id` so a multi-triple inner BGP
-/// cannot stitch across graphs.
+/// Slice 112: graph constraints are PER-PATTERN. Each `ScopedTriple`
+/// carries its own `GraphScope`; the builder pre-scans BGP +
+/// OPTIONAL scopes to produce a `ScopePlan` describing which scopes
+/// need INNER vs LEFT joins to `_pgrdf_graphs`. The returned
+/// `ScopePlan` is used by the caller's SELECT-list builder so a
+/// projected `?g` resolves to the right `g{S}.iri`.
 fn build_from_and_where(
-    bgp: &[TriplePattern],
+    bgp: &[ScopedTriple],
     filters: &[Expression],
     optionals: &[OptionalBlock],
-    minuses: &[Vec<TriplePattern>],
+    minuses: &[MinusBlock],
     anchors: &mut HashMap<String, (usize, &'static str)>,
     alias_offset: usize,
-    graph_constraint: Option<i64>,
-    graph_var: Option<&str>,
-) -> (String, Vec<String>) {
+) -> (String, Vec<String>, ScopePlan) {
+    let plan = ScopePlan::build(bgp, optionals, alias_offset);
     let mut where_clauses: Vec<String> = Vec::new();
     let mut from_sql = String::new();
-    let first_qi = alias_offset + 1;
     // Mandatory BGP — pattern 1 in FROM (predicates → WHERE),
-    // pattern 2..N as INNER JOIN qN ON (predicates).
-    for (i, tp) in bgp.iter().enumerate() {
+    // pattern 2..N as INNER JOIN qN ON (predicates). Each triple's
+    // graph constraint references either a Literal id ($K) or — for
+    // Variable scope — the first qN in the same scope (no
+    // _pgrdf_graphs reference yet; the JOIN to that table is
+    // appended after the mandatory triples).
+    for (i, st) in bgp.iter().enumerate() {
         let qi = alias_offset + i + 1;
-        let mut clauses = pattern_clauses(tp, qi, anchors);
-        // GRAPH <iri> { … } scope (slice 114): every triple alias
-        // inside the GRAPH block gets `qN.graph_id = $K`. Unresolved
-        // IRI yields -1, which no real partition uses → zero rows
-        // (spec-correct "no solutions").
-        if let Some(gid) = graph_constraint {
-            let p = id_placeholder(gid);
-            clauses.push(format!("q{qi}.graph_id = {p}"));
-        }
-        // GRAPH ?g { … } scope (slice 113): triples 2..N share q1's
-        // graph_id so a single inner BGP cannot stitch across graphs.
-        // q1 itself is unconstrained on graph_id — the JOIN to
-        // `_pgrdf_graphs g0` below filters it to graphs present in
-        // the IRI mapping.
-        if graph_var.is_some() && i > 0 {
-            clauses.push(format!("q{qi}.graph_id = q{first_qi}.graph_id"));
+        let mut clauses = pattern_clauses(&st.triple, qi, anchors);
+        if let Some(scope) = &st.scope {
+            scope_constraint_clauses_anchor_q(scope, qi, &plan, &mut clauses);
         }
         if i == 0 {
             from_sql.push_str(&format!("pgrdf._pgrdf_quads q{qi}"));
@@ -1464,38 +1675,43 @@ fn build_from_and_where(
             from_sql.push_str(&format!(" INNER JOIN pgrdf._pgrdf_quads q{qi} ON ({on})"));
         }
     }
-    // GRAPH ?g { … } JOIN to `_pgrdf_graphs` — exactly one per inner
-    // BGP. INNER JOIN matches W3C semantics: only graphs in the IRI
-    // mapping show up as solutions (a partition with no `_pgrdf_graphs`
-    // row never binds ?g; rows in unmapped graphs are dropped). The
-    // emitted alias `g0` is referenced by the projection layer when a
-    // projected var name matches `graph_var`.
-    if graph_var.is_some() && !bgp.is_empty() {
+    // INNER JOIN to `_pgrdf_graphs g{S}` — one per Variable scope
+    // that has at least one mandatory-BGP triple. Anchored on
+    // `q{first_qN_in_S}.graph_id` (which is in scope by this point)
+    // so the join is unambiguous. INNER matches W3C §13.3: a
+    // mandatory `?g` MUST bind to a graph in the IRI mapping.
+    for &scope_id in &plan.mandatory_join_ids {
+        let anchor_qi = plan
+            .first_qi_for(scope_id)
+            .expect("ScopePlan: every mandatory scope has a first_qi");
         from_sql.push_str(&format!(
-            " INNER JOIN pgrdf._pgrdf_graphs g0 ON (g0.graph_id = q{first_qi}.graph_id)"
+            " INNER JOIN pgrdf._pgrdf_graphs g{scope_id} \
+             ON (g{scope_id}.graph_id = q{anchor_qi}.graph_id)"
         ));
+    }
+    // Cross-scope consistency: two mandatory GRAPH blocks binding
+    // the same `?g` must agree on the graph. Emit
+    // `g{later}.graph_id = g{anchor}.graph_id` so the projected
+    // value is consistent. Optional-side scopes carry their own
+    // alias and are handled below.
+    for &(scope_id, anchor) in &plan.cross_scope_consistency {
+        let later_mandatory = plan.mandatory_join_ids.contains(&scope_id);
+        let anchor_mandatory = plan.mandatory_join_ids.contains(&anchor);
+        if later_mandatory && anchor_mandatory {
+            where_clauses.push(format!("g{scope_id}.graph_id = g{anchor}.graph_id"));
+        }
     }
     // OPTIONAL blocks — each becomes a LEFT JOIN whose ON includes
     // the OPTIONAL's inner FILTER (if any). Vars only bound in the
     // OPTIONAL come back NULL when the LEFT JOIN doesn't match.
     let mut next_qi = alias_offset + bgp.len() + 1;
+    let mut emitted_left_join_scopes: Vec<usize> = Vec::new();
     for opt in optionals {
         let opt_qi = next_qi;
         next_qi += 1;
         let mut clauses = pattern_clauses(&opt.triple, opt_qi, anchors);
-        // Same graph constraint applies to OPTIONAL aliases (slice
-        // 114 simplifying assumption — the entire single-branch
-        // pattern shares one GRAPH scope; slice 112 will lift it).
-        if let Some(gid) = graph_constraint {
-            let p = id_placeholder(gid);
-            clauses.push(format!("q{opt_qi}.graph_id = {p}"));
-        }
-        // Slice 113: OPTIONAL aliases inside `GRAPH ?g { … }` share
-        // the same graph as the mandatory BGP. Same simplifying
-        // assumption as slice 114; slice 112 lifts cross-scope
-        // composition.
-        if graph_var.is_some() && !bgp.is_empty() {
-            clauses.push(format!("q{opt_qi}.graph_id = q{first_qi}.graph_id"));
+        if let Some(scope) = &opt.scope {
+            scope_constraint_clauses_anchor_q(scope, opt_qi, &plan, &mut clauses);
         }
         if let Some(filter_expr) = &opt.filter {
             let sql = translate_filter(filter_expr, anchors).unwrap_or_else(|| {
@@ -1511,6 +1727,20 @@ fn build_from_and_where(
         from_sql.push_str(&format!(
             " LEFT JOIN pgrdf._pgrdf_quads q{opt_qi} ON ({on})"
         ));
+        // OPTIONAL-born Variable scopes get a LEFT JOIN to
+        // `_pgrdf_graphs g{S}` so an unmatched OPTIONAL leaves both
+        // qOPT_i.* and g{S}.iri NULL (?g unbound).
+        if let Some(GraphScope::Variable { scope_id, .. }) = &opt.scope {
+            if plan.optional_join_ids.contains(scope_id)
+                && !emitted_left_join_scopes.contains(scope_id)
+            {
+                from_sql.push_str(&format!(
+                    " LEFT JOIN pgrdf._pgrdf_graphs g{scope_id} \
+                     ON (g{scope_id}.graph_id = q{opt_qi}.graph_id)"
+                ));
+                emitted_left_join_scopes.push(*scope_id);
+            }
+        }
     }
     // Top-level / branch-level FILTERs — applied to the joined
     // result. NULL comparisons drop the row (SPARQL "type error →
@@ -1523,19 +1753,43 @@ fn build_from_and_where(
     // MINUS blocks → `NOT EXISTS (SELECT 1 FROM … WHERE shared_vars)`.
     // Per SPARQL spec, MINUS with no shared variables is a no-op and
     // is elided here.
-    for minus_triples in minuses {
-        if let Some(sql) = translate_minus(
-            minus_triples,
-            anchors,
-            &mut next_qi,
-            graph_constraint,
-            graph_var,
-            first_qi,
-        ) {
+    for minus in minuses {
+        if let Some(sql) = translate_minus(minus, anchors, &mut next_qi) {
             where_clauses.push(sql);
         }
     }
-    (from_sql, where_clauses)
+    (from_sql, where_clauses, plan)
+}
+
+/// Emit the graph-id constraint clauses for a triple alias whose
+/// scope is `scope`. Literal scopes add `qN.graph_id = $K` (with the
+/// resolved id as a positional parameter); Variable scopes add
+/// `qN.graph_id = q{first_qN_in_scope}.graph_id` — anchored on the
+/// SCOPE's first BGP alias (per ScopePlan) so the JOIN to
+/// `_pgrdf_graphs g{S}` (which lands after all mandatory triples in
+/// the textual SQL) doesn't need to be visible at the time this
+/// clause is emitted.
+///
+/// For the FIRST qN of a scope (qN == first_qN_in_scope), no
+/// equality is emitted — the alias IS the anchor.
+fn scope_constraint_clauses_anchor_q(
+    scope: &GraphScope,
+    qi: usize,
+    plan: &ScopePlan,
+    clauses: &mut Vec<String>,
+) {
+    match scope {
+        GraphScope::Literal(gid) => {
+            let p = id_placeholder(*gid);
+            clauses.push(format!("q{qi}.graph_id = {p}"));
+        }
+        GraphScope::Variable { scope_id, .. } => {
+            let anchor_qi = plan.first_qi_for(*scope_id).unwrap_or(qi);
+            if anchor_qi != qi {
+                clauses.push(format!("q{qi}.graph_id = q{anchor_qi}.graph_id"));
+            }
+        }
+    }
 }
 
 /// Translate a MINUS sub-pattern (N triples) against the outer
@@ -1546,14 +1800,21 @@ fn build_from_and_where(
 /// where the WHERE clause carries every triple's predicates +
 /// equality predicates joining shared variables back to the outer
 /// aliases.
+///
+/// Slice 112: the MINUS block carries its own `GraphScope`. A
+/// Literal scope adds `qN.graph_id = $K` per inner alias. A Variable
+/// scope adds a `_pgrdf_graphs g{S}` row into the NOT EXISTS FROM
+/// and constrains every inner alias to `g{S}.graph_id`. The Variable
+/// scope's `?g` is internal to the MINUS — it doesn't surface to the
+/// outer projection (a fresh GRAPH inside MINUS binds locally;
+/// MINUS-inherited scope is keyed by the outer `g{S}` and would have
+/// already been registered by the BGP/OPTIONAL scan).
 fn translate_minus(
-    triples: &[TriplePattern],
+    minus: &MinusBlock,
     outer_anchors: &HashMap<String, (usize, &'static str)>,
     next_qi: &mut usize,
-    graph_constraint: Option<i64>,
-    graph_var: Option<&str>,
-    outer_first_qi: usize,
 ) -> Option<String> {
+    let triples = &minus.triples;
     if triples.is_empty() {
         return None;
     }
@@ -1581,24 +1842,44 @@ fn translate_minus(
     let mut local_anchors = outer_anchors.clone();
     let mut all_clauses: Vec<String> = Vec::new();
     let mut from_aliases: Vec<String> = Vec::with_capacity(triples.len());
-    for tp in triples {
+    // First qN inside the MINUS for the Variable scope, if any —
+    // used as the anchor for both the `_pgrdf_graphs g{S}` row in
+    // the NOT EXISTS FROM and the per-triple graph_id equality.
+    let mut minus_first_qi: Option<usize> = None;
+    for (i, tp) in triples.iter().enumerate() {
         let qi = *next_qi;
         *next_qi += 1;
         from_aliases.push(format!("pgrdf._pgrdf_quads q{qi}"));
-        let mut clauses = pattern_clauses(tp, qi, &mut local_anchors);
-        // Slice-114 graph scope flows into MINUS too — same single
-        // constraint shared by the whole single-branch pattern.
-        if let Some(gid) = graph_constraint {
-            let p = id_placeholder(gid);
-            clauses.push(format!("q{qi}.graph_id = {p}"));
+        if i == 0 {
+            minus_first_qi = Some(qi);
         }
-        // Slice 113: MINUS sub-pattern aliases inside `GRAPH ?g { … }`
-        // share the outer mandatory BGP's graph_id. Same simplifying
-        // assumption — slice 112 will lift cross-scope composition.
-        if graph_var.is_some() {
-            clauses.push(format!("q{qi}.graph_id = q{outer_first_qi}.graph_id"));
+        let mut clauses = pattern_clauses(tp, qi, &mut local_anchors);
+        match &minus.scope {
+            Some(GraphScope::Literal(gid)) => {
+                let p = id_placeholder(*gid);
+                clauses.push(format!("q{qi}.graph_id = {p}"));
+            }
+            Some(GraphScope::Variable { .. }) => {
+                if let Some(first_qi) = minus_first_qi {
+                    if qi != first_qi {
+                        clauses.push(format!("q{qi}.graph_id = q{first_qi}.graph_id"));
+                    }
+                }
+            }
+            None => {}
         }
         all_clauses.append(&mut clauses);
+    }
+    // Variable scope inside MINUS → join `_pgrdf_graphs g{S}` so
+    // the NOT EXISTS subquery only matches rows whose graph is in
+    // the IRI mapping (consistent with mandatory-side semantics).
+    // The scope is internal to the subquery; the outer projection
+    // never references it.
+    if let Some(GraphScope::Variable { scope_id, .. }) = &minus.scope {
+        if let Some(first_qi) = minus_first_qi {
+            from_aliases.push(format!("pgrdf._pgrdf_graphs g{scope_id}"));
+            all_clauses.push(format!("g{scope_id}.graph_id = q{first_qi}.graph_id"));
+        }
     }
     let where_inside = if all_clauses.is_empty() {
         "TRUE".to_string()
@@ -4096,6 +4377,311 @@ mod tests {
         assert_eq!(
             multi_rows, 2,
             "multi-triple inner BGP must share graph_id — 1 row per graph, no cross-graph stitches"
+        );
+    }
+
+    /// Slice 112 — composition of GRAPH with OPTIONAL. The outer
+    /// BGP is scoped to one literal graph; the OPTIONAL wraps a
+    /// GRAPH block over a DIFFERENT literal graph. The OPTIONAL
+    /// scopes only its own triple — the outer is unaffected — and
+    /// unmatched OPTIONALs leave their projected var NULL while the
+    /// outer row survives (LEFT JOIN semantics).
+    ///
+    /// Setup: g1 (id 521) has alice ex:p "p1-alice". g2 (id 522)
+    /// has alice ex:q "q2-alice". g3 (id 523) has bob ex:p only.
+    /// Query: outer GRAPH g1 binds alice/p1; OPTIONAL GRAPH g2
+    /// binds ex:q for alice → q2-alice. Subject join across the two
+    /// GRAPH scopes is the SAME ?s (alice), so the OPTIONAL fires.
+    ///
+    /// Direct INSERT into `_pgrdf_graphs` + manual partitions to
+    /// bypass `add_graph`'s parallel-test flake, matching the
+    /// pattern slices 114 + 113 used.
+    #[pg_test]
+    fn sparql_graph_composition_with_optional() {
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (521, 'http://example.org/test-c1'), \
+                    (522, 'http://example.org/test-c2'), \
+                    (523, 'http://example.org/test-c3')",
+        )
+        .unwrap();
+        for gid in [521, 522, 523] {
+            Spi::run(&format!(
+                "CREATE TABLE pgrdf._pgrdf_quads_test{gid} \
+                 PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN ({gid})",
+            ))
+            .unwrap();
+        }
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:alice ex:p \"p1-alice\" .', 521)",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:alice ex:q \"q2-alice\" .', 522)",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:bob ex:p \"p3-bob\" .', 523)",
+        )
+        .unwrap();
+
+        // Outer GRAPH <c1> binds alice's ?o = "p1-alice"; OPTIONAL
+        // GRAPH <c2> { ?s ex:q ?v } binds ?v = "q2-alice" because
+        // ?s = alice appears in both graphs' subjects.
+        let row_count: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?s ?o ?v WHERE { \
+                  GRAPH <http://example.org/test-c1> { ?s ex:p ?o } \
+                  OPTIONAL { GRAPH <http://example.org/test-c2> { ?s ex:q ?v } } \
+                }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(row_count, 1, "outer GRAPH <c1> yields one row (alice)");
+
+        let optional_match: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?s ?o ?v WHERE { \
+                  GRAPH <http://example.org/test-c1> { ?s ex:p ?o } \
+                  OPTIONAL { GRAPH <http://example.org/test-c2> { ?s ex:q ?v } } \
+                }') AS s(j) \
+             WHERE (s.j->>'v') = 'q2-alice'",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            optional_match, 1,
+            "OPTIONAL {{ GRAPH <c2> {{ ?s ex:q ?v }} }} must bind ?v from c2"
+        );
+
+        // Outer GRAPH <c3> binds bob's ?o; OPTIONAL GRAPH <c2>
+        // doesn't bind ?v (bob has no ex:q anywhere). Row survives,
+        // ?v IS NULL.
+        let unbound: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?s ?o ?v WHERE { \
+                  GRAPH <http://example.org/test-c3> { ?s ex:p ?o } \
+                  OPTIONAL { GRAPH <http://example.org/test-c2> { ?s ex:q ?v } } \
+                }') AS s(j) \
+             WHERE (s.j->>'v') IS NULL",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            unbound, 1,
+            "unmatched OPTIONAL {{ GRAPH … }} must leave ?v NULL without dropping outer row"
+        );
+    }
+
+    /// Slice 112 — composition of GRAPH with UNION. Each branch
+    /// carries its own literal GRAPH scope; the per-pattern scope
+    /// design means the two branches don't accidentally share
+    /// constraints.
+    #[pg_test]
+    fn sparql_graph_composition_with_union() {
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (531, 'http://example.org/test-u1'), \
+                    (532, 'http://example.org/test-u2')",
+        )
+        .unwrap();
+        for gid in [531, 532] {
+            Spi::run(&format!(
+                "CREATE TABLE pgrdf._pgrdf_quads_test{gid} \
+                 PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN ({gid})",
+            ))
+            .unwrap();
+        }
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:alice ex:p \"p1-alice\" .', 531)",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:bob ex:p \"p2-bob\" .', 532)",
+        )
+        .unwrap();
+
+        // `{ GRAPH <u1> { ?s ex:p ?o } } UNION { GRAPH <u2> { ?s ex:p ?o } }`
+        // — 2 rows total, one per branch.
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?o WHERE { \
+                  { GRAPH <http://example.org/test-u1> { ?s ex:p ?o } } \
+                  UNION \
+                  { GRAPH <http://example.org/test-u2> { ?s ex:p ?o } } \
+                }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            rows, 2,
+            "GRAPH inside UNION branches yields one row per branch (each scoped independently)"
+        );
+    }
+
+    /// Slice 112 — composition of GRAPH with MINUS. The outer query
+    /// is a bare BGP (no GRAPH); the MINUS body is wrapped in
+    /// GRAPH <iri>, so MINUS only subtracts rows whose subject
+    /// appears in THAT graph's ex:q.
+    #[pg_test]
+    fn sparql_graph_composition_with_minus() {
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (541, 'http://example.org/test-m1')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE TABLE pgrdf._pgrdf_quads_test541 \
+             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (541)",
+        )
+        .unwrap();
+        // m1: alice has ex:q ; default graph (id 0): alice + bob have ex:p.
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:alice ex:q \"q-alice-m1\" .', 541)",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:alice ex:p \"p-alice-default\" . \
+                  ex:bob   ex:p \"p-bob-default\" .', 0)",
+        )
+        .unwrap();
+
+        // Outer: every ex:p row from default → alice + bob.
+        // MINUS GRAPH <m1> { ?s ex:q ?o2 } subtracts subjects whose
+        // ex:q is in m1 — alice. So bob survives, alice doesn't.
+        let after_minus: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?s ?o WHERE { \
+                  ?s ex:p ?o \
+                  MINUS { GRAPH <http://example.org/test-m1> { ?s ex:q ?o2 } } \
+                }') AS s(j) \
+             WHERE (s.j->>'s') = 'http://example.org/bob'",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            after_minus, 1,
+            "bob (no ex:q in m1) must survive MINUS GRAPH <m1>"
+        );
+
+        let alice_dropped: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?s ?o WHERE { \
+                  ?s ex:p ?o \
+                  MINUS { GRAPH <http://example.org/test-m1> { ?s ex:q ?o2 } } \
+                }') AS s(j) \
+             WHERE (s.j->>'s') = 'http://example.org/alice'",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            alice_dropped, 0,
+            "alice (has ex:q in m1) must be dropped by MINUS GRAPH <m1>"
+        );
+    }
+
+    /// Slice 112 — OPTIONAL inside GRAPH ?g. Both triples MUST come
+    /// from the same graph; the outer GRAPH ?g scope propagates
+    /// into the OPTIONAL's triple via inherited scope (no fresh
+    /// scope_id minted), so the OPTIONAL's `q{opt}.graph_id`
+    /// equates to the BGP's first qN graph_id.
+    #[pg_test]
+    fn sparql_optional_inside_graph_variable() {
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (551, 'http://example.org/test-v1'), \
+                    (552, 'http://example.org/test-v2')",
+        )
+        .unwrap();
+        for gid in [551, 552] {
+            Spi::run(&format!(
+                "CREATE TABLE pgrdf._pgrdf_quads_test{gid} \
+                 PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN ({gid})",
+            ))
+            .unwrap();
+        }
+        // v1: alice has both ex:p and ex:q. v2: bob has only ex:p.
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:alice ex:p \"p-v1\" . \
+                  ex:alice ex:q \"q-v1\" .', 551)",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:bob ex:p \"p-v2\" .', 552)",
+        )
+        .unwrap();
+
+        // GRAPH ?g { ?s ex:p ?o OPTIONAL { ?s ex:q ?v } } → 2 rows
+        // (one per graph). The v1 row has ?v = "q-v1"; the v2 row's
+        // OPTIONAL is unmatched (?v IS NULL).
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?g ?o ?v WHERE { \
+                  GRAPH ?g { ?s ex:p ?o OPTIONAL { ?s ex:q ?v } } \
+                }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            rows, 2,
+            "GRAPH ?g {{ ?s p ?o OPTIONAL {{ ?s q ?v }} }} yields 2 rows (one per graph)"
+        );
+
+        let v1_paired: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?g ?o ?v WHERE { \
+                  GRAPH ?g { ?s ex:p ?o OPTIONAL { ?s ex:q ?v } } \
+                }') AS s(j) \
+             WHERE (s.j->>'g') = 'http://example.org/test-v1' \
+               AND (s.j->>'v') = 'q-v1'",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            v1_paired, 1,
+            "v1 row pairs ?o + ?v from the same graph (no cross-graph stitch)"
+        );
+
+        let v2_unmatched: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?g ?o ?v WHERE { \
+                  GRAPH ?g { ?s ex:p ?o OPTIONAL { ?s ex:q ?v } } \
+                }') AS s(j) \
+             WHERE (s.j->>'g') = 'http://example.org/test-v2' \
+               AND (s.j->>'v') IS NULL",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            v2_unmatched, 1,
+            "v2's OPTIONAL inherits the outer GRAPH ?g scope; v2 has no ex:q so ?v stays NULL"
         );
     }
 }

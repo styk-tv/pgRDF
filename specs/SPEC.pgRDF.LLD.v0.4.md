@@ -95,6 +95,7 @@ Capability matrix for the v0.4 target:
 |---|---|---|---|
 | `GRAPH <iri> { … }` | ⏳ deferred | §3.3 | ✅ slice 114 |
 | `GRAPH ?g { … }` | ⏳ deferred | §3.3 | ✅ slice 113 |
+| GRAPH composition (OPTIONAL/UNION/MINUS) | ⏳ deferred | §3.3 | ✅ slice 112 |
 | IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | 🚧 |
 | SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | §4 | 🚧 |
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | 🚧 |
@@ -198,9 +199,8 @@ interchangeable at the UDF boundary. `pgrdf.put_quad`,
   walks `inner` so the contained BGP triples are still counted.
   Regression: [`tests/regression/sql/78-sparql-graph-literal-iri.sql`](../tests/regression/sql/78-sparql-graph-literal-iri.sql)
   + one `#[pg_test]` (`sparql_graph_literal_iri_scopes_to_graph`).
-  Slice-114 limitation: a single graph constraint covers the entire
-  single-branch BGP — composition with OPTIONAL / UNION / MINUS that
-  span different scopes is slice 112 (per-pattern annotation).
+  Slice-114 lifted by slice 112: the constraint is now per-pattern,
+  not per-query (see §3.3 composition entry below).
 - **`GRAPH ?g { … }`** ✅ landed (Phase A countdown slice 113). The
   executor records the variable name on `ParsedSelect.graph_var`
   (or `UnionBranch.graph_var`) during the algebra walk; in
@@ -222,19 +222,38 @@ interchangeable at the UDF boundary. `pgrdf.put_quad`,
   like the literal-IRI form. Regression:
   [`tests/regression/sql/79-sparql-graph-variable.sql`](../tests/regression/sql/79-sparql-graph-variable.sql)
   + one `#[pg_test]` (`sparql_graph_variable_projects_iri`).
-  Slice-113 limitation matches slice 114's: a single graph
-  variable / constraint covers the entire single-branch BGP —
-  composition with OPTIONAL / UNION / MINUS that spans DIFFERENT
-  GRAPH scopes is slice 112 (per-pattern annotation).
+  Slice-113 lifted by slice 112: per-pattern scope (see composition
+  entry below).
+- **GRAPH composition with OPTIONAL / UNION / MINUS** ✅ landed
+  (Phase A countdown slice 112). The graph constraint is now PER
+  TRIPLE PATTERN, not per query / per branch. A new `GraphScope`
+  enum carries either `Literal(graph_id)` or
+  `Variable { name, scope_id }`; the walk attaches an
+  `Option<GraphScope>` to each `ScopedTriple` in the mandatory BGP,
+  to each `OptionalBlock`, and to each `MinusBlock`. Distinct GRAPH
+  blocks within one query get distinct `scope_id`s. The SQL builder
+  pre-scans BGP + OPTIONAL scopes to produce a `ScopePlan`:
+  mandatory Variable scopes get an `INNER JOIN _pgrdf_graphs g{S}`
+  anchored on the scope's first BGP alias; OPTIONAL-born Variable
+  scopes get a `LEFT JOIN _pgrdf_graphs g{S}` anchored on the
+  OPTIONAL's alias so an unmatched OPTIONAL leaves `?g` NULL
+  without dropping the outer row. Two GRAPH blocks binding the same
+  `?g` are tied together with a `g{later}.graph_id = g{anchor}.graph_id`
+  so the projected variable is consistent. OPTIONAL / MINUS that
+  nest inside a GRAPH inherit the outer scope (W3C SPARQL 1.1 §13.3
+  — innermost wins at AST-walk time). Regression:
+  [`tests/regression/sql/87-sparql-graph-composition.sql`](../tests/regression/sql/87-sparql-graph-composition.sql)
+  + four `#[pg_test]`s
+  (`sparql_graph_composition_with_{optional,union,minus}` +
+  `sparql_optional_inside_graph_variable`).
 - Composition discipline:
   - `GRAPH { … }` composes inside `OPTIONAL`, `UNION`, and `MINUS`
-    blocks. Translation reuses the v0.3 `build_from_and_where`
-    layout, threading a new `graph_id` (or `graph_iri`) join
-    constraint per pattern.
-  - Nested `GRAPH` blocks resolve to the innermost scope at AST-walk
-    time (per W3C SPARQL 1.1 §13.3). Slice-114 honours this for
-    nested literal-IRI scopes (innermost overwrites the constraint
-    during the walk); per-pattern scope arrives in slice 112.
+    blocks via the per-pattern `Option<GraphScope>` decoration.
+    Each contained triple carries the scope of its innermost
+    enclosing GRAPH block (or `None` = scan every partition).
+  - Nested `GRAPH` blocks resolve to the innermost scope per W3C
+    SPARQL 1.1 §13.3 — the walk mints a fresh scope when it enters
+    a Graph node and rebinds `current_scope` for the inner walk.
   - A bare BGP outside any `GRAPH { … }` continues to mean "match in
     any graph" — same semantics as v0.3 (`pgrdf.sparql` over the
     union of all partitions).

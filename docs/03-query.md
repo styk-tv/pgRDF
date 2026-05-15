@@ -59,7 +59,8 @@ result rows ─► SETOF JSONB
 | UNION { A } { B } | `(SELECT … FROM A) UNION ALL (SELECT … FROM B)` | Each branch SELECTs `NULL::TEXT` for vars it doesn't bind |
 | MINUS { triple } | `WHERE NOT EXISTS (SELECT 1 FROM _pgrdf_quads qMIN_K WHERE …)` | Elided at translation time when there are no shared variables (SPARQL no-op) |
 | `GRAPH <iri> { … }` | `qN.graph_id = <resolved>` on every triple alias inside the block | IRI resolved against `_pgrdf_graphs.iri` at translate time; unresolved IRI binds to `-1` (zero rows, spec-correct "no solutions") |
-| `GRAPH ?g { … }` | `INNER JOIN _pgrdf_graphs g0 ON g0.graph_id = q1.graph_id` + `qN.graph_id = q1.graph_id` for N≥2 | One JOIN per inner BGP; ?g projects as `g0.iri` (the IRI string); INNER matches W3C §13.3 — only mapped graphs bind ?g; multi-triple inner BGPs share q1's graph_id so triples can't stitch across graphs |
+| `GRAPH ?g { … }` | `INNER JOIN _pgrdf_graphs g{S} ON g{S}.graph_id = q{first}.graph_id` + `qN.graph_id = q{first}.graph_id` for non-anchor triples | One JOIN per Variable scope; ?g projects as `g{S}.iri` (the IRI string); INNER matches W3C §13.3 — only mapped graphs bind ?g; multi-triple inner BGPs share the anchor's graph_id so triples can't stitch across graphs |
+| GRAPH composition (slice 112) | Per-pattern `Option<GraphScope>`; GRAPH inside OPTIONAL/UNION/MINUS scopes only its contained triples, OPTIONAL/MINUS inside GRAPH inherits the outer scope | Mandatory Variable scopes → INNER JOIN to `_pgrdf_graphs`; OPTIONAL-born scopes → LEFT JOIN so unmatched OPTIONALs still NULL out `?g` instead of dropping outer rows; MINUS scopes stay internal to the NOT EXISTS subquery |
 | DISTINCT / REDUCED | `SELECT DISTINCT …` | REDUCED → DISTINCT (safe over-approximation per spec) |
 | ORDER BY ?v | `ORDER BY (SELECT lex …) ASC/DESC NULLS LAST` or by ordinal | Unprojected ?v → hidden trailing SELECT column |
 | LIMIT N / OFFSET N | `LIMIT N` / `OFFSET N` | Postgres-native |
@@ -145,17 +146,26 @@ Concrete shape:
 - ✅ Named-graph `GRAPH <iri> { … }` — literal-IRI form (slice 114).
       Translate-time IRI → `graph_id` resolution via
       `_pgrdf_graphs.iri`; unresolved IRI binds to `-1` (zero
-      rows, spec-correct). Single-branch BGP shares one constraint;
-      composition with OPTIONAL / UNION / MINUS that spans different
-      scopes is slice 112.
+      rows, spec-correct).
 - ✅ Named-graph `GRAPH ?g { … }` — variable form (slice 113).
-      Inner BGP gains an `INNER JOIN _pgrdf_graphs g0 ON g0.graph_id
-      = q1.graph_id`; ?g projects as `g0.iri` (the IRI string, not
-      the integer id). Triples 2..N inside the GRAPH block carry an
-      additional `qN.graph_id = q1.graph_id` so a multi-triple inner
-      BGP cannot stitch triples from different graphs together. INNER
-      JOIN matches W3C SPARQL 1.1 §13.3 — only graphs in the IRI
-      mapping bind ?g. COUNT + GROUP BY ?g works as expected.
+      Inner BGP gains an `INNER JOIN _pgrdf_graphs g{S} ON
+      g{S}.graph_id = q{first}.graph_id`; ?g projects as `g{S}.iri`
+      (the IRI string, not the integer id). Triples 2..N inside the
+      GRAPH block share the anchor's graph_id so a multi-triple
+      inner BGP cannot stitch triples from different graphs together.
+      INNER JOIN matches W3C SPARQL 1.1 §13.3 — only graphs in the
+      IRI mapping bind ?g. COUNT + GROUP BY ?g works as expected.
+- ✅ GRAPH composition with OPTIONAL / UNION / MINUS (slice 112).
+      Per-pattern `Option<GraphScope>` decorates each triple, each
+      OPTIONAL triple, and each MINUS block: a GRAPH block inside
+      one of these scopes only the contained triples; an
+      OPTIONAL / MINUS inside a GRAPH inherits the outer scope. Two
+      GRAPH blocks binding the same `?g` variable get tied together
+      with a graph_id equality so the projected variable is
+      consistent. Distinct GRAPH blocks get distinct `scope_id`s and
+      independent `_pgrdf_graphs` joins; OPTIONAL-born Variable
+      scopes use a LEFT JOIN so an unmatched OPTIONAL leaves `?g`
+      NULL without dropping the outer row.
 - ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4

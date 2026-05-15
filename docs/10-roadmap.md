@@ -466,9 +466,10 @@ not the integer. See
   [`tests/regression/sql/78-sparql-graph-literal-iri.sql`](../tests/regression/sql/78-sparql-graph-literal-iri.sql)
   + one `#[pg_test]` (`sparql_graph_literal_iri_scopes_to_graph`
   in [`src/query/executor.rs`](../src/query/executor.rs)).
-  Slice-114 limitation: a single graph constraint covers the
-  entire single-branch BGP — composition with OPTIONAL / UNION /
-  MINUS that span different scopes is slice 112.
+  Slice-114 limitation (lifted in slice 112): the original
+  implementation kept a single graph constraint covering the entire
+  single-branch BGP. Slice 112 moved the constraint to per-pattern
+  scope so GRAPH composes correctly with OPTIONAL / UNION / MINUS.
 - ✅ **Slice 113 — SPARQL `GRAPH ?g { … }` variable form
   translation.** The executor's pattern walk now handles
   `GraphPattern::Graph { Variable(?g), inner }` by recording the
@@ -488,12 +489,31 @@ not the integer. See
   [`tests/regression/sql/79-sparql-graph-variable.sql`](../tests/regression/sql/79-sparql-graph-variable.sql)
   + one `#[pg_test]` (`sparql_graph_variable_projects_iri` in
   [`src/query/executor.rs`](../src/query/executor.rs)). Slice-113
-  limitation matches slice 114's: a single graph var covers the
-  entire single-branch BGP — composition with OPTIONAL / UNION /
-  MINUS that spans DIFFERENT GRAPH scopes is slice 112.
-- ⏳ Slice 112 — GRAPH composition with OPTIONAL / UNION / MINUS
-  across different graph scopes (per-pattern constraint
-  annotation).
+  limitation (lifted in slice 112): the original implementation
+  kept a single graph var covering the entire single-branch BGP.
+  Slice 112 moved scope to per-pattern.
+- ✅ **Slice 112 — GRAPH composition with OPTIONAL / UNION / MINUS
+  across different graph scopes.** Refactored the executor's graph
+  constraint from per-`ParsedSelect` (one literal id + one var
+  name, shared by the whole single-branch BGP) to per-pattern
+  `Option<GraphScope>` carried by each triple, each OPTIONAL
+  triple, and each MINUS block. A new `GraphScope` enum holds
+  either `Literal(graph_id)` (resolved at translate time) or
+  `Variable { name, scope_id }` (with a globally-unique scope_id
+  per GRAPH block instance). `build_from_and_where` builds a
+  `ScopePlan` describing which Variable scopes need an INNER JOIN
+  to `_pgrdf_graphs` (mandatory side) vs LEFT JOIN (OPTIONAL-born
+  side), anchors each scope's JOIN to the first BGP alias in scope,
+  and emits per-triple `qN.graph_id = …` constraints based on
+  scope. Two GRAPH blocks binding the same `?g` are tied together
+  with a `g{later}.graph_id = g{anchor}.graph_id` so the projected
+  variable stays consistent. The OPTIONAL/MINUS that nest inside a
+  GRAPH inherit the outer scope (W3C SPARQL 1.1 §13.3). Coverage in
+  [`tests/regression/sql/87-sparql-graph-composition.sql`](../tests/regression/sql/87-sparql-graph-composition.sql)
+  + four pgrx `#[pg_test]`s in
+  [`src/query/executor.rs`](../src/query/executor.rs)
+  (`sparql_graph_composition_with_{optional,union,minus}` +
+  `sparql_optional_inside_graph_variable`).
 - ✅ **Slice 111 — W3C-shape conformance fixtures for `GRAPH { … }`.**
   Three new directories under `tests/w3c-sparql/`:
   [`24-graph-named-iri/`](../tests/w3c-sparql/24-graph-named-iri/)

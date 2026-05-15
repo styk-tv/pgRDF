@@ -6,6 +6,75 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 112 — SPARQL GRAPH composition with OPTIONAL/UNION/MINUS
+
+The SPARQL executor's GRAPH constraint moves from PER-QUERY to
+PER-TRIPLE. The previous implementation (slices 114 + 113) carried a
+single `graph_id_constraint: Option<i64>` plus a single
+`graph_var: Option<String>` on `ParsedSelect` and `UnionBranch`,
+applying one graph scope to the whole single-branch BGP (and its
+OPTIONAL / MINUS bundle). That worked for simple BGPs but couldn't
+express GRAPH inside an OPTIONAL with a different scope, GRAPH
+inside individual UNION branches, or GRAPH inside MINUS.
+
+Slice 112 introduces:
+
+- A new `GraphScope` enum with two arms:
+  - `Literal(i64)` — `graph_id` resolved at translate time via
+    `_pgrdf_graphs.iri`.
+  - `Variable { name, scope_id }` — the SPARQL `?g` variable name
+    plus a globally-unique scope id (minted on entry to each GRAPH
+    block; counter lives on `ParsedSelect.graph_scope_counter`).
+- A `ScopedTriple { triple, scope: Option<GraphScope> }` wrapper
+  carried by `ParsedSelect.bgp` and `UnionBranch.bgp` instead of
+  bare `TriplePattern`. Each triple records the GRAPH scope that
+  was active during its walk.
+- A `MinusBlock { triples, scope }` struct (replaces
+  `Vec<Vec<TriplePattern>>`) and a `scope` field on `OptionalBlock`
+  — both pick up their scope from the walk's `current_scope`, OR
+  override it when a GRAPH block wraps the OPTIONAL's / MINUS's
+  right arm directly.
+- A new `walk_select_scoped` / `walk_branch` recursion that threads
+  `current_scope: Option<&GraphScope>` down through every algebra
+  node; a `GraphPattern::Graph` mints a fresh scope and walks
+  `inner` with it bound.
+
+The SQL builder grows a `ScopePlan` that scans the mandatory BGP +
+OPTIONALs to figure out which Variable scopes need JOINs to
+`_pgrdf_graphs`. Mandatory scopes get an INNER JOIN anchored on
+their first BGP alias; OPTIONAL-born scopes get a LEFT JOIN
+anchored on the OPTIONAL's alias, so an unmatched OPTIONAL leaves
+`?g` NULL without dropping the outer row (W3C SPARQL 1.1 §13.3
+LEFT-JOIN semantics for OPTIONAL preserved). When two GRAPH blocks
+bind the same `?g` variable, the second scope gets a
+`g{later}.graph_id = g{anchor}.graph_id` consistency predicate.
+MINUS scopes stay internal to the `NOT EXISTS` subquery — the
+subquery emits its own `_pgrdf_graphs g{S}` row and anchors all
+inner aliases on it.
+
+Coverage:
+
+- `tests/regression/sql/87-sparql-graph-composition.sql` —
+  pg_regress-shape file with the five composition shapes (GRAPH
+  inside OPTIONAL, GRAPH inside UNION branches, GRAPH inside MINUS,
+  OPTIONAL inside GRAPH ?g, MINUS inside GRAPH literal).
+- Four pgrx `#[pg_test]`s in `src/query/executor.rs`:
+  `sparql_graph_composition_with_optional`,
+  `sparql_graph_composition_with_union`,
+  `sparql_graph_composition_with_minus`,
+  `sparql_optional_inside_graph_variable`. Each uses direct INSERT
+  into `_pgrdf_graphs` + manual partition creation to bypass the
+  `add_graph` parallelism flake (same scaffolding as slices 114 +
+  113).
+
+Backwards compatibility is preserved: every slice 114 / 113
+regression case (`78-sparql-graph-literal-iri.sql`,
+`79-sparql-graph-variable.sql`, the W3C-shape fixtures from slice
+111) generates the same SQL shape as before — a single GRAPH around
+a BGP collapses into "every triple in the BGP carries the same
+scope", producing the same constraint set the previous
+`graph_id_constraint` / `graph_var` path emitted.
+
 ### Phase A slice 111 — W3C-shape conformance for SPARQL GRAPH
 
 Three new W3C-shape fixtures under `tests/w3c-sparql/` covering the
