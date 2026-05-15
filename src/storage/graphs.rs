@@ -237,6 +237,10 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         &[id.into()],
     )
     .unwrap_or_else(|e| panic!("drop_graph: _pgrdf_graphs row cleanup failed: {e}"));
+
+    total
+}
+
 /// Truncate every row in graph `id`'s LIST partition
 /// (`pgrdf._pgrdf_quads_g<id>`). Returns the rows-removed count
 /// (== the row count captured immediately before the TRUNCATE).
@@ -756,6 +760,8 @@ mod tests {
     #[pg_test(error = "drop_graph: graph_id must be >= 0, got -1")]
     fn drop_graph_negative_id_rejected() {
         Spi::run("SELECT pgrdf.drop_graph(-1::bigint)").unwrap();
+    }
+
     /// Slice 98 — idempotent on an absent graph. Calling
     /// `clear_graph` against a `graph_id` that has never had
     /// `add_graph(id)` run for it (so no LIST partition exists)
