@@ -211,6 +211,276 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Phase D slice 59 — CONSTRUCT foundation
+//
+// `pgrdf.construct(q TEXT) → SETOF JSONB` is the sibling UDF to
+// `pgrdf.sparql` documented in LLD v0.4 §6.1. CONSTRUCT's output shape
+// — triples, not solution rows — diverges enough from the SELECT row
+// shape that callers signal intent at the SQL boundary rather than
+// switching on a sentinel key.
+//
+// Output row shape (one row per (solution, template-triple) pair):
+//
+//   {"subject":   {"type": "iri",     "value": "..."},
+//    "predicate": {"type": "iri",     "value": "..."},
+//    "object":    {"type": "literal", "value": "...",
+//                  "datatype": "...", "language": "..."}}
+//
+// The slice 59 NARROW SCOPE — constant-only templates. Variables and
+// blank nodes in the template panic with the stable
+// `pgrdf.construct: slice 59 supports constant-only templates`
+// prefix; slices 58 / 57 will widen to variable substitution +
+// per-solution fresh blank-node minting (LLD §6.2). The WHERE pattern
+// itself accepts the full SELECT-side BGP / FILTER / OPTIONAL /
+// UNION / MINUS surface — translation reuses `parse_select` +
+// `build_bgp_sql` + `execute` end-to-end. Because the template is
+// constant for slice 59, each solution emits an identical
+// `template.len()`-row burst — but per W3C SPARQL 1.1 §16.2 the
+// solution sequence's multiplicity is the BGP's, so we MUST still
+// emit one burst per solution (no implicit DISTINCT).
+//
+// Out of scope on CONSTRUCT per W3C 1.1 §16.2: DISTINCT / ORDER BY /
+// GROUP BY / aggregates. We detect by inspecting the inner `pattern`
+// for a top-level Distinct / Reduced / OrderBy / Group wrapper and
+// reject with `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY /
+// aggregates not supported (W3C 1.1 §16.2)`.
+
+/// Execute a SPARQL CONSTRUCT query and return one JSONB row per
+/// `(solution, template-triple)` pair. Each row carries the shape
+/// `{"subject": <term>, "predicate": <term>, "object": <term>}`, with
+/// each term encoded as `{"type": "iri"|"literal"|"bnode", "value": …,
+/// "datatype"?: …, "language"?: …}`. Slice 59 (foundation) supports
+/// constant-only templates; variables and blank nodes in the template
+/// panic with a stable "slice 59 supports constant-only templates"
+/// prefix until slices 58 / 57 widen the surface.
+///
+/// SQL: `pgrdf.construct(q TEXT) → SETOF JSONB`.
+#[pg_extern]
+fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    let parsed = SparqlParser::new()
+        .parse_query(query)
+        .unwrap_or_else(|e| panic!("pgrdf.construct: parse error: {e}"));
+
+    let (template, pattern) = match parsed {
+        Query::Construct {
+            template, pattern, ..
+        } => (template, pattern),
+        Query::Select { .. } | Query::Ask { .. } | Query::Describe { .. } => {
+            panic!("pgrdf.construct: not a CONSTRUCT query")
+        }
+    };
+
+    // §16.2 modifier guard — detect DISTINCT / REDUCED / ORDER BY /
+    // GROUP BY / aggregate wrappers at the top of the WHERE algebra.
+    // SLICE-aside (Slice / Project) is permitted: spargebra wraps the
+    // pattern's algebra surface even on plain CONSTRUCT (Project for
+    // the implicit "all vars" projection). We walk past those and
+    // assert there is no Distinct / Reduced / OrderBy / Group on the
+    // way down to the BGP.
+    reject_construct_modifiers(&pattern);
+
+    // Slice 59 — template must be constant-only (no variables, no
+    // blank nodes in any triple position). Encode each template
+    // triple eagerly into JSONB term cells; we reuse the cells for
+    // every solution burst since they don't depend on the row.
+    let template_rows: Vec<Value> = template
+        .iter()
+        .map(encode_constant_template_triple)
+        .collect();
+
+    // Walk the WHERE pattern through the existing SELECT pipeline.
+    // SELECT-* equivalence: `parse_select` auto-fills `projected`
+    // with every variable the BGP binds, so the executor pulls a
+    // row per solution even though we don't consume the values
+    // (slice 59 templates are constant). An empty BGP panics —
+    // a CONSTRUCT with no WHERE is degenerate; reject cleanly.
+    let ps = parse_select(&pattern);
+    if ps.bgp.is_empty() && ps.union_branches.is_empty() {
+        panic!("pgrdf.construct: empty WHERE pattern");
+    }
+    // For solution-cardinality counting we just need SOME projection
+    // (the row count is what matters). If the BGP binds no variables
+    // at all — exotic but possible (`WHERE { <s> <p> <o> }` with all
+    // constants) — synthesise a single dummy projection that yields
+    // exactly one row per match.
+    if ps.projected.is_empty() {
+        // Build a probe-style SQL via build_ask_probe_sql which
+        // returns `SELECT 1 …` over the same FROM/WHERE — but we
+        // need every match (not just one), so we want a full table
+        // scan instead. Fall through to the standard build path
+        // with a synthetic projection: parse_select already widens
+        // projected to all BGP vars; an all-constants BGP yields
+        // an empty `projected` and the SELECT-clause builder
+        // would emit `SELECT  FROM …` which is invalid. Insert a
+        // literal `1` so the row stream is well-formed.
+        // This branch is rare; covered by an executor test for
+        // a constant-only WHERE.
+        let probe = build_construct_constant_where_sql(&ps);
+        let params = params_take();
+        let solutions = execute_count_only(&probe, &params);
+        let rows = expand_template_per_solution(&template_rows, solutions);
+        return SetOfIterator::new(rows.into_iter());
+    }
+
+    let sql = build_bgp_sql(&ps);
+    let plan = ExecPlan {
+        projected: ps.projected,
+        sql,
+        params: params_take(),
+    };
+    let solutions = execute(&plan).len();
+    let rows = expand_template_per_solution(&template_rows, solutions);
+    SetOfIterator::new(rows.into_iter())
+}
+
+/// Encode a constant-only template triple into a JSONB value of shape
+/// `{"subject": <term>, "predicate": <term>, "object": <term>}`. Each
+/// term cell is a structured object per LLD v0.4 §6.1. Panics with
+/// the slice 59 prefix if the triple carries a variable or blank node
+/// in any position.
+fn encode_constant_template_triple(tp: &TriplePattern) -> Value {
+    let s = match &tp.subject {
+        TermPattern::NamedNode(n) => encode_iri_term(n.as_str()),
+        TermPattern::Literal(_) => panic!(
+            "pgrdf.construct: literal in subject position is not legal RDF (SPARQL 1.1 §16.2)"
+        ),
+        TermPattern::Variable(_) | TermPattern::BlankNode(_) => panic!(
+            "pgrdf.construct: slice 59 supports constant-only templates (variables / blank nodes ship in slices 58 / 57)"
+        ),
+        #[allow(unreachable_patterns)]
+        _ => panic!("pgrdf.construct: unsupported subject term shape"),
+    };
+    let p = match &tp.predicate {
+        NamedNodePattern::NamedNode(n) => encode_iri_term(n.as_str()),
+        NamedNodePattern::Variable(_) => panic!(
+            "pgrdf.construct: slice 59 supports constant-only templates (variables / blank nodes ship in slices 58 / 57)"
+        ),
+    };
+    let o = match &tp.object {
+        TermPattern::NamedNode(n) => encode_iri_term(n.as_str()),
+        TermPattern::Literal(lit) => encode_literal_term(lit),
+        TermPattern::Variable(_) | TermPattern::BlankNode(_) => panic!(
+            "pgrdf.construct: slice 59 supports constant-only templates (variables / blank nodes ship in slices 58 / 57)"
+        ),
+        #[allow(unreachable_patterns)]
+        _ => panic!("pgrdf.construct: unsupported object term shape"),
+    };
+    json!({ "subject": s, "predicate": p, "object": o })
+}
+
+/// `{"type": "iri", "value": "<iri>"}` — shape contract per LLD §6.1.
+fn encode_iri_term(iri: &str) -> Value {
+    json!({ "type": "iri", "value": iri })
+}
+
+/// `{"type": "literal", "value": "<lex>", …}` with `datatype` for
+/// typed literals and `language` for language-tagged literals. Plain
+/// strings carry the `xsd:string` datatype IRI explicitly so callers
+/// don't have to special-case the absence-of-tag form (W3C 1.1
+/// §16.2 / RDF 1.1 §3.3 — `xsd:string` is the lexical default).
+fn encode_literal_term(lit: &Literal) -> Value {
+    let mut obj = Map::new();
+    obj.insert("type".into(), Value::String("literal".into()));
+    obj.insert("value".into(), Value::String(lit.value().to_string()));
+    if let Some(lang) = lit.language() {
+        obj.insert("language".into(), Value::String(lang.to_string()));
+    } else {
+        obj.insert(
+            "datatype".into(),
+            Value::String(lit.datatype().as_str().to_string()),
+        );
+    }
+    Value::Object(obj)
+}
+
+/// Walk past Project / Slice wrappers and refuse to translate a
+/// CONSTRUCT whose WHERE carries a §16.2-prohibited modifier. The
+/// reject is intentionally aggressive: a single panic prefix family
+/// per LLD §6 (`pgrdf.construct: DISTINCT / ORDER BY / GROUP BY /
+/// aggregates not supported (W3C 1.1 §16.2)`).
+fn reject_construct_modifiers(p: &GraphPattern) {
+    match p {
+        GraphPattern::Distinct { .. } | GraphPattern::Reduced { .. } => {
+            panic!("pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)")
+        }
+        GraphPattern::OrderBy { .. } => {
+            panic!("pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)")
+        }
+        GraphPattern::Group { .. } => {
+            panic!("pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)")
+        }
+        GraphPattern::Project { inner, .. } | GraphPattern::Slice { inner, .. } => {
+            reject_construct_modifiers(inner)
+        }
+        _ => {}
+    }
+}
+
+/// Build a probe SELECT for an all-constants WHERE (BGP binds zero
+/// variables). The standard build path would emit an empty SELECT
+/// list; here we project a literal `1` so the row stream is
+/// well-formed and the row count == solution count.
+fn build_construct_constant_where_sql(ps: &ParsedSelect) -> String {
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    let (from_sql, where_clauses, _plan) = build_from_and_where(
+        &ps.bgp,
+        &ps.filters,
+        &ps.optionals,
+        &ps.minuses,
+        &mut anchors,
+        0,
+    );
+    let mut sql = format!("SELECT 1 AS _pgrdf_construct_row FROM {from_sql}");
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+    sql
+}
+
+/// Run a parameterised SELECT just to count rows. Used for the rare
+/// all-constants WHERE case where the executor's standard JSONB row
+/// builder would have to be bypassed (zero projected vars).
+fn execute_count_only(sql: &str, params: &[i64]) -> usize {
+    Spi::connect_mut(|client| {
+        let arg_oids: Vec<PgOid> = vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+        let datums: Vec<DatumWithOid<'_>> = params
+            .iter()
+            .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
+            .collect();
+        let prepared = client
+            .prepare(sql, &arg_oids)
+            .expect("pgrdf.construct: probe prepare failed");
+        let table = client
+            .update(&prepared, None, &datums)
+            .expect("pgrdf.construct: probe SELECT failed");
+        let mut n = 0_usize;
+        for _ in table {
+            n += 1;
+        }
+        n
+    })
+}
+
+/// Emit one JSONB row per `(solution, template-triple)` pair. With a
+/// constant-only template the cells don't depend on the solution, so
+/// we clone the pre-encoded template values `n_solutions` times. The
+/// resulting `Vec<pgrx::JsonB>` is what the SetOfIterator wraps.
+fn expand_template_per_solution(
+    template_rows: &[Value],
+    n_solutions: usize,
+) -> Vec<pgrx::JsonB> {
+    let mut out: Vec<pgrx::JsonB> = Vec::with_capacity(template_rows.len() * n_solutions);
+    for _ in 0..n_solutions {
+        for row in template_rows {
+            out.push(pgrx::JsonB(row.clone()));
+        }
+    }
+    out
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Plan
 // ─────────────────────────────────────────────────────────────────────
 
@@ -7362,5 +7632,150 @@ mod tests {
         .unwrap()
         .unwrap_or(-1);
         assert_eq!(n, 1, "no duplicate binding after SILENT re-CREATE");
+    }
+
+    // ─── Phase D slice 59 — pgrdf.construct foundation ──────────────
+    //
+    // Constant-only templates per W3C SPARQL 1.1 §16.2. Each solution
+    // emits one row per template triple, all rows carrying the same
+    // pre-encoded structured term cells. Variables / blank nodes in
+    // the template panic with the slice 59 prefix until slices 58 / 57
+    // widen the surface.
+
+    /// Positive path — one solution, one template triple, one row.
+    /// Locks the structured-term shape `{"type":"iri","value":...}`
+    /// and `{"type":"literal","value":"...","datatype":"..."}`.
+    #[pg_test]
+    fn construct_constant_template_one_solution_one_row() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:s ex:p ex:o .',
+                9100)",
+        )
+        .unwrap();
+
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { <http://example.com/t1> <http://example.com/t2> \"x\" } \
+                 WHERE { <http://example.com/s> <http://example.com/p> <http://example.com/o> }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(n, 1, "one solution × one template triple → one row");
+
+        // Inspect the first row's structured shape end-to-end.
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.construct(
+               'CONSTRUCT { <http://example.com/t1> <http://example.com/t2> \"x\" } \
+                 WHERE { <http://example.com/s> <http://example.com/p> <http://example.com/o> }') LIMIT 1",
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        assert_eq!(v["subject"]["type"], "iri");
+        assert_eq!(v["subject"]["value"], "http://example.com/t1");
+        assert_eq!(v["predicate"]["type"], "iri");
+        assert_eq!(v["predicate"]["value"], "http://example.com/t2");
+        assert_eq!(v["object"]["type"], "literal");
+        assert_eq!(v["object"]["value"], "x");
+        // Plain string literal — datatype defaults to xsd:string.
+        assert_eq!(
+            v["object"]["datatype"],
+            "http://www.w3.org/2001/XMLSchema#string"
+        );
+    }
+
+    /// Multi-solution path — 3 matches, constant template emits 3
+    /// identical rows (one burst per solution per W3C 1.1 §16.2's
+    /// "solution sequence is the BGP's; multiplicity matters").
+    #[pg_test]
+    fn construct_constant_template_three_solutions() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:s1 ex:p ex:o1 .
+                 ex:s2 ex:p ex:o2 .
+                 ex:s3 ex:p ex:o3 .',
+                9101)",
+        )
+        .unwrap();
+
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { <http://example.com/tag> <http://example.com/k> \"v\" } \
+                 WHERE { ?s <http://example.com/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            n, 3,
+            "three solutions × one template triple → three identical rows"
+        );
+    }
+
+    /// Typed-literal object — datatype IRI surfaces verbatim in the
+    /// encoded term cell (slice 59 acceptance criterion C).
+    #[pg_test]
+    fn construct_typed_literal_in_template() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:b ex:c .',
+                9102)",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.construct(
+               'CONSTRUCT { <http://example.com/x> <http://example.com/y> \
+                  \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> } \
+                 WHERE { ?s ?p ?o }') LIMIT 1",
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        assert_eq!(v["object"]["type"], "literal");
+        assert_eq!(v["object"]["value"], "42");
+        assert_eq!(
+            v["object"]["datatype"],
+            "http://www.w3.org/2001/XMLSchema#integer"
+        );
+    }
+
+    /// Empty solution set — CONSTRUCT against a WHERE that matches
+    /// nothing yields zero rows (acceptance criterion D).
+    #[pg_test]
+    fn construct_empty_solution_set_yields_no_rows() {
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { <http://example.com/t1> <http://example.com/t2> \"x\" } \
+                 WHERE { ?s <http://example.com/never-loaded> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n, 0, "no solutions → zero output rows");
+    }
+
+    /// Negative — calling `pgrdf.construct` on a SELECT panics with
+    /// the stable "not a CONSTRUCT query" prefix.
+    #[pg_test(error = "pgrdf.construct: not a CONSTRUCT query")]
+    fn construct_rejects_select_query() {
+        Spi::run("SELECT * FROM pgrdf.construct('SELECT ?s WHERE { ?s ?p ?o }')").unwrap();
+    }
+
+    /// Negative — variable in template position rejected with the
+    /// stable slice 59 prefix (substring match, not exact: the tail
+    /// carries the next-slice signpost).
+    #[pg_test(
+        error = "pgrdf.construct: slice 59 supports constant-only templates (variables / blank nodes ship in slices 58 / 57)"
+    )]
+    fn construct_rejects_variable_in_template() {
+        Spi::run(
+            "SELECT * FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/t> \"x\" } \
+                 WHERE { ?s ?p ?o }')",
+        )
+        .unwrap();
     }
 }

@@ -377,7 +377,21 @@ Concrete shape:
       (spargebra parser.rs §Add / §Move / §Copy) into compositions
       of `Drop + DeleteInsert` (or just `DeleteInsert` for ADD),
       so they ride the existing per-form dispatcher arms.
-- ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
+- 🚧 `CONSTRUCT` (Phase D slice 59 — foundation) — sibling UDF
+      `pgrdf.construct(q TEXT) → SETOF JSONB` lands the constant-only
+      template form. Each row carries `{"subject": …, "predicate": …,
+      "object": …}` with structured term cells
+      `{"type": "iri"|"literal"|"bnode", "value": …, "datatype"?: …,
+      "language"?: …}` per LLD v0.4 §6.1. The WHERE pattern accepts
+      the full SELECT-side BGP / FILTER / OPTIONAL / UNION / MINUS
+      surface (translation reuses `parse_select` + `build_bgp_sql` +
+      `execute`). Variables / blank nodes in the template panic with
+      `pgrdf.construct: slice 59 supports constant-only templates`
+      until slices 58 / 57 widen the surface. DISTINCT / ORDER BY /
+      GROUP BY / aggregates on CONSTRUCT are explicitly out of scope
+      per W3C 1.1 §16.2 — rejected with `pgrdf.construct: DISTINCT /
+      ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)`.
+- ⏳ `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4
 - ⏳ Aggregates over UNION; multi-triple OPTIONAL; BIND-in-FILTER — v0.4

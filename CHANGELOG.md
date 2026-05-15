@@ -6,6 +6,20 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- `pgrdf.construct(q TEXT) → SETOF JSONB` UDF — Phase D slice 59
+  foundation. Constant-only templates per W3C 1.1 §16.2 supported;
+  variables / blank nodes panic with `slice 59 supports constant-only
+  templates` until slices 58 / 57 widen. DISTINCT / ORDER BY /
+  GROUP BY / aggregates on CONSTRUCT explicitly rejected (out of scope
+  per spec). Term encoding is the structured shape
+  `{"type": "iri"|"literal"|"bnode", "value": …, "datatype"?: …,
+  "language"?: …}` documented in LLD v0.4 §6.1 — sibling UDF rather
+  than overloading `pgrdf.sparql` so callers signal intent at the
+  SQL boundary. WHERE pattern reuses the full SELECT-side translator
+  (`parse_select` → `build_bgp_sql` → `execute`).
+
 ## [0.4.3] — 2026-05-15
 
 **Marquee: SPARQL UPDATE surface complete.** Closes the LLD v0.4 §4

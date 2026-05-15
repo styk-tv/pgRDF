@@ -167,7 +167,10 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`,
       alternation). Simple sequence already works because spargebra
       desugars `:a/:b` into a BGP chain. LLD v0.4 §7.
-- ⏳ `CONSTRUCT`, `DESCRIBE`. (`ASK` shipped step 12.) LLD v0.4 §6.
+- 🚧 `CONSTRUCT` — slice 59 landed (foundation, constant-only
+      templates); slices 58 / 57 widen to variable / blank-node
+      templates. `DESCRIBE` carried forward. (`ASK` shipped step 12.)
+      LLD v0.4 §6.
 
 ---
 
