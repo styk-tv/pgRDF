@@ -1,4 +1,4 @@
-# **SPEC.pgRDF.LLD.v0.4-FUTURE**
+# **SPEC.pgRDF.LLD.v0.4**
 
 **pgRDF: A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL,
 and OWL 2 RL reasoning.**
@@ -9,28 +9,37 @@ and OWL 2 RL reasoning.**
 
 ## 0. Document status and supersession
 
-- **Status:** draft / forward-looking / **target: pgRDF v0.4 cut**.
-- **Authoritative shipped contract:** [`SPEC.pgRDF.LLD.v0.3.md`](SPEC.pgRDF.LLD.v0.3.md)
-  remains the contract until v0.4 actually lands. This document is
-  a sibling, not a replacement.
+- **Status:** in-progress authoritative contract for the v0.4 cycle.
+  Items mark as shipped (✅) when they land on `main`, regardless of
+  whether the v0.4.0 tag has cut yet. Items still in progress are
+  marked 🚧. The document is authoritative now — not aspirational —
+  even though the cycle is mid-flight.
+- **Supersedes:** [`SPEC.pgRDF.LLD.v0.3.md`](SPEC.pgRDF.LLD.v0.3.md)
+  at the contract level for surfaces shipped in the v0.4 cycle.
+  v0.3 LLD remains the verbatim record of the v0.3.0-cut surface.
+- **Forward-looking sibling:** [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)
+  is the draft target spec for the next cut beyond v0.4. The
+  `-FUTURE` postfix on that sibling signals it is aspirational.
 - **Carries forward:** [`SPEC.pgRDF.INSTALL.v0.2.md`](SPEC.pgRDF.INSTALL.v0.2.md)
   (no install-spec changes anticipated for v0.4) and
-  [`ERRATA.v0.2.md`](ERRATA.v0.2.md) (still authoritative for spec
-  deltas predating v0.3; ERRATA E-009 in particular gates §9).
+  [`ERRATA.v0.4.md`](ERRATA.v0.4.md) (authoritative for v0.4-era spec
+  deltas). [`ERRATA.v0.2.md`](ERRATA.v0.2.md) remains live for
+  pre-v0.3 items.
 - **Reason for v0.4:** the v0.3 cut closes Phase 2's SPARQL surface
   to the line at which a substantial class of downstream consumers
   — operators with named-graph workloads, applications performing
-  atomic write-back via SPARQL, ingest pipelines consuming
-  TriG / N-Quads, validation tooling, reasoners selecting between
-  RDFS and OWL 2 RL profiles, and consumers traversing transitive
-  class hierarchies via `rdfs:subClassOf*`-style paths — start
-  running into the same handful of gaps. v0.4 closes the
-  highest-leverage gaps as a coherent group; v0.5 cleans up the
-  rest (see §15 for the forward look).
-- **Tense discipline:** v0.4 is **forward-looking**. Future tense
-  ("will land", "ships with") is the default throughout. Where
-  v0.4 builds on shipped v0.3 mechanism, that mechanism is named
-  in present tense and explicitly cross-linked to v0.3.
+  atomic write-back via SPARQL, validation tooling, reasoners
+  selecting between RDFS and OWL 2 RL profiles, and consumers
+  traversing transitive class hierarchies via `rdfs:subClassOf*`-style
+  paths — start running into the same handful of gaps. v0.4 closes
+  the highest-leverage gaps as a coherent group; the residual items
+  carried over move to
+  [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+- **Tense discipline:** v0.4 is authoritative-in-progress. Shipped
+  items (✅) describe reality in present tense. In-progress items
+  (🚧) use future tense ("will land", "ships with") until they
+  actually land — at which point this document is updated to flip
+  the marker and the tense in the same slice that lands the work.
 
 ## 1. Mission (unchanged from v0.3)
 
@@ -45,8 +54,9 @@ inside Postgres, with four engines:
    spargebra parser; dynamic-SQL executor with prepared-plan cache.
 3. **Inference Engine** — OWL 2 RL materialisation via `reasonable`.
 4. **Validation Engine** — SHACL Core via `shacl 0.3.x` (rudof
-   project). Real W3C-shape report in v0.4 (§9), replacing the
-   v0.3 stub. Unblocked via ERRATA.v0.4 E-011.
+   project). Real W3C-shape report ✅ shipped in v0.4 cycle (§9),
+   replacing the v0.3 stub. Unblock vehicle:
+   [`ERRATA.v0.4`](ERRATA.v0.4.md) E-011.
 
 ## 2. Scope of v0.4
 
@@ -56,51 +66,52 @@ already enumerated in [`v0.3 §3`](SPEC.pgRDF.LLD.v0.3.md) as
 
 1. **Named-graph scoping and IRI mapping** (§3) — `GRAPH { … }` in
    SPARQL, a new `_pgrdf_graphs` system table, IRI ↔ `graph_id`
-   helper UDFs.
+   helper UDFs. 🚧
 2. **SPARQL UPDATE** (§4) — `INSERT DATA`, `DELETE DATA`,
    `INSERT … WHERE …`, `DELETE … WHERE …`,
    `DELETE … INSERT … WHERE …`, and the graph-scoped variants
-   (`WITH <iri>`, inline `GRAPH <iri> { … }`).
+   (`WITH <iri>`, inline `GRAPH <iri> { … }`). 🚧
 3. **Graph-level lifecycle UDFs** (§5) — `drop_graph`, `clear_graph`,
    `copy_graph`, `move_graph` as state-management primitives over
-   the LIST-partitioned `_pgrdf_quads` table.
+   the LIST-partitioned `_pgrdf_quads` table. 🚧
 4. **CONSTRUCT** (§6) — `pgrdf.construct(q TEXT) → SETOF JSONB`
-   returning `{subject, predicate, object}`-shaped rows.
+   returning `{subject, predicate, object}`-shaped rows. 🚧
 5. **Property paths** (§7) — `*`, `+`, `?`, `^`, with alternation
-   `p1|p2` as a stretch. Materialised-closure-aware translation.
+   `p1|p2` as a stretch. Materialised-closure-aware translation. 🚧
 6. **SHACL real validation** (§9) — `pgrdf.validate(data, shapes)`
-   ships the real W3C-shaped report; the v0.3 stub is gone. Lands
-   in v0.4 because the upstream unblock (rudof 0.3.1 + patched
-   `reasonable`) cleared during the cycle. See ERRATA.v0.4 E-011.
+   ships the real W3C-shaped report; the v0.3 stub is gone. ✅
+   shipped on `main` in commit
+   [`ac40bc2`](https://github.com/styk-tv/pgRDF/commit/ac40bc2). See
+   ERRATA.v0.4 E-011.
 
 Plus the v0.3-deferred SPARQL surface items (§11): multi-triple
-OPTIONAL, VALUES, BIND-downstream-of-FILTER, aggregates over UNION,
-DESCRIBE. These share enough translator machinery with §4 and §6
-that they ship in the same cut for economy.
+OPTIONAL, VALUES, BIND-downstream, aggregates over UNION, DESCRIBE.
+These share enough translator machinery with §4 and §6 that they
+ship in the same cut for economy. 🚧
 
 Capability matrix for the v0.4 target:
 
-| Capability | v0.3 status | v0.4 target |
-|---|---|---|
-| `GRAPH <iri> { … }` and `GRAPH ?g { … }` | ⏳ deferred | ✅ §3 |
-| IRI ↔ graph_id mapping table + UDFs | not yet | ✅ §3.1/§3.2 |
-| SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | ✅ §4 |
-| `WITH <iri>` + graph-scoped UPDATE | not yet | ✅ §4.1 |
-| `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | ✅ §5 |
-| `CONSTRUCT` | ⏳ deferred | ✅ §6 |
-| Property paths `*`, `+`, `?`, `^` | ⏳ deferred | ✅ §7 |
-| Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 |
-| Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | ✅ §11 |
-| `VALUES` inline tables | ⏳ deferred | ✅ §11 |
-| `BIND` output in later FILTER / BGP | ⏳ deferred | ✅ §11 |
-| Aggregates over `UNION` | ⏳ deferred | ✅ §11 |
-| `DESCRIBE` | ⏳ deferred | ✅ §11 |
-| Reasoning profile selector (RDFS / OWL-RL) | not yet | ⏳ v0.5 §8 |
-| Real SHACL output | 🚧 stub | ✅ §9 (unblocked via ERRATA.v0.4 E-011) |
-| TriG / N-Quads ingest | not yet | ⏳ v0.5 §10 |
-| Incremental materialisation | not yet | ⏳ v1.0 §15 |
-| RDF 1.2 triple terms | not yet | ⏳ v1.0 §15 (gated on E-009) |
-| Federated `SERVICE` | ❌ | ❌ out of scope (§14) |
+| Capability | v0.3 status | v0.4 target | v0.4 status |
+|---|---|---|---|
+| `GRAPH <iri> { … }` and `GRAPH ?g { … }` | ⏳ deferred | §3 | 🚧 |
+| IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | 🚧 |
+| SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | §4 | 🚧 |
+| `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | 🚧 |
+| `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | 🚧 |
+| `CONSTRUCT` | ⏳ deferred | §6 | 🚧 |
+| Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | 🚧 |
+| Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | 🚧 |
+| Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | 🚧 |
+| `VALUES` inline tables | ⏳ deferred | §11 | 🚧 |
+| `BIND` output in later FILTER / BGP | ⏳ deferred | §11 | 🚧 |
+| Aggregates over `UNION` | ⏳ deferred | §11 | 🚧 |
+| `DESCRIBE` | ⏳ deferred | §11 | 🚧 |
+| Real SHACL output | 🚧 stub | §9 | ✅ shipped `ac40bc2` |
+| Reasoning profile selector (RDFS / OWL-RL) | not yet | — | ⏳ v0.5-FUTURE §3 |
+| TriG / N-Quads ingest | not yet | — | ⏳ v0.5-FUTURE §4 |
+| Incremental materialisation | not yet | — | ⏳ v1.0 (v0.5-FUTURE §9) |
+| RDF 1.2 triple terms | not yet | — | ⏳ v1.0 (v0.5-FUTURE §9; gated on E-009) |
+| Federated `SERVICE` | ❌ | — | ❌ out of scope (§14) |
 
 ## 3. Named-graph scoping and IRI mapping (NEW)
 
@@ -108,7 +119,7 @@ Named-graph workloads are first-class in pgRDF: storage already
 partitions `_pgrdf_quads` by `graph_id` (LIST partition), and the
 v0.3 cut ships `pgrdf.add_graph(id BIGINT)` and `pgrdf.count_quads`
 filtered by graph. What's missing is the **IRI ↔ id binding** and
-the **SPARQL `GRAPH { … }` surface**. v0.4 closes both.
+the **SPARQL `GRAPH { … }` surface**. v0.4 closes both. 🚧
 
 Downstream consumers running graph-level lifecycle operations
 (drop / clear / copy / move — §5) and atomic write-back via SPARQL
@@ -154,7 +165,8 @@ CREATE TABLE _pgrdf_graphs (
 The integer-id and IRI surfaces are interchangeable at the UDF
 boundary. `pgrdf.put_quad`, `pgrdf.count_quads`, and the lifecycle
 UDFs in §5 retain their `BIGINT graph_id` argument forms; an
-IRI-keyed overload may follow in v0.5 if usage warrants.
+IRI-keyed overload moves to
+[`v0.5-FUTURE §7`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
 
 ### 3.3 SPARQL GRAPH support
 
@@ -198,7 +210,7 @@ Applications running INSERT / DELETE / MODIFY against pgRDF need
 the operations to land **inside a single Postgres transaction** —
 the same transaction context as any surrounding SQL the caller has
 open. v0.3 supports SELECT and ASK only. v0.4 adds the UPDATE
-surface.
+surface. 🚧
 
 ### 4.1 Surface
 
@@ -323,7 +335,7 @@ Consumers running graph-level lifecycle operations as part of
 their state-management need drop / clear / copy / move primitives
 that operate at the **partition level** — not as N-row DELETE
 loops. v0.4 lands four UDFs that exploit `_pgrdf_quads`'s LIST
-partitioning.
+partitioning. 🚧
 
 ### 5.1 Surface
 
@@ -334,9 +346,9 @@ partitioning.
 | `pgrdf.copy_graph(src BIGINT, dst BIGINT)` | new | `BIGINT` | Copies all quads from `src` to `dst`. Creates the `dst` partition if absent. Returns triples copied. |
 | `pgrdf.move_graph(src BIGINT, dst BIGINT)` | new | `BIGINT` | Atomic association swap: the `src` partition's `FOR VALUES IN (...)` clause rebinds to the new id. Returns triples moved (== row count at swap time). |
 
-IRI overloads (`pgrdf.drop_graph(iri TEXT)`, etc.) may follow in
-v0.5; in v0.4 callers route IRI input through `pgrdf.graph_id(iri)`
-explicitly.
+IRI overloads (`pgrdf.drop_graph(iri TEXT)`, etc.) deferred to
+[`v0.5-FUTURE §7`](SPEC.pgRDF.LLD.v0.5-FUTURE.md); in v0.4 callers
+route IRI input through `pgrdf.graph_id(iri)` explicitly.
 
 ### 5.2 Implementation notes
 
@@ -400,7 +412,7 @@ explicitly.
 `CONSTRUCT` is the canonical SPARQL form for graph snapshot export,
 Turtle output, and sub-graph extraction. v0.3 lists it as
 deferred-to-v0.4 because its return shape (triples, not solutions)
-diverges from the `pgrdf.sparql` JSONB row shape.
+diverges from the `pgrdf.sparql` JSONB row shape. 🚧
 
 ### 6.1 Surface decision
 
@@ -473,7 +485,7 @@ Reuse of v0.3 machinery:
 Consumers traversing transitive class hierarchies via
 `rdfs:subClassOf*`-style patterns hit the v0.3 limitation: only
 direct predicate matches are supported. v0.4 adds the core path
-operators.
+operators. 🚧
 
 ### 7.1 Surface
 
@@ -517,10 +529,11 @@ Path-operator mapping:
   scans.
 
 **Materialised-closure detection.** If the graph has been
-materialised under a profile (OWL-RL or RDFS — see §8) that
-already entails the closure of the path's predicate, the translator
-falls back to a direct BGP match against the materialised triples.
-No recursion is emitted.
+materialised under a profile (OWL-RL or RDFS — see
+[`v0.5-FUTURE §3`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)) that already
+entails the closure of the path's predicate, the translator falls
+back to a direct BGP match against the materialised triples. No
+recursion is emitted.
 
 Heuristic for v0.4: if `_pgrdf_quads` carries `is_inferred = TRUE`
 rows whose `predicate_id` corresponds to one of the well-known
@@ -549,44 +562,27 @@ warning surfaces on `pgrdf.stats()` as `path_depth_truncations`.
   `pgrdf.path_max_depth` returns the truncated solution set and
   bumps `path_depth_truncations` in `pgrdf.stats()`.
 
-## 8. Reasoning profile selector (v0.5 — flagged here for planning)
+## 8. Reasoning profile selector — moved to v0.5-FUTURE
 
-Reasoners selecting between RDFS and OWL 2 RL per workload class
-need a per-call profile selector on `pgrdf.materialize`. v0.4 keeps
-the v0.3 surface (`pgrdf.materialize(graph_id) → JSONB`) unchanged
-but flags this as a v0.5 work item.
+The reasoning-profile selector on `pgrdf.materialize` (RDFS vs OWL-RL
+vs `owl-rl-ext`) is deferred to v0.5. See
+[`SPEC.pgRDF.LLD.v0.5-FUTURE §3`](SPEC.pgRDF.LLD.v0.5-FUTURE.md) for
+the surface sketch and acceptance criteria. v0.4 keeps
+`pgrdf.materialize(graph_id) → JSONB` unchanged from v0.3.
 
-**v0.5 surface:**
+## 9. SHACL real integration (✅ shipped in v0.4 cycle)
 
-```sql
-pgrdf.materialize(graph_id BIGINT, profile TEXT DEFAULT 'owl-rl') → JSONB
-```
-
-- Profiles: `'rdfs'`, `'owl-rl'`, future `'owl-rl-ext'`.
-- The `reasonable` crate's rule set is a superset of RDFS rules; an
-  `'rdfs'` path activates the appropriate subset, either via a
-  rule-filter pgRDF-internal pass (if upstream does not expose
-  profile selection) or via direct upstream support (preferred).
-- JSONB output gains a `profile` field reflecting the requested
-  profile.
-- Test surface: `tests/regression/sql/60-materialize-owl-rl.sql`
-  gains a sibling `63-materialize-rdfs.sql`. The
-  `'rdfs'` regression asserts the entailed-triple count is a
-  **non-strict subset** of the OWL-RL count on the same input.
-
-**Acceptance criteria (v0.5 gate):**
-- `pgrdf.materialize(g, 'rdfs')` triple count ≤
-  `pgrdf.materialize(g, 'owl-rl')` triple count on a fixed input.
-- The two profiles agree on the entailment of the RDFS axioms
-  (subClassOf transitivity, domain/range propagation, etc.).
-
-## 9. SHACL real integration (v0.4 — unblocked via ERRATA.v0.4 E-011)
-
-`pgrdf.validate(data_graph_id, shapes_graph_id) → JSONB` lands as
-a real W3C-shape SHACL Core validator in v0.4. The v0.3 stub is
-gone. The SQL surface signature is unchanged from v0.3 — only the
-JSONB body's keys shift from `{status: "stub", reason: …}` to a
-W3C `sh:ValidationReport`-shape document.
+`pgrdf.validate(data_graph_id, shapes_graph_id) → JSONB` ships as a
+real W3C-shape SHACL Core validator in v0.4. The v0.3 stub is gone.
+The SQL surface signature is unchanged from v0.3 — only the JSONB
+body's keys shifted from `{status: "stub", reason: …}` to a W3C
+`sh:ValidationReport`-shape document. Landed on `main` in commit
+[`ac40bc2`](https://github.com/styk-tv/pgRDF/commit/ac40bc2);
+covered by regression
+[`tests/regression/sql/71-shacl-real.sql`](../tests/regression/sql/71-shacl-real.sql)
+and three `#[pg_test]` integration tests in
+`src/validation/shacl.rs` (conforming, violations, unknown graphs).
+Unblock vehicle: [`ERRATA.v0.4`](ERRATA.v0.4.md) E-011.
 
 ### 9.1 Body shape
 
@@ -649,14 +645,15 @@ Two upstream-side preconditions cleared during the v0.4 cycle:
    `rdf-12 = ["oxrdf/rdf-12"]`. Strictly additive; lets pgRDF
    compose `shacl 0.3` (which hard-enables `rdf-12` via
    `rudof_rdf`) with `reasonable` 0.4.x in the same workspace.
-   See ERRATA.v0.4 E-011 for the full patch summary.
+   See [`ERRATA.v0.4`](ERRATA.v0.4.md) E-011 for the full patch
+   summary.
 
 The fork is wired via `[patch.crates-io]` in
 [`Cargo.toml`](../Cargo.toml). Once `gtfierro/reasonable` merges
 the upstream PR (held in the fork as `PR-DRAFT.md`), drop the
 patch and pin the released `reasonable` version.
 
-### 9.4 Acceptance criteria (v0.4 gate — landed)
+### 9.4 Acceptance criteria (v0.4 gate — landed ✅)
 
 - A SHACL `sh:NodeShape` with `sh:property` + `sh:datatype`
   reports a violation on a focus node whose data is missing the
@@ -670,52 +667,42 @@ patch and pin the released `reasonable` version.
   no external file IO, no external SPARQL endpoint — so the
   validator runs inside the calling Postgres transaction.
 
-### 9.5 Forward look (v0.5+)
+Sample violation output (from `71-shacl-real.sql`, Alice missing
+required `ex:age`):
 
-- **Validation against a materialised graph.** Allow
-  `data_graph_id` to be a graph that has already had
-  `pgrdf.materialize` run; the SHACL engine then sees the
-  entailed closure. Today the rehydrate selects both `is_inferred
-  = TRUE` and `FALSE` rows, so this works in practice; v0.5 adds
-  documentation + a regression covering the case.
-- **SHACL-SPARQL constraint mode.** `shacl 0.3` exposes a
-  `Sparql` validation mode in addition to `Native`. v0.5 may
-  expose this as a third positional arg to `pgrdf.validate`.
-- **W3C SHACL manifest runner.** Wire the upstream `rudof`
-  SHACL test suite to CI as a third correctness gate alongside
-  the W3C SPARQL manifest (v0.4 §13).
-
-## 10. TriG / N-Quads ingest (v0.5)
-
-Ingest pipelines that consume TriG and N-Quads with inline graph
-declarations need a parser that honours the inline `GRAPH { … }`
-blocks and resolves graph IRIs through the §3 mapping. v0.4 does
-not ship this; v0.5 does.
-
-**v0.5 surface:**
-
-```sql
-pgrdf.parse_trig(content TEXT, default_graph_id BIGINT DEFAULT 0, strict BOOLEAN DEFAULT FALSE) → JSONB
-pgrdf.parse_nquads(content TEXT, default_graph_id BIGINT DEFAULT 0, strict BOOLEAN DEFAULT FALSE) → JSONB
+```json
+{
+  "conforms": false,
+  "results": [{
+    "focusNode": "http://example.org/alice",
+    "resultPath": "http://example.org/age",
+    "sourceShape": "_:b887c79907df332dbd793b0bc80edbd5",
+    "resultMessage": "MinCount(1) not satisfied",
+    "resultSeverity": "sh:Violation",
+    "sourceConstraintComponent": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+    "value": null
+  }],
+  "data_graph_id": 8971,
+  "shapes_graph_id": 8972,
+  "data_triples": 5,
+  "shapes_triples": 10,
+  "elapsed_ms": 1.68
+}
 ```
 
-- **TriG:** accept the W3C TriG grammar; honour inline
-  `GRAPH <iri> { … }` blocks; resolve `<iri>` via §3.2
-  `pgrdf.add_graph(iri)` (auto-allocate unknown IRIs by default).
-- **N-Quads:** parse the 4-position line format; resolve the
-  fourth-position IRI via §3.2.
-- **`strict => TRUE`:** reject unknown graph IRIs instead of
-  auto-allocating. Useful for ingest into a pre-bound graph space.
-- Both UDFs reuse the v0.3 batched-insert path (same `flush_batch`
-  prepared plan).
+### 9.5 Forward look — moved to v0.5-FUTURE
 
-**Acceptance criteria (v0.5 gate):**
-- A TriG document declaring three inline named graphs loads into
-  three pgRDF graphs in a single call.
-- Unknown graph IRIs auto-allocate (default) or reject under
-  `strict => TRUE`.
-- Round-trip: `pgrdf.parse_trig` followed by a CONSTRUCT-of-each-graph
-  re-serialised back to TriG produces an isomorphic document.
+Validation-against-materialised-graph, SHACL-SPARQL constraint mode,
+and the W3C SHACL manifest runner all move forward to
+[`SPEC.pgRDF.LLD.v0.5-FUTURE §5/§6`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+v0.4 ships the Core-`Native` mode only.
+
+## 10. TriG / N-Quads ingest — moved to v0.5-FUTURE
+
+TriG and N-Quads ingest UDFs (`pgrdf.parse_trig`, `pgrdf.parse_nquads`)
+move forward to
+[`SPEC.pgRDF.LLD.v0.5-FUTURE §4`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+v0.4 retains Turtle-only ingest from v0.3.
 
 ## 11. SPARQL surface backlog (deferred from v0.3, now in scope)
 
@@ -724,7 +711,7 @@ These items were enumerated under "⏳ v0.4" in
 §4-§7 because the same translator machinery they need
 (LATERAL-style derived-table refactor + AST substitution) is the
 same machinery §4 (UPDATE) and §6 (CONSTRUCT) need. Ship together
-for economy.
+for economy. 🚧
 
 - **Multi-triple `OPTIONAL { BGP }`.** The v0.3 OPTIONAL handler
   supports a single-triple right side. v0.4 extends it to N-triple
@@ -738,7 +725,9 @@ for economy.
   BGP rewrites to the bound expression. The v0.3 limitation
   (BIND projection-only) lifts.
 - **Aggregates over `UNION`.** Derived-table refactor: the UNION
-  becomes a sub-SELECT, aggregation runs over its rows.
+  becomes a sub-SELECT, aggregation runs over its rows. Residual
+  refinements after the v0.4 cut move to
+  [`v0.5-FUTURE §8`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
 - **`DESCRIBE`.** Like CONSTRUCT but returning the closure around
   the described subject (every triple where the subject is the
   named term, transitively expanded one hop on blank nodes per
@@ -757,12 +746,12 @@ the relevant regression file gains the deferred shape, the
   [`v0.3 §4.3`](SPEC.pgRDF.LLD.v0.3.md) phase B remains unmet. v0.4
   targets shipping this. Acceptance fixture
   (`tests/regression/sql/52-bulk-ingest-perf.sql`) is already in
-  place from v0.3 — re-measure once phase B lands.
+  place from v0.3 — re-measure once phase B lands. 🚧
 - **Postgres custom-scan hooks** for specific quad-shape access
   patterns. v0.4 is the earliest target; may slip to v0.5 if the
   refactor cost exceeds the §4 / §6 wins. Acceptance: measurable
   wall-clock win on a single-predicate, single-graph SELECT against
-  a materialised closure.
+  a materialised closure. 🚧
 
 These do not gate the surface work in §3-§7; they ship in their
 own slices.
@@ -775,12 +764,11 @@ own slices.
   outputs are hand-computed from the SQL + spec.
 - The W3C SPARQL 1.1 manifest runner (Phase 6 step 2, gated `if: false`
   in v0.3) is wired in v0.4 — it gates §11's SPARQL backlog
-  automatically as the deferred forms come online.
-- New surface for v0.4: pg_regress files project to grow from
-  the v0.3 baseline (25 at the v0.3 cut per
-  [`v0.3 §2`](SPEC.pgRDF.LLD.v0.3.md); ~39 today including
-  post-cut hygiene fixtures) to roughly 60-something across
-  §3-§7 and §11.
+  automatically as the deferred forms come online. 🚧
+- Test bar at the start of the v0.4 cycle (post-SHACL slice):
+  **94 pgrx + 40 pg_regress + 23 W3C + 3 LUBM = 160 tests** green.
+  The v0.4 cut targets pg_regress growth to roughly 60-something
+  files across §3-§7 and §11.
   Approximate breakdown:
   - §3 named-graph + IRI mapping: 6-8 files
     (`70-graph-iri-map.sql`, `71-graph-scoped-select.sql`,
@@ -813,40 +801,25 @@ is that every UDF and every translator path takes its own file.
   callers fetch externally and invoke `pgrdf.load_turtle` or
   `pgrdf.parse_trig` directly.
 
-## 15. Forward look — v0.5 and v1.0
+## 15. Forward look — see v0.5-FUTURE
 
-**v0.5 contents (planned):**
-- Reasoning profile selector (§8).
-- TriG / N-Quads ingest (§10).
-- Aggregates-over-UNION refinements not landed in v0.4 §11.
-- IRI overloads for the §5 lifecycle UDFs.
-- W3C SHACL manifest runner wired in CI (§9.5).
-- SHACL-SPARQL constraint mode + validation-against-materialised-graph
-  (§9.5).
-
-**v1.0 contents (planned):**
-- Incremental (delta-driven) materialisation:
-  `pgrdf.materialize_delta(graph_id, since_xid TEXT)` — forward-chain
-  only over quads added since a recorded transaction id. Targets a
-  common optimisation pattern in reasoning pipelines but does not
-  gate any v0.x surface.
-- RDF 1.2 triple terms — enable `oxrdf`'s `rdf-12` feature once
-  upstream (`reasonable` + `shacl_validation`) supports it
-  unanimously. ERRATA E-009 tracks the conflict.
-- Federated `SERVICE` — explicitly deferred to v1.0; remains out of
-  scope for v0.x.
-
-No domain-specific motivation appears in this section; the items
-are listed as engineering targets only.
+The detailed forward look (reasoning-profile selector, TriG/N-Quads
+ingest, SHACL-SPARQL mode, W3C SHACL manifest runner, lifecycle IRI
+overloads, aggregates-over-UNION refinements, RDF 1.2 triple terms,
+incremental materialisation, federated `SERVICE`) lives in
+[`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
 
 ## 16. Errata
 
-- This document is the **draft** v0.4 contract. It is not yet
-  authoritative; v0.3 remains the shipped contract.
-- Spec corrections discovered during v0.4 implementation will land
-  in a future `ERRATA.v0.3.md` (or `ERRATA.v0.4.md` if scope
-  warrants a dedicated file).
-- `ERRATA.v0.2.md` remains authoritative for pre-v0.3 items.
-- **E-009** (SHACL upstream conflict) is unblock-tracked in §9 of
-  this document. It is the only erratum that meaningfully blocks a
-  v0.5 work item; it does not block any v0.4 work item.
+- This document is the authoritative-in-progress v0.4 contract.
+  Items shipped on `main` are marked ✅; items still in flight are
+  marked 🚧. The document is updated in the same slice that
+  changes a status marker.
+- [`ERRATA.v0.4.md`](ERRATA.v0.4.md) is the v0.4-era spec-deltas
+  log. E-011 tracks the upstream `reasonable` patch that unblocked
+  §9 SHACL real-impl.
+- [`ERRATA.v0.2.md`](ERRATA.v0.2.md) remains authoritative for
+  pre-v0.3 items still live (E-006 pgrx 0.18, E-007
+  `extension_control_path`, E-008 Linux builder, E-010 cargo audit).
+  **E-009** (SHACL upstream conflict) is resolved in v0.4 cycle via
+  E-011; final close-out gates on the upstream `reasonable` PR merge.

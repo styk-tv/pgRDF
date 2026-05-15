@@ -168,8 +168,10 @@ See [`specs/ERRATA.v0.2.md`](../specs/ERRATA.v0.2.md):
 ### Deferred to v0.4
 
 See
-[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)
-§2 for the canonical scope. Highlights:
+[`specs/SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md)
+§2 for the canonical scope (now the authoritative-in-progress v0.4
+contract, promoted from `-FUTURE` once SHACL real-impl landed on
+`main`). Highlights:
 
 - Named-graph scoping (`GRAPH { … }`) with an IRI ↔ `graph_id`
   mapping table (LLD §3).

@@ -30,10 +30,10 @@ different reasoner (e.g. ELK or a custom DL engine). Tracked in
 [`docs/10-roadmap.md`](10-roadmap.md) v0.4+. A per-call **reasoning
 profile selector** (`'rdfs'` / `'owl-rl'` / future `'owl-rl-ext'`)
 is flagged for v0.5 in
-[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §8 —
+[`specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md) §3 —
 the v0.3 surface (`pgrdf.materialize(graph_id) → JSONB`) is
-preserved; v0.5 adds an optional `profile TEXT DEFAULT 'owl-rl'`
-argument.
+preserved through v0.4; v0.5 adds an optional
+`profile TEXT DEFAULT 'owl-rl'` argument.
 
 ## Flow
 
@@ -121,5 +121,5 @@ Fast under partition-pruning. The base graph is preserved. The next
   [`62-materialize-empty.sql`](../tests/regression/sql/62-materialize-empty.sql) (zero-triple edge case).
 - ERRATA: [`E-002`](../specs/ERRATA.v0.2.md) — narrows the LLD §2
   reference from "Datalog reasoner" to "OWL 2 RL".
-- Forward-looking: [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §8 —
+- Forward-looking: [`specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md) §3 —
   reasoning profile selector (v0.5).

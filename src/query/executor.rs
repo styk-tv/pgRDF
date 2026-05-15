@@ -19,7 +19,7 @@
 //!
 //! Scope today:
 //!   * SELECT and ASK. CONSTRUCT / DESCRIBE remain unsupported
-//!     (CONSTRUCT lands in v0.4 — see SPEC.pgRDF.LLD.v0.4-FUTURE.md §6).
+//!     (CONSTRUCT lands in v0.4 — see SPEC.pgRDF.LLD.v0.4.md §6).
 //!   * N BGP triples joined by shared variables.
 //!   * FILTER expressions:
 //!     - identity (`=`, `!=`, `sameTerm`) via dict-id comparison,
@@ -75,7 +75,7 @@
 //!     Filtering on a BIND output is not yet supported.
 //!   * Property paths, inline VALUES, SERVICE, named-graph
 //!     `GRAPH` clauses remain unsupported (named graphs land in
-//!     v0.4 — see SPEC.pgRDF.LLD.v0.4-FUTURE.md §3; paths in §7;
+//!     v0.4 — see SPEC.pgRDF.LLD.v0.4.md §3; paths in §7;
 //!     VALUES + DESCRIBE in §4-deferred backlog).
 //!
 //! Output shape:

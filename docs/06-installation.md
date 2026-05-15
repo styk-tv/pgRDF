@@ -94,7 +94,7 @@ To move from one v0.x version to the next:
    Serialise the result to Turtle externally (psycopg → `oxttl`,
    `rdflib`, etc.). A future release is expected to add a
    `pgrdf.construct_turtle(…)` UDF for direct Turtle output (see
-   [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)
+   [`specs/SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md)
    §6); until that lands the SQL dump above is the supported path.
 
 2. **Drop the extension**:
@@ -119,7 +119,7 @@ To move from one v0.x version to the next:
 ### Why no in-place upgrade?
 
 - Pre-1.0 schema is fluid. Anticipated additions (named-graph
-  scoping, an IRI ↔ `graph_id` mapping table per LLD v0.4-FUTURE §3,
+  scoping, an IRI ↔ `graph_id` mapping table per LLD v0.4 §3,
   CONSTRUCT, SPARQL UPDATE) require migrations the v0.3 schema can't
   describe ahead of time.
 - The dictionary `id` space is not stable across versions — the same

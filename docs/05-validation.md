@@ -185,7 +185,7 @@ version (the `features = ["rdf-12"]` opt-in stays).
 ## See also
 
 - Implementation: [`src/validation/shacl.rs`](../src/validation/shacl.rs)
-- Spec: [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) §9
+- Spec: [`specs/SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md) §9
 - ERRATA: [`E-011`](../specs/ERRATA.v0.4.md) — fork patch +
   unblock vehicle.
 - ERRATA: [`E-009`](../specs/ERRATA.v0.2.md) — original

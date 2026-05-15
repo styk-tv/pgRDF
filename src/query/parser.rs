@@ -14,13 +14,13 @@
 //!   * CONSTRUCT / DESCRIBE — recognised but reported as
 //!     `supported: false`; the executor doesn't handle them yet
 //!     (CONSTRUCT lands in v0.4 — see
-//!     SPEC.pgRDF.LLD.v0.4-FUTURE.md §6).
+//!     SPEC.pgRDF.LLD.v0.4.md §6).
 //!   * OPTIONAL / UNION / MINUS / FILTER / aggregates / BIND — the
 //!     parser walks through them; the executor supports them too,
 //!     so they are NOT flagged in `unsupported_algebra`.
 //!   * GRAPH (named-graph clause), property paths, inline VALUES,
 //!     SERVICE — still flagged under `unsupported_algebra` (named
-//!     graphs land in v0.4 — see SPEC.pgRDF.LLD.v0.4-FUTURE.md §3;
+//!     graphs land in v0.4 — see SPEC.pgRDF.LLD.v0.4.md §3;
 //!     paths in §7; VALUES in §4-deferred backlog).
 
 use pgrx::prelude::*;

@@ -128,7 +128,7 @@ locally via `[patch.crates-io]`; the PR can be filed.
 
 1. ~~Wire `[patch.crates-io] reasonable = { git = "...", branch = "rdf12-passthrough" }` in pgRDF's `Cargo.toml` (with `features = ["rdf-12"]` on the dep).~~ **Done — landed in v0.4 slice.**
 2. ~~Add `shacl 0.3.x` to pgRDF's deps; verify the dep tree resolves cleanly.~~ **Done — pinned at `shacl = "0.3"` + `rudof_rdf = "0.3"`.**
-3. ~~Replace the `pgrdf.validate` stub in `src/validation/shacl.rs` with a real `shacl::GraphValidation`-backed body.~~ **Done — see LLD.v0.4-FUTURE §9.**
+3. ~~Replace the `pgrdf.validate` stub in `src/validation/shacl.rs` with a real `shacl::GraphValidation`-backed body.~~ **Done — see [LLD.v0.4 §9](SPEC.pgRDF.LLD.v0.4.md).**
 4. File the upstream PR using the held draft. **Open — held for user authorisation.**
 5. Once upstream merges, drop the `[patch.crates-io]` line and pin `reasonable = "0.4.2"` (or whatever lands). **Open — gated on (4).**
 
@@ -137,9 +137,10 @@ once upstream merges and pgRDF pins the released `reasonable` version.
 
 ## Forward-looking notes
 
-- **v0.4 LLD** §9 now describes the real SHACL surface (replacing
-  the v0.3 stub framing). The `pgrdf.validate()` JSONB return
-  shape is stable on the W3C `sh:ValidationReport` skeleton.
+- **[v0.4 LLD](SPEC.pgRDF.LLD.v0.4.md) §9** now describes the real
+  SHACL surface (replacing the v0.3 stub framing). The
+  `pgrdf.validate()` JSONB return shape is stable on the W3C
+  `sh:ValidationReport` skeleton.
 - **v0.4 pgrx migration (E-006)** remains the largest deferred work
   item; sequencing it after the SHACL real-body slice has kept the
   validation surface stable for the pgrx bump.

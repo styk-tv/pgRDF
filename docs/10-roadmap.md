@@ -10,11 +10,13 @@
 > Release) step 1 shipped.
 >
 > **Forward-look:**
-> [`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)
-> is the canonical scope document for the v0.4 cut (named-graph
-> scoping, SPARQL UPDATE, lifecycle UDFs, CONSTRUCT, property paths,
-> plus the SPARQL backlog deferred from v0.3 §3). v0.5 + v1.0 forward
-> look lives in that doc's §15.
+> [`specs/SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md)
+> is the authoritative-in-progress contract for the v0.4 cycle
+> (named-graph scoping, SPARQL UPDATE, lifecycle UDFs, CONSTRUCT,
+> property paths, plus the SPARQL backlog deferred from v0.3 §3 —
+> SHACL real-impl already landed on `main`). The next forward-look
+> beyond v0.4 lives in
+> [`specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md).
 
 Within each phase, sub-steps track delivery cadence — each one is a
 git commit on `main` with both pgrx + regression coverage green.
@@ -144,28 +146,28 @@ has been retired.)
 
 **SPARQL surface declared substantively complete with step 12.** The
 backlog below (every item deferred to v0.4 per
-[`SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md))
+[`SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md))
 does not block Phase 3 (Storage Performance) of the v0.3 LLD:
 
 - ⏳ `GRAPH { … }` named-graph clause — needs a graph IRI → graph_id
-      mapping (schema change). v0.4-FUTURE §3.
+      mapping (schema change). LLD v0.4 §3.
 - ⏳ Multi-triple OPTIONAL — relax the current single-triple
       restriction via a derived-table refactor inside the LEFT JOIN.
-      (Multi-triple MINUS shipped step 11.) v0.4-FUTURE §11.
+      (Multi-triple MINUS shipped step 11.) LLD v0.4 §11.
 - ⏳ Arithmetic in FILTER (`?a + ?b > 30`), `BIND` inside FILTER,
-      `SUBSTR`, aggregates-over-UNION. v0.4-FUTURE §11.
+      `SUBSTR`, aggregates-over-UNION. LLD v0.4 §11.
       (`lang(?v)` / `datatype(?v)` and the `STRLEN` / `CONTAINS` /
       `STRSTARTS` / `STRENDS` surface shipped step 9; `BIND (expr AS ?v)`
       for projection shipped step 10; type-aware `MIN`/`MAX` over
       `xsd:numeric` shipped post-step-12 — translator slice
       `7de9c17`.)
 - ⏳ Type-aware ORDER BY (sort numeric literals numerically rather
-      than as strings). v0.4-FUTURE §11.
-- ⏳ `VALUES (?x ?y) { … }`. v0.4-FUTURE §11.
+      than as strings). LLD v0.4 §11.
+- ⏳ `VALUES (?x ?y) { … }`. LLD v0.4 §11.
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`,
       alternation). Simple sequence already works because spargebra
-      desugars `:a/:b` into a BGP chain. v0.4-FUTURE §7.
-- ⏳ `CONSTRUCT`, `DESCRIBE`. (`ASK` shipped step 12.) v0.4-FUTURE §6.
+      desugars `:a/:b` into a BGP chain. LLD v0.4 §7.
+- ⏳ `CONSTRUCT`, `DESCRIBE`. (`ASK` shipped step 12.) LLD v0.4 §6.
 
 ---
 
@@ -199,7 +201,7 @@ Gates:
         Saves one parse+plan per batch (~100–500 µs each).
         Verified by `52-bulk-ingest-perf.sql` on synth-10k.ttl.
       - ⏳ **Phase B** (deferred to v0.4 per
-        [`SPEC.pgRDF.LLD.v0.4-FUTURE.md §12`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)):
+        [`SPEC.pgRDF.LLD.v0.4.md §12`](../specs/SPEC.pgRDF.LLD.v0.4.md)):
         the 2× wall-clock target from LLD §4.3 acceptance is not
         met by phase A alone — the per-tuple executor walk
         dominates. Candidate paths: `pg_sys::heap_multi_insert` per
@@ -234,14 +236,14 @@ Gates:
       uses minimal hand-authored TBoxes.
 - ⏳ Loader-side writeback via `flush_batch` (depends on Phase 3
       step 3 phase B shipping the bulk-INSERT primitive in v0.4 per
-      [`SPEC.pgRDF.LLD.v0.4-FUTURE.md §12`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)).
+      [`SPEC.pgRDF.LLD.v0.4.md §12`](../specs/SPEC.pgRDF.LLD.v0.4.md)).
 
 ---
 
 ## Phase 5 — Validation Engine ✅ (v0.4)
 
 Outcome: SHACL validation works against real shapes graphs. Tracks
-LLD v0.3 §5.3 and v0.4-FUTURE §9.
+LLD v0.3 §5.3 and LLD v0.4 §9.
 
 Gates:
 - ✅ `pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` —
@@ -256,7 +258,7 @@ Gates:
       (ERRATA.v0.4 E-011). Fork wired via `[patch.crates-io]`
       until upstream `gtfierro/reasonable` merges.
 - ⏳ W3C SHACL conformance manifest runner — paired with Phase 6,
-      targets v0.5 (see [`SPEC.pgRDF.LLD.v0.4-FUTURE.md §9.5`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)).
+      targets v0.5 (see [`SPEC.pgRDF.LLD.v0.5-FUTURE.md §6`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md)).
 
 ---
 
@@ -291,7 +293,7 @@ LLD v0.3 §5.4.
 - ⏳ W3C SHACL manifest runner. Real SHACL output landed in v0.4
   via ERRATA.v0.4 E-011; the manifest runner is the remaining
   half and targets v0.5 (per
-  [`SPEC.pgRDF.LLD.v0.4-FUTURE.md §9.5`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md)).
+  [`SPEC.pgRDF.LLD.v0.5-FUTURE.md §6`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md)).
 - ⏳ Coverage targets ratchet per release:
   SPARQL `≥ 30 % → ≥ 70 % → ≥ 95 %`; SHACL `≥ 50 % → ≥ 90 %`.
 
@@ -323,14 +325,14 @@ LLD v0.3 §5.4.
 - Target gates: W3C SPARQL 1.1 ≥ 95 % pass; SHACL ≥ 90 % pass.
   Real SHACL output landed in v0.4 (ERRATA E-011); the SHACL
   manifest gate is the remaining lever and targets v0.5 per
-  v0.4-FUTURE §9.5.
+  [`SPEC.pgRDF.LLD.v0.5-FUTURE.md §6`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md).
 
 ---
 
 ## v0.4 — next milestone (forward-looking)
 
 v0.4 is the next major cut, drafted in
-[`SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).
+[`SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md).
 What follows summarises the six major tracks — the full contract
 lives in the spec. Acceptance criteria, schema deltas, and
 translator-level wiring are NOT duplicated here; this section is a
@@ -341,7 +343,7 @@ navigation aid only.
 mapping graph IRIs to the existing integer `graph_id` (LIST-partition
 key of `_pgrdf_quads`). `GRAPH ?g { … }` projects `?g` as the IRI,
 not the integer. See
-[v0.4-FUTURE §3](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#3-named-graph-scoping-and-iri-mapping-new).
+[LLD v0.4 §3](../specs/SPEC.pgRDF.LLD.v0.4.md#3-named-graph-scoping-and-iri-mapping-new).
 
 ### Track 2 — SPARQL UPDATE
 `INSERT DATA`, `DELETE DATA`, pattern-driven `INSERT/DELETE … WHERE`,
@@ -349,7 +351,7 @@ the atomic `DELETE … INSERT … WHERE` modify, plus `WITH <iri>` and
 inline `GRAPH <iri> { … }` graph scope. Overloads `pgrdf.sparql(q)`
 to dispatch by query form; UPDATE forms return an `_update` JSONB
 summary row. See
-[v0.4-FUTURE §4](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#4-sparql-update-new).
+[LLD v0.4 §4](../specs/SPEC.pgRDF.LLD.v0.4.md#4-sparql-update-new).
 
 ### Track 3 — Graph-level lifecycle UDFs
 `pgrdf.drop_graph`, `clear_graph`, `copy_graph`, `move_graph` as
@@ -357,21 +359,21 @@ partition-level primitives over `_pgrdf_quads` — constant-time
 `move_graph` via DETACH/ATTACH metadata swap, `TRUNCATE ONLY` for
 `clear_graph`. Also wires the corresponding SPARQL UPDATE forms
 (`DROP/CLEAR/CREATE/COPY/MOVE/ADD GRAPH`) to these UDFs. See
-[v0.4-FUTURE §5](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#5-graph-level-lifecycle-udfs-new).
+[LLD v0.4 §5](../specs/SPEC.pgRDF.LLD.v0.4.md#5-graph-level-lifecycle-udfs-new).
 
 ### Track 4 — CONSTRUCT
 `pgrdf.construct(q TEXT) → SETOF JSONB` returning structured
 `{subject, predicate, object}`-shaped rows via the existing term
 shaper. Sibling UDF rather than overloading `pgrdf.sparql` — callers
 signal intent at the SQL boundary. See
-[v0.4-FUTURE §6](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#6-construct-deferred-from-v03-now-in-scope).
+[LLD v0.4 §6](../specs/SPEC.pgRDF.LLD.v0.4.md#6-construct-deferred-from-v03-now-in-scope).
 
 ### Track 5 — Property paths
 `*`, `+`, `?`, `^`, with alternation `p1|p2` as a stretch goal.
 Translates to recursive Postgres CTEs with a `pgrdf.path_max_depth`
 GUC; falls back to direct BGP match when the predicate's closure is
 already materialised. See
-[v0.4-FUTURE §7](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#7-property-paths-deferred-from-v03-now-in-scope).
+[LLD v0.4 §7](../specs/SPEC.pgRDF.LLD.v0.4.md#7-property-paths-deferred-from-v03-now-in-scope).
 
 ### Carried backlog — SPARQL surface gaps from v0.3
 Multi-triple `OPTIONAL { BGP }` (LATERAL-style derived-table refactor),
@@ -379,7 +381,7 @@ Multi-triple `OPTIONAL { BGP }` (LATERAL-style derived-table refactor),
 aggregates over `UNION`, and `DESCRIBE`. Shipped in the same cut
 because they share the translator machinery §4 + §6 already require.
 See
-[v0.4-FUTURE §11](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#11-sparql-surface-backlog-deferred-from-v03-now-in-scope).
+[LLD v0.4 §11](../specs/SPEC.pgRDF.LLD.v0.4.md#11-sparql-surface-backlog-deferred-from-v03-now-in-scope).
 
 ### Performance work carried forward from v0.3
 Phase 3 step 3 phase B — `heap_multi_insert` / `COPY BINARY` ingest
@@ -389,13 +391,13 @@ dominates). Postgres custom-scan hooks for specific quad-shape access
 patterns are also flagged at v0.4 as the earliest target, may slip to
 v0.5 if the refactor cost exceeds the §4 / §6 wins. These do not gate
 the surface work in tracks 1-5; they ship in their own slices. See
-[v0.4-FUTURE §12](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#12-performance-work-carried-forward-from-v03).
+[LLD v0.4 §12](../specs/SPEC.pgRDF.LLD.v0.4.md#12-performance-work-carried-forward-from-v03).
 
 ### Conformance runner wiring (v0.4)
 The W3C SPARQL 1.1 manifest runner (Phase 6 step 2, gated `if: false`
 in v0.3) is wired in v0.4 — it gates the §11 SPARQL backlog
 automatically as the deferred forms come online. See
-[v0.4-FUTURE §13](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#13-test-policy-continues-v03-6-unchanged-in-spirit).
+[LLD v0.4 §13](../specs/SPEC.pgRDF.LLD.v0.4.md#13-test-policy-continues-v03-6-unchanged-in-spirit).
 
 ### Track 6 — Real SHACL validation (✅ landed)
 `pgrdf.validate(data, shapes)` ships the real W3C `sh:ValidationReport`-shape
@@ -403,16 +405,18 @@ JSONB, backed by `shacl 0.3.x` (rudof). Unblocked via the patched
 `reasonable` fork tracked in ERRATA.v0.4 E-011. Regression
 fixtures `70-validate-stub.sql` (basic shape) and
 `71-shacl-real.sql` (LLD §9 violations). See
-[v0.4-FUTURE §9](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).
+[LLD v0.4 §9](../specs/SPEC.pgRDF.LLD.v0.4.md#9-shacl-real-integration-shipped-in-v04-cycle).
 
 ### Excluded from v0.4 (planned v0.5)
 The reasoning profile selector (`pgrdf.materialize(graph_id, profile)`
 — RDFS vs OWL-RL), TriG / N-Quads ingest, IRI overloads for the §5
 lifecycle UDFs, the W3C SHACL manifest runner, and the SHACL-SPARQL
 constraint mode. See
-[v0.4-FUTURE §8](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#8-reasoning-profile-selector-v05--flagged-here-for-planning),
-[§9](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#9-shacl-real-integration-v05--gated-on-errata-e-009),
-[§10](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#10-trig--n-quads-ingest-v05).
+[LLD v0.5-FUTURE §3](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md#3-reasoning-profile-selector),
+[§4](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md#4-trig--n-quads-ingest),
+[§5](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md#5-shacl-sparql-constraint-mode--materialised-graph-coverage),
+[§6](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md#6-w3c-shacl-manifest-runner),
+[§7](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md#7-iri-overloads-for-lifecycle-udfs).
 
 ---
 
@@ -423,7 +427,7 @@ external-standard pass-rate gates (W3C SPARQL 1.1, W3C SHACL) and the
 LUBM cross-engine benchmark. Cells anchor to
 [`specs/SPEC.pgRDF.LLD.v0.3.md` §6.1](../specs/SPEC.pgRDF.LLD.v0.3.md)
 (test-layer matrix),
-[`specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md` §13](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md#13-test-policy-continues-v03-6-unchanged-in-spirit)
+[`specs/SPEC.pgRDF.LLD.v0.4.md` §13](../specs/SPEC.pgRDF.LLD.v0.4.md#13-test-policy-continues-v03-6-unchanged-in-spirit)
 (v0.4 test policy), and
 [`docs/08-testing.md`](08-testing.md) (test strategy doc); nothing
 here is new contract, only a consolidated view of the targets already
@@ -453,17 +457,17 @@ fabricated here.
 ## Out of scope (v0.x)
 
 (Carries forward unchanged from
-[`SPEC.pgRDF.LLD.v0.4-FUTURE.md §14`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md).)
+[`SPEC.pgRDF.LLD.v0.4.md §14`](../specs/SPEC.pgRDF.LLD.v0.4.md).)
 
 - Streaming replication / logical decoding of RDF state.
 - Federated SPARQL `SERVICE` — explicitly deferred to v1.0 per
-  v0.4-FUTURE §15.
+  [v0.5-FUTURE §9](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md#9-forward-look--v10-and-beyond).
 - Full OWL 2 (EL / QL) reasoning — ERRATA E-002.
 - Backup/restore for opaque binary state (tracked by future
   `SPEC.pgRDF.BACKUP.v0.x`, INSTALL §11 OQ5).
 - `LOAD <url>` in SPARQL UPDATE — callers fetch externally and
   invoke `pgrdf.load_turtle` / `pgrdf.parse_trig` directly
-  (v0.4-FUTURE §14).
+  (LLD v0.4 §14).
 
 ---
 
@@ -514,4 +518,4 @@ above; the v0.3 rows below remain frozen as the shipped baseline.)
 | v0.3 edge-case signals — #57 | 93 | 39+23+3 | + `66-parse-sparql-roundtrip.sql` locks the end-to-end round-trip from `pgrdf.parse_turtle` ingest through `pgrdf.sparql` query: every triple the parser saw MUST be observable via the SPARQL executor across all four object-term kinds plus a blank-node subject. Five `bool_and(EXISTS …)` assertions over a single 5-shape Turtle fragment cover (1) IRI object (`foaf:knows`), (2) plain literal (`foaf:name "Alice"`), (3) typed literal (`ex:age "30"^^xsd:integer`), (4) language-tagged literal (`ex:bio "Engineer"@en`), and (5) blank-node subject — keyed by a sibling-property join `?s foaf:name "Anon" . ?s foaf:name ?n` so the parser-allocated bnode id stays out of the assertion. Sibling to `61-materialize-then-sparql.sql` (which locks the materialize→sparql edge); together they pin both ends of the storage layer's visibility contract to the SPARQL surface. Datatype URI and lang-tag echo policy are NOT pinned by this slice (the SPARQL projection emits the lexical only); their storage-side contracts are locked by `21-typed-literals.sql` / `22-lang-tags.sql` |
 | v0.3 edge-case signals — #56 | 93 | 39+23+3 | extends `82-stats-shape.sql` in-place (no new pg_regress file — the file is explicitly scoped to "schema shape only" and these three new invariants are schema shape too) with the schema-drift tripwire trio: (a) exact field count — `count(*) FROM jsonb_object_keys(stats()) = 10` pins to the literal current key count emitted by `src/storage/stats.rs::stats()` (`shmem_ready`, `shmem_slots`, `shmem_hits`, `shmem_misses`, `shmem_inserts`, `shmem_evictions`, `plan_cache_hits`, `plan_cache_misses`, `plan_cache_inserts`, `plan_cache_local_size`) so any added field forces a deliberate test update; (b) keys-match-canonical — `array_agg(k ORDER BY k) = ARRAY[…literal 10-element list…]` catches both silent additions (array gets longer) and silent renames (one element swaps); (c) no-null-fields — `bool_and(jsonb_typeof(value) != 'null')` catches a refactor that defaults an uninitialised counter to JSON `null` rather than `0`. Companions the existing "fields-that-SHOULD-be-there are there" block with the orthogonal "fields-that-SHOULDN'T-be-there ARE NOT there" guarantee — together they pin the closed-set shape contract downstream operator tooling (CloudNativePG operators, CI dashboards, telemetry parsers) wires against. Test count unchanged: still 39+23+3 — three new rows in `tests/regression/expected/82-stats-shape.out` |
 | v0.3 harness lock-in — #55 | 93 | 39+23+3 | promotes the W3C-shape + LUBM-shape harnesses to first-class Justfile recipes (`just test-w3c`, `just test-lubm`), introduces `just test-conformance` (regression + W3C-shape + LUBM-shape — every compose-based layer) and `just test-everything` (pgrx integration + test-conformance — the broadest sweep), and lands `just smoke-cold` (`compose-down` → `build-ext` → `compose-up` → `CREATE EXTENSION` → test-conformance) as the cold-compose discipline gate. `just test-all` keeps its narrow `test + test-regression` shape for back-compat. `docs/08-testing.md` and `README.md`'s Tests block point at the new entry points. The shift matters because two of the three compose-based harnesses were previously discoverable only by knowing the bash paths — `just --list` showed nothing about them, and `just test-all` silently skipped them. Cold-compose smoke is the verification half: it catches the bug class that passes on a warm compose because some prior `DROP/CREATE` left state behind, and breaks on the next cold boot. Test count unchanged — the new recipes are wrappers, not new tests. Final entry in the 66→1 coverage countdown; the next phase opens the hygiene cycle |
-| **v0.3 cut (current)** | **93** | **39 + 23 + 3 = 65** | **Total 158 tests across all five layers** (93 pgrx integration + 39 pg_regress + 23 W3C-shape SPARQL + 3 LUBM-shape). v0.3 LLD §5 phase status: Phase 1 ✅, Phase 2 ✅ (2.0/2.1/2.2 + extended SPARQL surface steps 1-12), Phase 3 🚧 (steps 1-2 ✅, step 3 phase A ✅, phase B → v0.4), Phase 4 ✅, Phase 5 🚧 stub (real impl → v0.5 per v0.4-FUTURE §9), Phase 6 🚧 (step 1 ✅, step 2 starter + expansions + essentials ✅, step 3 ⏳). License attribution (Apache 2.0 / 2026), MSRV (1.91), ERRATA E-006 re-check (2026-05-14), ERRATA E-010 (cargo audit informational). Forward look: [`SPEC.pgRDF.LLD.v0.4-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md) is canonical for v0.4 scope |
+| **v0.3 cut (current)** | **93** | **39 + 23 + 3 = 65** | **Total 158 tests across all five layers** (93 pgrx integration + 39 pg_regress + 23 W3C-shape SPARQL + 3 LUBM-shape). v0.3 LLD §5 phase status: Phase 1 ✅, Phase 2 ✅ (2.0/2.1/2.2 + extended SPARQL surface steps 1-12), Phase 3 🚧 (steps 1-2 ✅, step 3 phase A ✅, phase B → v0.4), Phase 4 ✅, Phase 5 🚧 stub (real impl → v0.4 per LLD v0.4 §9 — landed ✅ in commit `ac40bc2` post-v0.3.0), Phase 6 🚧 (step 1 ✅, step 2 starter + expansions + essentials ✅, step 3 ⏳). License attribution (Apache 2.0 / 2026), MSRV (1.91), ERRATA E-006 re-check (2026-05-14), ERRATA E-010 (cargo audit informational). Forward look: [`SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md) is canonical for v0.4 scope |

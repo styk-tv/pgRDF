@@ -6,6 +6,44 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Spec — v0.4 LLD promoted from FUTURE, v0.5-FUTURE opened
+
+SHACL real impl shipped on `main` in commit `ac40bc2`; v0.4 LLD is
+no longer forward-looking. `specs/SPEC.pgRDF.LLD.v0.4-FUTURE.md`
+renamed to `specs/SPEC.pgRDF.LLD.v0.4.md` via `git mv` (history
+preserved). The renamed file's §0 status flips from "draft /
+forward-looking / target: pgRDF v0.4 cut" to
+"in-progress authoritative contract for the v0.4 cycle". §9 SHACL
+restructured from "v0.5 — gated on E-009" to "✅ shipped in v0.4
+cycle" — cites commit `ac40bc2`, ERRATA.v0.4 E-011, and regression
+`71-shacl-real.sql`. Capability matrix (§2) marks SHACL ✅; all
+other v0.4 tracks (named-graph, UPDATE, lifecycle, CONSTRUCT,
+paths, SPARQL backlog) stay 🚧.
+
+New `specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md` opened as the next
+forward-look sibling. Carries the v0.5-targeted content split out
+of the prior v0.4-FUTURE: §3 reasoning profile selector (was v0.4
+§8), §4 TriG/N-Quads ingest (was v0.4 §10), §5 SHACL-SPARQL
+constraint mode + materialised-graph coverage (was v0.4 §9.5), §6
+W3C SHACL manifest runner (was v0.4 §9.5 / §13), §7 IRI overloads
+for lifecycle UDFs (was v0.4 §5.1 forward note), §8
+aggregates-over-UNION refinements (was v0.4 §11 forward note), §9
+v1.0 forward look (was v0.4 §15).
+
+Cross-link updates: v0.3 LLD §0 supersession block now points at
+`v0.4.md` (not `-FUTURE`); ERRATA.v0.4 E-011 next-steps row repoints
+to LLD.v0.4 §9; `docs/04-inference.md` reasoning-selector pointer
+moves to v0.5-FUTURE §3; `docs/05-validation.md` SHACL spec pointer
+moves to v0.4 §9; `docs/06-installation.md` two pointers move to
+v0.4; `docs/09-release.md` "Deferred to v0.4" pointer moves to v0.4
+§2 with promotion note; `docs/10-roadmap.md` ~25 pointers rewritten
+(most to v0.4, the v0.5-targeted ones to v0.5-FUTURE);
+`RELEASE_NOTES.md` deferral pointer moves to v0.4 §2;
+`src/query/{parser,executor}.rs` doc-comment pointers move to v0.4.
+
+No code changes; no test count changes (still 160 = 94 pgrx + 40
+pg_regress + 23 W3C + 3 LUBM).
+
 ### Phase 5 — Real SHACL validation lands (E-009 / E-011 resolved upstream-pending)
 
 `pgrdf.validate(data_graph, shapes_graph) → JSONB` now executes

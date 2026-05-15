@@ -14,10 +14,14 @@ and OWL 2 RL reasoning.**
 - **Carries forward:** `SPEC.pgRDF.INSTALL.v0.2.md` (no install-spec
   changes in v0.3) and `ERRATA.v0.2.md` (still authoritative for the
   spec deltas it lists).
-- **Forward-looking sibling:** [`SPEC.pgRDF.LLD.v0.4-FUTURE.md`](SPEC.pgRDF.LLD.v0.4-FUTURE.md)
-  is the draft target spec for the next cut; v0.3 remains the
-  shipped contract until v0.4 actually lands. The `-FUTURE` postfix
-  signals that the document is aspirational, not authoritative.
+- **Forward-looking sibling:** [`SPEC.pgRDF.LLD.v0.4.md`](SPEC.pgRDF.LLD.v0.4.md)
+  is the authoritative-in-progress contract for the v0.4 cycle
+  (promoted from `SPEC.pgRDF.LLD.v0.4-FUTURE.md` once the first
+  v0.4-cycle item — SHACL real-impl — landed on `main`). v0.3
+  remains the verbatim record of the v0.3.0-cut surface; v0.4 is
+  the authoritative contract for surfaces shipping in the v0.4
+  cycle. The next forward-look beyond v0.4 is
+  [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
 - **Reason for v0.3:** v0.2 captured the architecture + the
   initial Phase-by-Phase progression. After 12 Phase-3 SPARQL
   slices shipped, the v0.2 phase numbering and scoped surface no
