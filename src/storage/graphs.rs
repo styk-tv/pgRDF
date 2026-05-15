@@ -244,11 +244,9 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
     // subquery wrapper needed. The format!-built SQL is safe: the
     // partition name is constructed from a validated non-negative
     // BIGINT (no user input in identifier position).
-    let total: i64 = Spi::get_one(&format!(
-        "SELECT count(*)::bigint FROM pgrdf.{part_name}"
-    ))
-    .unwrap_or_else(|e| panic!("drop_graph: count failed: {e}"))
-    .unwrap_or(0);
+    let total: i64 = Spi::get_one(&format!("SELECT count(*)::bigint FROM pgrdf.{part_name}"))
+        .unwrap_or_else(|e| panic!("drop_graph: count failed: {e}"))
+        .unwrap_or(0);
 
     // Cascade guard — only when the caller asks for strict mode.
     if !cascade {
@@ -391,11 +389,10 @@ fn move_graph(src: i64, dst: i64) -> i64 {
         // `dst_name` is built from a validated non-negative BIGINT,
         // no user input in identifier position — same safe-format
         // convention as `drop_graph` / `clear_graph`.
-        let dst_count: i64 = Spi::get_one(&format!(
-            "SELECT count(*)::bigint FROM pgrdf.{dst_name}"
-        ))
-        .unwrap_or_else(|e| panic!("move_graph: dst count failed: {e}"))
-        .unwrap_or(0);
+        let dst_count: i64 =
+            Spi::get_one(&format!("SELECT count(*)::bigint FROM pgrdf.{dst_name}"))
+                .unwrap_or_else(|e| panic!("move_graph: dst count failed: {e}"))
+                .unwrap_or(0);
         if dst_count > 0 {
             panic!(
                 "move_graph: dst graph_id {dst} already has data ({dst_count} rows); \
@@ -419,11 +416,8 @@ fn move_graph(src: i64, dst: i64) -> i64 {
     // with the partition. The drop's return value is discarded —
     // we report `copied` as the move count, which is the row count
     // at copy time.
-    Spi::run_with_args(
-        "SELECT pgrdf.drop_graph($1::bigint, true)",
-        &[src.into()],
-    )
-    .unwrap_or_else(|e| panic!("move_graph: drop_graph step failed: {e}"));
+    Spi::run_with_args("SELECT pgrdf.drop_graph($1::bigint, true)", &[src.into()])
+        .unwrap_or_else(|e| panic!("move_graph: drop_graph step failed: {e}"));
 
     copied
 }
@@ -619,11 +613,9 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
     // no scalar-subquery wrapper needed. The format!-built SQL is
     // safe: the partition name is constructed from a validated
     // non-negative BIGINT (no user input in identifier position).
-    let count: i64 = Spi::get_one(&format!(
-        "SELECT count(*)::bigint FROM pgrdf.{src_name}"
-    ))
-    .unwrap_or_else(|e| panic!("copy_graph: count failed: {e}"))
-    .unwrap_or(0);
+    let count: i64 = Spi::get_one(&format!("SELECT count(*)::bigint FROM pgrdf.{src_name}"))
+        .unwrap_or_else(|e| panic!("copy_graph: count failed: {e}"))
+        .unwrap_or(0);
 
     if count == 0 {
         return 0;
@@ -986,8 +978,8 @@ mod tests {
 
         // Stranded `_pgrdf_graphs` row pruned, so the IRI lookup is
         // a clean miss.
-        let iri: Option<String> =
-            Spi::get_one("SELECT pgrdf.graph_iri(991100::bigint)").expect("graph_iri lookup failed");
+        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(991100::bigint)")
+            .expect("graph_iri lookup failed");
         assert_eq!(iri, None, "stranded binding must be cleaned up");
     }
 
@@ -1041,8 +1033,8 @@ mod tests {
         assert!(!exists, "partition table must be gone post-drop");
 
         // IRI binding gone too.
-        let iri: Option<String> =
-            Spi::get_one("SELECT pgrdf.graph_iri(992200::bigint)").expect("graph_iri lookup failed");
+        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(992200::bigint)")
+            .expect("graph_iri lookup failed");
         assert_eq!(iri, None, "binding must be cleaned up");
     }
 
@@ -1051,7 +1043,11 @@ mod tests {
     /// stable `drop_graph: inferred rows present` prefix. Default
     /// `cascade => TRUE` would proceed (covered by the regression
     /// suite, not duplicated here to keep pg_test count tight).
-    #[pg_test(error = "drop_graph: inferred rows present")]
+    /// pgrx-tests requires an EXACT match on the panic message, so the
+    /// graph_id and trailing hint are reproduced here verbatim.
+    #[pg_test(
+        error = "drop_graph: inferred rows present (graph_id = 993300); pass cascade => true to proceed"
+    )]
     fn drop_graph_cascade_false_blocks_inferred() {
         Spi::run(
             "CREATE TABLE pgrdf._pgrdf_quads_g993300 \
@@ -1141,11 +1137,10 @@ mod tests {
         )
         .expect("seed _pgrdf_quads rows failed");
 
-        let pre_count: i64 = Spi::get_one(
-            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 9889",
-        )
-        .expect("pre-count failed")
-        .expect("pre-count returned NULL");
+        let pre_count: i64 =
+            Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 9889")
+                .expect("pre-count failed")
+                .expect("pre-count returned NULL");
         assert_eq!(pre_count, 3);
 
         let removed: Option<i64> = Spi::get_one("SELECT pgrdf.clear_graph(9889::bigint)")
@@ -1153,11 +1148,10 @@ mod tests {
         assert_eq!(removed, Some(3), "must return the pre-clear row count");
 
         // Partition is empty post-clear.
-        let post_count: i64 = Spi::get_one(
-            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 9889",
-        )
-        .expect("post-count failed")
-        .expect("post-count returned NULL");
+        let post_count: i64 =
+            Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 9889")
+                .expect("post-count failed")
+                .expect("post-count returned NULL");
         assert_eq!(post_count, 0);
 
         // Partition still attached — its relation is still in
@@ -1171,8 +1165,8 @@ mod tests {
         assert_eq!(still_exists, Some(true), "partition must remain attached");
 
         // `_pgrdf_graphs` IRI binding (synthetic) survives.
-        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(9889::bigint)")
-            .expect("graph_iri lookup failed");
+        let iri: Option<String> =
+            Spi::get_one("SELECT pgrdf.graph_iri(9889::bigint)").expect("graph_iri lookup failed");
         assert_eq!(
             iri.as_deref(),
             Some("urn:pgrdf:graph:9889"),
@@ -1204,7 +1198,11 @@ mod tests {
 
         let second: Option<i64> = Spi::get_one("SELECT pgrdf.clear_graph(9890::bigint)")
             .expect("second clear_graph(9890) failed");
-        assert_eq!(second, Some(0), "second clear on empty partition must return 0");
+        assert_eq!(
+            second,
+            Some(0),
+            "second clear on empty partition must return 0"
+        );
     }
 
     /// Slice 97 — happy path: build a source partition, seed N rows
@@ -1254,11 +1252,10 @@ mod tests {
         assert!(dst_exists, "dst partition must exist post-copy");
 
         // Destination has all 3 rows with the rebound graph_id.
-        let dst_count: i64 = Spi::get_one(
-            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 971200",
-        )
-        .expect("dst count failed")
-        .expect("dst count returned NULL");
+        let dst_count: i64 =
+            Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 971200")
+                .expect("dst count failed")
+                .expect("dst count returned NULL");
         assert_eq!(dst_count, 3, "dst must hold every copied row");
 
         // is_inferred flag preserved across the copy: one inferred
@@ -1272,11 +1269,10 @@ mod tests {
         assert_eq!(inferred_count, 1, "is_inferred must carry forward");
 
         // Source partition still intact — copy is non-destructive.
-        let src_count: i64 = Spi::get_one(
-            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 971100",
-        )
-        .expect("src count failed")
-        .expect("src count returned NULL");
+        let src_count: i64 =
+            Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 971100")
+                .expect("src count failed")
+                .expect("src count returned NULL");
         assert_eq!(src_count, 3, "src must be untouched by copy");
     }
 
@@ -1291,8 +1287,9 @@ mod tests {
     /// existence on the source side.
     #[pg_test]
     fn copy_graph_absent_src_returns_zero() {
-        let copied: Option<i64> = Spi::get_one("SELECT pgrdf.copy_graph(972100::bigint, 972200::bigint)")
-            .expect("copy_graph absent src failed");
+        let copied: Option<i64> =
+            Spi::get_one("SELECT pgrdf.copy_graph(972100::bigint, 972200::bigint)")
+                .expect("copy_graph absent src failed");
         assert_eq!(copied, Some(0), "absent src must return 0");
 
         // Short-circuit semantics: dst partition not auto-created
@@ -1304,7 +1301,10 @@ mod tests {
         )
         .expect("pg_class probe failed")
         .unwrap_or(false);
-        assert!(!dst_exists, "dst must NOT be auto-created when src is absent");
+        assert!(
+            !dst_exists,
+            "dst must NOT be auto-created when src is absent"
+        );
     }
 
     /// Slice 97 — `src == dst` is rejected with the stable
@@ -1361,11 +1361,10 @@ mod tests {
         assert!(!src_exists, "src partition must be gone post-move");
 
         // dst partition holds the rows.
-        let dst_count: i64 = Spi::get_one(
-            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 9602",
-        )
-        .expect("dst count failed")
-        .expect("dst count returned NULL");
+        let dst_count: i64 =
+            Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 9602")
+                .expect("dst count failed")
+                .expect("dst count returned NULL");
         assert_eq!(dst_count, 4, "dst must hold the moved rows");
 
         // _pgrdf_graphs invalidation: src unbound, dst bound.
@@ -1396,16 +1395,18 @@ mod tests {
     /// Slice 96 — src == dst rejection. Self-move would be a copy
     /// followed by a drop of the destination, which is destructive.
     /// Explicit panic with the stable prefix is safer than a no-op.
-    /// Independent of slice 97.
-    #[pg_test(error = "move_graph: src and dst must differ")]
+    /// Independent of slice 97. pgrx-tests requires an EXACT match
+    /// on the panic message, so the `(both = N)` suffix is included.
+    #[pg_test(error = "move_graph: src and dst must differ (both = 9605)")]
     fn move_graph_self_move_rejected() {
         Spi::run("SELECT pgrdf.move_graph(9605::bigint, 9605::bigint)").unwrap();
     }
 
     /// Slice 96 — negative-id guard mirrors `drop_graph` /
     /// `clear_graph` / `add_graph(g BIGINT)`. Independent of
-    /// slice 97.
-    #[pg_test(error = "move_graph: graph_id must be >= 0")]
+    /// slice 97. pgrx-tests requires an EXACT match on the panic
+    /// message, so the full `, got src=-1, dst=9606` tail is matched.
+    #[pg_test(error = "move_graph: graph_id must be >= 0, got src=-1, dst=9606")]
     fn move_graph_negative_id_rejected() {
         Spi::run("SELECT pgrdf.move_graph(-1::bigint, 9606::bigint)").unwrap();
     }
@@ -1414,8 +1415,12 @@ mod tests {
     /// populated; move panics with the stable prefix. Note this
     /// path runs the dst existence + count check (which does NOT
     /// depend on slice 97), so it passes standalone in this
-    /// worktree.
-    #[pg_test(error = "move_graph: dst graph_id 9608 already has data")]
+    /// worktree. pgrx-tests requires an EXACT match on the panic
+    /// message, so the trailing `(N rows); clear or drop it first`
+    /// is matched verbatim.
+    #[pg_test(
+        error = "move_graph: dst graph_id 9608 already has data (1 rows); clear or drop it first"
+    )]
     fn move_graph_dst_has_data_rejected() {
         Spi::run("SELECT pgrdf.add_graph(9607::bigint)").expect("add_graph(9607) failed");
         Spi::run("SELECT pgrdf.add_graph(9608::bigint)").expect("add_graph(9608) failed");
