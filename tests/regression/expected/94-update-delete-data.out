@@ -15,6 +15,6 @@ DELETE_DATA|1|["http://example.org/g1"]
 1
 1
 0
-update-delete-insert-where-lands-82-77: t
+DELETE_INSERT_WHERE|0|0
 
 3

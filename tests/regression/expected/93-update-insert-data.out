@@ -16,7 +16,7 @@ UPDATE
 1
 InsertData
 0
-update-delete-insert-where-lands-82-77: t
+DELETE_INSERT_WHERE|0|0
 update-clear-graph-lands-71: t
 update-create-graph-lands-70: t
 update-drop-graph-lands-69: t

@@ -6,6 +6,97 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase C slice 80 — SPARQL UPDATE DELETE+INSERT WHERE (combined modify)
+
+The atomic "modify" form. The DeleteInsert dispatcher arm
+`(true, true)` now routes through `execute_delete_insert_where`
+rather than panicking with the slice-77 "lands" prefix. Toward
+v0.4.3.
+
+**Strategy.** Both halves resolve against the SAME WHERE solutions
+snapshot. We share the slice 81/82 WHERE-walk machinery
+(`parse_select(pattern)` + `build_from_and_where`), evaluate the
+pattern exactly once, and project the UNION of template-referenced
+variables from BOTH halves as BIGINT dict ids — DELETE-side vars
+first (`collect_ground_template_vars`), INSERT-side vars second
+(`collect_template_vars`), de-duplicated by first appearance.
+Stable ordering means adding an INSERT-only variable doesn't
+reshuffle the DELETE-side columns. Rust iterates the binding rows
+via SPI and per row instantiates: (a) the DELETE template through
+`instantiate_ground_template_quad` (lookup-only — missing terms
+skip the row), then (b) the INSERT template through
+`instantiate_template_quad` (interning path — fresh dict rows
+allocate on demand).
+
+**W3C §3.1.3 ordering.** The DELETE half is applied before the
+INSERT half. This matters for status-flip patterns
+(`DELETE { ?x ex:status "draft" } INSERT { ?x ex:status
+"approved" } WHERE { ?x ex:status "draft" }`) where the
+templates overlap on subject/predicate: DELETE-first removes the
+old row, then INSERT adds the new one cleanly. The opposite order
+would either duplicate-then-delete (and lose the new row) or
+trip the `WHERE NOT EXISTS` guard. Atomicity is naturally
+provided by Postgres's transaction model — the whole UDF call is
+one transaction, so DELETE and INSERT either both land or neither
+does. No two-phase commit dance, no snapshot capture, no save
+point.
+
+**Counter semantics.** Inherits the per-half siblings:
+`triples_deleted` counts ACTUAL rows removed (RETURNING-driven,
+slice 81/83 idiom), so a re-issue against the now-flipped state
+reports 0; `triples_inserted` counts template-instance attempts
+(slice 82 convention — the `WHERE NOT EXISTS` guard silently
+dedupes but the attempt count surfaces for audit-trail callers).
+
+**Summary discriminator.** The `_update` summary's `form` field
+reports `"DELETE_INSERT_WHERE"` — `update_op_name`'s DeleteInsert
+match already routed combined templates to this label per slice
+82, so no shape change required.
+
+**Limitations locked for slice 80** (inherit slices 81/82):
+
+- WHERE pattern may NOT carry aggregates / GROUP BY / UNION —
+  panics with a stable `DELETE/INSERT WHERE template feature
+  '<X>' not yet supported` prefix.
+- Template variables MUST be bound by the WHERE BGP (on EITHER
+  half) — an unbound template variable panics with the same
+  stable prefix.
+- Variable GRAPH in either template (`DELETE { GRAPH ?g { … } }`
+  or `INSERT { GRAPH ?g { … } }`) panics with the slice-76
+  prefix. A literal graph IRI is admissible.
+- `USING / USING NAMED` not yet supported (gated in the
+  dispatcher arm with a stable
+  `DELETE/INSERT WHERE template feature 'USING / USING NAMED'`
+  prefix).
+
+**Test coverage.**
+
+- `tests/regression/sql/97-update-delete-insert-where.sql` locks
+  five invariants — status-flip counters (2 deletes + 2 inserts),
+  idempotent termination (re-issue against the flipped state
+  matches 0 rows ⇒ 0/0 counters), multi-template (1 DELETE quad
+  + 2 INSERT quads × 2 solutions = 2 deletes + 4 inserts),
+  zero-match no-op (unrelated WHERE ⇒ 0/0), post-state
+  round-trip (SELECT confirms table state matches the counter
+  trail). Hand-authored expected output; never ACCEPT=1
+  baselined.
+- Three `#[pg_test]`s in `src/query/executor.rs`
+  (`sparql_update_delete_insert_where_happy_path`,
+  `sparql_update_delete_insert_where_idempotent_termination`,
+  `sparql_update_delete_insert_where_multi_template`).
+- The `update-delete-insert-where-lands-82-77` `_check_error`
+  assertions in regressions 93 / 94 / 95 were replaced with
+  smoke assertions that the dispatcher now returns a well-formed
+  `form = "DELETE_INSERT_WHERE"` row. The
+  `sparql_update_delete_insert_combined_still_panics` pgrx test
+  was removed (it now succeeds instead of panicking).
+
+**Test bar after slice 80.** 153 pgrx integration + 59 pg_regress
++ 26 W3C-shape + 3 LUBM-shape = 241 automated tests across all
+four layers (up from 238 at slice 81: +2 pgrx — 3 new slice-80
+cases minus 1 dropped slice-77 panic assertion — and
++1 pg_regress).
+
 ### Phase C slice 81 — SPARQL UPDATE DELETE WHERE (pattern-driven)
 
 Sibling of slice 82's INSERT WHERE. The DeleteInsert dispatcher

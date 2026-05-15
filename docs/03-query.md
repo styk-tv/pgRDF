@@ -245,9 +245,9 @@ Concrete shape:
       lands INSERT DATA end-to-end (default + named graph,
       multi-triple, idempotent on repeat via `WHERE NOT EXISTS`);
       other UPDATE forms panic with "lands in slice NN" pending
-      per-form follow-ups (DELETE/INSERT WHERE → 77,
-      CLEAR/CREATE/DROP GRAPH → 71/70/69). Pure DELETE WHERE and
-      pure INSERT WHERE shipped in slices 81 and 82 respectively.
+      per-form follow-ups (CLEAR/CREATE/DROP GRAPH → 71/70/69). The
+      pattern-driven UPDATE forms shipped in slices 82 (INSERT WHERE),
+      81 (DELETE WHERE), and 80 (combined DELETE+INSERT WHERE).
 - ✅ SPARQL UPDATE — `INSERT { template } WHERE { pattern }` (Phase C
       slice 82, LLD v0.4 §4.1). Pattern-driven insertion: the WHERE
       pattern goes through the v0.3 `parse_select` walker (sharing the
@@ -294,8 +294,29 @@ Concrete shape:
       operations of mixed kinds (e.g. a future
       `DELETE DATA ; INSERT DATA`), the `form` field collapses to
       `"MIXED"` and the per-op counters aggregate.
-- ⏳ `DELETE { … } INSERT { … } WHERE`, lifecycle algebra
-      (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices 77 / 71 → 69.
+- ✅ SPARQL UPDATE — `DELETE { … } INSERT { … } WHERE { … }` (Phase C
+      slice 80, LLD v0.4 §4.1). Atomic modify form. Both halves resolve
+      against the SAME WHERE solutions snapshot: the pattern is
+      evaluated exactly once, the projection unions every variable
+      referenced by EITHER template (DELETE-side then INSERT-side,
+      first-appearance per side), and Rust iterates the binding rows
+      applying DELETE then INSERT per row. Per W3C SPARQL 1.1 Update
+      §3.1.3 the DELETE conceptually precedes the INSERT — important
+      for status-flip patterns (`DELETE { ?x ex:status "draft" }
+      INSERT { ?x ex:status "approved" } WHERE { ?x ex:status
+      "draft" }`) where the DELETE removes the old row and the INSERT
+      adds the new one cleanly. Atomicity is naturally provided by
+      Postgres's transaction model. DELETE counter uses the
+      `WITH d AS (DELETE … RETURNING 1) SELECT count(*)` idiom from
+      slice 81/83 (actual rows removed); INSERT counter is per-attempt
+      (slice 82 convention). Summary reports `form:
+      "DELETE_INSERT_WHERE"`. Limitations inherit slices 81/82: no
+      aggregates / GROUP BY / UNION in WHERE; template variables must
+      be bound by the WHERE BGP; variable GRAPH in either template
+      panics with the slice-76 prefix; `USING / USING NAMED` not yet
+      supported.
+- ⏳ Lifecycle algebra (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices
+      71 → 69.
 - ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4

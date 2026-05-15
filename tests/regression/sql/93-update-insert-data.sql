@@ -196,13 +196,19 @@ SELECT jsonb_array_length(
 -- Each unimplemented variant panics with its documented "lands in
 -- slice NN" prefix so callers can preview the rollout schedule.
 
-SELECT _check_error(
-  'update-delete-insert-where-lands-82-77',
-  $$SELECT * FROM pgrdf.sparql(
-      'DELETE { ?s ?p ?o } INSERT { ?s ?p "new" } WHERE { ?s ?p ?o }'
-    )$$,
-  $$UPDATE form 'DELETE/INSERT WHERE' lands$$
-);
+-- Combined DELETE+INSERT WHERE — slice 80 shipped, so the dispatcher
+-- arm no longer panics with the "lands" prefix. We retain a smoke
+-- assertion that the form returns a well-formed _update row with
+-- `form = "DELETE_INSERT_WHERE"`. The dedicated regression for the
+-- implemented form lives in `97-update-delete-insert-where.sql`.
+SELECT
+  (j->'_update'->>'form')                            AS form,
+  (j->'_update'->>'triples_inserted')::bigint        AS inserted,
+  (j->'_update'->>'triples_deleted')::bigint         AS deleted
+FROM pgrdf.sparql(
+  'PREFIX zzz: <http://example.org/unbound/> '
+  'DELETE { ?s zzz:p ?o } INSERT { ?s zzz:p "x" } WHERE { ?s zzz:p ?o }'
+) AS s(j);
 
 SELECT _check_error(
   'update-clear-graph-lands-71',

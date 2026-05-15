@@ -555,6 +555,56 @@ to dispatch by query form; UPDATE forms return an `_update` JSONB
 summary row. See
 [LLD v0.4 §4](../specs/SPEC.pgRDF.LLD.v0.4.md#4-sparql-update-new).
 
+- ✅ **Slice 80 — SPARQL UPDATE DELETE+INSERT WHERE (combined modify).**
+  The atomic "modify" form. The DeleteInsert dispatcher arm
+  `(true, true)` now routes through `execute_delete_insert_where`
+  rather than panicking with the slice-77 "lands" prefix. Both halves
+  resolve against the SAME WHERE solutions snapshot: the pattern is
+  evaluated exactly once, the projection unions every variable
+  referenced by EITHER template (DELETE-side then INSERT-side,
+  first-appearance per side, so adding an INSERT-only var doesn't
+  reshuffle DELETE-side columns), and Rust iterates the binding rows
+  via SPI applying DELETE then INSERT per row. Per W3C SPARQL 1.1
+  Update §3.1.3 the DELETE conceptually precedes the INSERT — this
+  matters for status-flip patterns (`DELETE { ?x ex:status "draft" }
+  INSERT { ?x ex:status "approved" } WHERE { ?x ex:status "draft" }`)
+  where the DELETE removes the old row and the INSERT adds the new
+  one cleanly. Atomicity is naturally provided by Postgres's
+  transaction model (the whole UDF call is one transaction → DELETE
+  and INSERT either both land or neither does). DELETE counter uses
+  the `WITH d AS (DELETE … RETURNING 1) SELECT count(*)` idiom from
+  slice 81/83 (actual rows removed); INSERT counter is per-attempt
+  (slice 82 convention — the `WHERE NOT EXISTS` guard silently
+  dedupes but the attempt count surfaces). The `_update` summary
+  reports `form: "DELETE_INSERT_WHERE"` (the discriminator
+  `update_op_name` already routed combined templates to this label
+  per slice 82 — no shape change). Limitations inherit slices 81/82:
+  WHERE may not carry aggregates / GROUP BY / UNION; template
+  variables MUST be bound by the WHERE BGP (panics with
+  `DELETE/INSERT WHERE template feature 'unbound template variable`
+  stable prefix); variable GRAPH in either template panics (lands
+  with slice 76); `USING / USING NAMED` not yet supported (gated in
+  the dispatcher arm). Regression coverage:
+  `tests/regression/sql/97-update-delete-insert-where.sql` locks
+  five invariants — status-flip counters (2 deletes + 2 inserts),
+  idempotent termination (re-issue against flipped state ⇒ 0/0),
+  multi-template (1 DELETE quad + 2 INSERT quads × 2 solutions =
+  2 deletes + 4 inserts), zero-match no-op (unrelated WHERE ⇒ 0/0),
+  post-state round-trip (SELECT confirms table state matches counter
+  trail). Hand-authored expected output. Three `#[pg_test]`s in
+  `src/query/executor.rs`
+  (`sparql_update_delete_insert_where_happy_path`,
+  `sparql_update_delete_insert_where_idempotent_termination`,
+  `sparql_update_delete_insert_where_multi_template`). The
+  slice-77 "lands" panic assertions in regressions 93 / 94 / 95 (the
+  `update-delete-insert-where-lands-82-77` `_check_error` lines)
+  were replaced with smoke assertions that the dispatcher now
+  returns a well-formed `form = "DELETE_INSERT_WHERE"` row.
+  Test bar after slice 80: 153 pgrx integration + 59 pg_regress +
+  26 W3C-shape + 3 LUBM-shape = 241 automated tests (up from 238 at
+  slice 81: +2 pgrx — 3 new slice-80 cases minus 1 dropped panic
+  assertion — and +1 pg_regress).
+
 - ✅ **Slice 81 — SPARQL UPDATE DELETE WHERE (pattern-driven).**
   Sibling of slice 82's INSERT WHERE. The DeleteInsert dispatcher
   arm `(true, false)` now routes through `execute_delete_where`

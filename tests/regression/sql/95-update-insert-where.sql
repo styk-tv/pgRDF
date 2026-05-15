@@ -186,16 +186,19 @@ SELECT _check_error(
   $$INSERT WHERE template feature 'unbound template variable ?g'$$
 );
 
--- Invariant 8 — combined DELETE+INSERT WHERE still panics with the
--- slice-77 prefix. The contiguous substring matches the one slice
--- 84's regression `93-update-insert-data.sql` already locks.
-SELECT _check_error(
-  'insert-where-combined-modify-form-lands-77',
-  $$SELECT * FROM pgrdf.sparql(
-      'DELETE { ?s ?p ?o } INSERT { ?s ?p "new" } WHERE { ?s ?p ?o }'
-    )$$,
-  $$UPDATE form 'DELETE/INSERT WHERE' lands$$
-);
+-- Invariant 8 — combined DELETE+INSERT WHERE shipped in slice 80.
+-- The slice-77 panic is gone; we keep a smoke assertion that the
+-- dispatcher returns a well-formed `form = "DELETE_INSERT_WHERE"`
+-- row. The dedicated regression for the implemented form lives in
+-- `97-update-delete-insert-where.sql`.
+SELECT
+  (j->'_update'->>'form')                            AS form_combined,
+  (j->'_update'->>'triples_inserted')::bigint        AS inserted_combined,
+  (j->'_update'->>'triples_deleted')::bigint         AS deleted_combined
+FROM pgrdf.sparql(
+  'PREFIX zzz: <http://example.org/unbound/> '
+  'DELETE { ?s zzz:p ?o } INSERT { ?s zzz:p "x" } WHERE { ?s zzz:p ?o }'
+) AS s(j);
 
 -- DELETE-only WHERE form: now implemented (Phase C slice 81 — sibling
 -- of this slice). The slice-78 "lands" panic was removed when slice 81

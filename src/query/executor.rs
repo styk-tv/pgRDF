@@ -2722,15 +2722,34 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                 match (has_delete, has_insert) {
                     (true, true) => {
                         // Combined DELETE … INSERT … WHERE — the
-                        // "modify" form. The substring `UPDATE form
-                        // 'DELETE/INSERT WHERE' lands` is the locked
-                        // prefix scraped by slice 84's regression
-                        // (test 93's `update-delete-insert-where-lands`
-                        // expectation). Keep the substring contiguous.
-                        panic!(
-                            "sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slice 77 \
-                             (combined modify form)"
-                        )
+                        // atomic "modify" form (Phase C slice 80).
+                        // Both halves resolve against the SAME WHERE
+                        // solutions snapshot: we evaluate the pattern
+                        // exactly once, project every variable
+                        // referenced by EITHER template as a BIGINT
+                        // dict id, and per-row apply DELETE then
+                        // INSERT. Atomicity is naturally provided by
+                        // Postgres — the whole UDF call is one
+                        // transaction. Per W3C SPARQL 1.1 Update
+                        // §3.1.3 the DELETE half is conceptually
+                        // applied before the INSERT half, which
+                        // matters when the templates overlap
+                        // (e.g. same predicate, different object) —
+                        // the DELETE removes the old row, the INSERT
+                        // adds the new row.
+                        if using.is_some() {
+                            panic!(
+                                "sparql: DELETE/INSERT WHERE template feature \
+                                 'USING / USING NAMED' not yet supported"
+                            );
+                        }
+                        let (n_del, n_ins, graphs) =
+                            execute_delete_insert_where(delete, insert, pattern);
+                        triples_deleted += n_del;
+                        triples_inserted += n_ins;
+                        for g in graphs {
+                            graphs_touched.insert(g);
+                        }
                     }
                     (true, false) => {
                         // Pure DELETE WHERE — slice 81. Sibling of
@@ -3563,6 +3582,242 @@ fn instantiate_ground_template_quad(
         }
     };
     Some((s_id, p_id, o_id, g_id))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SPARQL UPDATE — DELETE { … } INSERT { … } WHERE { … } (Phase C slice 80)
+//
+// The atomic "modify" form. Both halves resolve against the SAME WHERE
+// solutions snapshot: we evaluate the pattern exactly once, project
+// every variable referenced by EITHER template as a BIGINT dict id, and
+// per-row apply DELETE then INSERT. Atomicity is naturally provided by
+// Postgres's transaction model — the whole UDF call runs inside one
+// transaction, so DELETE and INSERT either both land or neither does.
+//
+// Per W3C SPARQL 1.1 Update §3.1.3, the DELETE half is conceptually
+// applied before the INSERT half. This matters when the templates
+// overlap on subject/predicate (e.g. flipping `?x ex:status "draft"` to
+// `?x ex:status "approved"`): the DELETE removes the old row, then the
+// INSERT adds the new one. Doing it the other way around would either
+// (a) duplicate-on-insert and then delete the new row (if the WHERE
+// matched the new state), or (b) require the INSERT's `WHERE NOT EXISTS`
+// guard to swallow the row anyway. The DELETE-first ordering matches
+// the spec and removes the ambiguity.
+//
+// Strategy. Single-pass via SPI sharing the slice 81/82 WHERE walk:
+//   1. Union the template variables from BOTH halves (insert as
+//      `QuadPattern`, delete as `GroundQuadPattern`). Order is
+//      first-appearance, with DELETE-side vars before INSERT-side vars
+//      to keep ordering stable across reorderings of the templates.
+//   2. parse_select(pattern) + build_from_and_where, same as the
+//      siblings. Project each combined-template variable as a BIGINT.
+//   3. For each binding row, instantiate the DELETE template (via
+//      `instantiate_ground_template_quad`'s lookup-only path — if any
+//      term is absent, no row can exist, skip that quad), apply the
+//      `WITH d AS (DELETE … RETURNING 1) SELECT count(*)` idiom slice
+//      83/81 already use.
+//   4. Then instantiate the INSERT template (via
+//      `instantiate_template_quad`'s interning path) and route through
+//      the shared `insert_quad` helper with its `WHERE NOT EXISTS`
+//      set-semantic guard.
+//
+// Counter semantics match the per-half siblings:
+//   - `triples_deleted` counts ACTUAL rows removed (RETURNING-driven),
+//     so a re-issue against the now-flipped state reports 0.
+//   - `triples_inserted` counts template-instance attempts (the
+//     `WHERE NOT EXISTS` guard silently dedupes, but for audit-trail
+//     callers we surface the attempt count, mirroring slice 82).
+//
+// Limitations locked for slice 80 (inherited from siblings):
+//   - WHERE pattern may not carry aggregates / GROUP BY / UNION.
+//   - Template variables MUST be bound by the WHERE BGP — unbound
+//     template variables on EITHER half panic with the half-specific
+//     stable prefix (`INSERT WHERE template feature 'unbound …'` /
+//     `DELETE WHERE template feature 'unbound …'`), inherited from
+//     the per-half instantiators.
+//   - Variable GRAPH in either template panics (lands with slice 76).
+//   - `USING / USING NAMED` not yet supported (gated in the
+//     dispatcher arm).
+// ─────────────────────────────────────────────────────────────────────
+
+/// Translate + execute one `DELETE { delete } INSERT { insert } WHERE
+/// { pattern }` operation. Returns `(triples_deleted, triples_inserted,
+/// graphs_touched)` so the caller can fold into the `_update` summary.
+fn execute_delete_insert_where(
+    delete: &[GroundQuadPattern],
+    insert: &[QuadPattern],
+    pattern: &GraphPattern,
+) -> (i64, i64, HashSet<i64>) {
+    // Union the template vars across both halves. DELETE-side first so
+    // adding an INSERT-only variable doesn't reshuffle the existing
+    // DELETE columns (stable for cache-of-prepared-statements down the
+    // line, even though we don't cache today).
+    let mut template_vars: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for v in collect_ground_template_vars(delete) {
+        if seen.insert(v.clone()) {
+            template_vars.push(v);
+        }
+    }
+    for v in collect_template_vars(insert) {
+        if seen.insert(v.clone()) {
+            template_vars.push(v);
+        }
+    }
+
+    // Walk the WHERE pattern through the v0.3 SELECT walker — same
+    // posture as slice 81/82. Strip solution modifiers; the spec
+    // doesn't admit them on WHERE-of-UPDATE.
+    params_clear();
+    let mut ps = parse_select(pattern);
+    if !ps.aggregates.is_empty() || !ps.group_vars.is_empty() {
+        panic!(
+            "sparql: DELETE/INSERT WHERE template feature 'aggregate/GROUP BY in WHERE' \
+             not yet supported"
+        );
+    }
+    if !ps.union_branches.is_empty() {
+        panic!(
+            "sparql: DELETE/INSERT WHERE template feature 'UNION in WHERE' not yet supported"
+        );
+    }
+    if ps.bgp.is_empty() {
+        panic!("sparql: DELETE/INSERT WHERE requires a non-empty WHERE pattern");
+    }
+    ps.distinct = false;
+    ps.order_by.clear();
+    ps.limit = None;
+    ps.offset = 0;
+    ps.projected.clear();
+    ps.binds.clear();
+
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    let (from_sql, where_clauses, _plan) = build_from_and_where(
+        &ps.bgp,
+        &ps.filters,
+        &ps.optionals,
+        &ps.minuses,
+        &mut anchors,
+        0,
+    );
+
+    // Projection: one BIGINT column per combined template variable.
+    // Unbound template variables on EITHER half are surfaced here with
+    // the same fail-fast posture the siblings use, but with a
+    // discriminator-specific prefix so test-routing can tell the
+    // combined form apart from the pure halves.
+    let mut select_clauses: Vec<String> = Vec::new();
+    let mut col_order: Vec<String> = Vec::new();
+    for var in &template_vars {
+        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+            panic!(
+                "sparql: DELETE/INSERT WHERE template feature 'unbound template variable ?{var}' \
+                 not yet supported (every template variable must appear in the WHERE BGP)"
+            )
+        });
+        select_clauses.push(format!(
+            "q{alias_idx}.{col} AS {alias_v}",
+            alias_v = quote_identifier(var),
+        ));
+        col_order.push(var.clone());
+    }
+    // Degenerate templates with no variables at all — equivalent to
+    // DELETE DATA + INSERT DATA gated by a WHERE existence check.
+    // SELECT a constant so the binding count still drives the per-row
+    // mutation.
+    if select_clauses.is_empty() {
+        select_clauses.push("1 AS _pgrdf_unit".to_string());
+    }
+
+    let mut sql = format!(
+        "SELECT {sel} FROM {from_sql}",
+        sel = select_clauses.join(", "),
+    );
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+
+    let params = params_take();
+
+    let mut triples_deleted: i64 = 0;
+    let mut triples_inserted: i64 = 0;
+    let mut graphs_touched: HashSet<i64> = HashSet::new();
+
+    Spi::connect_mut(|client| {
+        let arg_oids: Vec<PgOid> =
+            vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let prepared = client
+            .prepare(sql.as_str(), &arg_oids)
+            .expect("sparql: DELETE/INSERT WHERE: prepare failed");
+        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+        // SAFETY: every WHERE-SELECT param is a dict id (i64). The
+        // (value, type-oid) pair is well-formed by construction.
+        let datums: Vec<DatumWithOid<'_>> = params
+            .iter()
+            .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
+            .collect();
+        let table = client
+            .select(&prepared, None, &datums)
+            .expect("sparql: DELETE/INSERT WHERE: WHERE-SELECT failed");
+        for row in table {
+            let mut binding: HashMap<&str, Option<i64>> = HashMap::new();
+            let mut skip_row = false;
+            for (i, var) in col_order.iter().enumerate() {
+                let v: Option<i64> = row
+                    .get::<i64>(i + 1)
+                    .ok()
+                    .flatten();
+                if v.is_none() {
+                    // Unbound (e.g. OPTIONAL didn't match) — skip the
+                    // whole row's instantiation per the same W3C §4.2
+                    // "Template Group" rule slices 81/82 apply.
+                    skip_row = true;
+                }
+                binding.insert(var.as_str(), v);
+            }
+            if skip_row {
+                continue;
+            }
+
+            // DELETE half first — W3C §3.1.3 ordering.
+            for gqp in delete {
+                let Some((s_id, p_id, o_id, g_id)) =
+                    instantiate_ground_template_quad(gqp, &binding)
+                else {
+                    continue;
+                };
+                let n: i64 = Spi::get_one_with_args(
+                    "WITH d AS (
+                        DELETE FROM pgrdf._pgrdf_quads
+                         WHERE subject_id   = $1
+                           AND predicate_id = $2
+                           AND object_id    = $3
+                           AND graph_id     = $4
+                       RETURNING 1)
+                     SELECT count(*)::bigint FROM d",
+                    &[s_id.into(), p_id.into(), o_id.into(), g_id.into()],
+                )
+                .unwrap_or_else(|e| {
+                    panic!("sparql: DELETE/INSERT WHERE: per-row DELETE failed: {e}")
+                })
+                .unwrap_or(0);
+                triples_deleted += n;
+                graphs_touched.insert(g_id);
+            }
+
+            // INSERT half — interning path, set-semantic guard.
+            for qp in insert {
+                let (s_id, p_id, o_id, g_id) =
+                    instantiate_template_quad(qp, &binding);
+                insert_quad(s_id, p_id, o_id, g_id);
+                triples_inserted += 1;
+                graphs_touched.insert(g_id);
+            }
+        }
+    });
+
+    (triples_deleted, triples_inserted, graphs_touched)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -6123,19 +6378,156 @@ mod tests {
         .flatten();
     }
 
-    /// Negative — combined DELETE+INSERT WHERE still panics with the
-    /// slice-77 prefix (the contiguous substring slice 84's regression
-    /// test 93 locks must still appear post-slice-82).
-    #[pg_test(
-        error = "sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slice 77 (combined modify form)"
-    )]
-    fn sparql_update_delete_insert_combined_still_panics() {
-        let _: Option<pgrx::JsonB> = Spi::get_one(
+    // ─────────────────────────────────────────────────────────────
+    // Phase C slice 80 — SPARQL UPDATE
+    // `DELETE { … } INSERT { … } WHERE { … }` (combined modify form).
+    // Both halves resolve against the SAME WHERE solutions snapshot —
+    // see `execute_delete_insert_where` for the strategy.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Happy path — flip `?x ex:status "draft"` to
+    /// `?x ex:status "approved"`. Two seeded rows ⇒ 2 deletes + 2
+    /// inserts; the summary reports `form = "DELETE_INSERT_WHERE"`.
+    #[pg_test]
+    fn sparql_update_delete_insert_where_happy_path() {
+        Spi::run(
             "SELECT * FROM pgrdf.sparql(\
-               'DELETE { ?s ?p ?o } INSERT { ?s ?p \"new\" } WHERE { ?s ?p ?o }')",
+               'PREFIX ex: <http://example.org/> \
+                INSERT DATA { \
+                  ex:alice ex:status \"draft\" . \
+                  ex:bob   ex:status \"draft\" \
+                }')",
         )
-        .ok()
-        .flatten();
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                DELETE { ?x ex:status \"draft\" } \
+                INSERT { ?x ex:status \"approved\" } \
+                WHERE  { ?x ex:status \"draft\" }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DELETE_INSERT_WHERE");
+        assert_eq!(summary["triples_deleted"], 2);
+        assert_eq!(summary["triples_inserted"], 2);
+
+        // Post-state: zero "draft" rows, two "approved" rows.
+        let drafts: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?x WHERE { ?x ex:status \"draft\" }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(drafts, 0, "all draft rows should be gone");
+        let approved: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?x WHERE { ?x ex:status \"approved\" }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(approved, 2, "both subjects now carry the approved status");
+    }
+
+    /// Idempotent termination. Re-issuing the same DELETE/INSERT WHERE
+    /// after the first call has already flipped everything reports
+    /// 0 deletes (no draft left to match) and 0 inserts (WHERE returns
+    /// no solutions, so the INSERT template never instantiates).
+    #[pg_test]
+    fn sparql_update_delete_insert_where_idempotent_termination() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                INSERT DATA { ex:alice ex:status \"draft\" . ex:bob ex:status \"draft\" }')",
+        )
+        .unwrap();
+
+        let _first: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                DELETE { ?x ex:status \"draft\" } \
+                INSERT { ?x ex:status \"approved\" } \
+                WHERE  { ?x ex:status \"draft\" }')",
+        )
+        .unwrap()
+        .unwrap();
+
+        // Second run — WHERE now matches nothing, so both counters are
+        // zero and the table is unchanged.
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                DELETE { ?x ex:status \"draft\" } \
+                INSERT { ?x ex:status \"approved\" } \
+                WHERE  { ?x ex:status \"draft\" }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DELETE_INSERT_WHERE");
+        assert_eq!(summary["triples_deleted"], 0);
+        assert_eq!(summary["triples_inserted"], 0);
+    }
+
+    /// Multi-template variant. DELETE { ?x ex:tag "old" } INSERT
+    /// { ?x ex:tag "new" . ?x ex:updated "true" } WHERE
+    /// { ?x ex:tag "old" }. Two seeded rows ⇒ 2 deletes + 4 inserts
+    /// (2 solutions × 2 insert-template quads).
+    #[pg_test]
+    fn sparql_update_delete_insert_where_multi_template() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                INSERT DATA { ex:a ex:tag \"old\" . ex:b ex:tag \"old\" }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                DELETE { ?x ex:tag \"old\" } \
+                INSERT { ?x ex:tag \"new\" . ?x ex:updated \"true\" } \
+                WHERE  { ?x ex:tag \"old\" }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DELETE_INSERT_WHERE");
+        assert_eq!(summary["triples_deleted"], 2);
+        assert_eq!(
+            summary["triples_inserted"], 4,
+            "2 solutions × 2 insert-template quads"
+        );
+
+        // Verify post-state: no old rows, 2 new rows, 2 updated rows.
+        let old_rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?x WHERE { ?x ex:tag \"old\" }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(old_rows, 0);
+        let new_rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?x WHERE { ?x ex:tag \"new\" }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(new_rows, 2);
+        let updated_rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?x WHERE { ?x ex:updated \"true\" }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(updated_rows, 2);
     }
 
     // ─────────────────────────────────────────────────────────────

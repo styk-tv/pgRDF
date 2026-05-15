@@ -189,14 +189,18 @@ SELECT count(*)::bigint AS lit_remaining
     'SELECT ?v WHERE { <http://example.org/lit> <http://example.org/n> ?v }'
   ) AS s(j);
 
--- ─── Negative path: DELETE/INSERT WHERE still panics ─────────────
-SELECT _check_error(
-  'update-delete-insert-where-lands-82-77',
-  $$SELECT * FROM pgrdf.sparql(
-      'DELETE { ?s ?p ?o } INSERT { ?s ?p "new" } WHERE { ?s ?p ?o }'
-    )$$,
-  $$UPDATE form 'DELETE/INSERT WHERE' lands$$
-);
+-- ─── Slice 80 smoke: DELETE/INSERT WHERE no longer panics ────────
+-- The combined modify form shipped in slice 80; we keep a smoke
+-- assertion that the dispatcher returns a well-formed _update row.
+-- The dedicated regression lives in `97-update-delete-insert-where.sql`.
+SELECT
+  (j->'_update'->>'form')                            AS form,
+  (j->'_update'->>'triples_inserted')::bigint        AS inserted,
+  (j->'_update'->>'triples_deleted')::bigint         AS deleted
+FROM pgrdf.sparql(
+  'PREFIX zzz: <http://example.org/unbound/> '
+  'DELETE { ?s zzz:p ?o } INSERT { ?s zzz:p "x" } WHERE { ?s zzz:p ?o }'
+) AS s(j);
 
 DROP FUNCTION _check_error(TEXT, TEXT, TEXT);
 
