@@ -13,8 +13,8 @@ require touching the engineering plan, and vice versa.
 |---|---|
 | [00-intro.md](00-intro.md) | What pgRDF is, who it's for, what it does + does not do today. |
 | [01-install.md](01-install.md) | Local-dev install (compose) and Kubernetes install (init-container drop-in). |
-| [02-loading-rdf.md](02-loading-rdf.md) | `pgrdf.load_turtle`, `pgrdf.parse_turtle`, graphs, the verbose stats UDFs. |
-| [03-querying.md](03-querying.md) | `pgrdf.sparql` — SPARQL SELECT over BGPs, single + multi-pattern joins, JSONB row shape, combining with regular SQL. |
+| [02-loading-rdf.md](02-loading-rdf.md) | `pgrdf.load_turtle`, `pgrdf.parse_turtle`, integer + IRI-keyed graph allocation (`pgrdf.add_graph` × 3 overloads, `pgrdf.graph_id`, `pgrdf.graph_iri`), the verbose stats UDFs. |
+| [03-querying.md](03-querying.md) | `pgrdf.sparql` — SPARQL SELECT over BGPs, FILTER / OPTIONAL / UNION / MINUS / aggregates / BIND / ASK, named-graph `GRAPH <iri> { … }` and `GRAPH ?g { … }` scoping, JSONB row shape, combining with regular SQL. |
 
 ## Client integrations
 

@@ -39,10 +39,10 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `HAVING(?alias > c)` (after AS-alias) **and** `HAVING(SUM(?v) > c)` (inline aggregate) | ✅ |
 | `BIND(expr AS ?v)` for projection (Literal / NamedNode / Variable, STR / LANG / DATATYPE / UCASE / LCASE / STRLEN, arithmetic, CONCAT) | ✅ |
 | `ASK { … }` query form | ✅ |
+| Named-graph `GRAPH <iri> { … }` and `GRAPH ?g { … }` clauses (composes with OPTIONAL / UNION / MINUS) | ✅ |
 | `CONSTRUCT`, `DESCRIBE` | ⏳ v0.4 |
 | Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) | ⏳ v0.4 |
 | `VALUES (?x) { … }` inline data | ⏳ v0.4 |
-| Named-graph `GRAPH { … }` clauses | ⏳ v0.4 |
 | Aggregates over `UNION` | ⏳ v0.4 |
 | BIND output referenced in later FILTER / BGP | ⏳ v0.4 |
 | `SERVICE` (federated SPARQL) | Out of scope for v0.x |
@@ -491,6 +491,223 @@ cross product.
 (Multi-triple MINUS sub-patterns are supported, keyed on shared
 variables with the outer query — see the surface table at the top.)
 
+### Named graphs
+
+`GRAPH <iri> { … }` and `GRAPH ?g { … }` scope a block of triple
+patterns to one or more named graphs in your dataset. Allocate the
+graphs first (see
+[02-loading-rdf.md → Named graphs by IRI](02-loading-rdf.md#named-graphs-by-iri))
+and load Turtle into them; then reference them by IRI in your
+SPARQL.
+
+#### Literal-IRI form — `GRAPH <iri> { … }`
+
+```sql
+-- Only triples whose graph_id matches g1's binding
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?s ?n WHERE {
+     GRAPH <http://example.org/g1> { ?s ex:name ?n }
+   }'
+);
+--  → {"s": "...alice", "n": "Alice in g1"}
+```
+
+At translate time the IRI resolves to its `graph_id` via
+`_pgrdf_graphs.iri`, and every triple alias inside the block carries
+an additional `qN.graph_id = <resolved>` constraint. An unresolved
+IRI binds to `-1` (the zero-rows sentinel) — the query returns no
+solutions rather than raising, matching SPARQL's "no solutions"
+semantics.
+
+Multi-triple BGPs inside one literal-IRI `GRAPH` block all share the
+same scope, so triples cannot stitch across graphs:
+
+```sql
+-- Both ?n and ?m MUST come from g1; there is no cross-graph join
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?s ?n ?m WHERE {
+     GRAPH <http://example.org/g1> {
+       ?s ex:name ?n .
+       ?s ex:mbox ?m
+     }
+   }'
+);
+```
+
+#### Variable form — `GRAPH ?g { … }`
+
+When you want the graph IRI to come back as a binding (e.g. to group
+by graph, or to discover which graph a result came from), use the
+variable form:
+
+```sql
+-- Name + the IRI of the graph each name came from
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?g ?n WHERE {
+     GRAPH ?g { ?s ex:name ?n }
+   }'
+);
+--  → {"g": "http://example.org/g1", "n": "Alice in g1"}
+--  → {"g": "http://example.org/g2", "n": "Alice in g2"}
+```
+
+The translator emits an INNER JOIN to `_pgrdf_graphs`, so `?g`
+binds only to graphs that have an IRI in the mapping (every graph
+allocated via `pgrdf.add_graph` does — see the loading guide).
+The projection layer substitutes the IRI string for the integer
+`graph_id`, so the JSONB row carries the IRI directly.
+
+As with the literal-IRI form, every triple inside one `GRAPH ?g`
+block shares the same graph_id binding:
+
+```sql
+-- Count of (name, mbox) pairs per graph
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?g (COUNT(*) AS ?n)
+     WHERE { GRAPH ?g { ?s ex:name ?nm . ?s ex:mbox ?m } }
+   GROUP BY ?g
+   ORDER BY ?g'
+);
+--  → {"g": "http://example.org/g1", "n": "1"}
+--  → {"g": "http://example.org/g2", "n": "1"}
+```
+
+#### Composition with OPTIONAL / UNION / MINUS
+
+`GRAPH` blocks compose freely with the other algebra operators. Each
+`GRAPH` block carries its own scope — distinct `GRAPH` blocks within
+the same query get distinct scopes, so an OPTIONAL pulling enrichment
+from a side graph doesn't constrain the outer pattern.
+
+**OPTIONAL with a different graph scope** — common pattern for
+"enrich from a side graph if the side graph has anything":
+
+```sql
+-- Names from g1, optionally enriched with mbox from g2
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?s ?n ?m WHERE {
+     GRAPH <http://example.org/g1> { ?s ex:name ?n }
+     OPTIONAL { GRAPH <http://example.org/g2> { ?s ex:mbox ?m } }
+   }'
+);
+--  → {"s": "...alice", "n": "Alice", "m": "alice@x"}    -- enrichment hit
+--  → {"s": "...bob",   "n": "Bob",   "m": null}         -- enrichment miss
+```
+
+If `?s` isn't bound in g2's `ex:mbox`, `?m` comes back as JSON null
+— the outer row still surfaces. This is a LEFT JOIN, not a graph
+constraint on the outer pattern.
+
+**UNION across graphs** — collect rows from several graphs into one
+result set:
+
+```sql
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?s ?n WHERE {
+     { GRAPH <http://example.org/g1> { ?s ex:name ?n } }
+     UNION
+     { GRAPH <http://example.org/g2> { ?s ex:name ?n } }
+   }'
+);
+```
+
+Each branch is its own GRAPH scope; rows from one graph do NOT
+stitch with rows from the other, even when they share a subject.
+This is the spec-correct shape — `GRAPH g1 UNION GRAPH g2` means
+"either from g1 or from g2", not "from g1 joined to g2".
+
+**MINUS against a side graph** — exclude rows whose subject is also
+present in some other graph:
+
+```sql
+-- Names from the default graph, minus subjects that already appear in g1
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?s ?n WHERE {
+     ?s ex:name ?n
+     MINUS { GRAPH <http://example.org/g1> { ?s ex:mbox ?m } }
+   }'
+);
+```
+
+The MINUS body inherits its own scope (g1 here); only g1's `ex:mbox`
+rows participate in the exclusion. As with bare MINUS, the
+shared-variable rule still applies: if the GRAPH-scoped MINUS shares
+no variable with the outer pattern, the MINUS is a no-op per spec.
+
+**GRAPH wrapping a multi-shape inner pattern** — an OPTIONAL or
+MINUS inside the SAME `GRAPH` block inherits the outer scope, so
+all triples are pinned to the same graph:
+
+```sql
+-- For each graph, name + optional mbox from THAT SAME graph
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?g ?n ?m WHERE {
+     GRAPH ?g { ?s ex:name ?n OPTIONAL { ?s ex:mbox ?m } }
+   }'
+);
+```
+
+The OPTIONAL's `?s ex:mbox ?m` is constrained to the same graph as
+the outer `?s ex:name ?n`. You won't see a g1-name paired with a
+g2-mbox.
+
+#### A worked end-to-end example
+
+Load two named graphs and query across them:
+
+```sql
+-- Allocate two graphs by IRI
+SELECT pgrdf.add_graph('http://example.org/employees');  --  → 1
+SELECT pgrdf.add_graph('http://example.org/contractors'); --  → 2
+
+-- Ingest into each
+SELECT pgrdf.parse_turtle(
+  '@prefix ex: <http://example.org/> .
+   ex:alice ex:name "Alice" ; ex:dept "Eng" .
+   ex:bob   ex:name "Bob"   ; ex:dept "Ops" .',
+  pgrdf.graph_id('http://example.org/employees')
+);
+SELECT pgrdf.parse_turtle(
+  '@prefix ex: <http://example.org/> .
+   ex:carol ex:name "Carol" ; ex:agency "Acme" .
+   ex:dave  ex:name "Dave"  ; ex:agency "Beta" .',
+  pgrdf.graph_id('http://example.org/contractors')
+);
+
+-- Everyone, with the graph they came from
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?g ?name WHERE {
+     GRAPH ?g { ?s ex:name ?name }
+   }
+   ORDER BY ?g ?name'
+);
+--  → {"g": "http://example.org/contractors", "name": "Carol"}
+--  → {"g": "http://example.org/contractors", "name": "Dave"}
+--  → {"g": "http://example.org/employees",   "name": "Alice"}
+--  → {"g": "http://example.org/employees",   "name": "Bob"}
+
+-- Employees only, with optional contractor-side enrichment
+-- (will always miss here — disjoint subjects)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?name ?agency WHERE {
+     GRAPH <http://example.org/employees>  { ?s ex:name ?name }
+     OPTIONAL {
+       GRAPH <http://example.org/contractors> { ?s ex:agency ?agency }
+     }
+   }'
+);
+```
+
 ### Aggregates and GROUP BY
 
 `pgrdf.sparql` supports the SPARQL set functions `COUNT` (with or
@@ -833,9 +1050,13 @@ from LLD §4.1 also lives in `pgrdf.stats()`
   `?b` and `_:b` as variables of different scoping rules; pgRDF
   refuses blank-node terms in patterns to keep semantics unambiguous.
 - **RDF-star quoted triples** are out of scope (LLD §2).
-- **Cross-graph queries**: today every `pgrdf.sparql` call searches
-  ALL graphs. Per-graph scoping (`GRAPH <g> { … }` and the dataset
-  clause) lands in v0.4 — see the deferral list above.
+- **Cross-graph queries**: by default every `pgrdf.sparql` call
+  searches ALL graphs (every partition). Scope to a specific graph
+  with `GRAPH <iri> { … }` or project the graph IRI with
+  `GRAPH ?g { … }` — see the Named graphs section above. SPARQL
+  dataset clauses (`FROM` / `FROM NAMED`) are still queued for a
+  later slice; allocate graphs explicitly via `pgrdf.add_graph` and
+  reference them inside the WHERE clause for now.
 - **No SPARQL 1.2** anything yet — base SPARQL 1.1 only.
 
 ## Next

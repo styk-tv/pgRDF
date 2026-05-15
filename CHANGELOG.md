@@ -6,6 +6,27 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 108 — user-guide updates for §3 named-graph surface
+
+The user-facing guide under `guide/` picks up the now-shipped §3
+surface (slices 120-110): three `pgrdf.add_graph` overloads, the
+`graph_id` / `graph_iri` lookups, and SPARQL `GRAPH <iri> { … }` /
+`GRAPH ?g { … }` scoping with full composition into OPTIONAL,
+UNION, and MINUS. `guide/02-loading-rdf.md` gains a "Named graphs
+by IRI" subsection covering the three overloads, the lookup
+functions, and the synthetic-IRI binding behaviour of the legacy
+integer-keyed call. `guide/03-querying.md` gains a "Named graphs"
+section after MINUS, walking through the literal-IRI form, the
+variable form with IRI projection, GRAPH-in-OPTIONAL for side-graph
+enrichment, GRAPH-in-UNION for cross-graph row collection, and
+GRAPH-against-MINUS for side-graph exclusion, plus an end-to-end
+worked example combining loading and querying. The surface tables
+in `guide/00-intro.md` and the index entries in `guide/README.md`
+flip the GRAPH row from ⏳ to ✅ and call out the new entry points;
+the previous "cross-graph queries land in v0.4" caveat in
+`guide/03-querying.md` is rewritten to point at the now-shipped
+forms. No changes outside `guide/` and this CHANGELOG entry.
+
 ### Phase A slice 109 — docs sync for §3 named-graph surface
 
 Coherence pass across the engineering doc set after Phase A
@@ -62,8 +83,10 @@ the now-shipped reality:
   (`24` / `25` / `26`), and the `§3 named-graph ✅` phase-status
   marker against the v0.4 LLD §5 track set.
 
-No `guide/`, `src/`, `tests/`, `Cargo.toml`, `LICENSE`, or `NOTICE`
-edits; those are owned by parallel / settled slices.
+Co-landed with slice 108 in parallel batch 3; slice 108 owns
+`guide/` updates while this slice handles the LLD / docs/ /
+README surface. No `src/`, `tests/`, `Cargo.toml`, `LICENSE`, or
+`NOTICE` edits.
 
 ### Phase A slice 110 — pg_dump round-trip for `_pgrdf_graphs`
 

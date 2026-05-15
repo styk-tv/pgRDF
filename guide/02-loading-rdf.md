@@ -116,6 +116,90 @@ DROP TABLE pgrdf._pgrdf_quads_g100;
 This is constant-time, no `DELETE` scan, no autovacuum churn. The
 partition is gone and the parent table reflects the new state.
 
+### Named graphs by IRI
+
+The integer `graph_id` form above is the original surface and stays
+fully supported. v0.4 adds an **IRI-keyed surface** on top: every
+graph carries an IRI in the `pgrdf._pgrdf_graphs(graph_id, iri)`
+mapping table, so you can allocate, look up, and SPARQL-query
+graphs by their RDF name rather than by an opaque integer.
+
+Three `pgrdf.add_graph` overloads are available:
+
+```sql
+-- 1. Integer-keyed (legacy). Auto-binds a synthetic
+--    urn:pgrdf:graph:<id> IRI in _pgrdf_graphs.
+SELECT pgrdf.add_graph(100);
+
+-- 2. IRI-keyed. Auto-allocates the next free graph_id, creates
+--    the partition, binds the IRI. Idempotent on the IRI —
+--    a second call with the same IRI returns the same id.
+SELECT pgrdf.add_graph('http://example.org/users');
+--  → 1
+
+-- 3. Explicit (id, iri) pair. Use when you want both sides
+--    pinned. Errors if either side conflicts with an existing
+--    binding; idempotent when both sides match an existing row.
+SELECT pgrdf.add_graph(200::bigint, 'http://example.org/products');
+--  → true
+```
+
+Once a graph exists, load Turtle into it via the integer `graph_id`
+the same way as before — `load_turtle` and `parse_turtle` haven't
+changed:
+
+```sql
+-- IRI-allocated graph: feed the returned id straight into load_turtle
+WITH g AS (SELECT pgrdf.add_graph('http://example.org/users') AS id)
+SELECT pgrdf.load_turtle('/data/users.ttl', g.id) FROM g;
+
+-- Or look up the id explicitly via graph_id(iri)
+SELECT pgrdf.load_turtle(
+  '/data/users.ttl',
+  pgrdf.graph_id('http://example.org/users')
+);
+```
+
+Two read-only lookup UDFs round out the surface:
+
+```sql
+SELECT pgrdf.graph_id('http://example.org/users');   --  → 1
+SELECT pgrdf.graph_iri(1::bigint);                   --  → 'http://example.org/users'
+
+-- Unknown side → NULL (no error)
+SELECT pgrdf.graph_id('http://nope.example/never');  --  → NULL
+SELECT pgrdf.graph_iri(999::bigint);                 --  → NULL
+```
+
+Both lookups are STRICT — `NULL` input short-circuits to `NULL`
+output without an SPI round trip. Use them to translate between the
+IRI you carry in your application and the integer id the storage
+layer keys on.
+
+The legacy integer overload `add_graph(id BIGINT)` still works as
+before; it now also INSERTs a synthetic `urn:pgrdf:graph:<id>`
+binding into `_pgrdf_graphs` so the IRI-keyed surface (SPARQL
+`GRAPH ?g { … }`, `graph_iri(id)`, etc.) sees every graph regardless
+of which overload created it. The synthetic IRI is an opaque URN —
+you can upgrade it later by calling the explicit `add_graph(id, iri)`
+form, which atomically rebinds the synthetic to your IRI.
+
+To inspect what's bound:
+
+```sql
+SELECT graph_id, iri FROM pgrdf._pgrdf_graphs ORDER BY graph_id;
+--  graph_id |               iri
+-- ----------+----------------------------------
+--         0 | urn:pgrdf:graph:0
+--         1 | http://example.org/users
+--       100 | urn:pgrdf:graph:100            -- from add_graph(100)
+--       200 | http://example.org/products
+```
+
+Once a graph is allocated, scope SPARQL queries to it with
+`GRAPH <iri> { … }` or `GRAPH ?g { … }` — see
+[03-querying.md → Named graphs](03-querying.md#named-graphs).
+
 ## Counts + sanity checks
 
 ```sql

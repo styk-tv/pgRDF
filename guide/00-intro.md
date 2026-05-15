@@ -63,6 +63,7 @@ SELECT * FROM pgrdf.sparql(
 | Per-backend prepared-plan cache (LLD §4.2) | ✅ |
 | Bulk-INSERT plan reuse (LLD §4.3 phase A) | ✅ |
 | SPARQL SELECT / ASK with BGP + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias **and** inline aggregate) + BIND | ✅ |
+| Named-graph SPARQL — `GRAPH <iri> { … }` + `GRAPH ?g { … }` with composition into OPTIONAL / UNION / MINUS | ✅ |
 | OWL 2 RL materialization via `reasonable` (`pgrdf.materialize`) | ✅ |
 | Operator surface — `pgrdf.stats()`, `pgrdf.shmem_reset()`, `pgrdf.plan_cache_clear()` | ✅ |
 | Regression suite + W3C-shape harness in CI (PR-gate + nightly) | ✅ |
@@ -70,7 +71,7 @@ SELECT * FROM pgrdf.sparql(
 | 2× ingest target (true COPY BINARY / heap_multi_insert) | ⏳ v0.4 |
 | Full W3C SPARQL 1.1 TTL-manifest runner against `w3c/rdf-tests` | ⏳ v0.4 |
 | LUBM-10 / LUBM-100 cross-engine benchmarks (Jena TDB, Apache AGE) | ⏳ v0.4 |
-| SPARQL surface — GRAPH, VALUES, property paths beyond simple seq, multi-triple OPTIONAL, CONSTRUCT, DESCRIBE, aggregates over UNION, BIND-in-FILTER | ⏳ v0.4 |
+| SPARQL surface — VALUES, property paths beyond simple seq, multi-triple OPTIONAL, CONSTRUCT, DESCRIBE, aggregates over UNION, BIND-in-FILTER | ⏳ v0.4 |
 
 For the long-form plan see
 [`docs/10-roadmap.md`](../docs/10-roadmap.md).
@@ -99,6 +100,11 @@ For the long-form plan see
   them as internal — query them, don't write to them directly).
 - Graph identifiers are `BIGINT`. `0` is the default partition;
   `pgrdf.add_graph(g)` creates a dedicated LIST partition for `g`.
+  Every graph also carries an IRI in `pgrdf._pgrdf_graphs`; allocate
+  by IRI with `pgrdf.add_graph(iri TEXT)` and scope SPARQL with
+  `GRAPH <iri> { … }` or `GRAPH ?g { … }`. See
+  [02-loading-rdf.md](02-loading-rdf.md) for the loader surface and
+  [03-querying.md](03-querying.md) for the SPARQL forms.
 
 ## Next
 
