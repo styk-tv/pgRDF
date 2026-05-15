@@ -8,6 +8,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ### Added
 
+- `pgrdf.construct` WHERE-shorthand form — Phase D slice 54. `CONSTRUCT WHERE { pattern }` is equivalent to `CONSTRUCT { pattern } WHERE { pattern }` per W3C SPARQL 1.1 §16.2.4. The pattern must be a pure BGP (no OPTIONAL/UNION/MINUS/FILTER/GRAPH/BIND/VALUES) and must contain no blank nodes; both restrictions panic with explicit W3C-citing messages. Compatible with all prior surfaces (multi-triple BGPs emit one row per template triple per solution).
 - `pgrdf.construct` GRAPH-scoped WHERE — Phase D slice 55. `WHERE { GRAPH <iri> { ... } }` and `WHERE { GRAPH ?g { ... } }` compose with all prior template surfaces (constant, variable, blank-node, multi-triple). Variable-GRAPH binds `?g` to the source graph IRI per solution; default-graph quads are excluded per W3C SPARQL 1.1 §13.3. Empty named graphs and missing graphs yield zero solutions.
 - `pgrdf.construct` multi-triple template support — Phase D slice 56.
   N-triple templates emit N rows per solution; blank-node labels are

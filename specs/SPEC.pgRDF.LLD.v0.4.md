@@ -114,7 +114,7 @@ Capability matrix for the v0.4 target:
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | ✅ slice 79 |
 | Lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / ALL / NAMED`) | not yet | §4.4 | ✅ slice 78 |
 | `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | ✅ all four shipped (slices 99 / 98 / 97 / 96) |
-| `CONSTRUCT` | ⏳ deferred | §6 | 🚧 (slice 55: variables + constants + blank-node templates + N-triple templates (with cross-triple bnode label joining) + GRAPH-scoped WHERE (literal-IRI and variable form, W3C §13.3 named-graph-only); WHERE shorthand / round-trip / `sparql_parse` pending) |
+| `CONSTRUCT` | ⏳ deferred | §6 | 🚧 (slice 54: variables + constants + blank-node templates + N-triple templates (with cross-triple bnode label joining) + GRAPH-scoped WHERE (literal-IRI and variable form, W3C §13.3 named-graph-only) + WHERE shorthand (W3C SPARQL 1.1 §16.2.4, pure BGP only, no blank nodes); round-trip / `sparql_parse` pending) |
 | Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | 🚧 |
 | Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | 🚧 |
 | Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | 🚧 |
@@ -559,28 +559,47 @@ route IRI input through `pgrdf.graph_id(iri)` explicitly.
 `CONSTRUCT` is the canonical SPARQL form for graph snapshot export,
 Turtle output, and sub-graph extraction. v0.3 lists it as
 deferred-to-v0.4 because its return shape (triples, not solutions)
-diverges from the `pgrdf.sparql` JSONB row shape. 🚧 (slice 55:
-GRAPH-scoped WHERE landed. `WHERE { GRAPH <iri> { … } }` filters
-solutions to a single named graph; `WHERE { GRAPH ?g { … } }`
-binds `?g` per-solution to the source graph IRI and ranges over
-named graphs only (W3C SPARQL 1.1 §13.3 — default-graph quads are
-excluded via `g{S}.graph_id <> 0` on the `_pgrdf_graphs` JOIN,
-which uniformly fixed the slice-79 / slice-87 SELECT path's latent
-default-graph bleed). All prior template surfaces (constant,
-variable, blank-node, multi-triple) compose with the new GRAPH
-forms. Slice 56: multi-triple template support landed; N-triple
-templates emit N rows per solution, with blank-node labels SHARED
-across all N template triples WITHIN the same solution (so `_:r`
-in triple-1 subject and `_:r` in triple-3 object resolve to the
-SAME fresh label for that solution). Across solutions the same
-template label still mints a NEW fresh label. Empty `{ }`
-templates reject with `pgrdf.construct: empty template`. Slice 57
-admitted blank-node template support (single-triple); slice 58
-admitted variable substitution; slice 59 was constant-only
-foundation. Blank nodes in predicate position are illegal RDF —
-spargebra rejects at parse time. CONSTRUCT WHERE shorthand
-(slice 54), round-trip (slice 53), and `sparql_parse` enrichment
-(slice 50) all still pending.)
+diverges from the `pgrdf.sparql` JSONB row shape. 🚧 (slice 54:
+CONSTRUCT WHERE shorthand landed. `CONSTRUCT WHERE { pattern }` is
+equivalent to `CONSTRUCT { pattern } WHERE { pattern }` per W3C
+SPARQL 1.1 §16.2.4 ("the pattern itself"). spargebra populates the
+AST's `template` field by cloning the BGP triples at parse time
+(parser.rs `ConstructQuery` rule), so the executor's existing
+multi-triple emission path handles the shorthand form without any
+new emit logic — slice 54 reduces to (1) detecting the shorthand
+form via an ASCII probe of the input query string (the post-parse
+AST is otherwise indistinguishable from the explicit form), and
+(2) enforcing the two W3C restrictions: the pattern must be a pure
+BGP (composites — OPTIONAL / UNION / MINUS / FILTER / GRAPH / BIND
+/ VALUES — surface as `pgrdf.construct: parse error: …` from
+spargebra's grammar before reaching our guard) AND the pattern must
+contain no blank nodes (spargebra's `TriplesTemplate` admits them
+freely; slice 54 enforces the rule semantically with the W3C-citing
+prefix `pgrdf.construct: WHERE-shorthand prohibits blank nodes in
+the pattern (W3C SPARQL 1.1 §16.2.4)`). All prior template surfaces
+compose with the shorthand form (multi-triple BGPs emit one row per
+template triple per matched solution; the join across template
+triples is preserved per W3C semantics). Slice 55: GRAPH-scoped
+WHERE landed. `WHERE { GRAPH <iri> { … } }` filters solutions to a
+single named graph; `WHERE { GRAPH ?g { … } }` binds `?g`
+per-solution to the source graph IRI and ranges over named graphs
+only (W3C SPARQL 1.1 §13.3 — default-graph quads are excluded via
+`g{S}.graph_id <> 0` on the `_pgrdf_graphs` JOIN, which uniformly
+fixed the slice-79 / slice-87 SELECT path's latent default-graph
+bleed). All prior template surfaces (constant, variable, blank-node,
+multi-triple) compose with the GRAPH forms. Slice 56: multi-triple
+template support landed; N-triple templates emit N rows per
+solution, with blank-node labels SHARED across all N template
+triples WITHIN the same solution (so `_:r` in triple-1 subject and
+`_:r` in triple-3 object resolve to the SAME fresh label for that
+solution). Across solutions the same template label still mints a
+NEW fresh label. Empty `{ }` templates reject with
+`pgrdf.construct: empty template`. Slice 57 admitted blank-node
+template support (single-triple); slice 58 admitted variable
+substitution; slice 59 was constant-only foundation. Blank nodes in
+predicate position are illegal RDF — spargebra rejects at parse
+time. Round-trip (slice 53) and `sparql_parse` enrichment (slice
+50) still pending.)
 
 ### 6.1 Surface decision
 

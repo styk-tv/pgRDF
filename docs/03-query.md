@@ -377,7 +377,7 @@ Concrete shape:
       (spargebra parser.rs §Add / §Move / §Copy) into compositions
       of `Drop + DeleteInsert` (or just `DeleteInsert` for ADD),
       so they ride the existing per-form dispatcher arms.
-- 🚧 `CONSTRUCT` (Phase D slice 55 — GRAPH-scoped WHERE) —
+- 🚧 `CONSTRUCT` (Phase D slice 54 — WHERE shorthand) —
       sibling UDF `pgrdf.construct(q TEXT) → SETOF JSONB`. Each row
       carries `{"subject": …, "predicate": …, "object": …}` with
       structured term cells `{"type": "iri"|"literal"|"bnode",
@@ -434,10 +434,30 @@ Concrete shape:
       latent default-graph bleed). All prior template surfaces
       compose: variable substitution, blank-node label sharing,
       multi-triple emission, constant constants. Empty named graphs
-      and missing graphs yield zero solutions. CONSTRUCT WHERE
-      shorthand (slice 54), round-trip preservation (slice 53),
-      and `sparql_parse` enrichment (slice 50) all still pending.
-      DISTINCT / ORDER BY /
+      and missing graphs yield zero solutions. **CONSTRUCT WHERE
+      shorthand (slice 54)** admits the `CONSTRUCT WHERE { pattern }`
+      form per W3C SPARQL 1.1 §16.2.4 — equivalent to `CONSTRUCT
+      { pattern } WHERE { pattern }`. spargebra populates the AST's
+      `template` field from the pattern's BGP at parse time, so the
+      shorthand flows through the same multi-triple emission path as
+      the explicit form; slice 54 reduces to (1) detecting the
+      shorthand syntactically via an ASCII probe of the input query
+      string (the post-parse AST is otherwise indistinguishable from
+      the explicit form), and (2) enforcing the two W3C
+      restrictions. The pattern must be a pure basic graph pattern
+      — composites (OPTIONAL / UNION / MINUS / FILTER / GRAPH / BIND
+      / VALUES) inside `CONSTRUCT WHERE { … }` are rejected at parse
+      time by spargebra's grammar with `pgrdf.construct: parse
+      error: …`. The pattern must contain no blank nodes — spargebra
+      admits them at parse, so slice 54 enforces this rule
+      semantically with `pgrdf.construct: WHERE-shorthand prohibits
+      blank nodes in the pattern (W3C SPARQL 1.1 §16.2.4)`. The
+      explicit `CONSTRUCT { } WHERE { … }` empty-template form
+      continues to reject with `pgrdf.construct: empty template`
+      (slice-56 contract preserved — the shorthand detection branch
+      does not swallow the explicit-empty case). Round-trip
+      preservation (slice 53) and `sparql_parse` enrichment (slice
+      50) still pending. DISTINCT / ORDER BY /
       GROUP BY / aggregates on CONSTRUCT are explicitly out of scope
       per W3C 1.1 §16.2 — rejected with `pgrdf.construct: DISTINCT /
       ORDER BY / GROUP BY / aggregates not supported (W3C 1.1

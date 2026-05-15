@@ -182,10 +182,16 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
       source graph IRI per solution; default-graph quads excluded
       per W3C SPARQL 1.1 §13.3 — the JOIN to `_pgrdf_graphs` now
       carries `g{S}.graph_id <> 0`, which also corrected the
-      slice-79 / slice-87 SELECT-side latent bleed). CONSTRUCT
-      WHERE shorthand (slice 54), round-trip preservation (slice
-      53), and `pgrdf.sparql_parse` enrichment (slice 50) all
-      still pending.
+      slice-79 / slice-87 SELECT-side latent bleed); ✅ slice 54
+      landed (CONSTRUCT WHERE shorthand: `CONSTRUCT WHERE { pattern }`
+      ≡ `CONSTRUCT { pattern } WHERE { pattern }` per W3C SPARQL 1.1
+      §16.2.4; pure-BGP-only, blank-node-free pattern; spargebra
+      populates `template` from the BGP at parse so the shorthand
+      reuses the multi-triple emission path; composite patterns
+      (FILTER/OPTIONAL/UNION/MINUS/GRAPH/BIND/VALUES) reject at parse
+      time, blank nodes reject semantically with the W3C-citing
+      message). Round-trip preservation (slice 53) and
+      `pgrdf.sparql_parse` enrichment (slice 50) still pending.
       `DESCRIBE` carried forward. (`ASK` shipped step 12.) LLD v0.4
       §6.
 

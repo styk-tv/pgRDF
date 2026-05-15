@@ -285,6 +285,20 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 /// SQL: `pgrdf.construct(q TEXT) → SETOF JSONB`.
 #[pg_extern]
 fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    // Slice 54 — recognise the W3C SPARQL 1.1 §16.2.4 shorthand form
+    // `CONSTRUCT WHERE { pattern }` (template omitted; the pattern IS
+    // the template). We probe the original query string BEFORE handing
+    // off to spargebra because the parser populates `template` from
+    // the pattern's BGP (`c.clone()` — see spargebra parser.rs
+    // `ConstructQuery` rule) and emits an AST that is OTHERWISE
+    // indistinguishable from the explicit `CONSTRUCT { ?s ?p ?o }
+    // WHERE { ?s ?p ?o }` form. We do NOT need to derive the template
+    // ourselves — spargebra already does it (Case I in slice-54
+    // investigation). The probe exists solely to gate the
+    // shorthand-only W3C restriction set (no blank nodes; pure BGP).
+    // Cost: ASCII scan, O(input length), microseconds.
+    let is_shorthand = detect_construct_where_shorthand(query);
+
     let parsed = SparqlParser::new()
         .parse_query(query)
         .unwrap_or_else(|e| panic!("pgrdf.construct: parse error: {e}"));
@@ -307,6 +321,29 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // way down to the BGP.
     reject_construct_modifiers(&pattern);
 
+    // Slice 54 — enforce W3C SPARQL 1.1 §16.2.4 shorthand restrictions.
+    // The grammar itself only accepts `TriplesTemplate` inside the
+    // shorthand braces, so composite wrappers (FILTER / OPTIONAL /
+    // UNION / MINUS / GRAPH / BIND / VALUES) get rejected as
+    // `pgrdf.construct: parse error: ...` by spargebra before we ever
+    // get here. The semantic checks below are defensive — they also
+    // catch the case where spargebra evolves and the BGP-only invariant
+    // could surface a wrapped pattern through the shorthand entry. The
+    // blank-node check IS needed at runtime: spargebra's TriplesTemplate
+    // freely admits blank nodes; the W3C shorthand rule does not.
+    if is_shorthand {
+        if !pattern_is_pure_bgp(&pattern) {
+            panic!(
+                "pgrdf.construct: WHERE-shorthand requires a single BGP — composites not allowed (W3C SPARQL 1.1 §16.2.4)"
+            );
+        }
+        if template_has_blank_node(&template) {
+            panic!(
+                "pgrdf.construct: WHERE-shorthand prohibits blank nodes in the pattern (W3C SPARQL 1.1 §16.2.4)"
+            );
+        }
+    }
+
     // Slice 56 — multi-triple templates land here. N-triple templates
     // emit N rows per solution, with blank-node labels shared across
     // all N triples within the same solution (the `BNodeMinter` is
@@ -317,7 +354,10 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // Empty templates `{ }` reject cleanly — they carry no emission
     // semantics worth supporting and the spec sequence runs but
     // emits zero rows. We surface the rejection to keep callers
-    // honest about their intent.
+    // honest about their intent. (The shorthand form populates the
+    // template from the BGP, so this guard only fires for the
+    // explicit `CONSTRUCT { } WHERE { … }` form or for the degenerate
+    // `CONSTRUCT WHERE { }` empty shorthand.)
     if template.is_empty() {
         panic!("pgrdf.construct: empty template");
     }
@@ -988,6 +1028,183 @@ fn reject_construct_modifiers(p: &GraphPattern) {
         }
         _ => {}
     }
+}
+
+/// Slice 54 — detect the W3C SPARQL 1.1 §16.2.4 shorthand form
+/// `CONSTRUCT WHERE { … }` (template omitted). spargebra populates
+/// `template` from the pattern's BGP in this case (`c.clone()` —
+/// see spargebra parser.rs `ConstructQuery` rule), producing an AST
+/// indistinguishable from the explicit `CONSTRUCT { … } WHERE { … }`
+/// form. The cheapest, most reliable detection is a probe of the
+/// original query string: skip leading whitespace + SPARQL comments,
+/// match `CONSTRUCT` (case-insensitive), skip required whitespace
+/// (and any further whitespace + comments), then look for `WHERE`
+/// (case-insensitive) followed by `{`. If anything else sits between
+/// `CONSTRUCT` and `WHERE` — e.g. `{` (explicit template) or
+/// `FROM <iri>` (dataset clause before the explicit template) — the
+/// query is in the explicit form and the shorthand restrictions do
+/// NOT apply. (A pathological `CONSTRUCT FROM <iri> WHERE { … }` is
+/// the shorthand-with-dataset form per the grammar; we accept it as
+/// shorthand here.)
+fn detect_construct_where_shorthand(query: &str) -> bool {
+    let bytes = query.as_bytes();
+    let mut i = skip_ws_and_comments(bytes, 0);
+    // Skip optional PREFIX / BASE declarations — the grammar allows
+    // them in the Prologue before the query body. We're keyword-
+    // matching tolerantly: any sequence of `BASE`/`PREFIX` directives
+    // followed by `CONSTRUCT` keeps the shorthand-detection invariant.
+    loop {
+        if match_keyword_ci(bytes, i, b"BASE") || match_keyword_ci(bytes, i, b"PREFIX") {
+            // Consume the directive up through the next whitespace
+            // run after the IRI/literal. A heuristic but safe scan:
+            // advance to the next `>` (end of IRIREF) and skip past
+            // it; PREFIX additionally has a `pname:` prefix-name that
+            // also ends at `<` and runs through `>`. Simpler approach:
+            // advance past whitespace, find the next `>`, skip it,
+            // then re-skip whitespace.
+            i = skip_to_byte(bytes, i, b'>');
+            if i < bytes.len() {
+                i += 1;
+            }
+            i = skip_ws_and_comments(bytes, i);
+            continue;
+        }
+        break;
+    }
+    if !match_keyword_ci(bytes, i, b"CONSTRUCT") {
+        return false;
+    }
+    i += b"CONSTRUCT".len();
+    // SPARQL grammar requires at least one whitespace character after
+    // the keyword (or a comment); without it the next token would
+    // glue onto CONSTRUCT and form an unknown identifier — but the
+    // parser would have rejected it. We tolerantly accept zero+
+    // whitespace here.
+    i = skip_ws_and_comments(bytes, i);
+    // The next significant token decides the form:
+    //   `{`     → explicit `CONSTRUCT { … } WHERE { … }`
+    //   `WHERE` → shorthand
+    //   `FROM`  → shorthand-with-dataset (rare; the grammar allows
+    //             dataset clauses before WHERE in the shorthand rule)
+    // For shorthand-with-dataset, skip any FROM <iri> clauses (zero
+    // or more) before the WHERE keyword.
+    while match_keyword_ci(bytes, i, b"FROM") {
+        i += b"FROM".len();
+        i = skip_ws_and_comments(bytes, i);
+        // Optional NAMED keyword.
+        if match_keyword_ci(bytes, i, b"NAMED") {
+            i += b"NAMED".len();
+            i = skip_ws_and_comments(bytes, i);
+        }
+        // Consume an IRIREF `<...>` or a PrefixedName up through the
+        // next whitespace. Cheapest path: scan to the next `>` if `<`
+        // is the next byte, otherwise scan to next whitespace.
+        if i < bytes.len() && bytes[i] == b'<' {
+            i = skip_to_byte(bytes, i, b'>');
+            if i < bytes.len() {
+                i += 1;
+            }
+        } else {
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+        }
+        i = skip_ws_and_comments(bytes, i);
+    }
+    if !match_keyword_ci(bytes, i, b"WHERE") {
+        return false;
+    }
+    i += b"WHERE".len();
+    i = skip_ws_and_comments(bytes, i);
+    i < bytes.len() && bytes[i] == b'{'
+}
+
+/// Slice 54 helper — skip whitespace AND SPARQL `#`-prefixed comments
+/// (single-line, terminated by newline or EOF).
+fn skip_ws_and_comments(bytes: &[u8], mut i: usize) -> usize {
+    loop {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'#' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+/// Slice 54 helper — advance to the next occurrence of `target`,
+/// stopping at end-of-input.
+fn skip_to_byte(bytes: &[u8], mut i: usize, target: u8) -> usize {
+    while i < bytes.len() && bytes[i] != target {
+        i += 1;
+    }
+    i
+}
+
+/// Slice 54 helper — case-insensitive ASCII keyword match at offset
+/// `i`. Returns true iff the next `keyword.len()` bytes match
+/// `keyword` ASCII-case-insensitively AND the byte AFTER would
+/// terminate the keyword (non-identifier or EOF) — so `WHEREVER`
+/// doesn't masquerade as `WHERE`.
+fn match_keyword_ci(bytes: &[u8], i: usize, keyword: &[u8]) -> bool {
+    if i + keyword.len() > bytes.len() {
+        return false;
+    }
+    for (k, &kw) in keyword.iter().enumerate() {
+        if !bytes[i + k].eq_ignore_ascii_case(&kw) {
+            return false;
+        }
+    }
+    // Boundary check: next char must NOT be alphanumeric or `_`.
+    let end = i + keyword.len();
+    if end == bytes.len() {
+        return true;
+    }
+    let next = bytes[end];
+    !(next.is_ascii_alphanumeric() || next == b'_')
+}
+
+/// Slice 54 — assert the WHERE pattern of a shorthand CONSTRUCT
+/// reduces to a single basic graph pattern (BGP), per W3C SPARQL 1.1
+/// §16.2.4 ("The WHERE clause is a Basic Graph Pattern"). spargebra's
+/// shorthand grammar already enforces this at parse time — any
+/// composite wrapper (FILTER / OPTIONAL / UNION / MINUS / GRAPH /
+/// BIND / VALUES) inside `CONSTRUCT WHERE { … }` raises a parse
+/// error before we get here. This function exists as a defensive
+/// guard in case spargebra's grammar evolves to admit composites in
+/// the shorthand form. Permitted wrappers: `Project` and `Slice`
+/// (which spargebra's `build_select` adds even for trivial queries —
+/// the trivial Project carries the implicit "all vars" projection
+/// and the Slice is empty in the shorthand path); we walk past them
+/// to the inner pattern, which MUST be a `Bgp { … }`.
+fn pattern_is_pure_bgp(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::Bgp { .. } => true,
+        GraphPattern::Project { inner, .. } | GraphPattern::Slice { inner, .. } => {
+            pattern_is_pure_bgp(inner)
+        }
+        _ => false,
+    }
+}
+
+/// Slice 54 — scan the template's triples (which, for shorthand, are
+/// the BGP's triples by construction; spargebra clones them into
+/// both fields) for any blank-node `TermPattern::BlankNode`. The
+/// shorthand form prohibits blank nodes per W3C SPARQL 1.1 §16.2.4
+/// ("blank nodes in the pattern are not allowed"). Predicate
+/// position can't carry a blank node per the spargebra grammar
+/// (`Verb` accepts only Iri / Variable / `a`), so we scan subject +
+/// object only.
+fn template_has_blank_node(template: &[TriplePattern]) -> bool {
+    template.iter().any(|tp| {
+        matches!(tp.subject, TermPattern::BlankNode(_))
+            || matches!(tp.object, TermPattern::BlankNode(_))
+    })
 }
 
 /// Build a probe SELECT for an all-constants WHERE (BGP binds zero
@@ -8926,5 +9143,125 @@ mod tests {
             pairing_ok,
             "within-solution ?g binding is consistent across the two emitted triples"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Slice 54 — `CONSTRUCT WHERE { pattern }` shorthand form.
+    // Per W3C SPARQL 1.1 §16.2.4, the shorthand is equivalent to
+    // `CONSTRUCT { pattern } WHERE { pattern }`. Restrictions:
+    // pure BGP only (no OPTIONAL/UNION/MINUS/FILTER/GRAPH/BIND/
+    // VALUES) AND no blank nodes in the pattern. spargebra rejects
+    // the composite forms at parse; we enforce the no-bnode rule
+    // semantically (spargebra's TriplesTemplate admits bnodes).
+    // ─────────────────────────────────────────────────────────────
+
+    /// Positive — single-triple shorthand. 3 seed solutions emit 3
+    /// rows (one per matched solution × one template triple). Locks
+    /// the basic shorthand semantics: pattern IS template.
+    #[pg_test]
+    fn construct_where_shorthand_single_triple_three_solutions() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:s54a ex:p \"1\" .
+                 ex:s54b ex:p \"2\" .
+                 ex:s54c ex:p \"3\" .',
+                9540)",
+        )
+        .unwrap();
+
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT WHERE { ?s <http://example.com/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(n, 3, "shorthand binds template to pattern → 3 rows");
+
+        // Subject IRIs come back from the seed dictionary.
+        let subjects: String = Spi::get_one(
+            "SELECT string_agg(j->'subject'->>'value', ',' \
+                               ORDER BY j->'subject'->>'value') \
+               FROM pgrdf.construct(
+                 'CONSTRUCT WHERE { ?s <http://example.com/p> ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            subjects, "http://example.com/s54a,http://example.com/s54b,http://example.com/s54c",
+            "shorthand subjects come from the per-solution dict resolve"
+        );
+    }
+
+    /// Positive — equivalence with the explicit form per W3C §16.2.4.
+    /// Both queries MUST emit the same row count and the same first
+    /// row shape (ordered by subject IRI to make the comparison
+    /// deterministic).
+    #[pg_test]
+    fn construct_where_shorthand_equivalent_to_explicit_form() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:s54e1 ex:p \"a\" .
+                 ex:s54e2 ex:p \"b\" .',
+                9541)",
+        )
+        .unwrap();
+
+        let n_short: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT WHERE { ?s <http://example.com/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        let n_explicit: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/p> ?o } \
+                 WHERE { ?s <http://example.com/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(-2);
+        assert_eq!(n_short, n_explicit, "shorthand row count == explicit form");
+        assert_eq!(n_short, 2, "both forms emit the seeded 2 solutions");
+
+        // First subject by sort order — same in both forms.
+        let s_short: String = Spi::get_one(
+            "SELECT min(j->'subject'->>'value') \
+               FROM pgrdf.construct(
+                 'CONSTRUCT WHERE { ?s <http://example.com/p> ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        let s_explicit: String = Spi::get_one(
+            "SELECT min(j->'subject'->>'value') \
+               FROM pgrdf.construct(
+                 'CONSTRUCT { ?s <http://example.com/p> ?o } \
+                   WHERE { ?s <http://example.com/p> ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(s_short, s_explicit, "row shape matches across forms");
+    }
+
+    /// Negative — blank node in shorthand pattern. spargebra's
+    /// `TriplesTemplate` grammar accepts blank nodes, so the
+    /// shorthand-form's W3C `no blank nodes` rule is enforced
+    /// semantically by slice 54 with a stable W3C-citing message.
+    /// (The composite-rejection case — FILTER / OPTIONAL / GRAPH
+    /// inside shorthand — fires earlier as `pgrdf.construct: parse
+    /// error: error at L:C: …` from spargebra; that surface message
+    /// is spargebra-version-coupled and so unsafe to lock as an
+    /// exact-match `#[pg_test(error = …)]` assertion. The regression
+    /// file `105-construct-where-shorthand.sql` covers it via the
+    /// substring-matching `_check_error` helper instead.)
+    #[pg_test(
+        error = "pgrdf.construct: WHERE-shorthand prohibits blank nodes in the pattern (W3C SPARQL 1.1 §16.2.4)"
+    )]
+    fn construct_where_shorthand_rejects_blank_node() {
+        Spi::run(
+            "SELECT * FROM pgrdf.construct(
+                 'CONSTRUCT WHERE { ?s ?p _:b }')",
+        )
+        .unwrap();
     }
 }

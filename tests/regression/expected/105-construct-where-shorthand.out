@@ -1,0 +1,23 @@
+
+0
+3
+3
+http://example.org/a,http://example.org/b,http://example.org/c
+3|http://www.w3.org/2001/XMLSchema#string
+3|3|t
+
+1
+6
+6
+3
+3
+3|t
+1
+http://example.org/c1
+e-rejects-filter-in-shorthand: t
+f-rejects-optional-in-shorthand: t
+g-rejects-bnode-in-shorthand: t
+h-rejects-graph-wrapper-in-shorthand: t
+i-explicit-empty-template-still-panics: t
+
+1
