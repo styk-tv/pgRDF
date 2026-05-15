@@ -29,3 +29,7 @@ fixtures/ontologies/
 *.swp
 .DS_Store
 .claude/
+
+# Local reference symlinks (point outside the repo; per-workstation only)
+ref-*/
+ref-*
