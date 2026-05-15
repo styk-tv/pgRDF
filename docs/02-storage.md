@@ -148,10 +148,34 @@ the stable `add_graph: iri must be non-empty` prefix; RFC-3987
 syntax validation is deferred to a later slice (we don't carry an
 `oxiri` dependency in v0.4.1).
 
+**Slice 117** adds the explicit-binding overload
+`pgrdf.add_graph(id BIGINT, iri TEXT) → BIGINT`. Caller specifies
+both halves; the function INSERTs the pair into `_pgrdf_graphs` and
+creates the matching LIST partition (via re-entry through the
+integer overload, same as slice 118). Idempotent on a matching
+`(id, iri)`: a repeat call returns `id` without touching the row.
+Conflicts panic with the stable `add_graph:` prefix:
+`add_graph: graph_id <N> is bound to a different IRI (<existing>)`
+when `id` is already bound to a non-synthetic IRI different from
+the requested one, or
+`add_graph: iri <iri> is bound to a different graph_id (<existing>)`
+when the requested IRI is bound to a different `graph_id`. The
+synthetic placeholder `urn:pgrdf:graph:{id}` (the slice-119 seed
+that the integer overload assigns automatically) is treated as
+**upgradable**: when `id` currently points at its synthetic IRI
+and the requested IRI is unbound elsewhere, the row is UPDATEd in
+place so the user-specified IRI replaces the placeholder. This
+covers the common sequence `add_graph(42)` →
+`add_graph(42, 'http://example.org/g42')`. Concurrent callers are
+serialised by the same
+`LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` the IRI-keyed
+overload takes. Negative `id` and empty/whitespace-only `iri` panic
+with the stable prefixes shared with the other two overloads.
+
 The remaining IRI-keyed UDF surface (`pgrdf.graph_id(iri)`,
-`pgrdf.graph_iri(id)`, plus a dual-arg `pgrdf.add_graph(id, iri)`
-overload) lands in subsequent Phase A slices; SPARQL `GRAPH { … }`
-translation lands later in Phase A. Spec: SPEC.pgRDF.LLD.v0.4 §3.
+`pgrdf.graph_iri(id)`) lands in subsequent Phase A slices; SPARQL
+`GRAPH { … }` translation lands later in Phase A. Spec:
+SPEC.pgRDF.LLD.v0.4 §3.
 
 ## 2.3 Bulk loader (`src/storage/loader.rs`)
 

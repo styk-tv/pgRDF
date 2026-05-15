@@ -1,0 +1,19 @@
+
+0
+50
+http://example.org/g50
+50
+1
+t
+urn:pgrdf:graph:60
+60
+http://example.org/g60
+1
+70
+add_graph id conflict: t
+80
+add_graph iri conflict: t
+add_graph negative id: t
+add_graph empty iri: t
+
+0

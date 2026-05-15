@@ -190,6 +190,134 @@ fn add_graph_iri(iri: &str) -> i64 {
     next
 }
 
+/// Bind a specific `(graph_id, iri)` pair into `_pgrdf_graphs`,
+/// creating the partition if absent. Returns `id` on success.
+///
+/// Idempotent on matching pairs: if `(id, iri)` is already bound,
+/// returns `id` with no side effects. Errors with a stable
+/// `add_graph:` prefix on conflicts:
+/// - `id` is bound to a *different* (non-synthetic) IRI, or
+/// - `iri` is bound to a *different* `graph_id`.
+///
+/// Synthetic IRIs of the form `urn:pgrdf:graph:{id}` (the placeholder
+/// inserted by the integer overload via the slice-119 path) are
+/// treated as upgradable: if `id` currently points at its synthetic
+/// IRI and the requested `iri` is not bound elsewhere, the row is
+/// UPDATEd in place so the user-specified IRI replaces the
+/// placeholder. This covers the common sequence
+/// `add_graph(42)` → `add_graph(42, 'http://example.org/g42')`.
+///
+/// If neither `id` nor `iri` is bound, the pair is INSERTed and the
+/// matching LIST partition is created by re-entering through the
+/// integer overload (so any future change to the partition-creation
+/// idiom stays single-sourced in `add_graph(g BIGINT)`).
+///
+/// Concurrent callers are serialised by
+/// `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE`, matching
+/// the IRI-keyed overload above; the lock releases at transaction
+/// end per Postgres semantics.
+///
+/// IRI syntax is **not** validated against RFC 3987 here — same
+/// rationale as the IRI-keyed overload (no `oxiri` dependency in
+/// v0.4.1). Empty / whitespace-only IRIs and negative ids panic with
+/// the stable `add_graph:` prefix.
+///
+/// SQL surface: `pgrdf.add_graph(id BIGINT, iri TEXT) → BIGINT`
+/// (third overload of `pgrdf.add_graph`; pgrx surfaces all three
+/// Rust functions under the same SQL name via the
+/// `name = "add_graph"` attribute, and Postgres dispatches on the
+/// argument types).
+#[pg_extern(name = "add_graph")]
+fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
+    if id < 0 {
+        panic!("add_graph: graph_id must be >= 0, got {}", id);
+    }
+    if iri.trim().is_empty() {
+        panic!("add_graph: iri must be non-empty");
+    }
+
+    // Serialise concurrent (id, iri) writers — same idiom as the
+    // IRI-keyed overload. SHARE ROW EXCLUSIVE blocks other writers
+    // (including itself) but not readers; the lock releases at
+    // transaction end.
+    Spi::run("LOCK TABLE pgrdf._pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE")
+        .unwrap_or_else(|e| panic!("add_graph: lock _pgrdf_graphs failed: {e}"));
+
+    // Resolve the current binding (if any) for both halves of the
+    // pair. Same scalar-subquery wrapper trick as the IRI overload
+    // so SPI yields `None` instead of erroring on an empty result.
+    let id_iri: Option<String> = Spi::get_one_with_args(
+        "SELECT (SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = $1 LIMIT 1)",
+        &[id.into()],
+    )
+    .unwrap_or_else(|e| panic!("add_graph: lookup by id failed: {e}"));
+
+    let iri_id: Option<i64> = Spi::get_one_with_args(
+        "SELECT (SELECT graph_id FROM pgrdf._pgrdf_graphs WHERE iri = $1 LIMIT 1)",
+        &[iri.into()],
+    )
+    .unwrap_or_else(|e| panic!("add_graph: lookup by iri failed: {e}"));
+
+    let synthetic_iri = format!("urn:pgrdf:graph:{}", id);
+
+    match (id_iri.as_deref(), iri_id) {
+        // Exact match already bound — idempotent.
+        (Some(existing_iri), Some(existing_id))
+            if existing_iri == iri && existing_id == id =>
+        {
+            id
+        }
+        // id is bound to its synthetic placeholder, iri is unbound
+        // elsewhere — UPDATE the row in place. Slice-119's synthetic
+        // shape `urn:pgrdf:graph:{id}` is the only IRI we treat as
+        // upgradable; any other existing IRI takes the conflict path
+        // below.
+        (Some(existing_iri), None) if existing_iri == synthetic_iri => {
+            Spi::run_with_args(
+                "UPDATE pgrdf._pgrdf_graphs SET iri = $2 WHERE graph_id = $1",
+                &[id.into(), iri.into()],
+            )
+            .unwrap_or_else(|e| panic!("add_graph: upgrade synthetic iri failed: {e}"));
+            id
+        }
+        // id is bound to a non-synthetic IRI different from the
+        // requested one — error. (The matching-pair case above
+        // already short-circuited the equal-IRI branch, so reaching
+        // here implies `existing_iri != iri`.)
+        (Some(existing_iri), _) => {
+            panic!(
+                "add_graph: graph_id {} is bound to a different IRI ({})",
+                id, existing_iri
+            );
+        }
+        // id is unbound but the IRI is bound to a different
+        // graph_id — error.
+        (None, Some(existing_id)) => {
+            panic!(
+                "add_graph: iri {} is bound to a different graph_id ({})",
+                iri, existing_id
+            );
+        }
+        // Neither bound — fresh INSERT + partition creation. We
+        // bind the pair *before* re-entering through the integer
+        // overload, so the slice-119 synthetic-IRI INSERT inside
+        // `add_graph(id BIGINT)` no-ops via
+        // `ON CONFLICT (graph_id) DO NOTHING` and the user-supplied
+        // IRI persists verbatim. Same pre-INSERT ordering as the
+        // IRI-keyed overload.
+        (None, None) => {
+            Spi::run_with_args(
+                "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) VALUES ($1, $2)",
+                &[id.into(), iri.into()],
+            )
+            .unwrap_or_else(|e| panic!("add_graph: insert binding failed: {e}"));
+            Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[id.into()])
+                .unwrap_or_else(|e| panic!("add_graph: partition creation failed: {e}"));
+            id
+        }
+    }
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {

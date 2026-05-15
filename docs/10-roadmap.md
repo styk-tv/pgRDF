@@ -388,9 +388,32 @@ not the integer. See
   + two `#[pg_test]`s in
   [`src/storage/graphs.rs`](../src/storage/graphs.rs)
   (`add_graph_iri_idempotent` + `add_graph_iri_empty_rejected`).
-- ⏳ Slices 117-115 — remaining UDF surface (`pgrdf.graph_id(iri)`,
-  `pgrdf.graph_iri(id)`, dual-arg `pgrdf.add_graph(id, iri)`
-  overload).
+- ✅ **Slice 117 — `pgrdf.add_graph(id BIGINT, iri TEXT) → BIGINT`
+  explicit-binding overload.** Caller supplies both halves;
+  idempotent on a matching `(id, iri)`. UPDATEs in place when `id`
+  is currently bound to its synthetic placeholder
+  `urn:pgrdf:graph:{id}` (the slice-119 seed) and the requested IRI
+  is unbound elsewhere — the upgrade path covering
+  `add_graph(42)` → `add_graph(42, 'http://example.org/g42')`.
+  Panics with the stable `add_graph:` prefix on conflicts:
+  `add_graph: graph_id <N> is bound to a different IRI (<existing>)`
+  when `id` is bound to a non-synthetic IRI different from the
+  request, or
+  `add_graph: iri <iri> is bound to a different graph_id (<existing>)`
+  when the IRI is already bound to a different graph_id. Negative
+  `id` and empty IRI rejected with the same stable prefixes shared
+  with the other two overloads. Concurrent writers serialised by
+  `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` (same idiom
+  as slice 118). Regression coverage:
+  [`tests/regression/sql/75-add-graph-id-iri.sql`](../tests/regression/sql/75-add-graph-id-iri.sql)
+  + four `#[pg_test]`s in
+  [`src/storage/graphs.rs`](../src/storage/graphs.rs)
+  (`add_graph_id_iri_fresh_pair`,
+  `add_graph_id_iri_synthetic_upgrade`,
+  `add_graph_id_iri_id_conflict`,
+  `add_graph_id_iri_iri_conflict`).
+- ⏳ Slices 116-115 — remaining UDF surface (`pgrdf.graph_id(iri)`,
+  `pgrdf.graph_iri(id)`).
 - ⏳ Slices 111-110 — SPARQL `GRAPH { … }` translation
   (resolution against `_pgrdf_graphs.iri`, projection of `?g` as
   IRI).

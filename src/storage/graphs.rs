@@ -6,6 +6,15 @@
 //! `pgrdf.graph_iri(id)`, plus the dual-arg `pgrdf.add_graph(id, iri)`
 //! overload) lands in slices 118-115.
 //!
+//! Slice 117 — the dual-arg overload
+//! [`super::hexastore::add_graph_id_iri`] surfaces as
+//! `pgrdf.add_graph(id BIGINT, iri TEXT) → BIGINT`. Idempotent on a
+//! matching `(id, iri)`; UPDATEs in place when `id` is currently
+//! bound to its synthetic placeholder `urn:pgrdf:graph:{id}` (upgrade
+//! path); panics with the stable `add_graph:` prefix on conflicting
+//! bindings (id bound to a different non-synthetic IRI, or iri bound
+//! to a different graph_id).
+//!
 //! Slice 119 — the existing integer-keyed
 //! [`super::hexastore::add_graph`] now binds a synthetic IRI
 //! `urn:pgrdf:graph:{id}` in `_pgrdf_graphs` on each successful
@@ -114,5 +123,83 @@ mod tests {
     #[pg_test(error = "add_graph: iri must be non-empty")]
     fn add_graph_iri_empty_rejected() {
         Spi::run("SELECT pgrdf.add_graph('')").unwrap();
+    }
+
+    /// Slice 117 — `pgrdf.add_graph(id BIGINT, iri TEXT) → BIGINT`
+    /// fresh-pair path. Caller supplies both halves; the function
+    /// INSERTs the binding verbatim, creates the LIST partition, and
+    /// echoes `id` back.
+    #[pg_test]
+    fn add_graph_id_iri_fresh_pair() {
+        let id: i64 = Spi::get_one(
+            "SELECT pgrdf.add_graph(50::bigint, 'http://example.org/g50')",
+        )
+        .expect("fresh add_graph(id, iri) failed")
+        .expect("fresh add_graph(id, iri) returned NULL");
+        assert_eq!(id, 50, "echoed id must equal the input");
+        let bound: Option<String> =
+            Spi::get_one("SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = 50")
+                .expect("iri lookup failed");
+        assert_eq!(bound.as_deref(), Some("http://example.org/g50"));
+    }
+
+    /// Slice 117 — synthetic-IRI upgrade path: a prior
+    /// `add_graph(60)` (slice 119) seeds `urn:pgrdf:graph:60`; a
+    /// subsequent `add_graph(60, 'http://example.org/g60')` UPDATEs
+    /// the row in place. The row count stays at 1 for graph_id = 60
+    /// — no duplicate, no error.
+    #[pg_test]
+    fn add_graph_id_iri_synthetic_upgrade() {
+        Spi::run("SELECT pgrdf.add_graph(60::bigint)").expect("seed add_graph(60) failed");
+        let synthetic: Option<String> =
+            Spi::get_one("SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = 60")
+                .expect("synthetic iri lookup failed");
+        assert_eq!(synthetic.as_deref(), Some("urn:pgrdf:graph:60"));
+
+        let id: i64 = Spi::get_one(
+            "SELECT pgrdf.add_graph(60::bigint, 'http://example.org/g60')",
+        )
+        .expect("upgrade add_graph(60, iri) failed")
+        .expect("upgrade add_graph(60, iri) returned NULL");
+        assert_eq!(id, 60);
+
+        let upgraded: Option<String> =
+            Spi::get_one("SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = 60")
+                .expect("upgraded iri lookup failed");
+        assert_eq!(upgraded.as_deref(), Some("http://example.org/g60"));
+
+        let count: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_graphs WHERE graph_id = 60",
+        )
+        .expect("row count failed")
+        .expect("row count returned NULL");
+        assert_eq!(count, 1, "synthetic upgrade must UPDATE in place, not duplicate");
+    }
+
+    /// Slice 117 — id-conflict path: `id` is already bound to a
+    /// non-synthetic IRI different from the requested one. Stable
+    /// `add_graph: graph_id 70 is bound to a different IRI` prefix.
+    /// The pgrx `error =` attribute matches the panic message
+    /// exactly, so the trailing `(<existing_iri>)` is included.
+    #[pg_test(
+        error = "add_graph: graph_id 70 is bound to a different IRI (http://example.org/g70)"
+    )]
+    fn add_graph_id_iri_id_conflict() {
+        Spi::run("SELECT pgrdf.add_graph(70::bigint, 'http://example.org/g70')")
+            .expect("first add_graph(70, iri) failed");
+        Spi::run("SELECT pgrdf.add_graph(70::bigint, 'http://example.org/different')")
+            .unwrap();
+    }
+
+    /// Slice 117 — iri-conflict path: the IRI is already bound to a
+    /// different `graph_id`. Stable `add_graph: iri … is bound to a
+    /// different graph_id (<existing>)` shape.
+    #[pg_test(
+        error = "add_graph: iri http://example.org/shared is bound to a different graph_id (80)"
+    )]
+    fn add_graph_id_iri_iri_conflict() {
+        Spi::run("SELECT pgrdf.add_graph(80::bigint, 'http://example.org/shared')")
+            .expect("first add_graph(80, iri) failed");
+        Spi::run("SELECT pgrdf.add_graph(81::bigint, 'http://example.org/shared')").unwrap();
     }
 }

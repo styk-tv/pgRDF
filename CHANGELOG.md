@@ -6,6 +6,24 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 117 — `pgrdf.add_graph(id BIGINT, iri TEXT)` explicit binding
+
+Third `pgrdf.add_graph` overload landing. Caller specifies both id
+and iri; idempotent on matching pairs; errors on conflicting
+bindings (id bound to different iri, or iri bound to different id);
+upgrades a synthetic `urn:pgrdf:graph:{id}` binding to a
+user-specified iri when the synthetic was auto-allocated by the
+integer-keyed overload.
+
+Error message contracts locked:
+  add_graph: graph_id <N> is bound to a different IRI (<existing>)
+  add_graph: iri <iri> is bound to a different graph_id (<existing>)
+
+Regression: `tests/regression/sql/75-add-graph-id-iri.sql` +
+pgrx tests covering fresh pair, synthetic upgrade, id conflict,
+iri conflict, negative id, empty iri. Test bar: 102 pgrx + 44
+pg_regress + 23 W3C + 3 LUBM = 172 green.
+
 ### Phase A slice 118 — `pgrdf.add_graph(iri TEXT)` overload (LLD v0.4 §3.2)
 
 New `#[pg_extern]` overload `pgrdf.add_graph(iri TEXT) → BIGINT`.
