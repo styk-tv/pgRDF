@@ -114,7 +114,7 @@ Capability matrix for the v0.4 target:
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | ✅ slice 79 |
 | Lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / ALL / NAMED`) | not yet | §4.4 | ✅ slice 78 |
 | `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | ✅ all four shipped (slices 99 / 98 / 97 / 96) |
-| `CONSTRUCT` | ⏳ deferred | §6 | 🚧 (slice 57: variables + constants + blank-node templates (single-triple); multi-triple / round-trip / `sparql_parse` pending) |
+| `CONSTRUCT` | ⏳ deferred | §6 | 🚧 (slice 56: variables + constants + blank-node templates + N-triple templates (with cross-triple bnode label joining); GRAPH-scoping / WHERE shorthand / round-trip / `sparql_parse` pending) |
 | Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | 🚧 |
 | Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | 🚧 |
 | Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | 🚧 |
@@ -559,17 +559,20 @@ route IRI input through `pgrdf.graph_id(iri)` explicitly.
 `CONSTRUCT` is the canonical SPARQL form for graph snapshot export,
 Turtle output, and sub-graph extraction. v0.3 lists it as
 deferred-to-v0.4 because its return shape (triples, not solutions)
-diverges from the `pgrdf.sparql` JSONB row shape. 🚧 (slice 57:
-blank-node template support landed; templates now accept constants,
-variables, AND blank-node labels in subject / object positions per
-W3C SPARQL 1.1 §16.2. Blank-node template positions mint a FRESH
-label per (solution, template-label) pair; the same template label
-across positions of one triple within one solution joins to the
-same fresh label (within-solution sameness). Blank nodes in
-predicate position are illegal RDF — spargebra rejects at parse
-time. Multi-triple templates land in slice 56 — today they panic
-with `slice 57 supports single-triple templates`; round-trip and
-`sparql_parse` enrichment land in slices 53-50.)
+diverges from the `pgrdf.sparql` JSONB row shape. 🚧 (slice 56:
+multi-triple template support landed; N-triple templates emit N
+rows per solution, with blank-node labels SHARED across all N
+template triples WITHIN the same solution (so `_:r` in triple-1
+subject and `_:r` in triple-3 object resolve to the SAME fresh
+label for that solution). Across solutions the same template label
+still mints a NEW fresh label. Empty `{ }` templates reject with
+`pgrdf.construct: empty template`. Slice 57 admitted blank-node
+template support (single-triple); slice 58 admitted variable
+substitution; slice 59 was constant-only foundation. Blank nodes
+in predicate position are illegal RDF — spargebra rejects at parse
+time. GRAPH-scoping (slice 55), CONSTRUCT WHERE shorthand (slice
+54), round-trip (slice 53), and `sparql_parse` enrichment (slice
+50) all still pending.)
 
 ### 6.1 Surface decision
 

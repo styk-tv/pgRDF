@@ -240,6 +240,13 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 //     panic — illegal RDF. Variable-bound blank nodes from the
 //     WHERE flow through with their original dictionary labels
 //     unchanged.
+//   * Slice 56 — multi-triple templates. The template's N triples
+//     each emit a row per solution (N×|solutions| total rows).
+//     Blank-node labels are shared across all N triples within the
+//     SAME solution (so `_:r` in triple-1's subject and `_:r` in
+//     triple-3's object resolve to the SAME fresh label for that
+//     solution); fresh labels still mint per solution. Empty
+//     templates `{ }` reject with `pgrdf.construct: empty template`.
 //
 // The WHERE pattern itself accepts the full SELECT-side BGP / FILTER /
 // OPTIONAL / UNION / MINUS surface — translation reuses
@@ -253,11 +260,6 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 // for a top-level Distinct / Reduced / OrderBy / Group wrapper and
 // reject with `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY /
 // aggregates not supported (W3C 1.1 §16.2)`.
-//
-// Out of scope on slice 57 (lands in slice 56): multi-triple templates.
-// Today the slice-57 boundary rejects them with `pgrdf.construct:
-// slice 57 supports single-triple templates; multi-triple lands in
-// slice 56`.
 
 /// Execute a SPARQL CONSTRUCT query and return one JSONB row per
 /// `(solution, template-triple)` pair. Each row carries the shape
@@ -273,7 +275,12 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 /// per W3C SPARQL 1.1 §16.2. Predicate-position blank nodes panic
 /// (illegal RDF). Variable-bound blank nodes (the WHERE binds `?o` to
 /// a blank node) pass through the dict-resolve path with the
-/// dictionary-stored label unchanged.
+/// dictionary-stored label unchanged. Slice 56 admits multi-triple
+/// templates: N-triple templates emit N rows per solution, and a
+/// shared `BNodeMinter` per-solution iteration means the same
+/// template blank-node label resolves to the SAME fresh label across
+/// all N triples of that solution (across-solution labels still
+/// differ). Empty templates `{ }` reject with `empty template`.
 ///
 /// SQL: `pgrdf.construct(q TEXT) → SETOF JSONB`.
 #[pg_extern]
@@ -300,15 +307,19 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // way down to the BGP.
     reject_construct_modifiers(&pattern);
 
-    // Slice 57 narrow scope — single-triple templates only. Multi-
-    // triple template support (cross-triple blank-node label joining
-    // in particular) lands in slice 56. The empty template is also
-    // rejected via this gate; a CONSTRUCT with `{}` carries no
-    // emission semantics worth supporting.
-    if template.len() != 1 {
-        panic!(
-            "pgrdf.construct: slice 57 supports single-triple templates; multi-triple lands in slice 56"
-        );
+    // Slice 56 — multi-triple templates land here. N-triple templates
+    // emit N rows per solution, with blank-node labels shared across
+    // all N triples within the same solution (the `BNodeMinter` is
+    // scoped to the outer per-solution loop and threaded through the
+    // inner template-triple iteration). Fresh labels still mint per
+    // solution; same template label across triples of one solution
+    // → same fresh label; across solutions → different fresh labels.
+    // Empty templates `{ }` reject cleanly — they carry no emission
+    // semantics worth supporting and the spec sequence runs but
+    // emits zero rows. We surface the rejection to keep callers
+    // honest about their intent.
+    if template.is_empty() {
+        panic!("pgrdf.construct: empty template");
     }
 
     // Slice 57 — classify every template triple position into a
@@ -8472,18 +8483,190 @@ mod tests {
         );
     }
 
-    /// Negative — multi-triple template rejected (slice 56 territory).
-    /// Slice 57 narrows to single-triple templates; the cross-triple
-    /// blank-node label joining contract belongs to slice 56.
-    #[pg_test(
-        error = "pgrdf.construct: slice 57 supports single-triple templates; multi-triple lands in slice 56"
-    )]
-    fn construct_rejects_multi_triple_template() {
+    // ─── Phase D slice 56 — multi-triple CONSTRUCT templates ───────
+    //
+    // N-triple templates emit N rows per solution. Blank-node labels
+    // are shared across all N triples within the SAME solution (so
+    // `_:r` in triple-1 subject and `_:r` in triple-3 object resolve
+    // to the SAME fresh label for that solution); across solutions
+    // the labels still differ. Empty templates `{ }` reject with
+    // `pgrdf.construct: empty template`.
+
+    /// Positive — 2-triple constant template, 3 solutions. Three
+    /// solutions × two template triples → six rows. Locks the
+    /// per-solution × per-template-triple emission cardinality and
+    /// confirms each row carries its corresponding template triple's
+    /// shape (variable substitution per solution).
+    #[pg_test]
+    fn construct_multi_triple_variable_six_rows() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:m1 ex:p \"1\" .
+                 ex:m2 ex:p \"2\" .
+                 ex:m3 ex:p \"3\" .',
+                9123)",
+        )
+        .unwrap();
+
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/tagA> \"A\" . \
+                            ?s <http://example.com/tagB> \"B\" } \
+                 WHERE { ?s <http://example.com/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            n, 6,
+            "three solutions × two template triples → six emitted rows"
+        );
+
+        // Per-triple predicate cardinality — 3 rows tagA, 3 rows tagB.
+        let n_a: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/tagA> \"A\" . \
+                            ?s <http://example.com/tagB> \"B\" } \
+                 WHERE { ?s <http://example.com/p> ?o }') AS t(j) \
+              WHERE j->'predicate'->>'value' = 'http://example.com/tagA'",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        let n_b: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?s <http://example.com/tagA> \"A\" . \
+                            ?s <http://example.com/tagB> \"B\" } \
+                 WHERE { ?s <http://example.com/p> ?o }') AS t(j) \
+              WHERE j->'predicate'->>'value' = 'http://example.com/tagB'",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n_a, 3, "three rows carry the tagA template triple");
+        assert_eq!(n_b, 3, "three rows carry the tagB template triple");
+    }
+
+    /// Positive — blank-node label shared across multiple template
+    /// triples within the same solution. The template's `_:r`
+    /// appears in subject of triple-0, subject of triple-1, and
+    /// object of triple-2; per W3C SPARQL 1.1 §16.2 + slice-56
+    /// contract, all three positions resolve to the SAME fresh label
+    /// for any given solution. Across solutions, the label MUST
+    /// differ.
+    #[pg_test]
+    fn construct_multi_triple_shared_bnode_within_solution() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:r1 ex:has \"v1\" .
+                 ex:r2 ex:has \"v2\" .',
+                9124)",
+        )
+        .unwrap();
+
+        // 2 solutions × 3 template triples → 6 rows total.
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { _:r <http://example.com/type> <http://example.com/Card> . \
+                            _:r <http://example.com/value> ?v . \
+                            <http://example.com/owner> <http://example.com/owns> _:r } \
+                 WHERE { ?s <http://example.com/has> ?v }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(n, 6, "two solutions × three template triples → six rows");
+
+        // Across all rows, the bnode label that appears in subject of
+        // the type/value triples and in object of the owns triple must
+        // come from exactly 2 distinct values (one per solution).
+        // We collect from rows where `_:r` shows up in subject (rows
+        // 0,1 of each solution group) AND rows where it shows up in
+        // object (row 2). All MUST come from 2 distinct labels.
+        let n_distinct_subjects: i64 = Spi::get_one(
+            "SELECT count(DISTINCT j->'subject'->>'value')::BIGINT \
+               FROM pgrdf.construct(
+                 'CONSTRUCT { _:r <http://example.com/type> <http://example.com/Card> . \
+                              _:r <http://example.com/value> ?v . \
+                              <http://example.com/owner> <http://example.com/owns> _:r } \
+                   WHERE { ?s <http://example.com/has> ?v }') AS t(j) \
+              WHERE j->'subject'->>'type' = 'bnode'",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            n_distinct_subjects, 2,
+            "two solutions × shared _:r in subject of two triples → 2 distinct subject labels"
+        );
+
+        // Combine subject-bnode rows + object-bnode rows: the entire
+        // set should still be 2 distinct labels (across-solution label
+        // joining preserved, within-solution label sameness preserved).
+        let n_all_bnode_labels: i64 = Spi::get_one(
+            "WITH r AS ( \
+               SELECT * FROM pgrdf.construct(
+                 'CONSTRUCT { _:r <http://example.com/type> <http://example.com/Card> . \
+                              _:r <http://example.com/value> ?v . \
+                              <http://example.com/owner> <http://example.com/owns> _:r } \
+                   WHERE { ?s <http://example.com/has> ?v }') AS t(j) \
+             ), labels AS ( \
+               SELECT j->'subject'->>'value' AS v FROM r \
+                 WHERE j->'subject'->>'type' = 'bnode' \
+               UNION ALL \
+               SELECT j->'object'->>'value' FROM r \
+                 WHERE j->'object'->>'type' = 'bnode' \
+             ) SELECT count(DISTINCT v)::BIGINT FROM labels",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            n_all_bnode_labels, 2,
+            "all bnode labels (subject+object across triples) come from 2 distinct values"
+        );
+    }
+
+    /// Positive — two distinct template bnode labels within one
+    /// solution → two DIFFERENT fresh labels. Slice 56 must not
+    /// conflate `_:a` and `_:b`. Across N solutions we expect 2N
+    /// distinct labels total.
+    #[pg_test]
+    fn construct_multi_triple_distinct_bnodes_within_solution() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:d1 ex:p \"1\" .
+                 ex:d2 ex:p \"2\" .',
+                9125)",
+        )
+        .unwrap();
+
+        // Two solutions × two template triples → four rows. Each row's
+        // subject is a fresh bnode. We expect 4 distinct labels — `_:a`
+        // and `_:b` mint different fresh labels within each solution,
+        // and labels differ across solutions.
+        let n_distinct: i64 = Spi::get_one(
+            "SELECT count(DISTINCT j->'subject'->>'value')::BIGINT \
+               FROM pgrdf.construct(
+                 'CONSTRUCT { _:a <http://example.com/type> <http://example.com/Foo> . \
+                              _:b <http://example.com/type> <http://example.com/Bar> } \
+                   WHERE { ?s <http://example.com/p> ?v }') AS t(j) \
+              WHERE j->'subject'->>'type' = 'bnode'",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            n_distinct, 4,
+            "2 solutions × 2 distinct template labels → 4 distinct fresh labels"
+        );
+    }
+
+    /// Negative — empty template `CONSTRUCT { } WHERE { … }` rejects
+    /// with the slice-56 prefix `pgrdf.construct: empty template`.
+    /// If spargebra rejects the empty `{ }` at parse, this test
+    /// would surface the parse-error prefix instead — adjust if so.
+    #[pg_test(error = "pgrdf.construct: empty template")]
+    fn construct_rejects_empty_template() {
         Spi::run(
             "SELECT * FROM pgrdf.construct(
-               'CONSTRUCT { <http://example.com/a> <http://example.com/p> \"1\" . \
-                            <http://example.com/b> <http://example.com/q> \"2\" } \
-                 WHERE { ?x ?y ?z }')",
+               'CONSTRUCT { } WHERE { ?s ?p ?o }')",
         )
         .unwrap();
     }

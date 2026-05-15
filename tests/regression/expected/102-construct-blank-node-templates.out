@@ -12,7 +12,7 @@ t
 2
 2
 2|2|http://example.com/relates_to|t|t
-e-rejects-multi-triple: t
+e-rejects-empty-template: t
 1
 bnode|t
 

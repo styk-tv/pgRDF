@@ -8,6 +8,12 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ### Added
 
+- `pgrdf.construct` multi-triple template support — Phase D slice 56.
+  N-triple templates emit N rows per solution; blank-node labels are
+  shared across all N triples within the same solution (and fresh per
+  solution). Empty templates `{ }` panic with `empty template`.
+  Variable substitution + constant resolution + within-solution bnode
+  label-joining all compose cleanly across template positions.
 - `pgrdf.construct(q TEXT) → SETOF JSONB` UDF — Phase D slice 59
   foundation. Constant-only templates per W3C 1.1 §16.2 supported;
   variables / blank nodes panic with `slice 59 supports constant-only

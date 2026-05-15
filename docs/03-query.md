@@ -377,7 +377,7 @@ Concrete shape:
       (spargebra parser.rs §Add / §Move / §Copy) into compositions
       of `Drop + DeleteInsert` (or just `DeleteInsert` for ADD),
       so they ride the existing per-form dispatcher arms.
-- 🚧 `CONSTRUCT` (Phase D slice 57 — blank-node template support) —
+- 🚧 `CONSTRUCT` (Phase D slice 56 — multi-triple templates) —
       sibling UDF `pgrdf.construct(q TEXT) → SETOF JSONB`. Each row
       carries `{"subject": …, "predicate": …, "object": …}` with
       structured term cells `{"type": "iri"|"literal"|"bnode",
@@ -393,24 +393,38 @@ Concrete shape:
       fresh label per solution). The same template label appearing
       in multiple positions of one triple within one solution
       resolves to the SAME fresh label (within-solution sameness);
-      across solutions, fresh labels differ. Variable-bound blank
-      nodes from the WHERE pattern (the dictionary stored a bnode
-      via Turtle ingest) pass through with the dictionary-stored
-      label unchanged. Typed and language-tagged literal bindings
-      flow through with full datatype IRI / `language` field
-      preservation (`rdf:langString` for tagged literals per RDF 1.1
-      §3.3). The WHERE pattern accepts the full SELECT-side BGP /
-      FILTER / OPTIONAL / UNION / MINUS surface (translation reuses
+      across solutions, fresh labels differ. **Multi-triple templates
+      (slice 56)** widen the surface to N-triple templates: an
+      N-triple `{ … . … . … }` template emits N rows per solution,
+      and the same template blank-node label is SHARED across all N
+      template triples WITHIN the same solution. So
+      `CONSTRUCT { _:r <ex:type> <ex:Card> . _:r <ex:value> ?v .
+      <ex:owner> <ex:owns> _:r }` emits three rows per solution, with
+      `_:r` resolving to the SAME fresh label in subject of the type
+      triple, subject of the value triple, AND object of the owns
+      triple of that solution. Across solutions, `_:r` mints a NEW
+      fresh label. Two distinct template labels `_:a` vs `_:b`
+      within the same solution mint TWO DIFFERENT fresh labels —
+      slice 56 does not conflate distinct labels. Empty templates
+      `CONSTRUCT { } WHERE { … }` reject with
+      `pgrdf.construct: empty template`. Variable-bound blank nodes
+      from the WHERE pattern (the dictionary stored a bnode via
+      Turtle ingest) pass through with the dictionary-stored label
+      unchanged. Typed and language-tagged literal bindings flow
+      through with full datatype IRI / `language` field preservation
+      (`rdf:langString` for tagged literals per RDF 1.1 §3.3). The
+      WHERE pattern accepts the full SELECT-side BGP / FILTER /
+      OPTIONAL / UNION / MINUS surface (translation reuses
       `parse_select` + `build_from_and_where`). Variables that the
       WHERE pattern does not bind panic with
-      `pgrdf.construct: unbound template variable ?X`. Multi-triple
-      templates (cross-triple blank-node label joining) land in
-      slice 56; today they panic with `pgrdf.construct: slice 57
-      supports single-triple templates; multi-triple lands in slice
-      56`. DISTINCT / ORDER BY / GROUP BY / aggregates on CONSTRUCT
-      are explicitly out of scope per W3C 1.1 §16.2 — rejected with
-      `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates
-      not supported (W3C 1.1 §16.2)`.
+      `pgrdf.construct: unbound template variable ?X`. GRAPH-scoping
+      of the WHERE (slice 55), CONSTRUCT WHERE shorthand (slice 54),
+      round-trip preservation (slice 53), and `sparql_parse`
+      enrichment (slice 50) all still pending. DISTINCT / ORDER BY /
+      GROUP BY / aggregates on CONSTRUCT are explicitly out of scope
+      per W3C 1.1 §16.2 — rejected with `pgrdf.construct: DISTINCT /
+      ORDER BY / GROUP BY / aggregates not supported (W3C 1.1
+      §16.2)`.
 - ⏳ `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4

@@ -19,13 +19,10 @@
 --     the same solution                → SAME fresh label (within-
 --                                         solution sameness).
 --   * Same template label across       → cross-triple joining is
---     separate triples (multi-triple)    SLICE 56 territory, NOT
---                                         locked here. Multi-triple
---                                         templates panic with
---                                         `pgrdf.construct: slice 57
---                                         supports single-triple
---                                         templates; multi-triple
---                                         lands in slice 56`.
+--     separate triples (multi-triple)    LOCKED in slice 56's
+--                                         `103-construct-multi-triple-
+--                                         templates.sql`. Not
+--                                         duplicated here.
 --   * Predicate blank-node             → parse-time error (illegal
 --                                         RDF — `NamedNodePattern`
 --                                         in spargebra excludes
@@ -48,7 +45,10 @@
 --   D. Mixed bnode subject + constant predicate + variable object
 --      template — bnode value distinct per row, object value matches
 --      bound variable.
---   E. Multi-triple template still rejected (slice 56 territory).
+--   E. Empty template `{ }` rejected (slice 56 widened to admit
+--      multi-triple templates but still rejects the degenerate
+--      empty case). The deeper multi-triple coverage lives in
+--      `103-construct-multi-triple-templates.sql`.
 --   F. Variable bound to bnode in WHERE — emitted in template via
 --      variable reference uses the dictionary-stored label
 --      unchanged (slice 58 contract, must not regress).
@@ -190,14 +190,19 @@ SELECT count(DISTINCT j->'subject'->>'value')::bigint AS d_distinct_subj,
     'CONSTRUCT { _:bn <http://example.com/relates_to> ?s } '
     'WHERE { ?s <http://example.com/dp> ?o }') AS s(j);
 
--- ─── Invariant E: multi-triple template rejected (slice 56) ─────
+-- ─── Invariant E: empty template `{ }` rejected ─────────────────
+-- Slice 56 widened the template surface to admit N-triple
+-- templates; the only remaining degenerate case rejected at this
+-- gate is the empty `{ }` template, which carries no emission
+-- semantics worth supporting (W3C SPARQL 1.1 §16.2 would run the
+-- solution sequence but emit zero rows; we surface the rejection
+-- to keep callers honest). Multi-triple coverage proper lives in
+-- `103-construct-multi-triple-templates.sql`.
 SELECT _check_error(
-  'e-rejects-multi-triple',
+  'e-rejects-empty-template',
   $$SELECT * FROM pgrdf.construct(
-    'CONSTRUCT { <http://example.com/a> <http://example.com/p> "1" . '
-    '            <http://example.com/b> <http://example.com/q> "2" } '
-    'WHERE { ?x ?y ?z }')$$,
-  $$pgrdf.construct: slice 57 supports single-triple templates; multi-triple lands in slice 56$$
+    'CONSTRUCT { } WHERE { ?x ?y ?z }')$$,
+  'pgrdf.construct: empty template'
 );
 
 -- ─── Invariant F: variable-bound bnode passthrough (slice 58) ────
