@@ -457,7 +457,7 @@ partitioning. 🚧
 | UDF | Signature | Returns | Semantics |
 |---|---|---|---|
 | `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT TRUE)` | ✅ slice 99 | `BIGINT` | Removes the partition entirely; returns the count of triples that were in it. `cascade => FALSE` errors if inferred rows are present. |
-| `pgrdf.clear_graph(id BIGINT)` | new | `BIGINT` | `TRUNCATE ONLY` the partition; the partition itself is preserved (so subsequent inserts route normally). Returns triples removed. |
+| `pgrdf.clear_graph(id BIGINT)` | ✅ slice 98 | `BIGINT` | `TRUNCATE ONLY` the partition; the partition itself is preserved (so subsequent inserts route normally). Returns triples removed. |
 | `pgrdf.copy_graph(src BIGINT, dst BIGINT)` | new | `BIGINT` | Copies all quads from `src` to `dst`. Creates the `dst` partition if absent. Returns triples copied. |
 | `pgrdf.move_graph(src BIGINT, dst BIGINT)` | new | `BIGINT` | Atomic association swap: the `src` partition's `FOR VALUES IN (...)` clause rebinds to the new id. Returns triples moved (== row count at swap time). |
 

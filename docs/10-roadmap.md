@@ -563,6 +563,12 @@ partition-level primitives over `_pgrdf_quads` — constant-time
 (`DROP/CLEAR/CREATE/COPY/MOVE/ADD GRAPH`) to these UDFs. See
 [LLD v0.4 §5](../specs/SPEC.pgRDF.LLD.v0.4.md#5-graph-level-lifecycle-udfs-new).
 
+Phase B countdown opens with **slices 99 + 98 as parallel batch 1**
+(`drop_graph` + `clear_graph`), continuing with slices 97 + 96
+(`copy_graph` + `move_graph`) in the next batch. All four lifecycle
+UDFs land in `src/storage/graphs.rs` against the §5.1 surface
+table.
+
 - ✅ **Slice 99 — `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN
   DEFAULT TRUE) → BIGINT`.** Removes the LIST partition
   `_pgrdf_quads_g<id>` from the parent `_pgrdf_quads` via
@@ -583,11 +589,26 @@ partition-level primitives over `_pgrdf_quads` — constant-time
   guard, cascade-TRUE-inferred override, default-partition guard,
   negative-id guard). Pgrx integration tests cover the absent +
   happy + cascade-FALSE + default-partition + negative-id paths.
-  Opens Phase B toward v0.4.2.
 
-- 🚧 Slices 98 → 96: `clear_graph` (parallel slice 98), then
-  `copy_graph`, `move_graph` — same partition-DDL discipline,
-  documented per LLD v0.4 §5.1 / §5.2.
+- ✅ **Slice 98 — `pgrdf.clear_graph(id BIGINT) → BIGINT`.**
+  `TRUNCATE ONLY pgrdf._pgrdf_quads_g<id>` against the per-graph
+  partition; returns rows removed (== pre-clear row count).
+  Partition shell + `_pgrdf_graphs` IRI binding both survive,
+  so subsequent inserts route normally and `graph_iri(id)`
+  keeps resolving. Idempotent on absent / empty graphs (returns
+  0 without erroring). `clear_graph(0)` is permitted (contrast
+  with `drop_graph(0)`, sibling slice 99, which rejects).
+  Negative id panics with stable
+  `clear_graph: graph_id must be >= 0, got <N>` prefix.
+  Regression coverage:
+  [`tests/regression/sql/89-clear-graph.sql`](../tests/regression/sql/89-clear-graph.sql)
+  + three `#[pg_test]`s in `src/storage/graphs.rs`
+  (`clear_graph_absent_returns_zero`,
+  `clear_graph_returns_row_count`,
+  `clear_graph_twice_second_returns_zero`).
+
+- 🚧 Slices 97 + 96: `copy_graph` + `move_graph` — same
+  partition-DDL discipline, parallel batch 2.
 
 ### Track 4 — CONSTRUCT
 `pgrdf.construct(q TEXT) → SETOF JSONB` returning structured

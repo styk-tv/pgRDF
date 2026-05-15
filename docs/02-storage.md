@@ -231,6 +231,62 @@ SELECT pgrdf.graph_iri(9999::bigint);
 --     covered by tests/regression/scripts/pg-dump-roundtrip.sh.
 ```
 
+### Lifecycle UDFs (`pgrdf.clear_graph`, **Phase B slice 98**)
+
+Phase B opens the LLD v0.4 §5 graph-level lifecycle UDF surface
+— partition-level primitives that operate on `_pgrdf_quads`'s LIST
+partitioning instead of N-row DELETE loops.
+
+#### clear_graph
+
+**`pgrdf.clear_graph(id BIGINT) → BIGINT`** (slice 98) issues
+`TRUNCATE ONLY pgrdf._pgrdf_quads_g<id>` against the per-graph
+partition and returns the rows-removed count (== the row count
+captured immediately before the TRUNCATE). Both base and inferred
+rows are wiped — the function is not `is_inferred`-discriminating
+per LLD v0.4 §5.2.
+
+Key invariants:
+
+- **Partition shell survives.** `TRUNCATE ONLY` empties the
+  per-graph partition's row storage but leaves the relation
+  attached to `_pgrdf_quads`. Subsequent inserts with the same
+  `graph_id` route into the same partition without falling back
+  to `_pgrdf_quads_default`.
+- **IRI binding survives.** The matching `_pgrdf_graphs` row is
+  untouched, so `pgrdf.graph_iri(id)` keeps resolving to the
+  bound IRI. This is the contrast point with `drop_graph(id)`
+  (sibling slice 99), which removes both the partition and the
+  IRI binding.
+- **Idempotent on absent / empty graphs.** Calling against a
+  `graph_id` with no LIST partition returns 0 without erroring;
+  re-calling against an already-empty partition returns 0
+  again. Callers can `clear_graph` blindly during cleanup
+  without probing for partition existence first.
+- **`graph_id = 0` is permitted.** Unlike `drop_graph(0)` (which
+  rejects the default-partition id outright), `clear_graph(0)`
+  is legal — it operates on the explicit `_pgrdf_quads_g0`
+  partition if one was created via `add_graph(0)`, or no-ops to
+  0 if not.
+- **Negative id panics** with the stable prefix
+  `clear_graph: graph_id must be >= 0, got <N>` — same shape
+  contract as `add_graph(id BIGINT)` (slice 119) so downstream
+  tooling can route on the prefix.
+
+`TRUNCATE ONLY` (not bare `TRUNCATE`) is deliberate: `ONLY` blocks
+cascade to any descendant partitions. The per-graph partitions
+have no children today, but `ONLY` is defence-in-depth against a
+future sub-partitioning slice silently widening the scope.
+
+Regression coverage:
+[`tests/regression/sql/89-clear-graph.sql`](../tests/regression/sql/89-clear-graph.sql)
+locks all six invariants (absent-graph idempotency, load+clear
+returns count, partition survives, IRI binding survives, double-
+clear returns 0, `clear_graph(0)` works, negative id rejected).
+Three `#[pg_test]`s in `src/storage/graphs.rs` exercise the
+happy path + idempotent-absent + clear-twice shapes against a
+live in-process Postgres.
+
 ## 2.3 Bulk loader (`src/storage/loader.rs`)
 
 ### Prepared batched INSERT (LLD §4.3 phase A, **shipped — Phase 3 step 3**)

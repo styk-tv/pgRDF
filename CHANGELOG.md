@@ -6,6 +6,52 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase B slice 98 — `pgrdf.clear_graph` lifecycle UDF
+
+First landing of the LLD v0.4 §5 graph-level lifecycle UDF
+surface. `pgrdf.clear_graph(id BIGINT) → BIGINT` issues
+`TRUNCATE ONLY pgrdf._pgrdf_quads_g<id>` against the per-graph
+LIST partition and returns the rows-removed count (== the row
+count captured immediately before the TRUNCATE). Both base and
+inferred rows are wiped; the function is not
+`is_inferred`-discriminating per LLD §5.2.
+
+Contract details:
+
+- **Partition shell + IRI binding survive.** Unlike sibling
+  slice 99's `drop_graph(id)` (which DETACHes the partition,
+  DROPs it, and removes the `_pgrdf_graphs` row), `clear_graph`
+  leaves both intact. Subsequent inserts with the same
+  `graph_id` route into the same partition without falling
+  back to `_pgrdf_quads_default`, and `pgrdf.graph_iri(id)`
+  keeps resolving to the bound IRI.
+- **Idempotent on absent / empty graphs.** Calling against a
+  `graph_id` with no LIST partition returns 0 without erroring;
+  re-calling against an already-empty partition returns 0
+  again. Callers can `clear_graph` blindly during cleanup
+  workflows without first probing partition existence.
+- **`graph_id = 0` is permitted.** Unlike `drop_graph(0)` —
+  which would destroy the catch-all bucket every unrouted
+  `INSERT` depends on, hence its outright rejection in slice 99
+  — `clear_graph(0)` just empties the explicit `_pgrdf_quads_g0`
+  partition (if `add_graph(0)` was ever called) or returns 0
+  (idempotent miss path).
+- **Negative id panics** with the stable
+  `clear_graph: graph_id must be >= 0, got <N>` prefix —
+  matches the error-shape contract `add_graph(id BIGINT)`
+  (slice 119) already established.
+
+`TRUNCATE ONLY` (not bare `TRUNCATE`) is deliberate defence-in-
+depth: `ONLY` blocks cascade to any descendant partitions. The
+per-graph partitions have no children today, but `ONLY` future-
+proofs against a sub-partitioning slice silently widening the
+scope.
+
+Regression coverage: `tests/regression/sql/89-clear-graph.sql`
+locks all six contract invariants end-to-end. Three
+`#[pg_test]`s in `src/storage/graphs.rs` exercise the happy path,
+idempotent-absent, and clear-twice paths.
+
 ### Phase B slice 99 — pgrdf.drop_graph lifecycle UDF
 
 Opens Phase B (lifecycle UDFs §5) toward v0.4.2.
@@ -48,7 +94,7 @@ LLD v0.4 §5.1 row marked `✅ slice 99`; §2 status row updated to
 reflect the `drop_graph` ✅ partial-completion of the
 lifecycle-UDFs track. `docs/02-storage.md` gains §2.4 covering
 the new `drop_graph` surface; `docs/10-roadmap.md` Track 3 picks
-up the slice 99 ✅ entry plus a 🚧 placeholder for slices 98 → 96.
+up the slice 99 ✅ entry alongside slice 98.
 
 ### Release ops — `publish-crate.yml` disabled until E-011 retires
 

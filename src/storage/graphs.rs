@@ -54,6 +54,20 @@
 //! graph is a 0-return no-op (idempotent). Opens Phase B (lifecycle
 //! UDFs §5) toward v0.4.2.
 //!
+//! Slice 98 (Phase B) — `pgrdf.clear_graph(id BIGINT) → BIGINT`
+//! lifecycle UDF ([`clear_graph`]). Per LLD v0.4 §5.1 the function
+//! `TRUNCATE ONLY`s the per-graph LIST partition
+//! (`_pgrdf_quads_g<id>`), wiping every row (base + inferred) but
+//! keeping the partition attached + its `_pgrdf_graphs` IRI
+//! binding intact (so subsequent inserts route normally and
+//! `graph_iri(id)` still resolves). Returns the rows-removed
+//! count (the row count immediately prior to the TRUNCATE).
+//! Idempotent on an absent or already-empty graph — returns 0,
+//! never errors. Permitted on `graph_id = 0` (the default catch-
+//! all partition); the sibling `drop_graph(0)` is the rejection
+//! site, not this one. Negative ids panic with the stable
+//! `clear_graph: graph_id must be >= 0, got <N>` prefix.
+//!
 //! Reference: SPEC.pgRDF.LLD.v0.4 §3.1, §3.2, §5.1.
 
 use pgrx::prelude::*;
@@ -223,6 +237,87 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         &[id.into()],
     )
     .unwrap_or_else(|e| panic!("drop_graph: _pgrdf_graphs row cleanup failed: {e}"));
+/// Truncate every row in graph `id`'s LIST partition
+/// (`pgrdf._pgrdf_quads_g<id>`). Returns the rows-removed count
+/// (== the row count captured immediately before the TRUNCATE).
+///
+/// Keeps the partition attached + the `_pgrdf_graphs` IRI
+/// binding intact: subsequent inserts route to the same
+/// partition, and `graph_iri(id)` still resolves to whatever
+/// IRI was bound. The function is the bulk-discard counterpart
+/// of the sibling slice-99 `drop_graph(id)` (which detaches +
+/// drops the partition outright + invalidates the IRI binding).
+///
+/// `TRUNCATE ONLY` is deliberate: `ONLY` blocks the cascade to
+/// descendant partitions. The per-graph partition has no
+/// children today, but `ONLY` is defence-in-depth against a
+/// future sub-partitioning slice silently widening the scope.
+///
+/// **Idempotent on absent / empty graphs.** If
+/// `_pgrdf_quads_g<id>` is missing entirely (no `add_graph(id)`
+/// has ever run), return 0 without erroring — per LLD v0.4 §5.2
+/// idempotency invariant. If the partition exists but is empty,
+/// the row-count read returns 0, `TRUNCATE` no-ops on a
+/// zero-row relation, and we return 0 again. Calling
+/// `clear_graph(id)` twice in succession therefore returns
+/// `(N, 0)`.
+///
+/// **`graph_id = 0` is permitted.** Unlike `drop_graph(0)`
+/// (which would destroy the catch-all bucket that every
+/// unrouted insert lands in), clearing the default partition
+/// just empties it. The default-partition `_pgrdf_graphs` row
+/// stays put, so the synthetic IRI `urn:pgrdf:graph:0`
+/// continues to resolve.
+///
+/// **Negative id** panics with the stable `clear_graph:` prefix
+/// — same error-shape contract as `add_graph(id BIGINT)`
+/// (slice 119) so downstream callers route on the prefix.
+///
+/// SQL surface: `pgrdf.clear_graph(id BIGINT) → BIGINT`. Per
+/// LLD v0.4 §5.1.
+#[pg_extern]
+fn clear_graph(id: i64) -> i64 {
+    if id < 0 {
+        panic!("clear_graph: graph_id must be >= 0, got {id}");
+    }
+
+    let partition_name = format!("_pgrdf_quads_g{id}");
+
+    // Existence check via pg_catalog — `pgrdf.<name>` is qualified
+    // by the namespace OID join so we don't false-match a relation
+    // with the same name in a different schema. Idempotent miss:
+    // an absent partition returns 0 without erroring.
+    let exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                       WHERE c.relname = $1 AND n.nspname = 'pgrdf')",
+        &[partition_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("clear_graph: partition existence check failed: {e}"))
+    .unwrap_or(false);
+
+    if !exists {
+        return 0;
+    }
+
+    // Capture the row count *before* the TRUNCATE so we can return
+    // it. `partition_name` is a string we constructed from a BIGINT
+    // — no user input in a SQL identifier position — so direct
+    // interpolation into the dynamic SQL is safe (same convention as
+    // `add_graph(g BIGINT)` in `hexastore.rs`).
+    let total: i64 = Spi::get_one(&format!(
+        "SELECT count(*)::bigint FROM pgrdf.{partition_name}"
+    ))
+    .unwrap_or_else(|e| panic!("clear_graph: count failed: {e}"))
+    .unwrap_or(0);
+
+    // `ONLY` keeps the truncate scoped to this partition table
+    // alone — no cascade to any (future) descendants. The partition
+    // shell stays attached to `_pgrdf_quads`, so the next
+    // `INSERT … VALUES (..., $1 = id, ...)` routes here without
+    // touching the default partition.
+    Spi::run(&format!("TRUNCATE ONLY pgrdf.{partition_name}"))
+        .unwrap_or_else(|e| panic!("clear_graph: TRUNCATE failed: {e}"));
 
     total
 }
@@ -661,5 +756,127 @@ mod tests {
     #[pg_test(error = "drop_graph: graph_id must be >= 0, got -1")]
     fn drop_graph_negative_id_rejected() {
         Spi::run("SELECT pgrdf.drop_graph(-1::bigint)").unwrap();
+    /// Slice 98 — idempotent on an absent graph. Calling
+    /// `clear_graph` against a `graph_id` that has never had
+    /// `add_graph(id)` run for it (so no LIST partition exists)
+    /// returns 0 without erroring. This is the bottom of the
+    /// idempotency contract: callers can `clear_graph` blindly
+    /// during cleanup without first probing partition existence.
+    /// The id (`9898`) is unique to this slice so concurrent
+    /// pgrx workers don't collide.
+    #[pg_test]
+    fn clear_graph_absent_returns_zero() {
+        let removed: Option<i64> = Spi::get_one("SELECT pgrdf.clear_graph(9898::bigint)")
+            .expect("clear_graph on absent partition failed");
+        assert_eq!(removed, Some(0));
+    }
+
+    /// Slice 98 — happy path: load N quads into a graph, clear,
+    /// observe the return value matches the row count and the
+    /// partition is empty afterward. The partition + its
+    /// `_pgrdf_graphs` IRI binding survive (the LLD §5.1
+    /// invariant that distinguishes `clear_graph` from
+    /// `drop_graph`).
+    ///
+    /// Direct INSERT into `_pgrdf_quads` + direct INSERT into
+    /// `_pgrdf_graphs` bypasses the `add_graph(id)` partition-DDL
+    /// path that takes AccessExclusiveLock on the parent — the
+    /// same parallelism mitigation used by `graph_id_after_iri_add`
+    /// and `graph_iri_direct_insert_lookup` above. The id (`9889`)
+    /// is unique to this slice; the dictionary ids are also
+    /// invented here so we don't depend on a stable order from
+    /// `put_term`.
+    ///
+    /// But — `clear_graph` reads from `pgrdf._pgrdf_quads_g<id>`
+    /// directly, which requires a real LIST partition (not just
+    /// a row in `_pgrdf_quads` routed to the default partition).
+    /// We therefore call `add_graph(9889)` first to create the
+    /// partition (this triggers the parent-table AccessExclusive
+    /// lock, but the id is unique so no concurrent worker
+    /// contends on the *same* LIST value — and the parent-table
+    /// lock window is brief enough that pgrx's parallel runner
+    /// has not been observed to deadlock on it; see slice 117
+    /// `add_graph_id_iri_synthetic_upgrade` which is the same
+    /// shape and ships green).
+    #[pg_test]
+    fn clear_graph_returns_row_count() {
+        Spi::run("SELECT pgrdf.add_graph(9889::bigint)").expect("add_graph(9889) failed");
+
+        // Three rows: two base + one inferred. `clear_graph` must
+        // count both — the LLD §5.2 invariant that the truncate is
+        // not is_inferred-discriminating.
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_quads \
+             (subject_id, predicate_id, object_id, graph_id, is_inferred) VALUES \
+             (1, 2, 3, 9889, false), \
+             (4, 5, 6, 9889, false), \
+             (7, 8, 9, 9889, true)",
+        )
+        .expect("seed _pgrdf_quads rows failed");
+
+        let pre_count: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 9889",
+        )
+        .expect("pre-count failed")
+        .expect("pre-count returned NULL");
+        assert_eq!(pre_count, 3);
+
+        let removed: Option<i64> = Spi::get_one("SELECT pgrdf.clear_graph(9889::bigint)")
+            .expect("clear_graph(9889) failed");
+        assert_eq!(removed, Some(3), "must return the pre-clear row count");
+
+        // Partition is empty post-clear.
+        let post_count: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = 9889",
+        )
+        .expect("post-count failed")
+        .expect("post-count returned NULL");
+        assert_eq!(post_count, 0);
+
+        // Partition still attached — its relation is still in
+        // `pg_class` under the `pgrdf` schema.
+        let still_exists: Option<bool> = Spi::get_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                           JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                           WHERE c.relname = '_pgrdf_quads_g9889' AND n.nspname = 'pgrdf')",
+        )
+        .expect("partition existence check failed");
+        assert_eq!(still_exists, Some(true), "partition must remain attached");
+
+        // `_pgrdf_graphs` IRI binding (synthetic) survives.
+        let iri: Option<String> = Spi::get_one("SELECT pgrdf.graph_iri(9889::bigint)")
+            .expect("graph_iri lookup failed");
+        assert_eq!(
+            iri.as_deref(),
+            Some("urn:pgrdf:graph:9889"),
+            "IRI binding must survive clear_graph"
+        );
+    }
+
+    /// Slice 98 — clear-then-clear returns 0 the second time. The
+    /// partition exists but is empty after the first clear; the
+    /// row count is 0, the TRUNCATE no-ops, and we return 0. This
+    /// completes the idempotency contract from the absent-graph
+    /// side: clearing an empty partition is the same shape as
+    /// clearing a never-created one (modulo whether the partition
+    /// row in `pg_class` exists, which the function-level
+    /// behaviour does not depend on).
+    #[pg_test]
+    fn clear_graph_twice_second_returns_zero() {
+        Spi::run("SELECT pgrdf.add_graph(9890::bigint)").expect("add_graph(9890) failed");
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_quads \
+             (subject_id, predicate_id, object_id, graph_id) VALUES \
+             (10, 20, 30, 9890), (40, 50, 60, 9890)",
+        )
+        .expect("seed _pgrdf_quads rows failed");
+
+        let first: Option<i64> = Spi::get_one("SELECT pgrdf.clear_graph(9890::bigint)")
+            .expect("first clear_graph(9890) failed");
+        assert_eq!(first, Some(2));
+
+        let second: Option<i64> = Spi::get_one("SELECT pgrdf.clear_graph(9890::bigint)")
+            .expect("second clear_graph(9890) failed");
+        assert_eq!(second, Some(0), "second clear on empty partition must return 0");
     }
 }
