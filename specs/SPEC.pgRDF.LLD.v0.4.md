@@ -110,7 +110,7 @@ Capability matrix for the v0.4 target:
 | `GRAPH ?g { … }` | ⏳ deferred | §3.3 | ✅ slice 113 |
 | GRAPH composition (OPTIONAL/UNION/MINUS) | ⏳ deferred | §3.3 | ✅ slice 112 |
 | IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | ✅ slices 120-115 |
-| SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | §4 | 🚧 |
+| SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE / DELETE+INSERT WHERE) | not yet | §4 | ✅ slices 84-80 |
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | ✅ slice 79 |
 | Lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / ALL / NAMED`) | not yet | §4.4 | ✅ slice 78 |
 | `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | ✅ all four shipped (slices 99 / 98 / 97 / 96) |

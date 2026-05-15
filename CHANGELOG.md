@@ -6,6 +6,63 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase C slice 74 — `sparql_parse` UPDATE detail enrichment
+
+`pgrdf.sparql_parse(q)` now surfaces enough of the executor's
+routing inputs that callers can preview an UPDATE's effect without
+running it. Per-op shape changes:
+
+- `InsertData` — unchanged (triples + graphs).
+- `DeleteData` — `graphs` array added (matches `InsertData`).
+- `DeleteInsert` — `kind` label added, narrowing to one of
+  `INSERT_WHERE` / `DELETE_WHERE` / `DELETE_INSERT_WHERE` (mirrors
+  the executor's runtime `_update.form` so callers can route on
+  the same key). `template_graphs` collects every template-side
+  graph IRI (default-graph quads surface as `"DEFAULT"`, variable
+  graphs as `"?var"`). `with_graph` carries the `WITH <iri>` IRI
+  when the operation has a single-default `using:` field.
+- `Clear` / `Drop` — `target` label (`DEFAULT` / `NAMED <iri>` /
+  `NAMED_ALL` / `ALL`) + `silent` flag.
+- `Create` — `target` (`NAMED <iri>`) + `silent`.
+
+Helpers added: `push_graph_name`, `push_graph_name_pattern`,
+`with_iri_from_using` (parser-side mirror of the executor's
+namesake, tolerates multi-IRI / USING NAMED by returning `None`
+instead of panicking so `sparql_parse` stays infallible on every
+parsed AST), `graph_target_label`.
+
+Seven new `#[pg_test]` cases lock the new fields (kind-narrowing
+for the three DeleteInsert kinds, `with_graph` surfacing,
+`template_graphs` surfacing, `DeleteData.graphs` surfacing, and
+lifecycle `target` labels across CLEAR DEFAULT / DROP GRAPH <iri> /
+CREATE SILENT GRAPH / DROP ALL).
+
+### Phase C slices 77-75 — W3C-shape conformance fixtures for SPARQL UPDATE
+
+Three new fixtures under `tests/w3c-sparql/` lock the UPDATE
+surface through the conformance harness, complementing the
+`tests/regression/sql/93-…-99-…` SQL-side regression set:
+
+- `27-update-insert-data` — §3.1.1 INSERT DATA, default + named
+  graph in a single query.
+- `28-update-delete-where` — §3.1.3 DELETE WHERE pattern-driven.
+- `29-update-with-graph-scope` — §3.1.3 ¶3 `WITH <g>` scopes
+  WHERE + template.
+
+Each fixture uses `setup.sql` (no `data.ttl`) because UPDATE forms
+LAND state via the query itself — the default `data.ttl` seed path
+would pre-stage rows the query is trying to verify it lands,
+blurring the assertion.
+
+Harness extension: `tests/w3c-sparql/run.sh` now normalises
+`elapsed_ms: <N>` inside `_update` rows to `elapsed_ms: 0` before
+diffing so bag-equivalence stays stable across runs. The
+substitution is narrow (matches only the JSON key/value pair via
+a sed regex); SELECT / ASK rows are untouched. Existing 26 tests
+(01-26) remain identical.
+
+Test count: w3c-sparql 26 → 29 (+3 UPDATE forms).
+
 ### Phase C slice 78 — SPARQL UPDATE lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`)
 
 Closes the LLD v0.4 §4.4 lattice between the SPARQL UPDATE lifecycle

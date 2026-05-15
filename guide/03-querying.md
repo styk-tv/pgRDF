@@ -40,6 +40,11 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `BIND(expr AS ?v)` for projection (Literal / NamedNode / Variable, STR / LANG / DATATYPE / UCASE / LCASE / STRLEN, arithmetic, CONCAT) | ✅ |
 | `ASK { … }` query form | ✅ |
 | Named-graph `GRAPH <iri> { … }` and `GRAPH ?g { … }` clauses (composes with OPTIONAL / UNION / MINUS) | ✅ |
+| `INSERT DATA { … }`, `DELETE DATA { … }` (default + named graph) | ✅ v0.4.3 |
+| `INSERT { template } WHERE { pattern }`, `DELETE { template } WHERE { pattern }` (also `DELETE WHERE { … }` shorthand) | ✅ v0.4.3 |
+| `DELETE { … } INSERT { … } WHERE { … }` atomic modify | ✅ v0.4.3 |
+| `WITH <iri>` graph scoping, `GRAPH <iri>` in templates + WHERE (cross-graph copy) | ✅ v0.4.3 |
+| Lifecycle algebra — `DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / NAMED / ALL` targets, `SILENT` flag | ✅ v0.4.3 |
 | `CONSTRUCT`, `DESCRIBE` | ⏳ v0.4 |
 | Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) | ⏳ v0.4 |
 | `VALUES (?x) { … }` inline data | ⏳ v0.4 |
@@ -924,6 +929,181 @@ SELECT customers.email, foaf.name
   FROM customers
   JOIN foaf ON customers.uri = foaf.person_iri;
 ```
+
+## SPARQL UPDATE
+
+`pgrdf.sparql(q)` accepts SPARQL UPDATE queries alongside SELECT /
+ASK. The function detects the form via `parse_query` first; if that
+fails it falls back to `parse_update`. UPDATE forms return a single
+summary row of shape `{"_update": …}` instead of a per-solution row
+set — `triples_inserted`, `triples_deleted`, `graphs_touched`, and
+the `form` label match the executor's runtime classification.
+
+The full surface ships as of v0.4.3:
+
+### 1. `INSERT DATA { … }`
+
+Static ground-triple block, no `WHERE`. Lands rows in the default
+graph (`graph_id = 0`) by default, or in a named graph if wrapped
+with `GRAPH <iri> { … }`. Unknown IRIs auto-allocate a fresh
+`graph_id` via `pgrdf.add_graph(iri)`.
+
+```sql
+SELECT j FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   INSERT DATA {
+     ex:alice ex:knows ex:bob .
+     GRAPH <http://example.org/social> {
+       ex:carol ex:knows ex:dave .
+     }
+   }'
+) AS j;
+--  → {"_update": {"form": "INSERT_DATA",
+--                  "triples_inserted": 2,
+--                  "triples_deleted":  0,
+--                  "graphs_touched":   ["DEFAULT", "http://example.org/social"],
+--                  "elapsed_ms":       3.42}}
+```
+
+INSERT DATA is idempotent: repeating the same statement does not
+duplicate rows (the underlying SQL uses `ON CONFLICT DO NOTHING`).
+The reported `triples_inserted` count is the number ATTEMPTED, not
+the net row delta — so a duplicate INSERT still reports the
+template size.
+
+### 2. `DELETE DATA { … }`
+
+Symmetric to `INSERT DATA`: ground quads only (no variables, no
+blank nodes — the latter forbidden by W3C SPARQL 1.1 §4.1.2). Uses
+a lookup-only path through the dictionary: if any term in the
+triple is absent the delete is a spec-correct no-op (never errors).
+
+```sql
+SELECT j FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   DELETE DATA { ex:alice ex:knows ex:bob }'
+) AS j;
+--  → {"_update": {"form": "DELETE_DATA",
+--                  "triples_inserted": 0,
+--                  "triples_deleted":  1, …}}
+```
+
+### 3. `INSERT { template } WHERE { pattern }`
+
+Pattern-driven insert: each solution of the WHERE clause produces
+one concrete triple via the template. The WHERE pattern accepts the
+same shape as a SELECT BGP (joins, FILTER, OPTIONAL, UNION, MINUS,
+GRAPH, …).
+
+```sql
+SELECT j FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   INSERT { ?s ex:tagged "yes" }
+   WHERE  { ?s ex:hasPrice ?p }'
+) AS j;
+```
+
+Template variables MUST be bound by the WHERE BGP — an unbound
+template variable panics with a `INSERT WHERE template feature
+"unbound template variable …"` prefix.
+
+### 4. `DELETE { template } WHERE { pattern }`
+
+Pattern-driven delete. Spargebra models the template as
+`Vec<GroundQuadPattern>` so the spec's "no blank nodes in DELETE"
+rule is enforced at the AST level. `triples_deleted` counts ACTUAL
+rows removed, not template instantiations attempted — important
+distinction from INSERT WHERE's "attempted insert" counter.
+
+```sql
+SELECT j FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   DELETE { ?s ex:age ?o } WHERE { ?s ex:age ?o }'
+) AS j;
+```
+
+The shorthand `DELETE WHERE { pattern }` (template equals pattern)
+is equivalent and produces the same `_update` row with
+`form: "DELETE_WHERE"`.
+
+### 5. `DELETE { … } INSERT { … } WHERE { … }`
+
+The atomic modify form. Both halves resolve against the SAME WHERE
+solutions snapshot: the executor evaluates the pattern exactly once,
+projects every variable referenced by EITHER template, and per-row
+applies DELETE then INSERT. Per W3C SPARQL 1.1 Update §3.1.3, the
+DELETE conceptually precedes the INSERT — important for status-flip
+patterns like:
+
+```sparql
+DELETE { ?x ex:status "draft" }
+INSERT { ?x ex:status "published" }
+WHERE  { ?x ex:status "draft" }
+```
+
+where the DELETE removes the old row and the INSERT adds the new
+row, atomically per Postgres's transaction model.
+
+### Graph-scoped variants
+
+Every form supports `GRAPH <iri> { … }` inside the template and/or
+the WHERE clause, scoping the operation to the named graph. The
+shorthand `WITH <iri>` selects `<iri>` as the default graph for
+BOTH the WHERE evaluation and the template's quad routing:
+
+```sql
+SELECT j FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   WITH <http://example.org/store>
+   INSERT { ?s ex:tagged "yes" }
+   WHERE  { ?s ex:hasPrice ?p }'
+) AS j;
+--  → {"_update": {…, "graphs_touched": ["http://example.org/store"]}}
+```
+
+Cross-graph copy is straightforward — name both graphs explicitly:
+
+```sparql
+INSERT { GRAPH <http://example.org/g2> { ?s ?p ?o } }
+WHERE  { GRAPH <http://example.org/g1> { ?s ?p ?o } }
+```
+
+### Lifecycle algebra — `DROP / CLEAR / CREATE GRAPH`
+
+The lifecycle operations route to the §5 graph-management UDFs
+(`pgrdf.drop_graph`, `pgrdf.clear_graph`, `pgrdf.add_graph`):
+
+```sparql
+CLEAR GRAPH <http://example.org/staging>   -- wipe rows, keep partition
+DROP  GRAPH <http://example.org/staging>   -- wipe rows + drop partition
+CREATE GRAPH <http://example.org/new>      -- allocate fresh binding
+CREATE SILENT GRAPH <http://example.org/g> -- idempotent on existing
+```
+
+`DEFAULT` / `NAMED` / `ALL` targets are recognised:
+
+```sparql
+DROP DEFAULT     -- wipe the default graph (graph_id = 0)
+DROP NAMED       -- wipe every named graph (partition + rows)
+DROP ALL         -- default + named
+CLEAR DEFAULT    -- like DROP DEFAULT today; partition stays
+CLEAR NAMED      -- wipe rows in every named graph; partitions stay
+CLEAR ALL        -- default + named
+```
+
+The `_update` summary's `form` field is one of `"CLEAR"`,
+`"CREATE"`, or `"DROP"`; the `graphs_touched` array carries the
+IRIs the operation actually visited.
+
+### Previewing UPDATE shape
+
+`pgrdf.sparql_parse(q)` (see "Inspecting queries before running
+them" below) reports `form: "UPDATE"` with a per-operation summary.
+For pattern-driven UPDATE forms it surfaces a `kind` label
+(`INSERT_WHERE` / `DELETE_WHERE` / `DELETE_INSERT_WHERE`) mirroring
+the executor's runtime `form`, plus `template_graphs` and (when
+`WITH <iri>` is present) `with_graph`. Lifecycle ops surface a
+`target` label (`DEFAULT` / `NAMED <iri>` / `NAMED_ALL` / `ALL`).
 
 ## Inspecting queries before running them
 
