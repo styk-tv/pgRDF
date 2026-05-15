@@ -183,7 +183,7 @@ SELECT _check_error(
       'PREFIX ex: <http://example.org/>
        INSERT { GRAPH ?g { ?x ex:tag "t" } } WHERE { GRAPH ?g { ?x ?p ?o } }'
     )$$,
-  $$INSERT WHERE template feature 'variable GRAPH ?g'$$
+  $$INSERT WHERE template feature 'unbound template variable ?g'$$
 );
 
 -- Invariant 8 — combined DELETE+INSERT WHERE still panics with the
