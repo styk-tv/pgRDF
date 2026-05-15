@@ -58,6 +58,7 @@ result rows ─► SETOF JSONB
 | OPTIONAL { triple } | `LEFT JOIN _pgrdf_quads qOPT_K ON (…)` | Per-block FILTER lands in the ON clause |
 | UNION { A } { B } | `(SELECT … FROM A) UNION ALL (SELECT … FROM B)` | Each branch SELECTs `NULL::TEXT` for vars it doesn't bind |
 | MINUS { triple } | `WHERE NOT EXISTS (SELECT 1 FROM _pgrdf_quads qMIN_K WHERE …)` | Elided at translation time when there are no shared variables (SPARQL no-op) |
+| `GRAPH <iri> { … }` | `qN.graph_id = <resolved>` on every triple alias inside the block | IRI resolved against `_pgrdf_graphs.iri` at translate time; unresolved IRI binds to `-1` (zero rows, spec-correct "no solutions") |
 | DISTINCT / REDUCED | `SELECT DISTINCT …` | REDUCED → DISTINCT (safe over-approximation per spec) |
 | ORDER BY ?v | `ORDER BY (SELECT lex …) ASC/DESC NULLS LAST` or by ordinal | Unprojected ?v → hidden trailing SELECT column |
 | LIMIT N / OFFSET N | `LIMIT N` / `OFFSET N` | Postgres-native |
@@ -120,7 +121,7 @@ Concrete shape:
   same shape but different IRI constants → 1 miss + 1 hit; a
   structurally distinct query → 1 miss + 0 hits.
 
-## Surface today (v0.3 SPARQL surface complete)
+## Surface today (v0.3 SPARQL surface complete; v0.4 §3.3 GRAPH `<iri>` landing)
 
 - ✅ Basic Graph Patterns (1..N triples)
 - ✅ `SELECT` (explicit projection or `SELECT *`); `ASK`
@@ -140,9 +141,19 @@ Concrete shape:
 - ✅ `BIND(expr AS ?v)` for projection — Literal / NamedNode /
       Variable, STR / LANG / DATATYPE / UCASE / LCASE / STRLEN,
       arithmetic, CONCAT
+- ✅ Named-graph `GRAPH <iri> { … }` — literal-IRI form (slice 114).
+      Translate-time IRI → `graph_id` resolution via
+      `_pgrdf_graphs.iri`; unresolved IRI binds to `-1` (zero
+      rows, spec-correct). Single-branch BGP shares one constraint;
+      composition with OPTIONAL / UNION / MINUS that spans different
+      scopes is slice 112.
+- ⏳ Named-graph `GRAPH ?g { … }` — variable form. Slice 113 wires
+      it: projection of `?g` as a `NamedNode` JSONB term via JOIN
+      against `_pgrdf_graphs`. Until then the executor panics with
+      the stable "GRAPH ?g { ... } (variable form) not yet supported"
+      prefix.
 - ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
-- ⏳ Named-graph `GRAPH { … }` — needs graph-IRI→graph_id mapping; v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4
 - ⏳ Aggregates over UNION; multi-triple OPTIONAL; BIND-in-FILTER — v0.4
 - ❌ Federated `SERVICE` — out of scope for v0.x

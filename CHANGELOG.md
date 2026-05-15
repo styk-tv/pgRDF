@@ -6,6 +6,25 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase A slice 114 — SPARQL `GRAPH <iri> { … }` translation (LLD v0.4 §3.3)
+
+The SPARQL executor now handles literal-IRI `GRAPH { … }` blocks.
+At translate time, the IRI resolves to a `graph_id` via
+`_pgrdf_graphs.iri`; unresolved IRIs bind to `-1` (zero-rows
+sentinel, spec-correct "no solutions"). Every triple alias inside
+the GRAPH block carries an additional `q.graph_id = <resolved>`
+WHERE constraint.
+
+`pgrdf.sparql_parse` no longer flags `GRAPH { … }` with a literal
+IRI under `unsupported_algebra`. Variable form `GRAPH ?g { … }`
+stays 🚧 until slice 113.
+
+Regression: `tests/regression/sql/78-sparql-graph-literal-iri.sql`
+verifies the per-graph scoping (g1 vs g2), pre-existing
+no-graph-scope path preservation, unresolved-IRI zero-rows
+semantics, and the `unsupported_algebra` flip. Plus one pgrx test
+exercising the same surface.
+
 ### Phase A slice 115 — `pgrdf.graph_iri(id)` symmetric lookup
 
 Read-only `pgrdf.graph_iri(id BIGINT) → TEXT` returns the IRI

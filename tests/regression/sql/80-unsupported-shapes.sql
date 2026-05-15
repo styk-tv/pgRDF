@@ -98,14 +98,23 @@ SELECT _check_gap(
   'sparql: unsupported algebra'
 );
 
--- ─── Gap 4: GRAPH named-graph clause ─────────────────────────────
--- W3C §13.3 — needs a graph IRI → graph_id mapping that the
--- storage schema doesn't yet carry.
+-- ─── Gap 4: GRAPH ?g { … } variable form ─────────────────────────
+-- W3C §13.3 — the literal-IRI form (`GRAPH <iri> { … }`) is now
+-- supported as of Phase A slice 114 (LLD v0.4 §3.3): the executor
+-- resolves the IRI to a `graph_id` via `_pgrdf_graphs.iri` at
+-- translate time and emits `qN.graph_id = <id>` on each pattern.
+-- Positive coverage lives in
+-- `tests/regression/sql/78-sparql-graph-literal-iri.sql`.
+--
+-- The variable form (`GRAPH ?g { … }`) is still 🚧 — slice 113
+-- adds projection of `?g` as an IRI via JOIN against
+-- `_pgrdf_graphs`. Until then the executor panics with the stable
+-- "GRAPH ?g { ... } (variable form) not yet supported" prefix.
 SELECT _check_gap(
-  'gap-4 GRAPH clause',
+  'gap-4 GRAPH ?g variable form',
   'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s WHERE { GRAPH <http://example.com/g1> { ?s foaf:name ?n } }',
-  'sparql: unsupported algebra'
+   SELECT ?s ?g WHERE { GRAPH ?g { ?s foaf:name ?n } }',
+  'sparql: GRAPH ?g { ... } (variable form) not yet supported'
 );
 
 -- ─── Gap 5: CONSTRUCT query form ─────────────────────────────────

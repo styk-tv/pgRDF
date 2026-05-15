@@ -449,9 +449,36 @@ not the integer. See
   `graph_iri_roundtrip`). With slice 115 done, the Phase A §3.2 UDF
   surface is complete (slices 120-115); the SPARQL surface lands
   next (slices 114-110).
-- ⏳ Slices 114-110 — SPARQL `GRAPH { … }` translation
-  (resolution against `_pgrdf_graphs.iri`, projection of `?g` as
-  IRI).
+- ✅ **Slice 114 — SPARQL `GRAPH <iri> { … }` literal-IRI form
+  translation.** The executor's pattern walk now handles
+  `GraphPattern::Graph { NamedNode(iri), inner }` by resolving the
+  IRI to a `graph_id` via `_pgrdf_graphs.iri` at translate time and
+  threading the constraint through `ParsedSelect` /
+  `build_from_and_where` so every triple alias inside the GRAPH
+  block carries an additional `qN.graph_id = $K` WHERE clause.
+  Unresolved IRI binds to the sentinel `-1` (no real partition
+  uses that value) ⇒ zero rows, spec-correct "no solutions"; no
+  error raised. The parser's `unsupported_algebra` walk now drops
+  the "Graph (named graph clause)" tag for the literal-IRI form
+  (it walks `inner` so the contained BGP triples are still
+  counted); the variable form `GRAPH ?g { … }` keeps a fresh
+  `"Graph (variable IRI; slice 113)"` tag. Regression coverage:
+  [`tests/regression/sql/78-sparql-graph-literal-iri.sql`](../tests/regression/sql/78-sparql-graph-literal-iri.sql)
+  + one `#[pg_test]` (`sparql_graph_literal_iri_scopes_to_graph`
+  in [`src/query/executor.rs`](../src/query/executor.rs)).
+  Slice-114 limitation: a single graph constraint covers the
+  entire single-branch BGP — composition with OPTIONAL / UNION /
+  MINUS that span different scopes is slice 112.
+- ⏳ Slice 113 — SPARQL `GRAPH ?g { … }` variable form.
+  Will project `?g` as a `NamedNode` JSONB term via JOIN against
+  `_pgrdf_graphs`. Today the executor panics with the stable
+  "GRAPH ?g { ... } (variable form) not yet supported — see slice
+  113" prefix.
+- ⏳ Slice 112 — GRAPH composition with OPTIONAL / UNION / MINUS
+  across different graph scopes (per-pattern constraint
+  annotation).
+- ⏳ Slices 111-110 — W3C-shape regression for named-graph
+  scoping + remaining §3 surface.
 
 ### Track 2 — SPARQL UPDATE
 `INSERT DATA`, `DELETE DATA`, pattern-driven `INSERT/DELETE … WHERE`,

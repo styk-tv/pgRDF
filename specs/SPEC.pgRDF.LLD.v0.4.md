@@ -93,7 +93,8 @@ Capability matrix for the v0.4 target:
 
 | Capability | v0.3 status | v0.4 target | v0.4 status |
 |---|---|---|---|
-| `GRAPH <iri> { … }` and `GRAPH ?g { … }` | ⏳ deferred | §3 | 🚧 |
+| `GRAPH <iri> { … }` | ⏳ deferred | §3.3 | ✅ slice 114 |
+| `GRAPH ?g { … }` | ⏳ deferred | §3.3 | 🚧 slice 113 |
 | IRI ↔ graph_id mapping table + UDFs | not yet | §3.1/§3.2 | 🚧 |
 | SPARQL UPDATE (INSERT DATA / DELETE DATA / INSERT/DELETE WHERE) | not yet | §4 | 🚧 |
 | `WITH <iri>` + graph-scoped UPDATE | not yet | §4.1 | 🚧 |
@@ -181,19 +182,42 @@ interchangeable at the UDF boundary. `pgrdf.put_quad`,
 
 ### 3.3 SPARQL GRAPH support
 
-- **`GRAPH <iri> { … }`** resolves `<iri>` against `_pgrdf_graphs.iri`
-  to a `graph_id`. Unresolved IRI ⇒ zero rows (spec-correct "no
-  solutions"; no error raised).
-- **`GRAPH ?g { … }`** projects `?g` as the **IRI** (NOT the integer
-  id) — bound by a JOIN against `_pgrdf_graphs`. This is
-  user-visible; callers see and write IRIs, never the dictionary id.
+- **`GRAPH <iri> { … }`** ✅ landed (Phase A countdown slice 114).
+  The executor's pattern walk resolves `<iri>` against
+  `_pgrdf_graphs.iri` at translate time and adds `qN.graph_id = $K`
+  to every triple alias inside the GRAPH block. Unresolved IRI binds
+  to the sentinel `-1` (no real partition uses that value) ⇒ zero
+  rows, spec-correct "no solutions"; no error raised. Implementation
+  threads a `graph_id_constraint: Option<i64>` from the
+  `GraphPattern::Graph { NamedNode, inner }` walk through
+  `ParsedSelect` / `UnionBranch` into `build_from_and_where`, where
+  the constraint is appended to mandatory BGP triples, OPTIONAL
+  LEFT-JOIN ON clauses, and `translate_minus` sub-SELECTs. The
+  parser's `unsupported_algebra` list no longer carries the
+  "Graph (named graph clause)" tag for the literal-IRI form; it
+  walks `inner` so the contained BGP triples are still counted.
+  Regression: [`tests/regression/sql/78-sparql-graph-literal-iri.sql`](../tests/regression/sql/78-sparql-graph-literal-iri.sql)
+  + one `#[pg_test]` (`sparql_graph_literal_iri_scopes_to_graph`).
+  Slice-114 limitation: a single graph constraint covers the entire
+  single-branch BGP — composition with OPTIONAL / UNION / MINUS that
+  span different scopes is slice 112 (per-pattern annotation).
+- **`GRAPH ?g { … }`** 🚧 pending slice 113. Will project `?g` as
+  the **IRI** (NOT the integer id) via JOIN against `_pgrdf_graphs`.
+  Today the executor panics with the stable
+  `sparql: GRAPH ?g { ... } (variable form) not yet supported — see slice 113`
+  prefix; the parser flags it as `"Graph (variable IRI; slice 113)"`
+  in `unsupported_algebra`. Locked in
+  [`tests/regression/sql/80-unsupported-shapes.sql`](../tests/regression/sql/80-unsupported-shapes.sql)
+  gap-4.
 - Composition discipline:
   - `GRAPH { … }` composes inside `OPTIONAL`, `UNION`, and `MINUS`
     blocks. Translation reuses the v0.3 `build_from_and_where`
     layout, threading a new `graph_id` (or `graph_iri`) join
     constraint per pattern.
   - Nested `GRAPH` blocks resolve to the innermost scope at AST-walk
-    time (per W3C SPARQL 1.1 §13.3).
+    time (per W3C SPARQL 1.1 §13.3). Slice-114 honours this for
+    nested literal-IRI scopes (innermost overwrites the constraint
+    during the walk); per-pattern scope arrives in slice 112.
   - A bare BGP outside any `GRAPH { … }` continues to mean "match in
     any graph" — same semantics as v0.3 (`pgrdf.sparql` over the
     union of all partitions).

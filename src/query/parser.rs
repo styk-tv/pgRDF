@@ -142,7 +142,24 @@ fn walk(
             walk(right, vars, bgp, unsupported);
         }
         GraphPattern::Join { .. } => unsupported.push("Join (non-BGP)"),
-        GraphPattern::Graph { .. } => unsupported.push("Graph (named graph clause)"),
+        GraphPattern::Graph { name, inner } => {
+            // Slice 114: `GRAPH <iri> { … }` (literal-IRI form) is
+            // supported by the executor — translate-time resolution
+            // against `_pgrdf_graphs.iri` flows a per-pattern graph
+            // constraint into the BGP SQL. Walk `inner` so the parser
+            // still counts the triples it carries.
+            //
+            // Slice 113 will replace the panic below; until then,
+            // `GRAPH ?g { … }` (variable form) remains flagged.
+            match name {
+                NamedNodePattern::NamedNode(_) => {
+                    walk(inner, vars, bgp, unsupported);
+                }
+                NamedNodePattern::Variable(_) => {
+                    unsupported.push("Graph (variable IRI; slice 113)");
+                }
+            }
+        }
         GraphPattern::Group { inner, .. } => {
             // Aggregates — supported by the executor. Walk the inner
             // BGP so the parser still reports its shape.

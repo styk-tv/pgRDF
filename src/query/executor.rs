@@ -73,10 +73,18 @@
 //!   * `BIND(expr AS ?v)` — captured as a BindSpec and rendered as
 //!     an extra SELECT-list column via `translate_bind_expression`.
 //!     Filtering on a BIND output is not yet supported.
-//!   * Property paths, inline VALUES, SERVICE, named-graph
-//!     `GRAPH` clauses remain unsupported (named graphs land in
-//!     v0.4 — see SPEC.pgRDF.LLD.v0.4.md §3; paths in §7;
-//!     VALUES + DESCRIBE in §4-deferred backlog).
+//!   * `GRAPH <iri> { … }` — literal-IRI named-graph scope.
+//!     Translate-time IRI → `graph_id` resolution via
+//!     `_pgrdf_graphs.iri`; unresolved IRI binds to the sentinel
+//!     `-1` (zero rows, spec-correct "no solutions"). Slice 114
+//!     restriction: the entire single-branch BGP carries one
+//!     graph constraint — composition with OPTIONAL / UNION /
+//!     MINUS that span different scopes is slice 112.
+//!   * `GRAPH ?g { … }` (variable form) panics with a clear
+//!     "see slice 113" message — slice 113 replaces it with a
+//!     `JOIN _pgrdf_graphs` projection-as-IRI translation.
+//!   * Property paths, inline VALUES, SERVICE remain unsupported
+//!     (paths in v0.4 §7; VALUES + DESCRIBE in §4-deferred backlog).
 //!
 //! Output shape:
 //!   `SETOF JSONB` — one row per solution, keys = projected variable
@@ -219,6 +227,20 @@ struct ParsedSelect {
     order_by: Vec<(String, bool)>,
     limit: Option<usize>,
     offset: usize,
+    /// Resolved `_pgrdf_graphs.graph_id` for the enclosing
+    /// `GRAPH <iri> { … }` block, if any. `None` ⇒ no graph
+    /// constraint (legacy v0.3 behaviour: scan every partition).
+    /// `Some(-1)` is the sentinel for an unresolved IRI, which
+    /// reliably produces zero rows because no real partition uses
+    /// `graph_id = -1`. Threaded down into `build_from_and_where`
+    /// where it adds `qN.graph_id = $K` to every mandatory BGP,
+    /// OPTIONAL, and MINUS triple alias inside the block.
+    ///
+    /// Slice-114 limitation: a single constraint applies to the
+    /// entire (single-branch) BGP. Composition with OPTIONAL /
+    /// UNION / MINUS that span different GRAPH scopes is slice 112
+    /// — it will move to per-pattern or per-block annotation.
+    graph_id_constraint: Option<i64>,
 }
 
 struct OptionalBlock {
@@ -279,6 +301,10 @@ struct UnionBranch {
     filters: Vec<Expression>,
     optionals: Vec<OptionalBlock>,
     minuses: Vec<Vec<TriplePattern>>,
+    /// Per-branch graph constraint — set when a UNION branch sits
+    /// inside `GRAPH <iri> { … }`. Same semantics as the
+    /// `ParsedSelect::graph_id_constraint` above.
+    graph_id_constraint: Option<i64>,
 }
 
 fn translate(q: &Query) -> ExecPlan {
@@ -348,6 +374,7 @@ fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
                     &b.minuses,
                     &mut anchors,
                     0,
+                    b.graph_id_constraint,
                 );
                 let mut sql = format!("SELECT 1 FROM {from_sql}");
                 if !where_clauses.is_empty() {
@@ -367,6 +394,7 @@ fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
         &ps.minuses,
         &mut anchors,
         0,
+        ps.graph_id_constraint,
     );
     let mut sql = format!("SELECT 1 FROM {from_sql}");
     if !where_clauses.is_empty() {
@@ -613,6 +641,23 @@ fn walk_branch(p: &GraphPattern, ub: &mut UnionBranch) {
             };
             ub.minuses.push(triples);
         }
+        GraphPattern::Graph { name, inner } => {
+            // Same shape as `walk_select`'s GRAPH arm — literal-IRI
+            // form resolves to a per-branch `graph_id_constraint`.
+            match name {
+                NamedNodePattern::NamedNode(node) => {
+                    let iri = node.as_str().to_string();
+                    let resolved = lookup_graph_id(&iri).unwrap_or(-1);
+                    ub.graph_id_constraint = Some(resolved);
+                    walk_branch(inner, ub);
+                }
+                NamedNodePattern::Variable(_) => {
+                    panic!(
+                        "sparql: GRAPH ?g {{ ... }} (variable form) not yet supported — see slice 113"
+                    );
+                }
+            }
+        }
         other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
     }
 }
@@ -747,6 +792,41 @@ fn walk_select(p: &GraphPattern, ps: &mut ParsedSelect) {
         GraphPattern::Bgp { patterns } => {
             ps.bgp = patterns.clone();
         }
+        GraphPattern::Graph { name, inner } => {
+            // `GRAPH <iri> { … }` — literal-IRI form only (slice
+            // 114). Resolve `<iri>` against `_pgrdf_graphs.iri` at
+            // translate time; unresolved IRI binds to `-1` so the
+            // generated SQL produces zero rows (spec-correct "no
+            // solutions" — same trick the constant-term path uses
+            // for unknown dictionary entries). The constraint flows
+            // through to `build_from_and_where` and is applied as
+            // `qN.graph_id = $K` on every triple alias inside.
+            //
+            // Variable form `GRAPH ?g { … }` is deferred to slice
+            // 113; we panic with a clear message rather than fall
+            // through and silently drop the scope.
+            //
+            // Composition with OPTIONAL / UNION / MINUS that span
+            // different graph scopes is slice 112 — today the
+            // entire single-branch BGP shares one constraint.
+            match name {
+                NamedNodePattern::NamedNode(node) => {
+                    let iri = node.as_str().to_string();
+                    let resolved = lookup_graph_id(&iri).unwrap_or(-1);
+                    // Nested GRAPH blocks: innermost wins (W3C
+                    // SPARQL 1.1 §13.3). Per-pattern scope arrives
+                    // in slice 112; today the latest assignment is
+                    // the single constraint applied to the BGP.
+                    ps.graph_id_constraint = Some(resolved);
+                    walk_select(inner, ps);
+                }
+                NamedNodePattern::Variable(_) => {
+                    panic!(
+                        "sparql: GRAPH ?g {{ ... }} (variable form) not yet supported — see slice 113"
+                    );
+                }
+            }
+        }
         other => panic!("sparql: unsupported algebra in select wrapper: {other:?}"),
     }
 }
@@ -823,6 +903,7 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
         &ps.minuses,
         &mut anchors,
         0,
+        ps.graph_id_constraint,
     );
 
     // Project: each projected var → its anchor alias.column → dict
@@ -912,6 +993,7 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
         &ps.minuses,
         &mut anchors,
         0,
+        ps.graph_id_constraint,
     );
 
     // Pre-compute SQL expressions per group variable so SELECT and
@@ -1231,6 +1313,7 @@ fn build_branch_sql(branch: &UnionBranch, projected: &[String]) -> String {
         &branch.minuses,
         &mut anchors,
         0,
+        branch.graph_id_constraint,
     );
 
     let mut select_clauses: Vec<String> = Vec::new();
@@ -1270,6 +1353,7 @@ fn build_from_and_where(
     minuses: &[Vec<TriplePattern>],
     anchors: &mut HashMap<String, (usize, &'static str)>,
     alias_offset: usize,
+    graph_constraint: Option<i64>,
 ) -> (String, Vec<String>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut from_sql = String::new();
@@ -1278,6 +1362,14 @@ fn build_from_and_where(
     for (i, tp) in bgp.iter().enumerate() {
         let qi = alias_offset + i + 1;
         let mut clauses = pattern_clauses(tp, qi, anchors);
+        // GRAPH <iri> { … } scope (slice 114): every triple alias
+        // inside the GRAPH block gets `qN.graph_id = $K`. Unresolved
+        // IRI yields -1, which no real partition uses → zero rows
+        // (spec-correct "no solutions").
+        if let Some(gid) = graph_constraint {
+            let p = id_placeholder(gid);
+            clauses.push(format!("q{qi}.graph_id = {p}"));
+        }
         if i == 0 {
             from_sql.push_str(&format!("pgrdf._pgrdf_quads q{qi}"));
             where_clauses.append(&mut clauses);
@@ -1298,6 +1390,13 @@ fn build_from_and_where(
         let opt_qi = next_qi;
         next_qi += 1;
         let mut clauses = pattern_clauses(&opt.triple, opt_qi, anchors);
+        // Same graph constraint applies to OPTIONAL aliases (slice
+        // 114 simplifying assumption — the entire single-branch
+        // pattern shares one GRAPH scope; slice 112 will lift it).
+        if let Some(gid) = graph_constraint {
+            let p = id_placeholder(gid);
+            clauses.push(format!("q{opt_qi}.graph_id = {p}"));
+        }
         if let Some(filter_expr) = &opt.filter {
             let sql = translate_filter(filter_expr, anchors).unwrap_or_else(|| {
                 panic!("sparql: OPTIONAL FILTER not translatable: {filter_expr:?}")
@@ -1325,7 +1424,9 @@ fn build_from_and_where(
     // Per SPARQL spec, MINUS with no shared variables is a no-op and
     // is elided here.
     for minus_triples in minuses {
-        if let Some(sql) = translate_minus(minus_triples, anchors, &mut next_qi) {
+        if let Some(sql) =
+            translate_minus(minus_triples, anchors, &mut next_qi, graph_constraint)
+        {
             where_clauses.push(sql);
         }
     }
@@ -1344,6 +1445,7 @@ fn translate_minus(
     triples: &[TriplePattern],
     outer_anchors: &HashMap<String, (usize, &'static str)>,
     next_qi: &mut usize,
+    graph_constraint: Option<i64>,
 ) -> Option<String> {
     if triples.is_empty() {
         return None;
@@ -1377,6 +1479,12 @@ fn translate_minus(
         *next_qi += 1;
         from_aliases.push(format!("pgrdf._pgrdf_quads q{qi}"));
         let mut clauses = pattern_clauses(tp, qi, &mut local_anchors);
+        // Slice-114 graph scope flows into MINUS too — same single
+        // constraint shared by the whole single-branch pattern.
+        if let Some(gid) = graph_constraint {
+            let p = id_placeholder(gid);
+            clauses.push(format!("q{qi}.graph_id = {p}"));
+        }
         all_clauses.append(&mut clauses);
     }
     let where_inside = if all_clauses.is_empty() {
@@ -1937,6 +2045,22 @@ fn lookup_iri_id(iri: &str) -> Option<i64> {
     Spi::get_one_with_args(
         "SELECT (SELECT id FROM pgrdf._pgrdf_dictionary
                   WHERE term_type = 1 AND lexical_value = $1 LIMIT 1)",
+        &[iri.into()],
+    )
+    .ok()
+    .flatten()
+}
+
+/// Resolve a graph IRI to its integer `graph_id` via
+/// `_pgrdf_graphs.iri`. Returns `None` if the IRI is not bound;
+/// callers turn that into the sentinel `-1` so the generated SQL
+/// produces zero rows (spec-correct "no solutions"). Wrapped in a
+/// scalar `SELECT (subquery)` so SPI stays on the "exactly one row"
+/// path — same idiom slice 116 / slice 115 use for their lookups.
+fn lookup_graph_id(iri: &str) -> Option<i64> {
+    Spi::get_one_with_args(
+        "SELECT (SELECT graph_id FROM pgrdf._pgrdf_graphs
+                  WHERE iri = $1 LIMIT 1)",
         &[iri.into()],
     )
     .ok()
@@ -3694,5 +3818,77 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 1);
+    }
+
+    /// Slice 114 — `GRAPH <iri> { … }` scopes the BGP to a single
+    /// named graph. Two graphs (501, 502) each carry one triple; a
+    /// `GRAPH <iri>` query against either's IRI returns exactly that
+    /// graph's triple, and an unresolved IRI returns zero rows
+    /// (sentinel `graph_id = -1` matches no real partition).
+    ///
+    /// Uses direct INSERT into `_pgrdf_graphs` + manual partition
+    /// creation to bypass `add_graph`'s parallelism flake — pgrx
+    /// runs `#[pg_test]`s in parallel and the IRI-keyed overload's
+    /// SHARE ROW EXCLUSIVE lock has been flaky under contention.
+    #[pg_test]
+    fn sparql_graph_literal_iri_scopes_to_graph() {
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
+             VALUES (501, 'http://example.org/test-g1'), \
+                    (502, 'http://example.org/test-g2')",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE TABLE pgrdf._pgrdf_quads_test501 \
+             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (501)",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE TABLE pgrdf._pgrdf_quads_test502 \
+             PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN (502)",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:a ex:p \"in-501\" .', 501)",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(\
+                 '@prefix ex: <http://example.org/> . \
+                  ex:b ex:p \"in-502\" .', 502)",
+        )
+        .unwrap();
+
+        let count_g1: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?o WHERE { GRAPH <http://example.org/test-g1> { ?s ex:p ?o } }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(count_g1, 1, "GRAPH <g1> should surface exactly its 1 triple");
+
+        let count_g2: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?o WHERE { GRAPH <http://example.org/test-g2> { ?s ex:p ?o } }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(count_g2, 1, "GRAPH <g2> should surface exactly its 1 triple");
+
+        let count_unresolved: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex: <http://example.org/> \
+                SELECT ?o WHERE { GRAPH <http://example.org/none> { ?s ex:p ?o } }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            count_unresolved, 0,
+            "unresolved GRAPH IRI must bind to the -1 sentinel → zero rows"
+        );
     }
 }
