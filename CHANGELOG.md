@@ -6,6 +6,19 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Upstream — `reasonable` PR filed (E-011 step 4)
+
+Filed the upstream patch as
+[gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
+on 2026-05-15. The PR description carries the downstream verification
+data (pgRDF 160 tests green, real SHACL `pgrdf.validate` running
+against `shacl 0.3.1` + the patched `reasonable` via
+`[patch.crates-io]`). `specs/ERRATA.v0.4.md` E-011 status flipped
+from "verified locally" to "verified locally + upstream PR open
+(awaiting maintainer review/merge)". Once the upstream merges, the
+`[patch.crates-io]` block in `Cargo.toml` drops and the dep pins
+to whatever release ships the patch.
+
 ### Spec — v0.4 LLD promoted from FUTURE, v0.5-FUTURE opened
 
 SHACL real impl shipped on `main` in commit `ac40bc2`; v0.4 LLD is

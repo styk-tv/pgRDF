@@ -25,11 +25,11 @@ resolution text; status notes below are deltas only.
 | Field | Value |
 |---|---|
 | Filed | 2026-05-15 |
-| Status | verified locally (fork patch unblocks SHACL real-impl end-to-end; upstream PR not yet filed) |
+| Status | verified locally + upstream PR open (awaiting maintainer review/merge) |
 | Resolves | The remaining `rdf-12 / TermRef::Triple` half of [E-009](ERRATA.v0.2.md) |
 | Fork branch | https://github.com/styk-tv/reasonable/tree/rdf12-passthrough |
-| Upstream target | https://github.com/gtfierro/reasonable (PR not yet filed) |
-| Local PR draft | `/Users/neoxr/git_styk/reasonable/PR-DRAFT.md` |
+| Upstream PR | <https://github.com/gtfierro/reasonable/pull/50> (filed 2026-05-15) |
+| Local PR draft | `/Users/neoxr/git_styk/reasonable/PR-DRAFT.md` (now reflected upstream) |
 
 #### Context
 
@@ -129,8 +129,8 @@ locally via `[patch.crates-io]`; the PR can be filed.
 1. ~~Wire `[patch.crates-io] reasonable = { git = "...", branch = "rdf12-passthrough" }` in pgRDF's `Cargo.toml` (with `features = ["rdf-12"]` on the dep).~~ **Done — landed in v0.4 slice.**
 2. ~~Add `shacl 0.3.x` to pgRDF's deps; verify the dep tree resolves cleanly.~~ **Done — pinned at `shacl = "0.3"` + `rudof_rdf = "0.3"`.**
 3. ~~Replace the `pgrdf.validate` stub in `src/validation/shacl.rs` with a real `shacl::GraphValidation`-backed body.~~ **Done — see [LLD.v0.4 §9](SPEC.pgRDF.LLD.v0.4.md).**
-4. File the upstream PR using the held draft. **Open — held for user authorisation.**
-5. Once upstream merges, drop the `[patch.crates-io]` line and pin `reasonable = "0.4.2"` (or whatever lands). **Open — gated on (4).**
+4. ~~File the upstream PR using the held draft.~~ **Done 2026-05-15: <https://github.com/gtfierro/reasonable/pull/50>**.
+5. Once upstream merges, drop the `[patch.crates-io]` line and pin `reasonable = "0.4.2"` (or whatever lands). **Open — gated on maintainer review of (4).**
 
 This entry is updated as work progresses; final state is **resolved**
 once upstream merges and pgRDF pins the released `reasonable` version.
