@@ -143,6 +143,15 @@ for name in "${tests[@]}"; do
   # the prompt, not the row output. The query rows come last; keep
   # the JSON-looking ones.
   actual_raw="$(printf '%s\n' "${raw}" | grep -E '^\{|^\[' || true)"
+  # Phase C slice 77 — UPDATE forms return a `_update` summary row
+  # carrying a non-deterministic `elapsed_ms` measurement. Normalise
+  # it to `0` so bag-equivalence diffs remain stable across runs. The
+  # substitution is narrow: it only matches the JSON key/value pair
+  # `"elapsed_ms": <number>` (integer, decimal, or scientific). SELECT
+  # / ASK rows are untouched — `elapsed_ms` only appears inside the
+  # UPDATE summary envelope.
+  actual_raw="$(printf '%s\n' "${actual_raw}" \
+    | sed -E 's/"elapsed_ms": [0-9eE.+-]+/"elapsed_ms": 0/g')"
   actual="$(printf '%s\n' "${actual_raw}" | LC_ALL=C sort)"
 
   if [ ! -f "${expected}" ] || [ "${ACCEPT}" = "1" ]; then

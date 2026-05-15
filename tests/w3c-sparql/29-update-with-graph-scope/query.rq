@@ -1,0 +1,4 @@
+PREFIX ex: <http://example.org/>
+WITH <http://example.org/store>
+INSERT { ?s ex:tagged "yes" }
+WHERE  { ?s ex:hasPrice ?p }
