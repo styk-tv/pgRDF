@@ -1,0 +1,54 @@
+
+0
+4
+http://example.org/alice|http://example.org/dave
+http://example.org/bob|http://example.org/alice
+http://example.org/carol|http://example.org/alice
+http://example.org/carol|http://example.org/bob
+http://example.org/alice|http://example.org/dave
+http://example.org/bob|http://example.org/alice
+http://example.org/carol|http://example.org/alice
+http://example.org/carol|http://example.org/bob
+4
+http://example.org/alice
+http://example.org/bob
+http://example.org/alice|http://example.org/bob
+http://example.org/alice|http://example.org/carol
+http://example.org/bob|http://example.org/carol
+http://example.org/dave|http://example.org/alice
+http://example.org/alice|http://example.org/bob
+http://example.org/alice|http://example.org/carol
+http://example.org/bob|http://example.org/carol
+http://example.org/dave|http://example.org/alice
+3
+http://example.org/bob|http://example.org/alice|30
+http://example.org/carol|http://example.org/alice|30
+http://example.org/carol|http://example.org/bob|25
+1
+2
+http://example.org/p1
+http://example.org/p2
+2
+t
+t
+6
+t
+64
+1024
+1
+64
+guc-below-min-rejected: t
+guc-above-max-rejected: t
+
+t
+0
+zero-or-more-preview-panic: t
+one-or-more-preview-panic: t
+zero-or-one-preview-panic: t
+alternation-gated-panic: t
+negated-set-out-of-scope-panic: t
+reverse-of-recursive-still-previews: t
+0
+1
+
+8

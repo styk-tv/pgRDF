@@ -134,6 +134,59 @@ coverage:
 plus W3C-shape fixtures 24 / 25 / 26 under
 [`tests/w3c-sparql/`](../tests/w3c-sparql/).
 
+## Property paths (LLD v0.4 §7 — Phase E, group E1 shipped)
+
+SPARQL property paths arrive in the spargebra algebra as
+`GraphPattern::Path { subject, path, object }`. The shared WHERE
+walker (`walk_select_scoped` / `walk_branch`) recognises `Path` at
+the single chokepoint every query form routes through — SELECT, ASK,
+`pgrdf.construct`, and the UPDATE WHERE bodies all inherit path
+support at once (it is not special-cased per consumer).
+`query::path::translate_property_path` lowers the supported operators
+to an ordinary triple, which then flows through the existing
+`pattern_clauses` machinery — so paths compose for free with
+named-graph scoping, multi-pattern BGP joins, and
+OPTIONAL/UNION/MINUS.
+
+| Operator | SPARQL | Semantics | Status |
+|---|---|---|---|
+| bare predicate | `?s p ?o` (as a `Path`) | direct triple | ✅ E1 — lowers to `?s p ?o` |
+| `^` inverse | `?s ^p ?o` | `?o p ?s` | ✅ E1 — subject/object swap, no recursion; `^(^p)` folds by parity |
+| `+` one-or-more | `?s p+ ?o` | transitive closure | 🚧 group E2 (recursive CTE) |
+| `*` zero-or-more | `?s p* ?o` | reflexive transitive closure | 🚧 group E3 |
+| `?` zero-or-one | `?s p? ?o` | equal-or-linked | 🚧 group E3 |
+| `\|` alternation | `?s (a\|b) ?o` | per-predicate union | 🚧 group E4 (gated stretch) |
+| `!(...)` negated set | `?s !(p) ?o` | — | out of v0.4 scope (panics) |
+| sequence `p1/p2` | `?s p1/p2 ?o` | — | use a multi-pattern BGP (`{ ?s p1 ?m . ?m p2 ?o }`); E1 rejects an explicit `Sequence` path-expr with a pointer to the BGP form |
+
+The not-yet-landed operators **preview-panic** with a stable prefix
+(`pgrdf: property path operator '<op>' lands in Phase E group EN
+(slice NN)` — `+`→E2, `*`/`?`→E3; `|` is the gated-stretch message
+for E4). Substring-match the prefix; the slice-number tail is
+advisory and shifts with the cycle countdown. `sparql_parse` does
+NOT panic on these — it lowers the E1 set into the `bgp` shape and
+flags the recursive forms in `unsupported_algebra` (parse-time
+analysis, mirroring how Phase C reports not-yet-shipped UPDATE
+forms).
+
+**`pgrdf.path_max_depth` GUC.** Integer, `GucContext::Userset`,
+default **64**, range **1..1024**, registered in `_PG_init`
+(`query::guc`). Bounds the recursive-path walk depth. E1 only
+registers + exposes it (`SHOW pgrdf.path_max_depth` /
+`current_setting('pgrdf.path_max_depth')`); enforcement lands with
+the recursive operators in group E2 (a depth guard is meaningless
+without recursion). Over-depth queries will *truncate* (not error)
+once E2 ships; the count surfaces on `pgrdf.stats()` as
+`path_depth_truncations` (a cross-backend shmem counter, 0 in E1,
+zeroed by `pgrdf.shmem_reset()`).
+
+Implementation:
+[`src/query/path.rs`](../src/query/path.rs),
+[`src/query/guc.rs`](../src/query/guc.rs); regression coverage:
+[`108-property-path-inverse.sql`](../tests/regression/sql/108-property-path-inverse.sql).
+W3C-shape property-path fixtures are deferred to group E4 (mirrors
+how Phase D deferred its W3C consolidation).
+
 ## Prepared-plan cache (LLD §4.2, **shipped — Phase 3 step 2**)
 
 Lives in [`src/query/plan_cache.rs`](../src/query/plan_cache.rs).

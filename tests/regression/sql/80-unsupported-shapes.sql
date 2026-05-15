@@ -129,15 +129,18 @@ SELECT _check_gap(
 );
 
 -- ─── Gap 7: Property path with `*` (zero-or-more) ─────────────────
--- W3C §9.1 — pgRDF handles only simple sequence paths (`:a/:b`)
--- which spargebra desugars into a BGP chain. Repetition operators
--- (`*`, `+`, `?`), inverse (`^`), and alternation (`|`) are out
--- of scope until v0.4.
+-- W3C §9.1 — Phase E group E1 ships bare-predicate + `^` inverse
+-- paths (see 108-property-path-inverse.sql). The recursive
+-- repetition operators (`*`, `+`, `?`) and alternation (`|`) are
+-- NOT executable until groups E2/E3/E4; they panic with a STABLE
+-- rollout-preview prefix so downstream tooling can preview the
+-- schedule. `*` (zero-or-more) → group E3. We match on the stable
+-- prefix substring only; the slice-number tail may shift.
 SELECT _check_gap(
   'gap-7 property path zero-or-more',
   'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
    SELECT ?o WHERE { ?s foaf:knows* ?o }',
-  'sparql: unsupported algebra'
+  'lands in Phase E group E3'
 );
 
 -- ─── Gap 8: aggregates over UNION ────────────────────────────────

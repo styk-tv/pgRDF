@@ -707,20 +707,41 @@ Reuse of v0.3 machinery:
 Consumers traversing transitive class hierarchies via
 `rdfs:subClassOf*`-style patterns hit the v0.3 limitation: only
 direct predicate matches are supported. v0.4 adds the core path
-operators. 🚧
+operators across **Phase E**, grouped into four dispatches:
+**E1** (plumbing + `^` inverse + `pgrdf.path_max_depth` GUC +
+`path_depth_truncations` stat scaffold) — **landed**; **E2** (`+`);
+**E3** (`*` / `?`); **E4** (closure-detect + the gated `|` stretch +
+W3C-shape consolidation + the v0.4.5 release). The section keeps the
+🚧 until E4 ships the full set. 🚧
 
 ### 7.1 Surface
 
-| Operator | SPARQL syntax | Semantics |
-|---|---|---|
-| `*` zero-or-more | `?s ex:knows* ?o` | Reflexive transitive closure of `ex:knows`. |
-| `+` one-or-more | `?s ex:knows+ ?o` | Transitive closure (non-reflexive). |
-| `?` zero-or-one | `?s ex:knows? ?o` | Either equal or directly linked. |
-| `^` inverse | `?s ^ex:knows ?o` | Equivalent to `?o ex:knows ?s`. |
-| `\|` alternation | `?s (ex:a\|ex:b) ?o` | Stretch goal — included if the translator refactor is cheap; explicitly gated. |
+| Operator | SPARQL syntax | Semantics | Status |
+|---|---|---|---|
+| `^` inverse | `?s ^ex:knows ?o` | Equivalent to `?o ex:knows ?s`. | **Landed (E1).** No recursion — a subject/object swap on the scan. Nested `^(^p)` folds by parity. |
+| `+` one-or-more | `?s ex:knows+ ?o` | Transitive closure (non-reflexive). | 🚧 group E2 — recursive CTE. |
+| `*` zero-or-more | `?s ex:knows* ?o` | Reflexive transitive closure of `ex:knows`. | 🚧 group E3. |
+| `?` zero-or-one | `?s ex:knows? ?o` | Either equal or directly linked. | 🚧 group E3. |
+| `\|` alternation | `?s (ex:a\|ex:b) ?o` | Stretch goal — included if the translator refactor is cheap; explicitly gated. | 🚧 group E4 (gated). |
+
+A bare predicate that spargebra wraps as a degenerate `Path`
+(adjacent to an operator) is also handled by E1 — it lowers to an
+ordinary triple. The not-yet-landed operators preview-panic with a
+stable rollout-schedule prefix (`pgrdf: property path operator
+'<op>' lands in Phase E group EN (slice NN)`) so downstream tooling
+can route on partial-translatability without depending on the
+volatile slice-number tail. `^` composes with named-graph scoping
+(`GRAPH <iri>` / `GRAPH ?g`), multi-pattern BGP joins,
+OPTIONAL/UNION/MINUS, and `pgrdf.construct` (all route through the
+shared `parse_select` walker, so path support is inherited, not
+special-cased).
 
 Sequence paths (`p1/p2`) are already representable as multi-pattern
-BGPs and do not need new translator support.
+BGPs and do not need new translator support; E1 rejects an explicit
+`Sequence` path-expression with a message pointing at the BGP form
+(rather than minting synthetic join variables that would leak into
+`SELECT *`). Negated property sets (`!(...)`) are out of v0.4 scope
+and panic explicitly.
 
 ### 7.2 Translation strategy
 
@@ -764,10 +785,25 @@ transitive predicates (`rdfs:subClassOf`, `rdfs:subPropertyOf`,
 The detection is per-query, not cached; a future refinement would
 record materialised-closure metadata on `_pgrdf_graphs`.
 
-**Depth-guard.** `$MAX_DEPTH` defaults to 64. Configurable via a
-new GUC `pgrdf.path_max_depth` (range 1..1024). Queries whose
-solution path exceeds the depth are truncated, not errored — a
-warning surfaces on `pgrdf.stats()` as `path_depth_truncations`.
+**Depth-guard.** `$MAX_DEPTH` defaults to 64. Configurable via the
+GUC `pgrdf.path_max_depth` (`GucContext::Userset`, integer, range
+1..1024). Queries whose solution path exceeds the depth are
+truncated, not errored — the count surfaces on `pgrdf.stats()` as
+`path_depth_truncations`.
+
+E1 builds the **scaffold**: the GUC is registered in `_PG_init`
+(`pgrx::guc::GucRegistry::define_int_guc`, name exactly
+`pgrdf.path_max_depth`) and is readable via `SHOW` /
+`current_setting`; `path_depth_truncations` is a cross-backend shmem
+`AtomicU64` (next to the dict-cache counters in
+`storage::shmem_cache`), initialised to 0, zeroed by
+`pgrdf.shmem_reset()`, and surfaced by `pgrdf.stats()`. **Actual
+enforcement** (reading `path_max_depth` to bound the recursive walk,
+and incrementing the counter on truncation) lands in **group E2**
+when the recursive CTE first exists — a depth guard is meaningless
+without recursion. The accessor `query::guc::path_max_depth()` and
+the `shmem_cache::note_path_depth_truncation()` increment helper are
+in place for E2 to call without re-touching the plumbing.
 
 ### 7.3 Acceptance criteria (v0.4 gate)
 

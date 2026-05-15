@@ -78,6 +78,16 @@ static EVICTIONS: PgAtomic<AtomicU64> = unsafe { PgAtomic::new(c"pgrdf_dict_cach
 /// slot in one atomic increment. Starts at 1 so the all-zero initial
 /// slot state reads as stale (slot.generation 0 ≠ current 1).
 static GENERATION: PgAtomic<AtomicU64> = unsafe { PgAtomic::new(c"pgrdf_dict_cache_generation") };
+/// Phase E group E1 (LLD v0.4 §7.2): count of SPARQL property-path
+/// solutions truncated because the walk hit `pgrdf.path_max_depth`.
+/// E1 only *scaffolds* this — the counter exists, initialises to 0,
+/// is zeroed by `pgrdf.shmem_reset()`, and surfaces on
+/// `pgrdf.stats()` as `path_depth_truncations`. The actual increment
+/// is wired in Phase E group E2 once the recursive CTE exists (a
+/// depth guard is meaningless without recursion). Cross-backend
+/// cumulative, like the dict-cache counters above.
+static PATH_DEPTH_TRUNCATIONS: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pgrdf_path_depth_truncations") };
 
 /// Register shmem requests + startup hooks for the dict cache and
 /// its counters + generation flag. Must be called from inside
@@ -95,6 +105,7 @@ pub fn init_in_postmaster() {
     pg_shmem_init!(INSERTS);
     pg_shmem_init!(EVICTIONS);
     pg_shmem_init!(GENERATION = AtomicU64::new(1));
+    pg_shmem_init!(PATH_DEPTH_TRUNCATIONS);
     mark_ready();
 }
 
@@ -114,6 +125,27 @@ pub fn reset() {
         return;
     }
     GENERATION.get().fetch_add(1, Ordering::Relaxed);
+    // Phase E group E1: `path_depth_truncations` is an absolute
+    // counter (not generation-versioned like the dict slots), so
+    // `pgrdf.shmem_reset()` must zero it directly for tests that
+    // assert a clean `0` baseline (LLD v0.4 §7.2 / regression
+    // invariant I).
+    PATH_DEPTH_TRUNCATIONS.get().store(0, Ordering::Relaxed);
+}
+
+/// Increment the property-path depth-truncation counter by one.
+///
+/// Phase E group E1 SCAFFOLD only — no caller increments yet because
+/// no recursive CTE exists until Phase E group E2. E2's recursive
+/// property-path translator calls this each time a solution path is
+/// truncated at `pgrdf.path_max_depth`. `#[allow(dead_code)]` keeps
+/// clippy quiet until that first caller lands.
+#[allow(dead_code)]
+pub fn note_path_depth_truncation() {
+    if !is_ready() {
+        return;
+    }
+    PATH_DEPTH_TRUNCATIONS.get().fetch_add(1, Ordering::Relaxed);
 }
 
 /// Set true inside `_PG_init` only when Postgres is running the
@@ -312,6 +344,11 @@ pub struct Snapshot {
     pub misses: u64,
     pub inserts: u64,
     pub evictions: u64,
+    /// Phase E group E1 (LLD v0.4 §7.2): cumulative property-path
+    /// depth truncations. Always 0 in E1 (no recursive CTE to
+    /// truncate yet); E2 starts incrementing it. Surfaces on
+    /// `pgrdf.stats()` as `path_depth_truncations`.
+    pub path_depth_truncations: u64,
 }
 
 pub fn snapshot() -> Snapshot {
@@ -335,6 +372,11 @@ pub fn snapshot() -> Snapshot {
         },
         evictions: if is_ready() {
             EVICTIONS.get().load(Ordering::Relaxed)
+        } else {
+            0
+        },
+        path_depth_truncations: if is_ready() {
+            PATH_DEPTH_TRUNCATIONS.get().load(Ordering::Relaxed)
         } else {
             0
         },

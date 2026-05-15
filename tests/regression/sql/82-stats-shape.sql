@@ -35,7 +35,8 @@ SELECT
   jsonb_typeof(j->'plan_cache_hits')       = 'number'  AS pc_hits_is_number,
   jsonb_typeof(j->'plan_cache_misses')     = 'number'  AS pc_misses_is_number,
   jsonb_typeof(j->'plan_cache_inserts')    = 'number'  AS pc_inserts_is_number,
-  jsonb_typeof(j->'plan_cache_local_size') = 'number'  AS pc_size_is_number
+  jsonb_typeof(j->'plan_cache_local_size') = 'number'  AS pc_size_is_number,
+  jsonb_typeof(j->'path_depth_truncations') = 'number' AS pdt_is_number
   FROM (SELECT pgrdf.stats() AS j) s;
 
 -- ─── Value-range contract: every counter is non-negative; slots is
@@ -54,7 +55,8 @@ SELECT
   (j->>'plan_cache_hits')::bigint        >= 0    AS pc_hits_nonneg,
   (j->>'plan_cache_misses')::bigint      >= 0    AS pc_misses_nonneg,
   (j->>'plan_cache_inserts')::bigint     >= 0    AS pc_inserts_nonneg,
-  (j->>'plan_cache_local_size')::bigint  >= 0    AS pc_size_nonneg
+  (j->>'plan_cache_local_size')::bigint  >= 0    AS pc_size_nonneg,
+  (j->>'path_depth_truncations')::bigint >= 0    AS pdt_nonneg
   FROM (SELECT pgrdf.stats() AS j) s;
 
 -- Note: functional invariants (cache hit/miss counter behaviour
@@ -75,19 +77,24 @@ SELECT
 -- test update rather than a silent shape extension that breaks
 -- downstream consumers locked to the documented set.
 --
--- Current canonical set (10 keys) per `src/storage/stats.rs::stats()`:
+-- Current canonical set (11 keys) per `src/storage/stats.rs::stats()`:
 --   shmem_ready, shmem_slots, shmem_hits, shmem_misses,
 --   shmem_inserts, shmem_evictions, plan_cache_hits,
---   plan_cache_misses, plan_cache_inserts, plan_cache_local_size.
+--   plan_cache_misses, plan_cache_inserts, plan_cache_local_size,
+--   path_depth_truncations.
+-- (path_depth_truncations added by Phase E group E1, LLD v0.4 §7.2 —
+--  the property-path depth-guard scaffold; always 0 until group E2
+--  wires the recursive-CTE increment.)
 
 -- (a) Exact field count — the bullseye tripwire.
 SELECT (SELECT count(*) FROM jsonb_object_keys((SELECT pgrdf.stats())))
-       = 10 AS exact_ten_keys;
+       = 11 AS exact_eleven_keys;
 
 -- (b) No extra / no missing keys — array equality against the
 --     canonical sorted list. Catches both additions and renames.
 SELECT array_agg(k ORDER BY k)
        = ARRAY[
+           'path_depth_truncations',
            'plan_cache_hits',
            'plan_cache_inserts',
            'plan_cache_local_size',

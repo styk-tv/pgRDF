@@ -1767,6 +1767,25 @@ fn walk_branch(
                 });
             }
         }
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => {
+            // Phase E group E1 (LLD v0.4 §7): a property-path pattern
+            // inside a UNION branch. The E1-supported operators
+            // (bare predicate, `^` inverse, nested `^(^…)`) lower to
+            // an ordinary triple — push it like a BGP triple so it
+            // composes with the branch's GRAPH scope, joins, and
+            // OPTIONAL/MINUS exactly as a plain triple would.
+            // Recursive operators panic with their stable rollout
+            // preview prefix inside `translate_property_path`.
+            let tp = crate::query::path::translate_property_path(subject, path, object);
+            ub.bgp.push(ScopedTriple {
+                triple: tp,
+                scope: current_scope.cloned(),
+            });
+        }
         GraphPattern::Filter { expr, inner } => {
             ub.filters.push(expr.clone());
             walk_branch(inner, ub, current_scope, scope_counter);
@@ -2024,6 +2043,29 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
                     scope: current_scope.cloned(),
                 });
             }
+        }
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => {
+            // Phase E group E1 (LLD v0.4 §7) — the single chokepoint.
+            // SELECT / ASK / CONSTRUCT / INSERT-WHERE / DELETE-WHERE
+            // all route their WHERE through `parse_select` →
+            // `walk_select_scoped`, so recognising `Path` here makes
+            // property paths available to every consumer at once.
+            // `translate_property_path` lowers the E1 operator set
+            // (bare predicate, `^` inverse, nested `^(^…)`) to an
+            // ordinary triple — pushed exactly like a BGP triple, so
+            // it composes for free with GRAPH scoping, multi-pattern
+            // joins, and OPTIONAL/UNION/MINUS. Recursive operators
+            // (`*`/`+`/`?`), alternation (`|`) and negated sets panic
+            // with a STABLE rollout-preview prefix (E2/E3/E4).
+            let tp = crate::query::path::translate_property_path(subject, path, object);
+            ps.bgp.push(ScopedTriple {
+                triple: tp,
+                scope: current_scope.cloned(),
+            });
         }
         GraphPattern::Graph { name, inner } => {
             // Slice 112: a GRAPH block mints a scope and walks
@@ -9261,6 +9303,113 @@ mod tests {
         Spi::run(
             "SELECT * FROM pgrdf.construct(
                  'CONSTRUCT WHERE { ?s ?p _:b }')",
+        )
+        .unwrap();
+    }
+
+    // ─── Phase E group E1 — property-path foundation + `^` inverse ─
+
+    /// `^` round-trip equivalence (LLD v0.4 §7.3 acceptance, the A
+    /// invariant in miniature): `?s ^p ?o` returns exactly the same
+    /// solution set as `?o p ?s` over the same graph. We compare the
+    /// ordered concatenations rather than counts so a wrong
+    /// subject/object swap would surface as a string mismatch.
+    #[pg_test]
+    fn property_path_inverse_round_trips() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:knows ex:b .
+                 ex:a ex:knows ex:c .
+                 ex:b ex:knows ex:c .',
+                9100)",
+        )
+        .unwrap();
+
+        let forward: String = Spi::get_one(
+            "SELECT string_agg((j->>'s') || '|' || (j->>'o'), ',' \
+                               ORDER BY (j->>'s'), (j->>'o')) \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?o WHERE { ?o ex:knows ?s }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        let inverse: String = Spi::get_one(
+            "SELECT string_agg((j->>'s') || '|' || (j->>'o'), ',' \
+                               ORDER BY (j->>'s'), (j->>'o')) \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?o WHERE { ?s ^ex:knows ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            forward, inverse,
+            "`?s ^p ?o` must equal `?o p ?s` (LLD v0.4 §7.3)"
+        );
+    }
+
+    /// `^(^p)` (double inverse) collapses to the plain predicate `p`
+    /// (the C invariant in miniature). Note: the W3C SPARQL grammar
+    /// reserves the `^^` token for typed-literal datatypes, so a
+    /// double inverse must be written with explicit parentheses
+    /// (`^(^p)`); spargebra then yields nested `Reverse(Reverse(...))`
+    /// which the parity fold collapses.
+    #[pg_test]
+    fn property_path_double_inverse_is_plain_predicate() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:x ex:rel ex:y .
+                 ex:y ex:rel ex:z .',
+                9101)",
+        )
+        .unwrap();
+
+        let plain: String = Spi::get_one(
+            "SELECT string_agg((j->>'s') || '|' || (j->>'o'), ',' \
+                               ORDER BY (j->>'s'), (j->>'o')) \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?o WHERE { ?s ex:rel ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        let double_inv: String = Spi::get_one(
+            "SELECT string_agg((j->>'s') || '|' || (j->>'o'), ',' \
+                               ORDER BY (j->>'s'), (j->>'o')) \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?o WHERE { ?s ^(^ex:rel) ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(plain, double_inv, "`^(^p)` must equal plain `p`");
+    }
+
+    /// The `pgrdf.path_max_depth` GUC is registered and reads its
+    /// LLD v0.4 §7.2 default of 64.
+    #[pg_test]
+    fn property_path_max_depth_guc_default_is_64() {
+        let v: String = Spi::get_one("SELECT current_setting('pgrdf.path_max_depth')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v, "64",
+            "pgrdf.path_max_depth default is 64 (LLD v0.4 §7.2)"
+        );
+    }
+
+    /// A recursive operator preview-panics with the EXACT stable
+    /// message (pgrx-tests needs the literal — slice number included;
+    /// it is the single source of truth in `crate::query::path`).
+    #[pg_test(error = "pgrdf: property path operator '+' lands in Phase E group E2 (slice 45)")]
+    fn property_path_one_or_more_preview_panics() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?o WHERE { ?s ex:knows+ ?o }')",
         )
         .unwrap();
     }

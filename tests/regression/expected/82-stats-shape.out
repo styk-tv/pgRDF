@@ -1,8 +1,8 @@
 
 0
-{plan_cache_hits,plan_cache_inserts,plan_cache_local_size,plan_cache_misses,shmem_evictions,shmem_hits,shmem_inserts,shmem_misses,shmem_ready,shmem_slots}
-t|t|t|t|t|t|t|t|t|t
-t|t|t|t|t|t|t|t|t|t
+{path_depth_truncations,plan_cache_hits,plan_cache_inserts,plan_cache_local_size,plan_cache_misses,shmem_evictions,shmem_hits,shmem_inserts,shmem_misses,shmem_ready,shmem_slots}
+t|t|t|t|t|t|t|t|t|t|t
+t|t|t|t|t|t|t|t|t|t|t
 t
 t
 t

@@ -6,6 +6,10 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- SPARQL property-path foundation — Phase E group E1 (slices 49-46). Property-path AST detection + translator dispatch; `^` inverse operator fully supported (`?s ^p ?o` ≡ `?o p ?s`, composes with GRAPH scoping / BGP joins / pgrdf.construct). New GUC `pgrdf.path_max_depth` (default 64, range 1-1024). New `pgrdf.stats()` field `path_depth_truncations` (depth-guard enforcement lands with the recursive operators in group E2). Recursive operators `*`/`+`/`?` and alternation `|` preview-panic with stable rollout-schedule prefixes.
+
 ## [0.4.4] — 2026-05-15
 
 **Marquee: SPARQL 1.1 CONSTRUCT surface complete.** Closes the LLD

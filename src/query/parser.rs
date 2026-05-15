@@ -27,10 +27,16 @@
 //!   * OPTIONAL / UNION / MINUS / FILTER / aggregates / BIND — the
 //!     parser walks through them; the executor supports them too,
 //!     so they are NOT flagged in `unsupported_algebra`.
-//!   * GRAPH (named-graph clause), property paths, inline VALUES,
-//!     SERVICE — still flagged under `unsupported_algebra` (named
-//!     graphs land in v0.4 — see SPEC.pgRDF.LLD.v0.4.md §3;
-//!     paths in §7; VALUES in §4-deferred backlog).
+//!   * Property paths (Phase E group E1, SPEC.pgRDF.LLD.v0.4 §7) —
+//!     the parser lowers the E1-supported set (bare predicate, `^`
+//!     inverse, nested `^(^…)`) into `bgp` triples and does NOT flag
+//!     them. Recursive operators (`*`/`+`/`?`), alternation (`|`)
+//!     and negated property sets are still flagged under
+//!     `unsupported_algebra` (they land in groups E2/E3/E4); their
+//!     execution panics with a stable rollout-preview prefix.
+//!   * GRAPH (named-graph clause) — supported (v0.4 §3); not flagged.
+//!     Inline VALUES, SERVICE — still flagged under
+//!     `unsupported_algebra` (VALUES in §4-deferred backlog).
 
 use pgrx::prelude::*;
 use serde_json::{json, Value};
@@ -404,7 +410,30 @@ fn walk(
             // the inner so the underlying BGP is still visible.
             walk(inner, vars, bgp, unsupported);
         }
-        GraphPattern::Path { .. } => unsupported.push("Path (property path)"),
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => {
+            // Phase E group E1 (LLD v0.4 §7) — property paths. The
+            // E1-supported operators (bare predicate, `^` inverse,
+            // nested `^(^…)`) lower to an ordinary triple, so report
+            // them in the `bgp` array + collect their variables just
+            // like a BGP triple (the executor handles them). The
+            // recursive operators (`*`/`+`/`?`), alternation (`|`)
+            // and negated sets are not yet executable — flag them in
+            // `unsupported_algebra` here (parse-time, no panic),
+            // mirroring how Phase C reports not-yet-shipped UPDATE
+            // forms. Execution of those still panics with a stable
+            // rollout-preview prefix (see `query::path`).
+            if crate::query::path::is_e1_supported(path) {
+                let tp = crate::query::path::translate_property_path(subject, path, object);
+                bgp.push(triple_to_json(&tp));
+                collect_vars(&tp, vars);
+            } else {
+                unsupported.push("Path (recursive/alternation property path)");
+            }
+        }
         GraphPattern::Values { .. } => unsupported.push("Values (inline VALUES)"),
         GraphPattern::Service { .. } => unsupported.push("Service (federation)"),
 
@@ -579,7 +608,13 @@ fn count_bgp_triples(p: &GraphPattern) -> usize {
         | GraphPattern::Slice { inner, .. }
         | GraphPattern::Group { inner, .. }
         | GraphPattern::Service { inner, .. } => count_bgp_triples(inner),
-        GraphPattern::Path { .. } | GraphPattern::Values { .. } => 0,
+        // Phase E group E1: an E1-supported property path lowers to
+        // exactly one triple (bare predicate / `^` inverse); count it
+        // as 1 so CONSTRUCT-side `where_shape.triple_count` is
+        // accurate. Not-yet-supported recursive forms contribute 0
+        // (they never reach execution). `Values` carries no triples.
+        GraphPattern::Path { path, .. } => usize::from(crate::query::path::is_e1_supported(path)),
+        GraphPattern::Values { .. } => 0,
         _ => 0,
     }
 }
@@ -638,6 +673,26 @@ fn collect_pattern_vars(p: &GraphPattern, out: &mut Vec<String>) {
                 if let TermPattern::Variable(v) = &tp.object {
                     push_unique(out, format!("?{}", v.as_str()));
                 }
+            }
+        }
+        // Phase E group E1: surface a property path's variables the
+        // same way a BGP triple's would be — only for the E1-supported
+        // set (the lowered triple is well-defined). Recursive forms
+        // never reach execution, so they contribute no analysis vars.
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } if crate::query::path::is_e1_supported(path) => {
+            let tp = crate::query::path::translate_property_path(subject, path, object);
+            if let TermPattern::Variable(v) = &tp.subject {
+                push_unique(out, format!("?{}", v.as_str()));
+            }
+            if let NamedNodePattern::Variable(v) = &tp.predicate {
+                push_unique(out, format!("?{}", v.as_str()));
+            }
+            if let TermPattern::Variable(v) = &tp.object {
+                push_unique(out, format!("?{}", v.as_str()));
             }
         }
         GraphPattern::Graph { name, inner } => {

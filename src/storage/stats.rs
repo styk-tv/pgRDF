@@ -25,9 +25,16 @@ use serde_json::json;
 ///   "plan_cache_hits":         42,
 ///   "plan_cache_misses":        7,
 ///   "plan_cache_inserts":       7,
-///   "plan_cache_local_size":    7
+///   "plan_cache_local_size":    7,
+///   "path_depth_truncations":   0
 /// }
 /// ```
+///
+/// `path_depth_truncations` (Phase E group E1, LLD v0.4 §7.2) counts
+/// SPARQL property-path solutions truncated at `pgrdf.path_max_depth`.
+/// Always 0 in v0.4.5 (the recursive CTE that would truncate lands
+/// with the `+` operator in Phase E group E2); `pgrdf.shmem_reset()`
+/// zeroes it.
 /// `shmem_ready: false` means the .so was not loaded via
 /// `shared_preload_libraries`; the shmem counters are all zero in
 /// that case and `put_term_full` runs without the cross-backend
@@ -52,6 +59,11 @@ fn stats() -> pgrx::JsonB {
         "plan_cache_misses":    p.misses,
         "plan_cache_inserts":   p.inserts,
         "plan_cache_local_size": p.local_size,
+        // Phase E group E1 (LLD v0.4 §7.2): property-path depth-guard
+        // scaffold. Always 0 in E1 (the recursive CTE that would
+        // truncate lands in group E2); the field is present so
+        // tooling can rely on its shape from v0.4.5 onward.
+        "path_depth_truncations": s.path_depth_truncations,
     }))
 }
 

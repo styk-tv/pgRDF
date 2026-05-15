@@ -1020,11 +1020,38 @@ shaper. Sibling UDF rather than overloading `pgrdf.sparql` — callers
 signal intent at the SQL boundary. See
 [LLD v0.4 §6](../specs/SPEC.pgRDF.LLD.v0.4.md#6-construct-deferred-from-v03-now-in-scope).
 
-### Track 5 — Property paths
+### Track 5 — Property paths (Phase E countdown — group E1 ✅)
+
 `*`, `+`, `?`, `^`, with alternation `p1|p2` as a stretch goal.
-Translates to recursive Postgres CTEs with a `pgrdf.path_max_depth`
-GUC; falls back to direct BGP match when the predicate's closure is
-already materialised. See
+Recursive operators translate to recursive Postgres CTEs with a
+`pgrdf.path_max_depth` GUC; future work falls back to direct BGP
+match when the predicate's closure is already materialised. Phase E
+is grouped into four dispatches:
+
+- ✅ **Group E1 (slices 49 → 46) — foundation + `^` inverse.**
+  Property-path AST detection in the shared WHERE walker + the
+  `query::path::translate_property_path` dispatcher. `^` inverse
+  fully supported (`?s ^p ?o` ≡ `?o p ?s`; nested `^(^p)` folds by
+  parity; bare-predicate degenerate `Path` lowers to a triple).
+  Composes with GRAPH scoping / BGP joins / OPTIONAL-UNION-MINUS /
+  `pgrdf.construct` (shared walker → inherited, not special-cased).
+  New GUC `pgrdf.path_max_depth` (Userset, default 64, range
+  1..1024) registered in `_PG_init`; new `pgrdf.stats()` field
+  `path_depth_truncations` (cross-backend shmem counter, 0 in E1,
+  zeroed by `shmem_reset()` — depth enforcement + the increment land
+  with the recursive CTE in group E2). Recursive `*`/`+`/`?` and `|`
+  preview-panic with stable rollout-schedule prefixes. New
+  regression `108-property-path-inverse.sql` (+4 pgrx tests, +8
+  host-only `query::path` unit tests). Sequence paths rejected with
+  a pointer to the equivalent multi-pattern BGP; negated property
+  sets out of v0.4 scope.
+- 🚧 **Group E2 — `+` (one-or-more).** First recursive CTE; wires
+  depth enforcement + the `path_depth_truncations` increment.
+- 🚧 **Group E3 — `*` / `?`.** Reflexive / zero-or-one closures.
+- 🚧 **Group E4 — closure-detect + gated `|` + W3C-shape
+  consolidation + the v0.4.5 release.**
+
+See
 [LLD v0.4 §7](../specs/SPEC.pgRDF.LLD.v0.4.md#7-property-paths-deferred-from-v03-now-in-scope).
 
 ### Carried backlog — SPARQL surface gaps from v0.3
