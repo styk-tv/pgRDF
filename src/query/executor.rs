@@ -649,11 +649,7 @@ fn encode_iri_term(iri: &str) -> Value {
 /// Language-tagged literals carry BOTH a `language` field AND the
 /// implicit `rdf:langString` datatype IRI per RDF 1.1 §3.3 so
 /// callers don't have to special-case the absence of `datatype`.
-fn encode_literal_term_parts(
-    value: &str,
-    datatype: Option<&str>,
-    language: Option<&str>,
-) -> Value {
+fn encode_literal_term_parts(value: &str, datatype: Option<&str>, language: Option<&str>) -> Value {
     let mut obj = Map::new();
     obj.insert("type".into(), Value::String("literal".into()));
     obj.insert("value".into(), Value::String(value.to_string()));
@@ -697,34 +693,38 @@ fn resolve_dict_term(id: i64, cache: &mut HashMap<i64, ResolvedTerm>) -> Resolve
     if let Some(hit) = cache.get(&id) {
         return hit.clone();
     }
-    let row = Spi::connect(|client| -> Option<(i16, String, Option<String>, Option<String>)> {
-        let prepared = client
-            .prepare(
-                "SELECT d.term_type, d.lexical_value, dt.lexical_value, d.language_tag
+    let row = Spi::connect(
+        |client| -> Option<(i16, String, Option<String>, Option<String>)> {
+            let prepared = client
+                .prepare(
+                    "SELECT d.term_type, d.lexical_value, dt.lexical_value, d.language_tag
                    FROM pgrdf._pgrdf_dictionary d
                    LEFT JOIN pgrdf._pgrdf_dictionary dt
                      ON dt.id = d.datatype_iri_id
                   WHERE d.id = $1",
-                &[PgOid::BuiltIn(PgBuiltInOids::INT8OID)],
-            )
-            .expect("pgrdf.construct: dict resolve prepare failed");
-        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
-        let datum = unsafe { DatumWithOid::new(id, int8_oid) };
-        let table = client
-            .select(&prepared, Some(1), &[datum])
-            .expect("pgrdf.construct: dict resolve select failed");
-        for r in table {
-            let term_type: i16 = r.get::<i16>(1).ok().flatten()?;
-            let lex: String = r.get::<String>(2).ok().flatten()?;
-            let dt: Option<String> = r.get::<String>(3).ok().flatten();
-            let lang: Option<String> = r.get::<String>(4).ok().flatten();
-            return Some((term_type, lex, dt, lang));
-        }
-        None
-    })
-    .unwrap_or_else(|| {
-        panic!("pgrdf.construct: dict id {id} not found (corrupted projection)")
-    });
+                    &[PgOid::BuiltIn(PgBuiltInOids::INT8OID)],
+                )
+                .expect("pgrdf.construct: dict resolve prepare failed");
+            let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+            let datum = unsafe { DatumWithOid::new(id, int8_oid) };
+            let table = client
+                .select(&prepared, Some(1), &[datum])
+                .expect("pgrdf.construct: dict resolve select failed");
+            // LIMIT 1 above guarantees at most one row; take the
+            // first (and only) row. clippy::never_loop flagged the
+            // `for r in table { ... return Some(...) }` form because
+            // the loop body always returns on the first iteration.
+            if let Some(r) = table.into_iter().next() {
+                let term_type: i16 = r.get::<i16>(1).ok().flatten()?;
+                let lex: String = r.get::<String>(2).ok().flatten()?;
+                let dt: Option<String> = r.get::<String>(3).ok().flatten();
+                let lang: Option<String> = r.get::<String>(4).ok().flatten();
+                return Some((term_type, lex, dt, lang));
+            }
+            None
+        },
+    )
+    .unwrap_or_else(|| panic!("pgrdf.construct: dict id {id} not found (corrupted projection)"));
     let term = ResolvedTerm {
         term_type: row.0,
         lexical: row.1,
