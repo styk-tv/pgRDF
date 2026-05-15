@@ -100,6 +100,7 @@
 
 use crate::query::plan_cache;
 use crate::storage::dict::{put_term_full, term_type};
+use crate::storage::partition::acquire_partition_ddl_gate;
 use pgrx::datum::DatumWithOid;
 use pgrx::iter::SetOfIterator;
 use pgrx::pg_sys::{Oid, PgBuiltInOids};
@@ -3692,6 +3693,24 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
 /// `SetOfIterator`. Wall-clock timing starts at function entry so the
 /// dictionary internment + partition setup cost is visible to operators.
 fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
+    // Partition-DDL gate FIRST — the global OUTERMOST lock for the
+    // whole UPDATE statement, taken before ANY dictionary internment,
+    // quad insert, or `add_graph` / `_pgrdf_graphs` write below.
+    //
+    // Why here and not only inside `add_graph`: an `INSERT DATA`
+    // touching both the default graph and a `GRAPH <iri> { … }` block
+    // interns dictionary terms and inserts default-graph quads
+    // *before* it reaches `add_graph(iri)` for the named graph. If the
+    // gate were taken only at that late point, this transaction would
+    // already hold dict/quad row locks while a concurrent gate-holder
+    // waited on them — and this txn would then wait on the gate:
+    // an advisory-vs-data-lock cycle (observed as `deadlock detected`
+    // on `pg_advisory_xact_lock` under CI's tighter scheduling).
+    // Acquiring the gate as the statement's first lock makes every
+    // partition-creating UPDATE serialise FIFO with no cycle. The
+    // nested re-acquire inside `add_graph*` is a cheap re-entrant
+    // no-op (xact-scoped, released at the pgrx rollback boundary).
+    acquire_partition_ddl_gate();
     let start = std::time::Instant::now();
     let mut triples_inserted: i64 = 0;
     let mut triples_deleted: i64 = 0;
@@ -6957,14 +6976,20 @@ mod tests {
     /// SHARE ROW EXCLUSIVE lock has been flaky under contention.
     #[pg_test]
     fn sparql_graph_literal_iri_scopes_to_graph() {
+        // Partition gate FIRST (before the `_pgrdf_graphs` INSERT) so
+        // this fixture's lock order matches the global discipline —
+        // gate is the outermost lock. Reversed order would let a
+        // parallel `#[pg_test]` hold the gate and wait on
+        // `_pgrdf_graphs` while this one held `_pgrdf_graphs` and
+        // waited on the gate (advisory-vs-data deadlock).
+        create_quads_partition_named("_pgrdf_quads_test501", 501);
+        create_quads_partition_named("_pgrdf_quads_test502", 502);
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
              VALUES (501, 'http://example.org/test-g1'), \
                     (502, 'http://example.org/test-g2')",
         )
         .unwrap();
-        create_quads_partition_named("_pgrdf_quads_test501", 501);
-        create_quads_partition_named("_pgrdf_quads_test502", 502);
         Spi::run(
             "SELECT pgrdf.parse_turtle(\
                  '@prefix ex: <http://example.org/> . \
@@ -7029,14 +7054,16 @@ mod tests {
     /// harness.
     #[pg_test]
     fn sparql_graph_variable_projects_iri() {
+        // Gate FIRST (see `sparql_graph_literal_iri_scopes_to_graph`
+        // for the lock-order rationale).
+        create_quads_partition_named("_pgrdf_quads_test511", 511);
+        create_quads_partition_named("_pgrdf_quads_test512", 512);
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
              VALUES (511, 'http://example.org/test-v1'), \
                     (512, 'http://example.org/test-v2')",
         )
         .unwrap();
-        create_quads_partition_named("_pgrdf_quads_test511", 511);
-        create_quads_partition_named("_pgrdf_quads_test512", 512);
         // Two triples in g1 (so the multi-triple BGP can match a
         // shared subject), two in g2.
         Spi::run(
@@ -7119,6 +7146,10 @@ mod tests {
     /// pattern slices 114 + 113 used.
     #[pg_test]
     fn sparql_graph_composition_with_optional() {
+        // Gate FIRST (see `sparql_graph_literal_iri_scopes_to_graph`).
+        for gid in [521, 522, 523] {
+            create_quads_partition_named(&format!("_pgrdf_quads_test{gid}"), gid);
+        }
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
              VALUES (521, 'http://example.org/test-c1'), \
@@ -7126,9 +7157,6 @@ mod tests {
                     (523, 'http://example.org/test-c3')",
         )
         .unwrap();
-        for gid in [521, 522, 523] {
-            create_quads_partition_named(&format!("_pgrdf_quads_test{gid}"), gid);
-        }
         Spi::run(
             "SELECT pgrdf.parse_turtle(\
                  '@prefix ex: <http://example.org/> . \
@@ -7205,15 +7233,16 @@ mod tests {
     /// constraints.
     #[pg_test]
     fn sparql_graph_composition_with_union() {
+        // Gate FIRST (see `sparql_graph_literal_iri_scopes_to_graph`).
+        for gid in [531, 532] {
+            create_quads_partition_named(&format!("_pgrdf_quads_test{gid}"), gid);
+        }
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
              VALUES (531, 'http://example.org/test-u1'), \
                     (532, 'http://example.org/test-u2')",
         )
         .unwrap();
-        for gid in [531, 532] {
-            create_quads_partition_named(&format!("_pgrdf_quads_test{gid}"), gid);
-        }
         Spi::run(
             "SELECT pgrdf.parse_turtle(\
                  '@prefix ex: <http://example.org/> . \
@@ -7252,12 +7281,13 @@ mod tests {
     /// appears in THAT graph's ex:q.
     #[pg_test]
     fn sparql_graph_composition_with_minus() {
+        // Gate FIRST (see `sparql_graph_literal_iri_scopes_to_graph`).
+        create_quads_partition_named("_pgrdf_quads_test541", 541);
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
              VALUES (541, 'http://example.org/test-m1')",
         )
         .unwrap();
-        create_quads_partition_named("_pgrdf_quads_test541", 541);
         // m1: alice has ex:q ; default graph (id 0): alice + bob have ex:p.
         Spi::run(
             "SELECT pgrdf.parse_turtle(\
@@ -7316,15 +7346,16 @@ mod tests {
     /// equates to the BGP's first qN graph_id.
     #[pg_test]
     fn sparql_optional_inside_graph_variable() {
+        // Gate FIRST (see `sparql_graph_literal_iri_scopes_to_graph`).
+        for gid in [551, 552] {
+            create_quads_partition_named(&format!("_pgrdf_quads_test{gid}"), gid);
+        }
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
              VALUES (551, 'http://example.org/test-v1'), \
                     (552, 'http://example.org/test-v2')",
         )
         .unwrap();
-        for gid in [551, 552] {
-            create_quads_partition_named(&format!("_pgrdf_quads_test{gid}"), gid);
-        }
         // v1: alice has both ex:p and ex:q. v2: bob has only ex:p.
         Spi::run(
             "SELECT pgrdf.parse_turtle(\

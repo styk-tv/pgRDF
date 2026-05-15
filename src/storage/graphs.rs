@@ -360,6 +360,12 @@ fn move_graph(src: i64, dst: i64) -> i64 {
         panic!("move_graph: src and dst must differ (both = {src})");
     }
 
+    // Partition-DDL gate FIRST — uniform with the lifecycle UDFs it
+    // composes (`copy_graph` + `drop_graph`, both gate-first). Keeps
+    // the txn lock order consistent with every concurrent
+    // partition-creating caller. Re-entrant/xact-scoped.
+    acquire_partition_ddl_gate();
+
     // Idempotent miss: src partition absent → 0 return, no error.
     // The compose's `copy_graph` step would also short-circuit on an
     // absent src, but we want the explicit early return so the
@@ -582,6 +588,14 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
     if src == dst {
         panic!("copy_graph: src and dst must differ (both = {src})");
     }
+
+    // Partition-DDL gate FIRST — uniform with the rest of the
+    // partition-affecting lifecycle UDFs. `copy_graph` delegates dst
+    // creation to `add_graph` (gate-first) and then bulk-INSERTs into
+    // the dst partition; taking the gate up-front keeps this txn's
+    // lock order `advisory -> {graphs,quads}` consistent with every
+    // concurrent partition-creating caller. Re-entrant/xact-scoped.
+    acquire_partition_ddl_gate();
 
     // Source partition existence check — idempotent miss path
     // returns 0 without erroring per LLD v0.4 §5.2.
