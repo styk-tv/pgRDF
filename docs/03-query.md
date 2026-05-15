@@ -245,8 +245,9 @@ Concrete shape:
       lands INSERT DATA end-to-end (default + named graph,
       multi-triple, idempotent on repeat via `WHERE NOT EXISTS`);
       other UPDATE forms panic with "lands in slice NN" pending
-      per-form follow-ups (DELETE WHERE → 78,
-      DELETE/INSERT WHERE → 77, CLEAR/CREATE/DROP GRAPH → 71/70/69).
+      per-form follow-ups (DELETE/INSERT WHERE → 77,
+      CLEAR/CREATE/DROP GRAPH → 71/70/69). Pure DELETE WHERE and
+      pure INSERT WHERE shipped in slices 81 and 82 respectively.
 - ✅ SPARQL UPDATE — `INSERT { template } WHERE { pattern }` (Phase C
       slice 82, LLD v0.4 §4.1). Pattern-driven insertion: the WHERE
       pattern goes through the v0.3 `parse_select` walker (sharing the
@@ -262,6 +263,23 @@ Concrete shape:
       UNION; template variables MUST be bound by the WHERE BGP
       (fail-fast rather than silent-skip); variable GRAPH in template
       panics (lands with slice 76 graph-scoped INSERT WHERE).
+- ✅ SPARQL UPDATE — `DELETE { template } WHERE { pattern }` (Phase C
+      slice 81, LLD v0.4 §4.1). Sibling of slice 82's INSERT WHERE.
+      Same `parse_select` walker for the WHERE half, same dict-id
+      (BIGINT) projection one row per solution, same per-row
+      template instantiation. The DELETE template is modelled as
+      `Vec<GroundQuadPattern>` (spargebra bakes the W3C §4.1.2 "no
+      blank nodes in the DELETE clause" rule into the AST). Per-row
+      DELETE uses the `WITH d AS (DELETE … RETURNING 1) SELECT
+      count(*)` idiom slice 83 installed for DELETE DATA, so the
+      counter reports ACTUAL rows removed (distinct from INSERT
+      WHERE's per-attempt counter). Lookup-only dict path mirrors
+      slice 83: missing terms in the instantiated template route to
+      a per-row no-op rather than an error. The `_update` summary
+      reports `form: "DELETE_WHERE"`. Limitations locked: WHERE may
+      not carry aggregates / GROUP BY / UNION; template variables
+      MUST be bound by the WHERE BGP (fail-fast); variable GRAPH in
+      template panics (lands with slice 76).
 - ✅ SPARQL UPDATE — `DELETE DATA { … }` (Phase C slice 83, LLD v0.4
       §4). Symmetric to slice 84's INSERT DATA: ground quads only,
       no variables. Default-graph + `GRAPH <iri> { … }` inline
@@ -276,9 +294,8 @@ Concrete shape:
       operations of mixed kinds (e.g. a future
       `DELETE DATA ; INSERT DATA`), the `form` field collapses to
       `"MIXED"` and the per-op counters aggregate.
-- ⏳ `DELETE { … } WHERE`, `DELETE { … } INSERT { … } WHERE`,
-      lifecycle algebra (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices
-      78 / 77 / 71 → 69.
+- ⏳ `DELETE { … } INSERT { … } WHERE`, lifecycle algebra
+      (`CLEAR/CREATE/DROP GRAPH`) — Phase C slices 77 / 71 → 69.
 - ⏳ `CONSTRUCT`, `DESCRIBE` — different output shape; v0.4
 - ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4

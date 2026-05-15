@@ -555,6 +555,58 @@ to dispatch by query form; UPDATE forms return an `_update` JSONB
 summary row. See
 [LLD v0.4 §4](../specs/SPEC.pgRDF.LLD.v0.4.md#4-sparql-update-new).
 
+- ✅ **Slice 81 — SPARQL UPDATE DELETE WHERE (pattern-driven).**
+  Sibling of slice 82's INSERT WHERE. The DeleteInsert dispatcher
+  arm `(true, false)` now routes through `execute_delete_where`
+  rather than panicking with the slice-78 "lands" prefix (the
+  panic was removed when slice 81 shipped; the slice number was
+  also renumbered from 78 to 81 to keep the countdown spacing
+  consistent — see CHANGELOG). Same strategy as slice 82: the
+  WHERE pattern goes through the v0.3 `parse_select` walker
+  (sharing BGP/FILTER/OPTIONAL/MINUS algebra with SELECT); a
+  custom projection returns each template-referenced variable's
+  **dict id** (BIGINT, not lexical text); Rust iterates the
+  binding rows via SPI and materialises each template's
+  `GroundQuadPattern` per row. The DELETE template type
+  (`Vec<GroundQuadPattern>` rather than `Vec<QuadPattern>` for
+  INSERT) bakes the W3C SPARQL 1.1 §4.1.2 rule "blank nodes are
+  not allowed in the DELETE clause" into the spargebra AST — the
+  helper-pair `collect_ground_template_vars` /
+  `instantiate_ground_template_quad` mirrors slice 82's INSERT-
+  side helpers but matches `GroundTermPattern` (no blank-node
+  arm). Per-row DELETE uses the same `WITH d AS (DELETE …
+  RETURNING 1) SELECT count(*)` idiom slice 83 installed for
+  DELETE DATA, so `triples_deleted` counts ACTUAL rows removed
+  (not template instantiations attempted) — a critical
+  distinction from INSERT WHERE's "attempted insert" counter,
+  which the WHERE NOT EXISTS guard silently dedupes. Lookup-only
+  dict path mirrors slice 83's DELETE DATA: if any term in the
+  instantiated template is absent from `_pgrdf_dictionary`, the
+  per-row delete is a spec-correct no-op rather than an error.
+  The `_update` summary reports `form: "DELETE_WHERE"` (distinct
+  from `DELETE_DATA`); `update_op_name`'s DeleteInsert label was
+  already split by slice 82, so no shape change there.
+  Slice-81 limitations locked (mirroring slice 82): WHERE may
+  not carry aggregates / GROUP BY / UNION; template variables
+  MUST be bound by the WHERE BGP (panics with `DELETE WHERE
+  template feature 'unbound template variable` stable prefix);
+  variable GRAPH in template panics (lands with slice 76);
+  `USING / USING NAMED` not yet supported. Regression coverage:
+  `tests/regression/sql/96-update-delete-where.sql` locks five
+  invariants (filtered-DELETE counter, broad-DELETE counter,
+  zero-match no-op, post-state round-trip, set-semantics on
+  re-issue). Three `#[pg_test]`s in `src/query/executor.rs`
+  (`sparql_update_delete_where_happy_path`,
+  `sparql_update_delete_where_broad_and_idempotent`,
+  `sparql_update_delete_where_zero_match_noop`). En passant
+  fix: tightened the `error =` strings on slice 82's two
+  negative-path pgrx tests
+  (`sparql_update_insert_where_unbound_template_var_panics`,
+  `sparql_update_delete_insert_combined_still_panics`) to
+  include the full panic suffix — pgrx-tests does an exact
+  string match on the error attribute, not a substring match,
+  so the trimmed forms were silently failing.
+
 - ✅ **Slice 82 — SPARQL UPDATE INSERT WHERE (pattern-driven).**
   Builds on slice 84's UPDATE foundation to land
   `INSERT { template } WHERE { pattern }` end-to-end. Strategy:
@@ -579,9 +631,10 @@ summary row. See
   ships); a variable GRAPH in the template
   (`INSERT { GRAPH ?g { … } }`) panics with the slice-76 prefix.
   Per-form panic table updated for slice 84's siblings: pure
-  DELETE WHERE → slice 78, combined DELETE+INSERT WHERE → slice
-  77 (the contiguous substring `UPDATE form 'DELETE/INSERT WHERE'
-  lands` is preserved across the new dispatcher so slice 84's
+  DELETE WHERE → slice 78 (subsequently renumbered to slice 81
+  and shipped), combined DELETE+INSERT WHERE → slice 77 (the
+  contiguous substring `UPDATE form 'DELETE/INSERT WHERE' lands`
+  is preserved across the new dispatcher so slice 84's
   regression locks still hold). Regression coverage:
   `tests/regression/sql/95-update-insert-where.sql` locks five
   happy-path invariants (form discriminator, multi-row template

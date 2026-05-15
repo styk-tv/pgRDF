@@ -197,14 +197,21 @@ SELECT _check_error(
   $$UPDATE form 'DELETE/INSERT WHERE' lands$$
 );
 
--- DELETE-only WHERE form lands in slice 78.
-SELECT _check_error(
-  'delete-where-without-insert-lands-78',
-  $$SELECT * FROM pgrdf.sparql(
-      'DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }'
-    )$$,
-  $$UPDATE form 'DELETE WHERE' (without INSERT) lands in slice 78$$
-);
+-- DELETE-only WHERE form: now implemented (Phase C slice 81 — sibling
+-- of this slice). The slice-78 "lands" panic was removed when slice 81
+-- shipped; the dedicated regression for the implemented form lives in
+-- `96-update-delete-where.sql`. We keep a smoke-level assertion here
+-- that the dispatcher no longer routes DELETE WHERE through a panic —
+-- a WHERE pattern against a never-bound predicate returns zero
+-- solutions, so the operation is a well-formed
+-- `form = "DELETE_WHERE"`, `triples_deleted = 0` row.
+SELECT
+  (j->'_update'->>'form')                            AS form,
+  (j->'_update'->>'triples_deleted')::bigint         AS deleted
+FROM pgrdf.sparql(
+  'PREFIX zzz: <http://example.org/unbound/> '
+  'DELETE { ?s zzz:p ?o } WHERE { ?s zzz:p ?o }'
+) AS s(j);
 
 DROP FUNCTION _check_error(TEXT, TEXT, TEXT);
 

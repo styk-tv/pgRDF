@@ -109,8 +109,8 @@ use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, Function, GraphPattern, OrderExpression,
 };
 use spargebra::term::{
-    GraphName, GraphNamePattern, GroundTerm, Literal, NamedNodePattern, NamedOrBlankNode,
-    QuadPattern, Term, TermPattern, TriplePattern,
+    GraphName, GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern, Literal,
+    NamedNodePattern, NamedOrBlankNode, QuadPattern, Term, TermPattern, TriplePattern,
 };
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 use std::cell::RefCell;
@@ -2733,7 +2733,28 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                         )
                     }
                     (true, false) => {
-                        panic!("sparql: UPDATE form 'DELETE WHERE' (without INSERT) lands in slice 78")
+                        // Pure DELETE WHERE — slice 81. Sibling of
+                        // slice 82's INSERT WHERE: same WHERE-pattern
+                        // walker + per-row template instantiation, but
+                        // the template is `Vec<GroundQuadPattern>` (no
+                        // blank-node arm — W3C SPARQL 1.1 §4.1.2 rules
+                        // them out of the DELETE clause), and each
+                        // instantiated quad routes through a
+                        // **lookup-only** dict path (no interning): if
+                        // any term is absent the row cannot exist, so
+                        // we skip — same spec-correct no-op posture as
+                        // DELETE DATA (slice 83).
+                        if using.is_some() {
+                            panic!(
+                                "sparql: DELETE WHERE template feature 'USING / USING NAMED' \
+                                 not yet supported"
+                            );
+                        }
+                        let (n_deleted, graphs) = execute_delete_where(delete, pattern);
+                        triples_deleted += n_deleted;
+                        for g in graphs {
+                            graphs_touched.insert(g);
+                        }
                     }
                     (false, true) => {
                         // Pure INSERT WHERE — slice 82.
@@ -2804,9 +2825,9 @@ fn update_op_name(op: &GraphUpdateOperation) -> &'static str {
         GraphUpdateOperation::DeleteData { .. } => "DELETE_DATA",
         // Slice 82 narrows the DeleteInsert label by template-half
         // presence: pure-INSERT-WHERE reports `INSERT_WHERE`, pure-
-        // DELETE-WHERE will report `DELETE_WHERE` once slice 78 ships,
-        // and the combined modify form keeps the legacy
-        // `DELETE_INSERT_WHERE` discriminator for slice 77.
+        // DELETE-WHERE reports `DELETE_WHERE` (slice 81), and the
+        // combined modify form keeps the legacy `DELETE_INSERT_WHERE`
+        // discriminator for slice 77.
         GraphUpdateOperation::DeleteInsert { delete, insert, .. } => {
             match (!delete.is_empty(), !insert.is_empty()) {
                 (false, true) => "INSERT_WHERE",
@@ -3240,6 +3261,308 @@ fn instantiate_template_quad(
         }
     };
     (s_id, p_id, o_id, g_id)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SPARQL UPDATE — DELETE { template } WHERE { pattern } (Phase C slice 81)
+//
+// Sibling of slice 82's INSERT WHERE. The strategy is identical — the
+// WHERE pattern goes through the v0.3 `parse_select` walker, a custom
+// SELECT projection returns each template-referenced variable as a
+// BIGINT dict id (lossless internment), and Rust iterates the binding
+// rows materialising the template per row — but the template type is
+// `Vec<GroundQuadPattern>` rather than `Vec<QuadPattern>`. The spargebra
+// model bakes the W3C SPARQL 1.1 §4.1.2 rule "blank nodes are not
+// allowed in the DELETE clause" into the type: `GroundTermPattern` has
+// no `BlankNode` arm. We mirror that — the template branches here
+// match `GroundSubjectPattern` (which spargebra collapses into
+// `GroundTermPattern` for both subject and object slots) and never
+// surface a blank-node case.
+//
+// Lookup-only dict path. Per W3C §4.1.2 a DELETE is "remove if exists"
+// — never "error if missing". For each instantiated template quad we
+// call the existing `lookup_iri_id` / `lookup_literal_id` /
+// `lookup_ground_term_id` helpers (the same ones slice 83 added for
+// DELETE DATA). If any of (subject, predicate, object) is not in the
+// dictionary, the row can't possibly be in `_pgrdf_quads` — skip with
+// `triples_deleted += 0`. Same posture for an unbound named graph IRI.
+//
+// Per-row DELETE issues the same `WITH d AS (DELETE … RETURNING 1)
+// SELECT count(*)` idiom slice 83 installed for DELETE DATA, so the
+// counter reflects ACTUAL rows removed (not template instantiations
+// attempted) — a critical distinction from INSERT WHERE's counter,
+// which counts attempted inserts (because the WHERE NOT EXISTS guard
+// silently drops duplicates and we want the per-template-instance
+// audit trail to surface). For DELETE the spec-correct counter is
+// "rows that left the table", and that's what we return.
+//
+// Limitations locked for slice 81 (mirroring slice 82):
+//   - WHERE pattern may not carry aggregates / GROUP BY / UNION.
+//   - Template variables MUST be bound by the WHERE BGP. spargebra's
+//     `GroundTermPattern::Variable` arm carries no special semantics
+//     beyond "name a variable bound by the WHERE pattern" — same as
+//     `TermPattern::Variable` in INSERT WHERE.
+//   - Variable GRAPH in template (`DELETE { GRAPH ?g { … } }`) panics
+//     — graph-scoped DELETE WHERE lands with the broader slice-76
+//     graph-template work.
+//   - `USING / USING NAMED` not yet supported.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Translate + execute one `DELETE { template } WHERE { pattern }`
+/// operation. Returns `(triples_deleted, graphs_touched)` so the
+/// caller can fold into the `_update` summary row.
+fn execute_delete_where(
+    template: &[GroundQuadPattern],
+    pattern: &GraphPattern,
+) -> (i64, HashSet<i64>) {
+    // Collect template-referenced variables — same first-appearance
+    // ordering as slice 82's `collect_template_vars` so SQL columns
+    // are reproducible.
+    let template_vars = collect_ground_template_vars(template);
+
+    params_clear();
+    let mut ps = parse_select(pattern);
+    if !ps.aggregates.is_empty() || !ps.group_vars.is_empty() {
+        panic!(
+            "sparql: DELETE WHERE template feature 'aggregate/GROUP BY in WHERE' not yet supported"
+        );
+    }
+    if !ps.union_branches.is_empty() {
+        panic!("sparql: DELETE WHERE template feature 'UNION in WHERE' not yet supported");
+    }
+    if ps.bgp.is_empty() {
+        panic!("sparql: DELETE WHERE requires a non-empty WHERE pattern");
+    }
+    ps.distinct = false;
+    ps.order_by.clear();
+    ps.limit = None;
+    ps.offset = 0;
+    ps.projected.clear();
+    ps.binds.clear();
+
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    let (from_sql, where_clauses, _plan) = build_from_and_where(
+        &ps.bgp,
+        &ps.filters,
+        &ps.optionals,
+        &ps.minuses,
+        &mut anchors,
+        0,
+    );
+
+    // Projection: one BIGINT column per template variable.
+    let mut select_clauses: Vec<String> = Vec::new();
+    let mut col_order: Vec<String> = Vec::new();
+    for var in &template_vars {
+        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+            panic!(
+                "sparql: DELETE WHERE template feature 'unbound template variable ?{var}' \
+                 not yet supported (every template variable must appear in the WHERE BGP)"
+            )
+        });
+        select_clauses.push(format!(
+            "q{alias_idx}.{col} AS {alias_v}",
+            alias_v = quote_identifier(var),
+        ));
+        col_order.push(var.clone());
+    }
+    if select_clauses.is_empty() {
+        select_clauses.push("1 AS _pgrdf_unit".to_string());
+    }
+
+    let mut sql = format!(
+        "SELECT {sel} FROM {from_sql}",
+        sel = select_clauses.join(", "),
+    );
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+
+    let params = params_take();
+
+    let mut triples_deleted: i64 = 0;
+    let mut graphs_touched: HashSet<i64> = HashSet::new();
+
+    Spi::connect_mut(|client| {
+        let arg_oids: Vec<PgOid> =
+            vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let prepared = client
+            .prepare(sql.as_str(), &arg_oids)
+            .expect("sparql: DELETE WHERE: prepare failed");
+        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+        // SAFETY: every WHERE-SELECT param is a dict id (i64). The
+        // (value, type-oid) pair is well-formed by construction.
+        let datums: Vec<DatumWithOid<'_>> = params
+            .iter()
+            .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
+            .collect();
+        let table = client
+            .select(&prepared, None, &datums)
+            .expect("sparql: DELETE WHERE: WHERE-SELECT failed");
+        for row in table {
+            let mut binding: HashMap<&str, Option<i64>> = HashMap::new();
+            let mut skip_row = false;
+            for (i, var) in col_order.iter().enumerate() {
+                let v: Option<i64> = row
+                    .get::<i64>(i + 1)
+                    .ok()
+                    .flatten();
+                if v.is_none() {
+                    // Unbound template variable on this solution row —
+                    // the resulting "triple" has no concrete subject /
+                    // predicate / object, so it can't possibly match a
+                    // row in `_pgrdf_quads`. Skip per the same W3C
+                    // §4.2 "Template Group" rule INSERT WHERE applies.
+                    skip_row = true;
+                }
+                binding.insert(var.as_str(), v);
+            }
+            if skip_row {
+                continue;
+            }
+            for gqp in template {
+                // Instantiate the template's ground quad against the
+                // current binding. Variables resolve via the binding
+                // map; constants resolve via the dictionary
+                // (lookup-only — never intern, since a missing term
+                // means "this row can't exist"). The instantiator
+                // returns `None` when any term is unresolvable, which
+                // we treat as a per-row no-op for that template quad.
+                let Some((s_id, p_id, o_id, g_id)) =
+                    instantiate_ground_template_quad(gqp, &binding)
+                else {
+                    continue;
+                };
+                let n: i64 = Spi::get_one_with_args(
+                    "WITH d AS (
+                        DELETE FROM pgrdf._pgrdf_quads
+                         WHERE subject_id   = $1
+                           AND predicate_id = $2
+                           AND object_id    = $3
+                           AND graph_id     = $4
+                       RETURNING 1)
+                     SELECT count(*)::bigint FROM d",
+                    &[s_id.into(), p_id.into(), o_id.into(), g_id.into()],
+                )
+                .unwrap_or_else(|e| {
+                    panic!("sparql: DELETE WHERE: per-row DELETE failed: {e}")
+                })
+                .unwrap_or(0);
+                triples_deleted += n;
+                // Always record the graph — operator intent matches
+                // DELETE DATA's behaviour where graphs_touched
+                // surfaces scope even when no row was actually
+                // removed (per slice 83 contract).
+                graphs_touched.insert(g_id);
+            }
+        }
+    });
+
+    (triples_deleted, graphs_touched)
+}
+
+/// Walk a `Vec<GroundQuadPattern>` and collect every Variable name
+/// referenced across subject / predicate / object / graph_name slots.
+/// First-appearance ordering — same contract as
+/// `collect_template_vars` for the INSERT WHERE / slice 82 case.
+fn collect_ground_template_vars(template: &[GroundQuadPattern]) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |name: &str| {
+        if seen.insert(name.to_string()) {
+            out.push(name.to_string());
+        }
+    };
+    for gqp in template {
+        if let GroundTermPattern::Variable(v) = &gqp.subject {
+            push(v.as_str());
+        }
+        if let NamedNodePattern::Variable(v) = &gqp.predicate {
+            push(v.as_str());
+        }
+        if let GroundTermPattern::Variable(v) = &gqp.object {
+            push(v.as_str());
+        }
+        if let GraphNamePattern::Variable(v) = &gqp.graph_name {
+            push(v.as_str());
+        }
+    }
+    out
+}
+
+/// Resolve a template `GroundQuadPattern` to `(s, p, o, g)` concrete
+/// dict ids by combining (a) constants looked up (NOT interned) in the
+/// dictionary and (b) variables looked up in the per-row binding.
+///
+/// Returns `None` when any term has no dictionary entry — the row
+/// can't exist in `_pgrdf_quads`, so the per-row DELETE is a
+/// spec-correct no-op for that template quad. This mirrors slice
+/// 83's DELETE DATA "lookup-only" posture.
+fn instantiate_ground_template_quad(
+    gqp: &GroundQuadPattern,
+    binding: &HashMap<&str, Option<i64>>,
+) -> Option<(i64, i64, i64, i64)> {
+    let s_id = match &gqp.subject {
+        GroundTermPattern::Variable(v) => binding
+            .get(v.as_str())
+            .and_then(|x| *x)
+            .unwrap_or_else(|| {
+                panic!(
+                    "sparql: DELETE WHERE: subject variable ?{} unbound (internal)",
+                    v.as_str()
+                )
+            }),
+        GroundTermPattern::NamedNode(n) => lookup_iri_id(n.as_str())?,
+        GroundTermPattern::Literal(_) => {
+            // RDF disallows a literal in subject position; spargebra's
+            // GroundTermPattern is the same union used for both s and
+            // o, so we surface a clear error rather than silently
+            // skipping.
+            panic!("sparql: literal subject is invalid in RDF")
+        }
+        #[allow(unreachable_patterns)]
+        other => panic!("sparql: DELETE WHERE template: unsupported subject term {other:?}"),
+    };
+    let p_id = match &gqp.predicate {
+        NamedNodePattern::Variable(v) => binding
+            .get(v.as_str())
+            .and_then(|x| *x)
+            .unwrap_or_else(|| {
+                panic!(
+                    "sparql: DELETE WHERE: predicate variable ?{} unbound (internal)",
+                    v.as_str()
+                )
+            }),
+        NamedNodePattern::NamedNode(n) => lookup_iri_id(n.as_str())?,
+    };
+    let o_id = match &gqp.object {
+        GroundTermPattern::Variable(v) => binding
+            .get(v.as_str())
+            .and_then(|x| *x)
+            .unwrap_or_else(|| {
+                panic!(
+                    "sparql: DELETE WHERE: object variable ?{} unbound (internal)",
+                    v.as_str()
+                )
+            }),
+        GroundTermPattern::NamedNode(n) => lookup_iri_id(n.as_str())?,
+        GroundTermPattern::Literal(lit) => lookup_literal_id(lit)?,
+        #[allow(unreachable_patterns)]
+        other => panic!("sparql: DELETE WHERE template: unsupported object term {other:?}"),
+    };
+    let g_id = match &gqp.graph_name {
+        GraphNamePattern::DefaultGraph => 0,
+        GraphNamePattern::NamedNode(n) => lookup_graph_id(n.as_str())?,
+        GraphNamePattern::Variable(v) => {
+            panic!(
+                "sparql: DELETE WHERE template feature 'variable GRAPH ?{}' not yet supported \
+                 (lands with slice 76 graph-scoped DELETE WHERE)",
+                v.as_str()
+            )
+        }
+    };
+    Some((s_id, p_id, o_id, g_id))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -5783,7 +6106,7 @@ mod tests {
     /// `INSERT WHERE template feature 'unbound template variable` prefix.
     /// Downstream tooling routes on this for partial-translatability.
     #[pg_test(
-        error = "sparql: INSERT WHERE template feature 'unbound template variable ?z' not yet supported"
+        error = "sparql: INSERT WHERE template feature 'unbound template variable ?z' not yet supported (every template variable must appear in the WHERE BGP)"
     )]
     fn sparql_update_insert_where_unbound_template_var_panics() {
         Spi::run(
@@ -5804,7 +6127,7 @@ mod tests {
     /// slice-77 prefix (the contiguous substring slice 84's regression
     /// test 93 locks must still appear post-slice-82).
     #[pg_test(
-        error = "sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slice 77"
+        error = "sparql: UPDATE form 'DELETE/INSERT WHERE' lands in slice 77 (combined modify form)"
     )]
     fn sparql_update_delete_insert_combined_still_panics() {
         let _: Option<pgrx::JsonB> = Spi::get_one(
@@ -5813,5 +6136,136 @@ mod tests {
         )
         .ok()
         .flatten();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Phase C slice 81 — SPARQL UPDATE `DELETE { template } WHERE`
+    // (pattern-driven removal). Sibling of slice 82's INSERT WHERE.
+    // ─────────────────────────────────────────────────────────────
+
+    /// Happy path. Seed four `rdf:type ex:Person` triples then
+    /// DELETE WHERE narrowed by a FILTER picks off exactly one. The
+    /// summary reports `form = "DELETE_WHERE"` (distinct from
+    /// `DELETE_DATA` so callers can route on which variant ran) and
+    /// `triples_deleted = 1`.
+    #[pg_test]
+    fn sparql_update_delete_where_happy_path() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex:  <http://example.org/> \
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+                INSERT DATA { \
+                  ex:alice rdf:type ex:Person . \
+                  ex:bob   rdf:type ex:Person . \
+                  ex:carol rdf:type ex:Person . \
+                  ex:dave  rdf:type ex:Person \
+                }')",
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex:  <http://example.org/> \
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+                DELETE { ?x rdf:type ex:Person } \
+                WHERE  { ?x rdf:type ex:Person FILTER(?x = ex:carol) }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DELETE_WHERE");
+        assert_eq!(
+            summary["triples_deleted"], 1,
+            "FILTER(?x = ex:carol) narrows to one solution row"
+        );
+        assert_eq!(summary["triples_inserted"], 0);
+
+        // Verify three rows remain (alice/bob/dave).
+        let remaining: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(\
+               'PREFIX ex:  <http://example.org/> \
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+                SELECT ?x WHERE { ?x rdf:type ex:Person }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(remaining, 3, "three persons should remain after delete");
+    }
+
+    /// Broad DELETE WHERE — pattern matches every seeded row. The
+    /// counter reports the actual rows removed (not template
+    /// instantiations attempted), so two reissues of the same
+    /// DELETE WHERE see N then 0.
+    #[pg_test]
+    fn sparql_update_delete_where_broad_and_idempotent() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex:  <http://example.org/> \
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+                INSERT DATA { \
+                  ex:alice rdf:type ex:Person . \
+                  ex:bob   rdf:type ex:Person . \
+                  ex:carol rdf:type ex:Person \
+                }')",
+        )
+        .unwrap();
+
+        let j1: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex:  <http://example.org/> \
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+                DELETE { ?x rdf:type ex:Person } WHERE { ?x rdf:type ex:Person }')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(j1.0["_update"]["triples_deleted"], 3);
+
+        // Re-issue — the rows are gone, so the WHERE returns no
+        // solutions; counter is zero, no error.
+        let j2: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX ex:  <http://example.org/> \
+                PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+                DELETE { ?x rdf:type ex:Person } WHERE { ?x rdf:type ex:Person }')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(j2.0["_update"]["form"], "DELETE_WHERE");
+        assert_eq!(j2.0["_update"]["triples_deleted"], 0);
+    }
+
+    /// Zero-match no-op. DELETE WHERE against a pattern that matches
+    /// nothing is a spec-correct zero-counter, no-error operation.
+    #[pg_test]
+    fn sparql_update_delete_where_zero_match_noop() {
+        // Seed one unrelated triple so the database isn't pristine.
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(\
+               'INSERT DATA { <http://example.org/a> <http://example.org/b> \"hi\" }')",
+        )
+        .unwrap();
+        let before: i64 =
+            Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads")
+                .unwrap()
+                .unwrap_or(-1);
+
+        let j: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(\
+               'PREFIX foaf: <http://xmlns.com/foaf/0.1/> \
+                PREFIX ex:   <http://example.org/> \
+                DELETE { ?x ex:name ?n } WHERE { ?x foaf:name ?n }')",
+        )
+        .unwrap()
+        .unwrap();
+        let summary = &j.0["_update"];
+        assert_eq!(summary["form"], "DELETE_WHERE");
+        assert_eq!(summary["triples_deleted"], 0);
+        let after: i64 = Spi::get_one("SELECT count(*)::BIGINT FROM pgrdf._pgrdf_quads")
+            .unwrap()
+            .unwrap_or(-1);
+        assert_eq!(
+            before, after,
+            "DELETE WHERE with no matches must not touch the quads table"
+        );
     }
 }

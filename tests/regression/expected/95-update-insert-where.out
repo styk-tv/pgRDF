@@ -12,6 +12,6 @@ INSERT_WHERE|0|0
 insert-where-unbound-template-var: t
 insert-where-variable-graph-in-template: t
 insert-where-combined-modify-form-lands-77: t
-delete-where-without-insert-lands-78: t
+DELETE_WHERE|0
 
 2

@@ -6,6 +6,119 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Phase C slice 81 — SPARQL UPDATE DELETE WHERE (pattern-driven)
+
+Sibling of slice 82's INSERT WHERE. The DeleteInsert dispatcher
+arm `(true, false)` now routes through `execute_delete_where`
+rather than panicking with the slice-78 "lands" prefix — the
+slice number was renumbered from 78 to 81 to keep countdown
+spacing consistent with the Track 2 sequence (84 → 83 → 82 →
+81 …). Toward v0.4.3.
+
+**Strategy.** Same recipe as slice 82: the WHERE pattern goes
+through the v0.3 `parse_select` walker — sharing the
+BGP/FILTER/OPTIONAL/MINUS algebra with SELECT — and a custom
+projection emits each template-referenced variable's **dict
+id** (BIGINT, not lexical text) one row per solution. Rust
+iterates the binding rows via SPI's prepared-statement path
+and materialises each `GroundQuadPattern` in the template per
+row. The DELETE template's type (`Vec<GroundQuadPattern>`
+rather than `Vec<QuadPattern>` for INSERT) bakes the W3C
+SPARQL 1.1 §4.1.2 rule "blank nodes are not allowed in the
+DELETE clause" directly into the spargebra AST — the
+helper-pair `collect_ground_template_vars` /
+`instantiate_ground_template_quad` mirrors slice 82's
+INSERT-side helpers but matches `GroundTermPattern` (which
+has no blank-node arm).
+
+**Lookup-only dict path.** Per W3C §4.1.2 a DELETE is "remove
+if exists" — never "error if missing". Each instantiated
+template quad routes through the existing `lookup_iri_id` /
+`lookup_literal_id` helpers (no interning, mirroring slice
+83's DELETE DATA posture). If any of (subject, predicate,
+object, graph) is absent from `_pgrdf_dictionary`, the per-row
+delete is a spec-correct no-op rather than an error.
+
+**Per-row DELETE counter semantics.** The per-row template-
+quad DELETE uses the same `WITH d AS (DELETE … RETURNING 1)
+SELECT count(*)::bigint FROM d` idiom slice 83 installed for
+DELETE DATA, so `triples_deleted` counts ACTUAL rows removed
+(not template instantiations attempted). This is an important
+distinction from INSERT WHERE's per-attempt counter — the
+WHERE NOT EXISTS guard in `insert_quad` silently dedupes, and
+slice 82 trades the "rows actually added" counter for a
+per-template-instance audit trail. For DELETE the
+spec-correct counter is "rows that left the table", and
+that's what slice 81 returns. Concretely: issuing the same
+broad DELETE WHERE twice removes N rows on the first call
+and 0 on the second.
+
+**Summary discriminator.** The `_update` summary's `form`
+field reports `"DELETE_WHERE"` (distinct from slice 83's
+`"DELETE_DATA"`). `update_op_name` was already split by
+slice 82 — pure-INSERT → `INSERT_WHERE`, pure-DELETE →
+`DELETE_WHERE`, combined modify form → `DELETE_INSERT_WHERE`
+— so this slice required no shape change there.
+
+**Limitations locked for slice 81** (mirroring slice 82's
+limitation set):
+
+- WHERE pattern may NOT carry aggregates / GROUP BY / UNION
+  — those produce variable scopes outside the §4.1
+  DELETE WHERE intent. Panics with a stable
+  `DELETE WHERE template feature '<X>' not yet supported`
+  prefix.
+- Template variables MUST be bound by the WHERE BGP — an
+  unbound template variable panics with the same stable
+  prefix. Same fail-fast posture as slice 82, awaiting the
+  same spec-conformant silent-skip enhancement when
+  CONSTRUCT ships (Track 4).
+- Variable GRAPH in template (`DELETE { GRAPH ?g { … } }`)
+  panics with the slice-76 prefix. A literal graph IRI
+  (`DELETE { GRAPH <iri> { … } }`) is admissible.
+- `USING / USING NAMED` not yet supported.
+
+**Test coverage.**
+
+- `tests/regression/sql/96-update-delete-where.sql` locks
+  five invariants — filtered-DELETE counter (FILTER narrows
+  to one row of four seeded), broad-DELETE counter (three
+  remaining persons fall to a single un-filtered DELETE
+  WHERE), zero-match no-op (`?x foaf:name ?n` against a
+  table with no foaf assertions reports `deleted = 0`),
+  post-state round-trip (SELECT confirms table state
+  matches the counter trail), set-semantics on re-issue
+  (second broad-DELETE returns 0). Hand-authored expected
+  output; never ACCEPT=1 baselined.
+- Three `#[pg_test]`s in `src/query/executor.rs`
+  (`sparql_update_delete_where_happy_path`,
+  `sparql_update_delete_where_broad_and_idempotent`,
+  `sparql_update_delete_where_zero_match_noop`).
+- The slice-82 regression `95-update-insert-where.sql`'s
+  "pure DELETE WHERE lands in slice 78" `_check_error`
+  assertion was replaced with a smoke-level assertion that
+  the dispatcher no longer routes DELETE WHERE through a
+  panic (a never-bound-predicate WHERE returns a
+  well-formed `form = "DELETE_WHERE"`, `triples_deleted = 0`
+  row).
+
+**En passant fix.** Slice 82's two negative-path pgrx tests
+(`sparql_update_insert_where_unbound_template_var_panics`,
+`sparql_update_delete_insert_combined_still_panics`) were
+silently failing on main against the post-1d99406 panic
+message text — pgrx-tests does an EXACT string match on the
+`error =` attribute (not a substring match), and the
+attributes had been trimmed to the prefix while the panic
+message carries an explanatory parenthetical suffix. Slice
+81 aligns the `error =` strings to the full panic message
+so both tests now pass alongside the new slice-81 cases.
+
+**Test bar after slice 81.** 151 pgrx integration + 58
+pg_regress + 26 W3C-shape + 3 LUBM-shape = 238 automated
+tests across all four layers (up from 231 at slice 82: +5
+pgrx — 3 new slice-81 cases + 2 pre-existing slice-82
+negative-path tests fixed en passant — and +1 pg_regress).
+
 ### Phase C slice 82 — SPARQL UPDATE INSERT WHERE (pattern-driven)
 
 Builds on slice 84's UPDATE foundation to land
@@ -47,8 +160,8 @@ reports `"INSERT_WHERE"` (distinct from slice 84's
 `"INSERT_DATA"`) so callers can route on which UPDATE variant
 ran. `update_op_name` widens the `DeleteInsert` arm to split by
 template-half presence: pure-INSERT → `INSERT_WHERE`, pure-DELETE
-→ `DELETE_WHERE` (when slice 78 ships), combined modify form →
-`DELETE_INSERT_WHERE` (slice 77).
+→ `DELETE_WHERE` (the wiring shipped subsequently in slice 81),
+combined modify form → `DELETE_INSERT_WHERE` (slice 77).
 
 **Limitations locked for slice 82.**
 
