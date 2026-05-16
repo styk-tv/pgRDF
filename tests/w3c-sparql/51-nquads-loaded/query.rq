@@ -1,0 +1,7 @@
+PREFIX ex: <http://example.org/>
+# Names in the ex:people graph only. N-Quads assigned alice + bob to
+# <http://example.org/people> (4th position) and widget to a
+# different graph. A GRAPH-scoped query over ex:people must return
+# exactly the two names — proving per-line N-Quads graph assignment
+# is observable through SPARQL after pgrdf.parse_nquads ingest.
+SELECT ?n WHERE { GRAPH ex:people { ?s ex:name ?n } } ORDER BY ?n

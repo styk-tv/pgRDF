@@ -137,21 +137,47 @@ tests/perf/smoke-ontologies.sh --check       # regression: diff vs locked .expec
 
 ## Layer 4 — W3C-shape SPARQL harness (✅ shipped)
 
-`tests/w3c-sparql/` holds 23 hand-authored W3C-shape tests — each
-subdirectory is one test (`data.ttl` + `query.rq` + `expected.jsonl`)
-covering BGP, DISTINCT, UNION-disjoint, OPTIONAL chain, MINUS,
-FILTER (isIRI / regex / IN), aggregates, ORDER BY, LIMIT/OFFSET,
-BIND, ASK, STRLEN / LANG / UCASE / STR, BOUND-after-OPTIONAL,
-numeric FILTER, HAVING-inline-aggregate, MIN/MAX numeric. Expected
-outputs hand-verified against the W3C SPARQL 1.1 spec section they
-exercise. Driven by `tests/w3c-sparql/run.sh` against the compose
-Postgres.
+`tests/w3c-sparql/` holds **51** hand-authored W3C-shape tests —
+each subdirectory is one test (`data.ttl`/`setup.sql` + `query.rq` +
+`expected.jsonl`) covering BGP, DISTINCT, UNION-disjoint, OPTIONAL
+chain, MINUS, FILTER (isIRI / regex / IN), aggregates, ORDER BY,
+LIMIT/OFFSET, BIND, ASK, GRAPH, UPDATE, CONSTRUCT, DESCRIBE,
+property paths, type-aware ORDER BY, and the Phase G surface
+(fixtures 48-51 — RDFS / OWL-RL reasoning-profile-sensitive queries,
+TriG- and N-Quads-loaded GRAPH-scoped queries). Expected outputs
+hand-verified against the W3C SPARQL 1.1 spec section they exercise;
+never `ACCEPT=1` baselined. Driven by `tests/w3c-sparql/run.sh`
+against the compose Postgres.
 
 ```bash
 just test-w3c
 ```
 
-## Layer 5 — LUBM-shape correctness harness (✅ shipped)
+## Layer 5 — W3C SHACL Core manifest gate (✅ shipped — v0.5)
+
+`tests/w3c-shacl/` holds a vendored, hermetic subset of the W3C
+`data-shapes-test-suite` SHACL **Core** tests (checked in, never
+fetched at test time — structured like layer 4). Each test ships as
+`<name>.w3c.ttl` (unmodified W3C source, for provenance +
+hand-deriving the expected) + `<name>.ttl` (the `<>`-free data+shapes
+split the harness loads) + `<name>.expected.json`. The vendored Core
+suite is a genuine **full-pass — 24 / 24** on the W3C `sh:conforms`
+invariant (ERRATA.v0.5 **E-013** explains why `conforms`, not the
+violation count, is the principled gate — pgRDF's dictionary
+rehydrate relabels blank-node focus nodes, a serialization artifact
+that does not flip conformance). One W3C Core fixture
+(`prop-nodeKind-001`) is documented-excluded to
+`fixtures/excluded/` for an upstream `sh:nodeKind` bug (E-013;
+Phase H+I follow-up). `--sparql` asserts the ERRATA.v0.5 **E-012**
+known state (the upstream `SparqlEngine` is a stub →
+`conforms:null` for every fixture). Wired into CI on every PG major.
+
+```bash
+just test-shacl-manifest          # W3C SHACL Core gate (24/24)
+just test-shacl-manifest --sparql # E-012 known-state sub-run
+```
+
+## Layer 6 — LUBM-shape correctness harness (✅ shipped)
 
 `tests/perf/lubm-shape/` holds 3 hand-authored LUBM-shape tests
 (`Q1-class-membership`, `Q2-professor-of`, `Q3-takes-course`) over
@@ -163,7 +189,7 @@ is layer 8 (not wired).
 just test-lubm
 ```
 
-## Layer 6 — W3C SPARQL 1.1 full manifest (⏳ not wired)
+## Layer 7 — W3C SPARQL 1.1 full manifest (⏳ not wired)
 
 W3C maintains the SPARQL 1.1 test suite at `w3c/rdf-tests`. The
 plan is to pull it as a git submodule and run a manifest-driven
@@ -177,14 +203,16 @@ git submodule update --init tests/w3c-sparql/fixtures
 cargo run -p pgrdf-w3c-sparql -- tests/w3c-sparql/fixtures/sparql11/manifest.ttl
 ```
 
-## Layer 7 — W3C SHACL full manifest (⏳ not wired)
+## Layer 8 — W3C SHACL full manifest (⏳ not wired)
 
-Mirror of layer 6 against the `w3c/data-shapes` test suite. Blocked
-upstream by ERRATA E-009 (`shacl_validation` / `reasonable` feature
-unification on `oxrdf`'s `rdf-12`). Lands with Phase 6 step 2 once
-E-009 clears.
+The vendored W3C SHACL **Core** subset (layer 5) is the shipped
+gate. A full manifest-driven runner over the entire `w3c/data-shapes`
+suite (incl. SHACL-SPARQL) is future work — and is upstream-blocked
+for SHACL-SPARQL by ERRATA.v0.5 **E-012** (`shacl 0.3.1`'s
+`SparqlEngine` is `unimplemented!()`; no SHACL-SPARQL constraint
+component). Lands when a rudof release ships the engine.
 
-## Layer 8 — LUBM real benchmarks (⏳ not wired)
+## Layer 9 — LUBM real benchmarks (⏳ not wired)
 
 LUBM (Lehigh University Benchmark) is the de facto OWL/SPARQL store
 benchmark. We compare against Apache Jena TDB and Apache AGE at

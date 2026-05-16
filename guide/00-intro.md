@@ -65,10 +65,11 @@ SELECT * FROM pgrdf.sparql(
 | SPARQL SELECT / ASK with BGP + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias **and** inline aggregate) + BIND | ✅ |
 | Named-graph SPARQL — `GRAPH <iri> { … }` + `GRAPH ?g { … }` with composition into OPTIONAL / UNION / MINUS | ✅ |
 | SPARQL `CONSTRUCT` — constant / variable / blank-node / multi-triple templates, GRAPH-scoped WHERE, `CONSTRUCT WHERE { … }` shorthand, round-trip ingest (`pgrdf.construct` + `pgrdf.put_construct_rows`) | ✅ v0.4 |
-| OWL 2 RL materialization via `reasonable` (`pgrdf.materialize`) | ✅ |
+| OWL 2 RL materialization via `reasonable` (`pgrdf.materialize`) + the `profile` selector (`'owl-rl'` default / `'rdfs'`) | ✅ v0.5 |
+| TriG / N-Quads ingest (`pgrdf.parse_trig`, `pgrdf.parse_nquads`) | ✅ v0.5 |
 | Operator surface — `pgrdf.stats()`, `pgrdf.shmem_reset()`, `pgrdf.plan_cache_clear()` | ✅ |
-| Regression suite + W3C-shape harness in CI (PR-gate + nightly) | ✅ |
-| SHACL validation — surface stub; real impl blocked by [ERRATA E-009](../specs/ERRATA.v0.2.md) | 🚧 |
+| Regression suite + W3C-shape SPARQL harness + W3C SHACL Core manifest gate in CI (PR-gate, every PG major) | ✅ v0.5 |
+| SHACL Core validation — real W3C-shape report (`pgrdf.validate(data, shapes [, mode])`); SHACL-SPARQL mode upstream-stubbed ([ERRATA.v0.5 E-012](../specs/ERRATA.v0.5.md)) | ✅ v0.4 / v0.5 |
 | 2× ingest target (true COPY BINARY / heap_multi_insert) | ⏳ v0.4 |
 | Full W3C SPARQL 1.1 TTL-manifest runner against `w3c/rdf-tests` | ⏳ v0.4 |
 | LUBM-10 / LUBM-100 cross-engine benchmarks (Jena TDB, Apache AGE) | ⏳ v0.4 |

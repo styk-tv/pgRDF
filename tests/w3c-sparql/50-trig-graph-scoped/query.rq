@@ -1,0 +1,6 @@
+PREFIX ex: <http://example.org/>
+# Per-graph row count over the two graphs the TriG document declared
+# inline. g1 has 1 triple (alice), g2 has 2 (bob, carol). GROUP BY
+# the GRAPH var proves the inline TriG `GRAPH <iri> { … }` scoping is
+# observable through SPARQL after pgrdf.parse_trig ingest.
+SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g ORDER BY ?g

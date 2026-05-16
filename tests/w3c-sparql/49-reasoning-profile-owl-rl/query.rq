@@ -1,0 +1,6 @@
+PREFIX ex: <http://example.org/>
+# The inverse triple entailed ONLY under the OWL-RL profile
+# (prp-inv): base `ex:alice ex:owns ex:book` + `ex:owns owl:inverseOf
+# ex:ownedBy` ⇒ `ex:book ex:ownedBy ex:alice`. RDFS would NOT entail
+# this, so the single bound subject (ex:book) is profile-evidence.
+SELECT ?s WHERE { ?s ex:ownedBy ex:alice }

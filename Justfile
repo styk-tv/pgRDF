@@ -78,6 +78,16 @@ test-regression-accept:
 test-w3c:
     PGRDF_RUNTIME={{RUN}} bash tests/w3c-sparql/run.sh
 
+# W3C SHACL conformance harness against the compose Postgres on
+# podman (v0.5-FUTURE §6). Vendored W3C SHACL Core fixtures +
+# hand-derived expected {conforms,violations}. The Core suite is the
+# v0.5 full-pass gate (§6.1 #1). `--sparql` runs the 'sparql'
+# evaluation-engine sub-run and asserts the ERRATA.v0.5 E-012
+# known-state (Core-violation parity with 'native'; SHACL-SPARQL
+# constraint components are an upstream gap).
+test-shacl-manifest *ARGS:
+    PGRDF_RUNTIME={{RUN}} bash tests/w3c-shacl/run.sh {{ARGS}}
+
 # LUBM-shape correctness gate against the compose Postgres on podman.
 # Same pattern as test-w3c; deferred LUBM-1/10/100 + cross-engine bench
 # tracked in tests/perf/README.md.
@@ -97,7 +107,7 @@ test-all: test test-regression
 
 # Every test layer that runs against the live compose Postgres
 # (no pgrx framework needed — the compose runtime is the only dep).
-test-conformance: test-regression test-w3c test-lubm test-pg-dump-roundtrip
+test-conformance: test-regression test-w3c test-shacl-manifest test-lubm test-pg-dump-roundtrip
 
 # Every test layer end-to-end: pgrx integration + every compose-based harness.
 test-everything: test test-conformance

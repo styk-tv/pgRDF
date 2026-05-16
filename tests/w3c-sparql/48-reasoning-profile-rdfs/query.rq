@@ -1,0 +1,8 @@
+PREFIX ex:  <http://example.org/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+# All rdf:type values of ex:tweety AFTER an RDFS-profile materialize.
+# Base: tweety a Sparrow. RDFS rdfs11 (subClassOf transitivity) +
+# rdfs9 (subClassOf application) entail tweety a Bird and tweety a
+# Animal. The RDFS profile is sound + complete for these rules, so
+# exactly three types: Sparrow (base), Bird, Animal (both entailed).
+SELECT ?t WHERE { ex:tweety rdf:type ?t } ORDER BY ?t

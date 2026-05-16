@@ -1,27 +1,42 @@
 # 05 — Validation
 
-> **Status: real SHACL Core (v0.4).** The SQL surface
-> `pgrdf.validate(data BIGINT, shapes BIGINT) → JSONB` ships as a
-> real W3C-shape SHACL Core validator backed by the rudof project's
-> `shacl 0.3.x` crate. The v0.3 stub is gone. The upstream unblock
-> is tracked in [`specs/ERRATA.v0.4.md`](../specs/ERRATA.v0.4.md)
-> **E-011** (which supersedes [`E-009`](../specs/ERRATA.v0.2.md)).
+> **Status: real SHACL Core (v0.4) + the `mode` argument and the
+> W3C SHACL Core manifest gate (v0.5).** The SQL surface
+> `pgrdf.validate(data BIGINT, shapes BIGINT, mode TEXT DEFAULT
+> 'native') → JSONB` is a real W3C-shape SHACL Core validator
+> backed by the rudof project's `shacl 0.3.x` crate. The v0.3 stub
+> is gone. The v0.4 upstream unblock is tracked in
+> [`specs/ERRATA.v0.4.md`](../specs/ERRATA.v0.4.md) **E-011**; the
+> v0.5 `mode`-arg scope is tracked in
+> [`specs/ERRATA.v0.5.md`](../specs/ERRATA.v0.5.md) **E-012**
+> (SHACL-SPARQL upstream stub) and **E-013** (Core manifest gate
+> invariant + one excluded fixture).
 
 ## Surface
 
 ```sql
-SELECT pgrdf.validate(data_graph_id, shapes_graph_id);
+SELECT pgrdf.validate(data_graph_id, shapes_graph_id [, mode]);
 --   data_graph_id   — graph containing the assertions to validate
 --   shapes_graph_id — graph containing the SHACL shapes (sh:NodeShape /
 --                     sh:PropertyShape) those assertions must satisfy
+--   mode            — TEXT DEFAULT 'native'; one of {'native','sparql'}.
+--                     'native' is the Rust-native SHACL Core engine
+--                     (the v0.4 surface, unchanged — the 2-arg form
+--                     defaults here). 'sparql' is wired but the
+--                     upstream shacl 0.3.1 SparqlEngine is a stub
+--                     (ERRATA.v0.5 E-012): it returns a deterministic
+--                     structured "unavailable" report (conforms:null
+--                     + an error naming the gap), never a panic.
+--                     An unknown mode errors `validate: unknown mode`.
 -- Returns JSONB:
 --   {
---     "conforms":        <bool>,
+--     "conforms":        <bool|null>,
 --     "results":         [ ValidationResult, ... ],
 --     "data_graph_id":   <i64>,
 --     "shapes_graph_id": <i64>,
 --     "data_triples":    <i64>,
 --     "shapes_triples":  <i64>,
+--     "mode":            "native|sparql",
 --     "elapsed_ms":      <f64>
 --   }
 ```
@@ -43,7 +58,30 @@ Each `ValidationResult` element is:
 `conforms` is `true` iff `results` is empty, mirroring W3C
 `sh:conforms`. A degenerate report whose shapes graph names no
 targets is vacuously conforming; missing graphs (zero triples)
-follow the same rule.
+follow the same rule. Under `mode => 'sparql'`, `conforms` is
+`null` and an `error` field names the upstream gap (E-012) — the
+engine is not invoked.
+
+### The `mode` argument (v0.5)
+
+`pgrdf.validate(data, shapes, mode TEXT DEFAULT 'native')`:
+
+- `'native'` — the Rust-native SHACL Core engine. The default; the
+  2-arg `pgrdf.validate(d, s)` form is byte-identical to v0.4.
+- `'sparql'` — the SHACL-SPARQL mode. `shacl 0.3.1` has **no**
+  SHACL-SPARQL constraint component and its `SparqlEngine` is an
+  upstream stub (`unimplemented!()` in every target-resolution
+  method). pgRDF does **not** invoke the broken engine (a panic the
+  SQL caller cannot act on); `'sparql'` returns a clean,
+  deterministic structured report: `conforms:null`, empty
+  `results`, `mode:"sparql"`, and an `error` naming the gap +
+  ERRATA.v0.5 **E-012**. Forward-compatible: the day a rudof
+  release ships the engine, one guard is deleted and the existing
+  `&validation_mode` dispatch routes `'sparql'` through with no
+  signature change.
+- Any other value → `validate: unknown mode "<x>" (supported:
+  'native', 'sparql')`, raised **before** any work (no silent
+  fallback — mirrors `materialize: unknown profile`).
 
 ## Example
 
@@ -119,7 +157,10 @@ Bob is silent because he conforms.
 4. **Compile shapes** — `shacl::ShaclDataManager::load(…)`
    compiles the shapes graph into a SHACL `IRSchema`.
 5. **Validate** — `GraphValidation::new(data).validate(&schema,
-   &ShaclValidationMode::Native)` runs the Native engine.
+   &validation_mode)` runs the requested engine. `'native'` is the
+   in-process Rust engine. `'sparql'` short-circuits to the E-012
+   structured report **before** this step (the upstream engine is a
+   stub) — steps 5-6 are skipped for `'sparql'`.
 6. **Shape** — the resulting `ValidationReport.results()` maps to
    the JSONB shape above. Severities normalise to the canonical
    `sh:` constants; literals render Turtle-ish.
@@ -133,12 +174,32 @@ calling Postgres transaction.
 - SHACL Core — `sh:NodeShape` + `sh:PropertyShape` + the standard
   Core constraint components (cardinality, value-type, value-range,
   string, property-pair, logical, shape-based).
-- Native engine (in-process). The `Sparql` engine in `shacl 0.3`
-  is wired but not exposed at the SQL boundary today; v0.5 may
-  add a third positional arg.
-- Validation against materialised graphs works today via the
-  rehydrate's `is_inferred` inclusivity (no explicit `materialize`
-  call inside `validate`).
+- `'native'` engine (in-process). The `'sparql'` mode argument
+  ships (v0.5) but the upstream `shacl 0.3.1` SPARQL engine is a
+  stub (E-012) — `'sparql'` returns the deterministic structured
+  report, not a validation. SHACL-SPARQL (`sh:sparql`/`sh:select`)
+  constraint components are not parsed by `shacl 0.3.1` at all.
+- Validation against materialised graphs works via the rehydrate's
+  `is_inferred` inclusivity: `pgrdf.materialize` then
+  `pgrdf.validate` validates the entailed closure (regression
+  `122-shacl-modes.sql` §E + the W3C SHACL Core gate below).
+
+## W3C SHACL Core manifest gate (v0.5)
+
+`just test-shacl-manifest` runs a vendored, hermetic subset of the
+W3C `data-shapes-test-suite` SHACL **Core** tests
+(`tests/w3c-shacl/`, structured like `tests/w3c-sparql/`), wired
+into CI on every PG major (14-17) as a real gate. The vendored Core
+suite is a genuine **full-pass — 24 / 24** on the W3C `sh:conforms`
+invariant; per ERRATA.v0.5 **E-013** the gate compares `conforms`
+(not the violation *count*, which drifts ±1 from pgRDF's
+blank-node-relabelling dictionary rehydrate — a serialization
+artifact that does not flip conformance). One W3C Core fixture
+(`prop-nodeKind-001`) is documented-excluded for an upstream
+`sh:nodeKind` multi-value bug (E-013) and carried to Phase H+I for
+the final v0.5.0. `just test-shacl-manifest --sparql` asserts the
+E-012 known state (`conforms:null` for every fixture — the upstream
+SparqlEngine stub).
 
 ### Out of scope (v0.4)
 
@@ -158,10 +219,18 @@ calling Postgres transaction.
 - [`tests/regression/sql/71-shacl-real.sql`](../tests/regression/sql/71-shacl-real.sql) —
   LLD §9 acceptance: `sh:NodeShape` + `sh:property` + `sh:datatype`
   with a non-conforming focus node (Alice).
+- [`tests/regression/sql/122-shacl-modes.sql`](../tests/regression/sql/122-shacl-modes.sql) —
+  v0.5 §5: mode field + default; unknown-mode error; `'native'`
+  ignores a silently-dropped `sh:sparql` block while still flagging
+  the Core violation; `'sparql'` structured report; §5.3 #2
+  materialised-graph entailment (RDFS profile).
+- [`tests/w3c-shacl/`](../tests/w3c-shacl/) — the W3C SHACL Core
+  manifest gate (24/24, `conforms` invariant; E-013).
 
-Plus three `#[pg_test]` integration tests in
+Plus seven `#[pg_test]` integration tests in
 `src/validation/shacl.rs::tests` (conforming, violations, unknown
-graphs).
+graphs, mode-field-default, unknown-mode-errors, sparql-mode
+structured-unavailable, materialised-graph-entailed).
 
 ## Unblock vehicle
 
@@ -186,7 +255,15 @@ version (the `features = ["rdf-12"]` opt-in stays).
 
 - Implementation: [`src/validation/shacl.rs`](../src/validation/shacl.rs)
 - Spec: [`specs/SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md) §9
+  (real SHACL Core) +
+  [`specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md)
+  §5 / §6 (the `mode` arg + the W3C SHACL Core gate)
 - ERRATA: [`E-011`](../specs/ERRATA.v0.4.md) — fork patch +
   unblock vehicle.
+- ERRATA: [`E-012`](../specs/ERRATA.v0.5.md) — `shacl 0.3.1`
+  SHACL-SPARQL mode is an upstream stub; the `mode` arg ships
+  forward-compatible.
+- ERRATA: [`E-013`](../specs/ERRATA.v0.5.md) — the W3C SHACL Core
+  gate `sh:conforms` invariant + the one excluded fixture.
 - ERRATA: [`E-009`](../specs/ERRATA.v0.2.md) — original
   dep-block, now resolved.

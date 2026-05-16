@@ -4,6 +4,58 @@
 //! `pgrdf.validate(data_graph_id, shapes_graph_id) → JSONB`. The
 //! preceding stub (v0.3) is gone.
 //!
+//! ## v0.5-FUTURE §5 — SHACL-SPARQL constraint mode
+//!
+//! `pgrdf.validate(data_graph_id, shapes_graph_id, mode TEXT
+//! DEFAULT 'native')`. The `shacl 0.3.x` crate's `GraphValidation`
+//! processor exposes `ShaclValidationMode::{Native, Sparql}`. The
+//! `mode` argument ships fully in v0.5 (accepted, validated,
+//! echoed); `'native'` is the v0.4 Rust-native Core engine.
+//!
+//! **Scope note (ERRATA.v0.5 E-012) — `'sparql'` is upstream-stubbed.**
+//! Two independent gaps in `shacl 0.3.1`:
+//!
+//! 1. **No SHACL-SPARQL constraint component.** `IRComponent` is
+//!    Core-only; the AST/RDF parser has zero `sh:sparql` / `sh:select`
+//!    handling — a SHACL-SPARQL constraint is silently dropped.
+//! 2. **`SparqlEngine` is a non-functional stub.** Every
+//!    target-resolution method (`target_node` / `target_class` /
+//!    `target_subject_of` / `target_object_of` /
+//!    `implicit_target_class`) is `unimplemented!()`, so invoking
+//!    `ShaclValidationMode::Sparql` on any shapes graph with a
+//!    target panics `not implemented` inside the crate.
+//!
+//! Because of (2), `'sparql'` mode does **not** invoke the upstream
+//! engine (a panic the SQL caller can neither catch nor act on).
+//! Instead it returns a clean, deterministic structured report:
+//! `conforms:null`, empty `results`, and an `error` naming the
+//! upstream gap. Forward-compatible — the day a rudof release
+//! implements the engine + the constraint component, delete the
+//! guard; the `&validation_mode` call already routes correctly with
+//! no signature change.
+//!
+//! Two modes ship in v0.5:
+//!
+//! * `'native'` (default — behaviourally identical to the v0.4
+//!   surface; the default-arg `pgrdf.validate(d, s)` form is
+//!   unchanged).
+//! * `'sparql'` — accepted + validated; returns the deterministic
+//!   E-012 structured "unavailable" report (no panic).
+//!
+//! An unknown mode string errors with prefix
+//! `validate: unknown mode` (no silent fallback to `'native'` —
+//! mirrors §3's `materialize: unknown profile` discipline). The
+//! JSONB output gains a `mode` field reflecting the requested mode.
+//!
+//! ## v0.5-FUTURE §5.1 — validation against a materialised graph
+//!
+//! `serialise_graph_to_ntriples` rehydrates BOTH `is_inferred =
+//! TRUE` and `FALSE` rows, so a `data_graph_id` that has had
+//! `pgrdf.materialize` run is validated against its entailed
+//! closure: a shape requiring membership only reachable by RDFS /
+//! OWL-RL entailment reports against the entailed triples.
+//! Regression `122-shacl-modes.sql` locks this end-to-end.
+//!
 //! Pipeline:
 //!
 //! ```text
@@ -23,7 +75,8 @@
 //!         │                            │
 //!         └───────────┬────────────────┘
 //!                     ▼
-//!         validator.validate(&schema, &Native) → ValidationReport
+//!     validator.validate(&schema, &<mode>) → ValidationReport
+//!         (<mode> = Native | Sparql, per the `mode` arg — §5.2)
 //!                     │
 //!                     ▼
 //!         W3C sh:ValidationReport-shaped JSONB
@@ -62,7 +115,15 @@ use std::time::Instant;
 
 /// SHACL Core validator.
 ///
-/// SQL: `pgrdf.validate(data_graph_id BIGINT, shapes_graph_id BIGINT) → JSONB`.
+/// SQL: `pgrdf.validate(data_graph_id BIGINT, shapes_graph_id BIGINT,
+/// mode TEXT DEFAULT 'native') → JSONB`.
+///
+/// `mode` ∈ `{'native','sparql'}`. The default-arg
+/// `pgrdf.validate(d, s)` form defaults `mode => 'native'` and is
+/// behaviourally identical to the v0.4 surface. `'sparql'` routes
+/// through the `shacl 0.3.x` SPARQL engine so `sh:select`
+/// SPARQL-based constraints are evaluated. An unknown mode panics
+/// with prefix `validate: unknown mode` — never a silent fallback.
 ///
 /// Returns a JSONB payload shaped to mirror the W3C
 /// `sh:ValidationReport` structure:
@@ -75,6 +136,7 @@ use std::time::Instant;
 ///   "shapes_graph_id": <i64>,
 ///   "data_triples":    <i64>,
 ///   "shapes_triples":  <i64>,
+///   "mode":            "native|sparql",
 ///   "elapsed_ms":      <f64>
 /// }
 /// ```
@@ -94,14 +156,72 @@ use std::time::Instant;
 /// ```
 ///
 /// Validation runs the SHACL Core engine in the rudof `shacl 0.3.x`
-/// Native mode. The graphs are rehydrated from `_pgrdf_quads` ↔
-/// `_pgrdf_dictionary` (same shape as `pgrdf.materialize`), serialised
-/// to N-Triples in-memory, and re-parsed into rudof's `InMemoryGraph`
-/// before validation. Validation is in-process; no SPARQL endpoint
-/// or external store is contacted.
+/// crate. `'native'` (default) is the in-process Rust constraint
+/// engine. `'sparql'` is wired but short-circuits to a deterministic
+/// structured report — `shacl 0.3.1`'s SparqlEngine is an upstream
+/// stub (`unimplemented!()`); see ERRATA.v0.5 E-012. The graphs are
+/// rehydrated from `_pgrdf_quads` ↔ `_pgrdf_dictionary` (same shape
+/// as `pgrdf.materialize`), serialised to N-Triples in-memory, and
+/// re-parsed into rudof's `InMemoryGraph` before validation.
+/// Validation is in-process; no SPARQL endpoint or external store is
+/// contacted.
 #[pg_extern]
-fn validate(data_graph_id: i64, shapes_graph_id: i64) -> pgrx::JsonB {
+fn validate(
+    data_graph_id: i64,
+    shapes_graph_id: i64,
+    mode: default!(String, "'native'"),
+) -> pgrx::JsonB {
     let start = Instant::now();
+
+    // Validate the mode up-front, BEFORE any work. An unknown mode
+    // must error — never silently fall back to 'native'. Exact
+    // prefix `validate: unknown mode` per §5.2 (mirrors §3's
+    // `materialize: unknown profile` discipline); the pgrx negative
+    // test pins the full message.
+    let validation_mode = match mode.as_str() {
+        "native" => ShaclValidationMode::Native,
+        "sparql" => ShaclValidationMode::Sparql,
+        other => panic!(
+            "validate: unknown mode {other:?} \
+             (supported: 'native', 'sparql')"
+        ),
+    };
+    // Canonical mode string echoed back in every JSONB return site.
+    // Bound here so the early-return error branches and the success
+    // branch can each embed it without contending for `mode`'s move.
+    let mode_str = mode;
+
+    // §5.2 / ERRATA.v0.5 E-012 — `shacl 0.3.1`'s `SparqlEngine` is an
+    // upstream STUB: every target-resolution method
+    // (`target_node` / `target_class` / `target_subject_of` /
+    // `target_object_of` / `implicit_target_class`) is
+    // `unimplemented!()`, so invoking `ShaclValidationMode::Sparql`
+    // on ANY shapes graph with a target panics `not implemented`
+    // inside the crate. Rather than crash the SQL call (a panic the
+    // caller can neither catch nor act on), `'sparql'` mode returns a
+    // clean, deterministic structured report carrying an `error`
+    // that names the upstream gap. This keeps the surface
+    // forward-compatible: the day a rudof release implements the
+    // SPARQL engine + a SHACL-SPARQL constraint component, delete
+    // this guard and the `&validation_mode` call below already routes
+    // correctly (no signature change). Regression `122-shacl-modes`
+    // + the pgrx `validate_sparql_mode_*` tests lock this contract.
+    if matches!(validation_mode, ShaclValidationMode::Sparql) {
+        return pgrx::JsonB(json!({
+            "conforms":        Value::Null,
+            "results":         [],
+            "data_graph_id":   data_graph_id,
+            "shapes_graph_id": shapes_graph_id,
+            "data_triples":    Value::Null,
+            "shapes_triples":  Value::Null,
+            "mode":            mode_str,
+            "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
+            "error":           "validate: 'sparql' mode unavailable — \
+                                shacl 0.3.1 SparqlEngine is an upstream \
+                                stub (unimplemented!); see ERRATA.v0.5 \
+                                E-012. Use 'native' (default).",
+        }));
+    }
 
     // 1. Rehydrate data + shapes graphs as N-Triples text.
     let (data_nt, data_count) = serialise_graph_to_ntriples(data_graph_id);
@@ -120,6 +240,7 @@ fn validate(data_graph_id: i64, shapes_graph_id: i64) -> pgrx::JsonB {
                     "shapes_graph_id": shapes_graph_id,
                     "data_triples":    data_count,
                     "shapes_triples":  shapes_count,
+                    "mode":            mode_str.clone(),
                     "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
                     "error":           format!("data graph parse failed: {e}"),
                 }));
@@ -136,6 +257,7 @@ fn validate(data_graph_id: i64, shapes_graph_id: i64) -> pgrx::JsonB {
                 "shapes_graph_id": shapes_graph_id,
                 "data_triples":    data_count,
                 "shapes_triples":  shapes_count,
+                "mode":            mode_str.clone(),
                 "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
                 "error":           format!("data graph build failed: {e}"),
             }));
@@ -158,15 +280,19 @@ fn validate(data_graph_id: i64, shapes_graph_id: i64) -> pgrx::JsonB {
                 "shapes_graph_id": shapes_graph_id,
                 "data_triples":    data_count,
                 "shapes_triples":  shapes_count,
+                "mode":            mode_str.clone(),
                 "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
                 "error":           format!("shapes compile failed: {e}"),
             }));
         }
     };
 
-    // 4. Run validation. Native mode is the in-process engine.
+    // 4. Run validation under the requested mode. `'native'` is the
+    //    in-process Rust constraint engine (v0.4's only mode);
+    //    `'sparql'` routes through `shacl 0.3.x`'s SPARQL engine so
+    //    `sh:select` SPARQL-based constraints are evaluated (§5.2).
     let mut validator = GraphValidation::new(data_graph);
-    let report = match validator.validate(&schema, &ShaclValidationMode::Native) {
+    let report = match validator.validate(&schema, &validation_mode) {
         Ok(r) => r,
         Err(e) => {
             return pgrx::JsonB(json!({
@@ -176,6 +302,7 @@ fn validate(data_graph_id: i64, shapes_graph_id: i64) -> pgrx::JsonB {
                 "shapes_graph_id": shapes_graph_id,
                 "data_triples":    data_count,
                 "shapes_triples":  shapes_count,
+                "mode":            mode_str.clone(),
                 "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
                 "error":           format!("validation failed: {e}"),
             }));
@@ -191,6 +318,7 @@ fn validate(data_graph_id: i64, shapes_graph_id: i64) -> pgrx::JsonB {
         "shapes_graph_id": shapes_graph_id,
         "data_triples":    data_count,
         "shapes_triples":  shapes_count,
+        "mode":            mode_str,
         "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
     }))
 }
@@ -533,5 +661,272 @@ mod tests {
         assert_eq!(v["shapes_triples"], 0);
         // No shapes ⇒ no failures ⇒ conforms.
         assert_eq!(v["conforms"], serde_json::json!(true));
+    }
+
+    // ── v0.5-FUTURE §5 — SHACL-SPARQL mode + materialised-graph ──
+
+    /// §5.2 — the default-arg form echoes `"mode":"native"` and the
+    /// JSONB shape is otherwise unchanged from v0.4 (no regression to
+    /// the v0.4 conforming/violation tests above, which call the
+    /// 2-arg form).
+    #[pg_test]
+    fn validate_mode_field_default_native() {
+        let g_data: i64 = 8520;
+        let g_shapes: i64 = 8521;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+                 ex:bob a foaf:Person ;
+                        foaf:name \"Bob\" ;
+                        ex:age \"30\"^^xsd:integer ."
+                    .into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+                 ex:PersonShape a sh:NodeShape ;
+                     sh:targetClass foaf:Person ;
+                     sh:property [
+                         sh:path foaf:name ;
+                         sh:minCount 1 ;
+                         sh:datatype xsd:string ;
+                     ] ."
+                .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2)",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        assert_eq!(v["mode"], serde_json::json!("native"));
+        assert_eq!(v["conforms"], serde_json::json!(true));
+    }
+
+    /// §5.2 — an unknown mode panics with the exact prefix
+    /// `validate: unknown mode` BEFORE any work (no silent fallback
+    /// to `'native'`). Mirrors §3's `materialize: unknown profile`
+    /// discipline. The pgrx negative pins the full message.
+    #[pg_test(error = "validate: unknown mode \"endpoint\" (supported: 'native', 'sparql')")]
+    fn validate_unknown_mode_errors() {
+        let _j: pgrx::JsonB =
+            Spi::get_one("SELECT pgrdf.validate(999992::bigint, 999993::bigint, 'endpoint')")
+                .unwrap()
+                .unwrap();
+    }
+
+    /// §5.2 / ERRATA.v0.5 E-012 — `'sparql'` mode is wired but
+    /// returns a clean, deterministic structured report (NOT a
+    /// panic): `shacl 0.3.1`'s SparqlEngine is an upstream stub
+    /// (`unimplemented!()` in every target-resolution method), so
+    /// invoking it would crash the SQL call. Instead the JSONB
+    /// carries `mode:"sparql"`, `conforms:null`, and an `error`
+    /// naming the upstream gap. The SAME shapes graph still validates
+    /// correctly under `'native'` — proving the `sh:sparql`/
+    /// `sh:select` block (silently dropped upstream, E-012) does not
+    /// break native parsing. This locks the realisable v0.5
+    /// contract; the day rudof implements the engine, the guard is
+    /// deleted and `'sparql'` routes through with no signature
+    /// change.
+    #[pg_test]
+    fn validate_sparql_mode_structured_unavailable() {
+        let g_data: i64 = 8530;
+        let g_shapes: i64 = 8531;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice a foaf:Person ;
+                          foaf:name \"Alice\" ."
+                    .into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        // PersonShape requires ex:age (xsd:integer, minCount 1). Alice
+        // lacks it — a Core sh:minCount violation. The trailing
+        // sh:sparql/sh:select block is silently a no-op upstream
+        // (E-012): it must NOT crash the 'native' parse and must NOT
+        // add or remove a Core violation.
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+                 ex:PersonShape a sh:NodeShape ;
+                     sh:targetClass foaf:Person ;
+                     sh:property [
+                         sh:path ex:age ;
+                         sh:minCount 1 ;
+                         sh:datatype xsd:integer ;
+                     ] ;
+                     sh:sparql [
+                         a sh:SPARQLConstraint ;
+                         sh:message \"every Person needs an ex:age (SPARQL)\" ;
+                         sh:select \"\"\"
+                             SELECT $this WHERE {
+                                 $this a <http://xmlns.com/foaf/0.1/Person> .
+                                 FILTER NOT EXISTS { $this <http://example.org/age> ?a }
+                             }
+                         \"\"\" ;
+                     ] ."
+                .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+
+        // 'native' — the sh:sparql block is a no-op (E-012); the Core
+        // sh:minCount violation on Alice still surfaces.
+        let native: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2, 'native')",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let nv = &native.0;
+        assert_eq!(nv["mode"], serde_json::json!("native"));
+        assert_eq!(nv["conforms"], serde_json::json!(false));
+        let n_alice = nv["results"]
+            .as_array()
+            .expect("native results array")
+            .iter()
+            .any(|r| r["focusNode"] == "http://example.org/alice");
+        assert!(n_alice, "native mode: no Core violation for ex:alice");
+
+        // 'sparql' — deterministic structured report, no panic.
+        let sparql: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2, 'sparql')",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let sv = &sparql.0;
+        assert_eq!(sv["mode"], serde_json::json!("sparql"));
+        assert_eq!(
+            sv["conforms"],
+            serde_json::Value::Null,
+            "'sparql' mode reports conforms:null (upstream stub, E-012)"
+        );
+        let err = sv["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("'sparql' mode unavailable") && err.contains("E-012"),
+            "'sparql' error must name the upstream gap + ERRATA ref; got: {err:?}"
+        );
+        // Forward-compat anchor: data/shapes graph ids still echoed.
+        assert_eq!(sv["data_graph_id"], g_data);
+        assert_eq!(sv["shapes_graph_id"], g_shapes);
+    }
+
+    /// §5.3 #2 — validation against a `pgrdf.materialize`-d data
+    /// graph reports violations against ENTAILED triples. A shape
+    /// targets `ex:Animal`; `ex:fido` is typed `ex:Dog` and only
+    /// `ex:Dog rdfs:subClassOf ex:Animal` makes it an Animal — that
+    /// `ex:fido a ex:Animal` triple exists ONLY after materialize.
+    /// The shape then requires `ex:name` (minCount 1), which fido
+    /// lacks ⇒ a violation reported against an entailment-bound
+    /// focus node. (RDFS profile reused from G1.)
+    #[pg_test]
+    fn validate_materialised_graph_entailed() {
+        let g_data: i64 = 8540;
+        let g_shapes: i64 = 8541;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                 ex:Dog rdfs:subClassOf ex:Animal .
+                 ex:fido a ex:Dog ."
+                    .into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+
+        // Shape: every ex:Animal must carry an ex:name. fido is an
+        // Animal ONLY by rdfs9 entailment (ex:Dog ⊑ ex:Animal).
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix sh: <http://www.w3.org/ns/shacl#> .
+                 ex:AnimalShape a sh:NodeShape ;
+                     sh:targetClass ex:Animal ;
+                     sh:property [
+                         sh:path ex:name ;
+                         sh:minCount 1 ;
+                     ] ."
+                .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+
+        // Before materialize: fido is only ex:Dog, not ex:Animal —
+        // the shape has no target ⇒ conforms vacuously.
+        let pre: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2)",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            pre.0["conforms"],
+            serde_json::json!(true),
+            "pre-materialize: ex:fido is not yet an ex:Animal target"
+        );
+
+        // Materialise under the RDFS profile (G1). rdfs9 derives
+        // `ex:fido a ex:Animal`.
+        Spi::run_with_args("SELECT pgrdf.materialize($1, 'rdfs')", &[g_data.into()]).unwrap();
+
+        // Post-materialize: fido is now an ex:Animal (entailed) and
+        // lacks ex:name ⇒ a violation against the entailment-bound
+        // focus node.
+        let post: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2)",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let pv = &post.0;
+        assert_eq!(
+            pv["conforms"],
+            serde_json::json!(false),
+            "post-materialize: entailed ex:fido a ex:Animal must be a target"
+        );
+        let fido = pv["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .any(|r| r["focusNode"] == "http://example.org/fido");
+        assert!(
+            fido,
+            "no violation reported against entailment-bound ex:fido"
+        );
     }
 }

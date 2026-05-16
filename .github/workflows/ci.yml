@@ -114,12 +114,39 @@ jobs:
       - name: Run W3C-shape SPARQL harness
         env:
           PGRDF_RUNTIME: docker
-        # 35 hand-authored W3C-shape fixtures covering W3C SPARQL 1.1
-        # SELECT / ASK / GRAPH / UPDATE / CONSTRUCT patterns. CONSTRUCT
-        # fixtures 30-35 landed Phase D slice 51 (see the `kind` file
-        # convention in tests/w3c-sparql/README.md). The full
-        # TTL-manifest runner against w3c/rdf-tests is later v0.4 work.
+        # 51 hand-authored W3C-shape fixtures covering W3C SPARQL 1.1
+        # SELECT / ASK / GRAPH / UPDATE / CONSTRUCT / DESCRIBE /
+        # property-path / type-aware-ORDER-BY patterns + the Phase G
+        # surface (48-51: RDFS/OWL-RL reasoning-profile-sensitive
+        # queries, TriG- and N-Quads-loaded GRAPH-scoped queries).
+        # See the `kind` / `setup.sql` conventions in
+        # tests/w3c-sparql/README.md.
         run: bash tests/w3c-sparql/run.sh
+      - name: Run W3C SHACL Core manifest gate
+        env:
+          PGRDF_RUNTIME: docker
+        # v0.5-FUTURE §6 — a vendored, hermetic subset of the W3C
+        # data-shapes-test-suite SHACL Core tests (checked in, never
+        # fetched at test time). REAL gate (no continue-on-error /
+        # if:false): the Core suite must be full-pass (24/24) on the
+        # W3C sh:conforms invariant. One W3C Core fixture is
+        # documented-excluded for an upstream sh:nodeKind bug
+        # (specs/ERRATA.v0.5.md E-013). The pgrx `test` matrix job
+        # (PG14-17) additionally exercises pgrdf.validate's SHACL
+        # path on every PG major via the #[pg_test] SHACL tests;
+        # the compose stack is PG17 (E-006 — same scoping the
+        # regression/w3c-sparql/LUBM steps in this job already use).
+        run: bash tests/w3c-shacl/run.sh
+      - name: Run W3C SHACL --sparql known-state assertion
+        env:
+          PGRDF_RUNTIME: docker
+        # ERRATA.v0.5 E-012 — shacl 0.3.1's SparqlEngine is an
+        # upstream stub (unimplemented!). 'sparql' mode returns a
+        # deterministic structured report; this asserts that bounded
+        # KNOWN STATE (conforms:null for every fixture) — NOT a raw
+        # failure, NOT continue-on-error. Promotes toward full-pass
+        # when a rudof release ships the engine (E-012 re-check).
+        run: bash tests/w3c-shacl/run.sh --sparql
       - name: Run LUBM-shape correctness gate
         env:
           PGRDF_RUNTIME: docker

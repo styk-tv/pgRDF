@@ -1,29 +1,99 @@
-# W3C SHACL conformance harness
+# tests/w3c-shacl — W3C SHACL conformance harness
 
-Mirror of [tests/w3c-sparql/](../w3c-sparql/) for the W3C SHACL test
-suite at https://github.com/w3c/data-shapes.
+v0.5-FUTURE §6. The third correctness gate, alongside
+[`tests/w3c-sparql/`](../w3c-sparql/) (W3C SPARQL-shape) and
+`tests/regression/` (pg_regress). Wired into `ci.yml` on every PG
+major and runnable locally via `just test-shacl-manifest`.
 
-## Layout (target)
+## Layout
 
     tests/w3c-shacl/
-    ├── README.md                  (this file)
-    ├── manifest_runner.rs         (Phase 3)
-    └── fixtures/                  (submodule: w3c/data-shapes, sparse-checked to data-shapes-test-suite/tests/core/)
+    ├── README.md                       (this file)
+    ├── run.sh                          (the harness)
+    └── fixtures/core/
+        ├── <name>.ttl                  (vendored W3C SHACL Core test)
+        └── <name>.expected.json        (hand-derived {conforms,violations})
 
-## Manifest format
+The `.ttl` fixtures are a curated, **vendored** subset of the W3C
+`data-shapes-test-suite` SHACL Core tests
+(<https://github.com/w3c/data-shapes>, `gh-pages`). They are checked
+into the repo — the harness never fetches at test time, so CI is
+hermetic (same discipline as the w3c-sparql shape fixtures).
 
-SHACL tests use Turtle manifests pointing at:
-- `sht:dataGraph`   → input data graph
-- `sht:shapesGraph` → SHACL shapes
-- `mf:result`       → expected ValidationReport (Turtle)
+Each test ships as TWO files: `<name>.w3c.ttl` (the **unmodified**
+W3C source, kept for provenance + to hand-derive the expected from
+its `mf:result`) and `<name>.ttl` (the data + shapes split — the W3C
+suite roots its `mf:Manifest` at the empty relative IRI `<>`, which
+oxttl rejects without a base; the SHACL engine never needs the
+manifest triples, so the harness loads the `<>`-free split). The
+harness skips the `*.w3c.ttl` provenance copies.
 
-The runner calls `pgrdf.validate()` and diffs the returned JSONB
-against the expected report (after JSONB→Turtle round-trip via a tiny
-deserializer).
+**Status:** the vendored W3C SHACL **Core** suite is a genuine
+**full-pass — 24 / 24** on the `sh:conforms` invariant (see ERRATA
+E-013 for why `conforms`, not violation count, is the gate). One W3C
+Core fixture (`prop-nodeKind-001`) is documented-excluded to
+`fixtures/excluded/` — a true upstream `sh:nodeKind` enforcement bug
+in `shacl 0.3.1` (ERRATA.v0.5 **E-013**); it is a Phase H+I
+follow-up for the final v0.5.0, NOT a silent omission.
 
-## Coverage gates per phase
+Each fixture is a self-contained W3C test `.ttl`: data triples +
+`sh:` shapes + an `mf:Manifest` whose `mf:result` carries the
+spec-authoritative `sh:ValidationReport`. Per the W3C suite
+convention `sht:dataGraph <>` and `sht:shapesGraph <>` both point at
+the file itself, so the harness loads the whole `.ttl` into ONE
+pgRDF graph and validates it against itself (`pgrdf.validate(g, g)`).
+The SHACL engine acts only on the `sh:*` shapes + their targets and
+ignores the `mf:` / `sht:` manifest triples (they declare no SHACL
+constraint).
 
-- Phase 1: scaffolded only.
-- Phase 2: runner runs (may all-fail).
-- Phase 3: ≥ 50% pass.
-- Phase 4: ≥ 90% pass.
+## Comparison invariant — `{conforms}` (ERRATA.v0.5 E-013)
+
+`run.sh` compares the validator's **`sh:conforms` boolean** against a
+hand-derived `expected.json` (`{"conforms":true|false}`), derived
+from each fixture's W3C `mf:result` `sh:conforms` (the
+spec-authoritative answer) and committed alongside the fixture.
+Never auto-blessed — `ACCEPT=1` refuses to overwrite an existing
+`expected.json`.
+
+`conforms` is the headline W3C SHACL conformance signal: a validator
+that decides conformance correctly is W3C-conformant at the
+report level. The violation **count** is printed for diagnostics but
+is **not** a gate criterion: the W3C fixtures use blank-node focus
+nodes whose identity does not survive pgRDF's dictionary-encoded
+N-Triples rehydrate byte-stable, so a blank-node-focus violation can
+be relabelled/coalesced and the count drift by ±1 *without* a
+conformance error (the same blank-node-relabel reason focus-node
+IRIs are excluded). A genuinely missed or spurious constraint flips
+`conforms` (caught); a serialization artifact does not (tolerated).
+Full rationale: `specs/ERRATA.v0.5.md` **E-013**.
+
+## Modes
+
+| Invocation | Mode | Gate |
+|---|---|---|
+| `just test-shacl-manifest` | `pgrdf.validate(g,g)` — `'native'` | **§6.1 #1 — Core full-pass (hard gate)** |
+| `just test-shacl-manifest --sparql` | `pgrdf.validate(g,g,'sparql')` | §6.1 #2 — ERRATA.v0.5 E-012 known-state |
+
+`--sparql` runs the same Core fixtures through the upstream SPARQL
+*evaluation* engine. Per
+[`specs/ERRATA.v0.5.md`](../../specs/ERRATA.v0.5.md) **E-012**,
+`shacl 0.3.1` has **no SHACL-SPARQL (`sh:select`) constraint
+component** — `ShaclValidationMode::Sparql` is an alternative
+evaluation engine for the same SHACL **Core** constraints, not
+SHACL-SPARQL constraint-language support. The known state for the
+vendored Core fixtures is therefore "identical to `'native'`"
+(Core-violation parity); the `--sparql` sub-run asserts that bounded
+known set rather than a raw failure. A true W3C SHACL-SPARQL
+manifest cannot pass with the current upstream crate and is NOT
+vendored here — it is fully scoped in E-012 and revisited when a
+future rudof release adds SHACL-SPARQL parsing.
+
+## Runner
+
+```bash
+bash tests/w3c-shacl/run.sh                   # Core, native (the gate)
+bash tests/w3c-shacl/run.sh --sparql          # sparql sub-run
+bash tests/w3c-shacl/run.sh node-datatype-001 # one fixture
+```
+
+Exit 0 iff every selected fixture matches its hand-derived expected.
