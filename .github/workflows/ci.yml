@@ -128,14 +128,20 @@ jobs:
         # v0.5-FUTURE §6 — a vendored, hermetic subset of the W3C
         # data-shapes-test-suite SHACL Core tests (checked in, never
         # fetched at test time). REAL gate (no continue-on-error /
-        # if:false): the Core suite must be full-pass (24/24) on the
-        # W3C sh:conforms invariant. One W3C Core fixture is
-        # documented-excluded for an upstream sh:nodeKind bug
-        # (specs/ERRATA.v0.5.md E-013). The pgrx `test` matrix job
-        # (PG14-17) additionally exercises pgrdf.validate's SHACL
-        # path on every PG major via the #[pg_test] SHACL tests;
-        # the compose stack is PG17 (E-006 — same scoping the
-        # regression/w3c-sparql/LUBM steps in this job already use).
+        # if:false): the Core suite is a genuine full-pass (25/25)
+        # on the W3C sh:conforms invariant, no exclusion. (The
+        # earlier "prop-nodeKind-001 excluded for an upstream
+        # sh:nodeKind bug" claim was a G3 unverified assumption — the
+        # fixture had been committed straight into fixtures/excluded/
+        # so run.sh never ran it; investigation at v0.5.0-rc1 found
+        # no upstream bug, pgRDF produces the W3C-authoritative
+        # conforms:false / 27 violations, and the fixture is now
+        # graded in fixtures/core/. See specs/ERRATA.v0.5.md E-013.)
+        # The pgrx `test` matrix job (PG14-17) additionally exercises
+        # pgrdf.validate's SHACL path on every PG major via the
+        # #[pg_test] SHACL tests; the compose stack is PG17 (E-006 —
+        # same scoping the regression/w3c-sparql/LUBM steps in this
+        # job already use).
         run: bash tests/w3c-shacl/run.sh
       - name: Run W3C SHACL --sparql known-state assertion
         env:

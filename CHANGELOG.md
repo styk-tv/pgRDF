@@ -14,10 +14,15 @@ profile selector, IRI lifecycle overloads, TriG/N-Quads ingest,
 aggregates-over-UNION residuals, the SHACL `mode` argument, and the
 W3C SHACL Core manifest gate. Two documented honest caveats carry
 to the final v0.5.0 after Phase H+I hygiene: ERRATA.v0.5 **E-012**
-(`shacl 0.3.1` SHACL-SPARQL mode is an upstream stub — the `mode`
-arg ships forward-compatible) and **E-013** (one W3C SHACL Core
-fixture excluded for an upstream `sh:nodeKind` bug; Core is
-otherwise 24/24 full-pass). crates.io publish stays gated on
+(`shacl 0.3.1` SHACL-SPARQL mode is a documented upstream-gate — the
+`mode` arg ships forward-compatible). **E-013** is corrected/resolved:
+its earlier "one W3C SHACL Core fixture excluded for an upstream
+`sh:nodeKind` bug" claim was a G3 unverified assumption (the fixture
+was committed straight into `fixtures/excluded/` so the harness never
+ran it); investigation at v0.5.0-rc1 found no upstream bug, the
+fixture is restored to `fixtures/core/`, and W3C SHACL Core is a
+**genuine 25/25 full-pass, no exclusion**. crates.io publish stays
+gated on
 gtfierro/reasonable#50 (E-011); this rc ships the 8 platform
 tarballs via release.yml only.
 

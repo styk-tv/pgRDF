@@ -23,9 +23,10 @@ appears") — E-012 is that first delta.
 | Field | Value |
 |---|---|
 | Filed | 2026-05-16 |
-| Status | upstream gap (two independent) — documented + scoped; pgRDF surface adjusted to the realisable contract |
+| Status | **documented upstream-gate (final for v0.5.0)** — two independent upstream gaps, scoped; pgRDF ships an honest deterministic short-circuit; a documented limitation, NOT a pgRDF defect |
 | Affects | [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md) §5.2 / §5.3 #1, §6.1 #2 |
 | Crate | `shacl 0.3.1` (rudof project, 2026-05-12) |
+| Upstream | `rudof-project/rudof` issues #21, #94, #1 (SHACL-SPARQL constraint component + `SparqlEngine` are upstream's own unscheduled roadmap) |
 
 #### Claim (v0.5-FUTURE §5.2 / §5.3 #1)
 
@@ -124,26 +125,59 @@ routes `'sparql'` through with **no signature change**.
   not vendored: it cannot pass with the current crate and would add
   no signal beyond this erratum.
 
+#### Documented-upstream-gate — final for v0.5.0
+
+This is the clean, final v0.5.0 form (wording only; **no code
+change** — the G3 short-circuit, the `mode` argument, and the CI
+known-state assertion stay exactly as they are):
+
+- `shacl 0.3.1` has **no SHACL-SPARQL constraint component** and its
+  `SparqlEngine` is an `unimplemented!()` stub (Gaps 1 + 2 above).
+  This is **upstream's own unscheduled roadmap**, tracked in
+  `rudof-project/rudof` issues **#21, #94, #1** — not a pgRDF
+  omission.
+- pgRDF ships an **honest deterministic `mode => 'sparql'`
+  short-circuit**: it returns a structured report (`conforms:null` +
+  an `error` naming the upstream gap + this erratum), **never
+  panics**, and is **forward-compatible** — the surface is exactly
+  what it will be once upstream lands the engine, so it activates
+  with no signature change the day a rudof release ships
+  `IRComponent::Sparql` (or equivalent) + `sh:sparql`/`sh:select`
+  parsing.
+- **CI asserts this known state as a real gate** (`just
+  test-shacl-manifest --sparql` → every vendored fixture yields
+  exactly `{"conforms":null}`; regression `122-shacl-modes.sql` +
+  pgrx `validate_sparql_mode_structured_unavailable`). The gate is
+  NOT weakened — it asserts a bounded known state, not a raw failure.
+- v0.5-FUTURE §5.3 acceptance **#1** is **upstream-unimplementable**
+  with the pinned dependency; #2 is fully met (it uses `'native'`).
+- This is a **documented limitation, consistent with the
+  RDF-1.2 / `reasonable#50` (E-011) precedent** — an honest,
+  scoped, forward-compatible upstream-gate — and is **NOT a pgRDF
+  defect**.
+
 #### Re-check trigger
 
 A future `shacl` (rudof) release that adds an `IRComponent::Sparql`
-(or equivalent) + `sh:sparql`/`sh:select` parsing. At that point:
-revisit `src/validation/shacl.rs` (no signature change needed — the
-`mode` arg already routes to `ShaclValidationMode::Sparql`), promote
-the `122` `sh:select` no-op assertion to a real `sh:Violation`
-assertion, and re-run `just test-shacl-manifest --sparql` to
-re-baseline the known-failing set toward full-pass.
+(or equivalent) + `sh:sparql`/`sh:select` parsing (rudof issues #21 /
+#94 / #1). At that point: revisit `src/validation/shacl.rs` (no
+signature change needed — the `mode` arg already routes to
+`ShaclValidationMode::Sparql`), promote the `122` `sh:select` no-op
+assertion to a real `sh:Violation` assertion, and re-run `just
+test-shacl-manifest --sparql` to re-baseline the known-failing set
+toward full-pass.
 
-This entry is updated as upstream progresses; final state is
-**resolved** once a rudof release ships SHACL-SPARQL constraint
-parsing and pgRDF promotes the §5.3 #1 / §6.1 #2 assertions.
+This entry is **final for the v0.5.0 release** as a documented
+upstream-gate; it is updated only if upstream ships SHACL-SPARQL
+constraint parsing, at which point pgRDF promotes the §5.3 #1 / §6.1
+#2 assertions.
 
-### E-013 — W3C SHACL Core manifest: gate invariant + one excluded fixture
+### E-013 — W3C SHACL Core manifest: gate invariant + a corrected false exclusion
 
 | Field | Value |
 |---|---|
 | Filed | 2026-05-16 |
-| Status | upstream Core gap (1 fixture) + a principled gate invariant — documented + scoped |
+| Status | **resolved / corrected** — investigated at tag v0.5.0-rc1; the asserted upstream `sh:nodeKind` bug does **not** exist; fixture restored; §6 is a genuine 25/25 full-pass |
 | Affects | [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md) §6.1 #1 |
 | Crate | `shacl 0.3.1` (rudof project) |
 
@@ -169,44 +203,76 @@ already excludes focus-node-IRI comparison for the identical
 blank-node-relabel reason; excluding the count too keeps the gate
 honest — a genuinely missed or spurious constraint flips `conforms`
 (caught), a blank-node relabel does not (correctly tolerated). The
-diagnostic count is still printed by `run.sh` for visibility.
+diagnostic count is still printed by `run.sh` for visibility. This
+rationale remains valid and is retained for the node-shape fixtures
+above — it is unrelated to `prop-nodeKind-001` (whose 6 focus nodes
+are all IRIs).
 
 With this invariant the vendored W3C SHACL Core suite is a **genuine
-full-pass: 24 / 24** (`conforms` matches the W3C `mf:result` on
-every fixture).
+full-pass: 25 / 25** (`conforms` matches the W3C `mf:result` on
+every fixture, with **no exclusion**).
 
-#### Excluded fixture — `prop-nodeKind-001`
+#### Corrected: `prop-nodeKind-001` was never a real upstream bug
 
-The W3C `core/property/nodeKind-001` test (a multi-valued
-`sh:nodeKind` property shape over instances that mix blank-node, IRI
-and literal objects) is a **true upstream Core conformance bug** in
-`shacl 0.3.1`: the validator returns `sh:conforms = true` (0
-violations) where the W3C `mf:result` requires `sh:conforms = false`
-(27 violations). This is a `conforms`-level disagreement (not a
-blank-node count artifact), so it is **NOT** silently included in a
-"full-pass" gate. The unmodified W3C source is preserved at
-`tests/w3c-shacl/fixtures/excluded/prop-nodeKind-001.w3c.ttl` for
-provenance and is excluded from the active gate.
+This erratum originally claimed `core/property/nodeKind-001` was a
+"true upstream Core conformance bug" in `shacl 0.3.1` — that the
+validator returned `sh:conforms = true` (0 violations) where the W3C
+`mf:result` requires `sh:conforms = false` (27 violations) — and
+excluded the fixture to `fixtures/excluded/`.
 
-This is the **one honest §6.1 #1 caveat for v0.5.0-rc1**: the
-vendored Core gate is full-pass *as curated* (24/24), with this
-single W3C Core fixture documented-excluded due to an upstream
-`sh:nodeKind` multi-value enforcement bug. It is a **Phase H+I
-follow-up for the final v0.5.0** (either an upstream rudof fix, a
-pgRDF-side `sh:nodeKind` pre-check, or a documented permanent
-exclusion with rationale).
+A **triple-verified investigation at tag v0.5.0-rc1** (a diagnostic
+pass, an adversarial-skeptic re-check, and a forensic ERRATA audit)
+established that claim was **factually false and never had supporting
+evidence**. It was an **unverified assumption made at G3 authoring**
+(commit `e3762d4`): the fixture was committed *directly* into
+`tests/w3c-shacl/fixtures/excluded/prop-nodeKind-001.w3c.ttl`, and
+`tests/w3c-shacl/run.sh` structurally **never ran it** — the harness
+globs only `fixtures/core/*.ttl`, so a fixture placed straight into
+`fixtures/excluded/` is invisible to the runner. The "validator
+returns `conforms:true`/0 violations" claim therefore rested on **zero
+harness output**.
+
+The fixture's own embedded W3C `mf:result` declares
+`sh:conforms "false"^^xsd:boolean` with **27** `sh:result` blocks.
+pgRDF produces **exactly that** — verified at three independent
+levels:
+
+1. **Isolated `shacl 0.3.1`** — the upstream crate alone, on the
+   split data+shapes graph, returns `conforms:false` with 27
+   violations.
+2. **pgRDF N-Triples dictionary-rehydrate path** — through
+   `serialise_graph_to_ntriples` + re-parse: same result.
+3. **Live v0.5.0-rc1 extension via the real `run.sh` code path** —
+   `prop-nodeKind-001` now grades **PASS** on `{"conforms":false}`
+   (diagnostic violations=27), matching the W3C `mf:result` exactly.
+
+The blank-node-relabel concern (the gate invariant above) is
+**inapplicable** to this fixture: all 6 focus nodes
+(`ex:InstanceWith*`) are IRIs, so there is no count drift to tolerate
+here — `conforms` AND the count both match the W3C answer.
+
+#### Resolution
+
+No fork, no MR, no `[patch.crates-io]` for `shacl`, and no
+`Cargo.toml` change are needed (there is no upstream bug to patch).
+The fixture was simply restored to `tests/w3c-shacl/fixtures/core/`
+following the established split convention every other `core/`
+fixture uses (manifest wrapper stripped — the W3C `<>` `mf:Manifest`
+root is rejected by oxttl without a base — data + shapes graph kept
+verbatim), with a hand-derived `prop-nodeKind-001.expected.json`
+(`{"conforms":false}`, derived from the W3C `mf:result`'s
+`sh:conforms "false"`, never auto-blessed) and the unmodified W3C
+source kept as `prop-nodeKind-001.w3c.ttl` provenance alongside it.
+`fixtures/excluded/` is now empty and removed.
+
+§6 W3C SHACL Core is therefore a **genuine 25 / 25 full-pass for
+v0.5.0** — no exclusion, no honest-caveat, no Phase H+I follow-up
+required for this item.
 
 #### Re-check trigger
 
-A future `shacl` (rudof) release fixing multi-valued `sh:nodeKind`
-enforcement. At that point: restore
-`fixtures/excluded/prop-nodeKind-001.w3c.ttl` into `fixtures/core/`,
-re-split + hand-derive its `{conforms}` expected, and re-run
-`just test-shacl-manifest` (expect 25/25). Also re-evaluate whether
-the dictionary-rehydrate blank-node relabel can be made
-identity-stable so the gate can tighten from `conforms` to
-`{conforms, violation-count}`.
-
-This entry is updated as upstream progresses; final state is
-**resolved** once the upstream `sh:nodeKind` bug is fixed and the
-fixture is restored to the active gate.
+None outstanding for `prop-nodeKind-001` (resolved). Independently,
+if the dictionary-rehydrate blank-node relabel is ever made
+identity-stable, the gate could tighten from `conforms` to
+`{conforms, violation-count}` for the blank-node-focus node-shape
+fixtures — that is a separate hardening opportunity, not a defect.

@@ -18,9 +18,12 @@ and OWL 2 RL reasoning.**
   (no install-spec changes anticipated for v0.5) and
   [`ERRATA.v0.4.md`](ERRATA.v0.4.md) (carried forward into the v0.5
   cycle). [`ERRATA.v0.5.md`](ERRATA.v0.5.md) opens in Phase G group
-  G3 with **E-012** (`shacl 0.3.1` SHACL-SPARQL mode is an upstream
-  stub) and **E-013** (W3C SHACL Core gate invariant + one excluded
-  fixture). [`ERRATA.v0.2.md`](ERRATA.v0.2.md) remains live for
+  G3 with **E-012** (`shacl 0.3.1` SHACL-SPARQL mode is a documented
+  upstream-gate) and **E-013** (W3C SHACL Core gate invariant;
+  corrected/resolved — the earlier "one excluded fixture for an
+  upstream `sh:nodeKind` bug" claim was a G3 unverified assumption,
+  no upstream bug, §6 is a genuine 25/25 full-pass).
+  [`ERRATA.v0.2.md`](ERRATA.v0.2.md) remains live for
   pre-v0.3 items still open. **E-009** (SHACL upstream conflict) is
   resolved in v0.4 cycle via E-011; the v0.5 cycle inherits the
   resolved state and tracks final upstream-merge close-out under
@@ -54,7 +57,8 @@ inside Postgres, with four engines:
 4. **Validation Engine** — SHACL Core via `shacl 0.3.x` (rudof
    project). Real W3C-shape report ✅ shipped in v0.4 cycle (LLD
    v0.4 §9). v0.5 ✅ adds the `pgrdf.validate(…, mode)` argument
-   (§5), the W3C SHACL Core manifest gate (§6, 24/24 full-pass),
+   (§5), the W3C SHACL Core manifest gate (§6, genuine 25/25
+   full-pass, no exclusion),
    and validation-against-materialised-graph coverage (§5.1).
    SHACL-SPARQL constraint-mode is upstream-stubbed in `shacl
    0.3.1` ([`ERRATA.v0.5.md`](ERRATA.v0.5.md) E-012); the surface
@@ -67,18 +71,21 @@ inside Postgres, with four engines:
 | §3 | Reasoning profile selector on `pgrdf.materialize` | was v0.4-FUTURE §8 | ✅ shipped — Phase G group G1 (slices 21-18) |
 | §4 | TriG / N-Quads ingest (`pgrdf.parse_trig`, `pgrdf.parse_nquads`) | was v0.4-FUTURE §10 | ✅ shipped — Phase G group G2 (slices 17-16) |
 | §5 | SHACL-SPARQL constraint mode + validation-against-materialised-graph | was v0.4-FUTURE §9.5 | ✅ shipped — Phase G group G3 (slices 13-12); §5.2 mode arg + §5.3 #2 fully met; §5.3 #1 adjusted per ERRATA.v0.5 E-012 |
-| §6 | W3C SHACL manifest runner wired to CI | was v0.4-FUTURE §9.5 / §13 | ✅ shipped — Phase G group G3 (slices 13-12); Core 24/24 full-pass (`conforms` invariant); 1 fixture documented-excluded (ERRATA.v0.5 E-013) |
+| §6 | W3C SHACL manifest runner wired to CI | was v0.4-FUTURE §9.5 / §13 | ✅ shipped — Phase G group G3 (slices 13-12); Core genuine 25/25 full-pass (`conforms` invariant), no exclusion (ERRATA.v0.5 E-013 corrected — no upstream bug) |
 | §7 | IRI overloads for lifecycle UDFs (`drop_graph(iri)`, etc.) | was v0.4-FUTURE §5.1 forward note | ✅ shipped — Phase G group G1 (slices 21-18) |
 | §8 | Aggregates-over-UNION refinements not landed in v0.4 §11 | was v0.4-FUTURE §11 | ✅ shipped — Phase G group G2 (slices 15-14) |
 | §9 | v1.0 contents (forward look) | was v0.4-FUTURE §15 | forward look |
 
 > **v0.5-gate scope COMPLETE.** With Phase G group G3 (this cut),
-> every v0.5-gate track §3–§8 is ✅ shipped. §5.3 #1 and §6.1 #1
-> carry the two documented honest caveats above (ERRATA.v0.5 E-012
-> SHACL-SPARQL upstream stub; E-013 one excluded W3C Core fixture)
-> — both are spec-permitted for the **v0.5.0-rc1** candidate and
-> tracked as Phase H+I follow-ups for the final v0.5.0. §9 stays a
-> forward look (v1.0). This is the headline of v0.5.0-rc1.
+> every v0.5-gate track §3–§8 is ✅ shipped. §5.3 #1 carries one
+> documented honest caveat (ERRATA.v0.5 **E-012** — `shacl 0.3.1`
+> SHACL-SPARQL is a documented upstream-gate, upstream's own
+> roadmap, final for v0.5.0). §6.1 #1 is a **genuine 25/25
+> full-pass with no exclusion**: E-013's earlier "one excluded W3C
+> Core fixture for an upstream `sh:nodeKind` bug" claim was a G3
+> unverified assumption (corrected at v0.5.0-rc1 — no upstream bug,
+> fixture restored to `fixtures/core/`). §9 stays a forward look
+> (v1.0). This is the headline of v0.5.0-rc1.
 
 ## 3. Reasoning profile selector ✅ shipped (Phase G group G1)
 
@@ -316,15 +323,21 @@ JSONB output gains a `mode` field reflecting the requested mode.
 > false`. Fixtures are a vendored subset of the W3C
 > `data-shapes-test-suite` SHACL Core tests (hermetic — checked in,
 > never fetched at test time). The **W3C SHACL Core** suite is a
-> genuine **full-pass: 24 / 24** on the `sh:conforms` invariant
-> (ERRATA.v0.5 E-013 explains why `conforms`, not violation count,
-> is the principled gate — pgRDF's dictionary-rehydrate relabels
-> blank-node focus nodes, a serialization artifact that does not
-> flip conformance). **One** W3C Core fixture (`prop-nodeKind-001`)
-> is documented-excluded (ERRATA.v0.5 **E-013**) — a true upstream
-> `sh:nodeKind` multi-value enforcement bug in `shacl 0.3.1`; this
-> is the single honest §6.1 #1 caveat for v0.5.0-rc1 and a Phase
-> H+I follow-up for the final v0.5.0. The `--sparql` sub-run asserts
+> genuine **full-pass: 25 / 25** on the `sh:conforms` invariant,
+> **with no exclusion** (ERRATA.v0.5 E-013 explains why `conforms`,
+> not violation count, is the principled gate — pgRDF's
+> dictionary-rehydrate relabels blank-node *focus* nodes, a
+> serialization artifact that does not flip conformance; still
+> valid for the node-shape fixtures). E-013's earlier claim that
+> `prop-nodeKind-001` was excluded for a "true upstream
+> `sh:nodeKind` bug" was a **G3 unverified assumption** — the
+> fixture had been committed straight into `fixtures/excluded/`, so
+> `run.sh` (which globs only `fixtures/core/*.ttl`) never ran it. A
+> triple-verified investigation at v0.5.0-rc1 found **no upstream
+> bug**: pgRDF produces the W3C-authoritative `conforms:false` / 27
+> violations, the fixture is restored to `fixtures/core/` and
+> PASSes — no fork, no MR, no `[patch.crates-io]`. The `--sparql`
+> sub-run asserts
 > the ERRATA.v0.5 E-012 known state (`conforms:null` for every
 > fixture — the upstream SparqlEngine stub).
 
@@ -340,13 +353,15 @@ signal beyond the erratum.
 
 ### 6.1 Acceptance criteria (v0.5 gate) — status
 
-- ✅ **#1 — met as curated (one documented exclusion).**
+- ✅ **#1 — met (genuine full-pass, no exclusion).**
   `just test-shacl-manifest` exits 0 on the vendored W3C SHACL Core
-  suite (24/24, `conforms` invariant) on every PG major (the CI job
-  is a real matrix gate). The single W3C Core fixture
-  `prop-nodeKind-001` is documented-excluded per ERRATA.v0.5 E-013
-  (upstream `sh:nodeKind` bug) — the **one honest §6.1 #1 caveat for
-  rc1**, carried to Phase H+I for the final v0.5.0.
+  suite (genuine **25/25**, `conforms` invariant) on every PG major
+  (the CI job is a real matrix gate). `prop-nodeKind-001` is graded
+  in `fixtures/core/` and PASSes; E-013's earlier "documented
+  exclusion for an upstream `sh:nodeKind` bug" was a G3 unverified
+  assumption (the fixture never ran through the harness) — corrected
+  at v0.5.0-rc1, no upstream bug, no caveat, no Phase H+I follow-up
+  for this item.
 - ✅ **#2 — met.** `just test-shacl-manifest --sparql` exits 0
   asserting the bounded known state (`conforms:null` for every
   fixture), documented in ERRATA.v0.5 **E-012** (the upstream
@@ -542,14 +557,20 @@ are listed as engineering targets only.
   contract.
 - Spec corrections discovered during v0.5 implementation land in
   [`ERRATA.v0.5.md`](ERRATA.v0.5.md) (opened in Phase G group G3).
-  **E-012** — `shacl 0.3.1` SHACL-SPARQL mode is an upstream stub
-  (no constraint component + `unimplemented!()` engine); the §5.2
-  `mode` arg ships forward-compatible, `'sparql'` returns a
-  deterministic structured report. **E-013** — the W3C SHACL Core
-  gate uses the `sh:conforms` invariant (24/24 full-pass); one W3C
-  Core fixture `prop-nodeKind-001` is documented-excluded for an
-  upstream `sh:nodeKind` bug. Both are spec-permitted for v0.5.0-rc1
-  and tracked as Phase H+I follow-ups for the final v0.5.0.
+  **E-012** — `shacl 0.3.1` SHACL-SPARQL mode is a documented
+  upstream-gate (no constraint component + `unimplemented!()`
+  engine; upstream's own roadmap, rudof issues #21/#94/#1); the
+  §5.2 `mode` arg ships forward-compatible, `'sparql'` returns a
+  deterministic structured report — final for v0.5.0, not a pgRDF
+  defect. **E-013** — the W3C SHACL Core gate uses the `sh:conforms`
+  invariant and is a **genuine 25/25 full-pass with no exclusion**;
+  its earlier "one W3C Core fixture `prop-nodeKind-001`
+  documented-excluded for an upstream `sh:nodeKind` bug" claim was a
+  G3 unverified assumption (the fixture was committed straight into
+  `fixtures/excluded/` so the harness never ran it) — corrected at
+  v0.5.0-rc1, no upstream bug, fixture restored to `fixtures/core/`,
+  resolved. E-012 stays spec-permitted for v0.5.0-rc1 as a
+  documented upstream-gate.
 - **E-009** (SHACL upstream conflict) is resolved in v0.4 cycle via
   E-011 (patched `reasonable` fork). The v0.5 cycle inherits the
   resolved state; final close-out gates on the upstream

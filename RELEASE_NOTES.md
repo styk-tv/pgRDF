@@ -42,8 +42,8 @@ Everything the v0.5-FUTURE LLD gates (§3 through §8) ships:
   against a materialised data graph reports violations against
   entailed triples.
 - **W3C SHACL Core manifest gate** (v0.5, Phase G G3) — a vendored,
-  hermetic W3C SHACL Core subset, 24/24 full-pass, wired into CI
-  on every PG major.
+  hermetic W3C SHACL Core subset, genuine 25/25 full-pass (no
+  exclusion), wired into CI on every PG major.
 
 ## Phase G group G3 — SHACL `mode` + W3C SHACL Core gate
 
@@ -89,16 +89,21 @@ never fetched at test time). Wired into `ci.yml` on every PG major
 (14-17) as a **real gate** (no `continue-on-error`/`if:false`).
 
 The vendored W3C SHACL **Core** suite is a genuine **full-pass —
-24 / 24** on the W3C `sh:conforms` invariant. Per ERRATA.v0.5
-**E-013** the gate compares `conforms` (not the violation *count*,
-which drifts ±1 from pgRDF's blank-node-relabelling dictionary
-rehydrate — a serialization artifact that does not flip
-conformance, the same reason focus-node IRIs are excluded). One W3C
-Core fixture (`prop-nodeKind-001`) is **documented-excluded** for a
-true upstream `sh:nodeKind` multi-value enforcement bug in `shacl
-0.3.1` — the one honest §6.1 #1 caveat for this candidate, carried
-to Phase H+I for the final v0.5.0. `--sparql` asserts the E-012
-known state (`conforms:null` for every fixture).
+25 / 25** on the W3C `sh:conforms` invariant, **with no exclusion**.
+Per ERRATA.v0.5 **E-013** the gate compares `conforms` (not the
+violation *count*, which drifts ±1 from pgRDF's blank-node-relabelling
+dictionary rehydrate for blank-node *focus* nodes — a serialization
+artifact that does not flip conformance, the same reason focus-node
+IRIs are excluded). E-013's earlier "`prop-nodeKind-001`
+documented-excluded for a true upstream `sh:nodeKind` bug" claim was
+a **G3 unverified assumption** (the fixture was committed straight
+into `fixtures/excluded/`, so `run.sh` — which globs only
+`fixtures/core/*.ttl` — never ran it); a triple-verified investigation
+at v0.5.0-rc1 found **no upstream bug**: pgRDF produces the
+W3C-authoritative `conforms:false` / 27 violations, and the fixture
+is now graded in `fixtures/core/` and PASSing. No fork, no MR, no
+`[patch.crates-io]`. `--sparql` asserts the E-012 known state
+(`conforms:null` for every fixture).
 
 ## Test bar
 
@@ -108,11 +113,11 @@ pg_regress         85  (was 84  — +1: 122-shacl-modes)
 w3c-sparql         51  (was 47  — +4 Phase G fixtures
                         48-reasoning-profile-rdfs …
                         51-nquads-loaded)
-w3c-shacl Core      24  (NEW — vendored W3C SHACL Core gate,
-                        24/24 full-pass on sh:conforms; 1 W3C
-                        Core fixture documented-excluded, E-013)
+w3c-shacl Core      25  (NEW — vendored W3C SHACL Core gate,
+                        genuine 25/25 full-pass on sh:conforms,
+                        no exclusion; E-013)
 LUBM-shape          3  (unchanged)
-Total: 437 green across six layers, plus the pg_dump round-trip
+Total: 438 green across six layers, plus the pg_dump round-trip
 gate and the w3c-shacl --sparql E-012 known-state assertion.
 ```
 
@@ -130,15 +135,21 @@ hand-derived from each fixture's W3C `mf:result` block.
   merges. The v0.5.0-rc1 tag fires `release.yml` only (8 platform
   tarballs PG14-17 × amd64/arm64 + SHA256SUMS); **no crates.io
   publish this cut**.
-- **E-012** (new, v0.5) — `shacl 0.3.1` SHACL-SPARQL mode is an
-  upstream stub (no constraint component + `unimplemented!()`
-  engine). The `mode` arg ships forward-compatible; `'sparql'`
-  returns a deterministic structured report. Phase H+I follow-up
-  for the final v0.5.0.
-- **E-013** (new, v0.5) — the W3C SHACL Core gate uses the
-  `sh:conforms` invariant (24/24 full-pass); one W3C Core fixture
-  `prop-nodeKind-001` documented-excluded for an upstream
-  `sh:nodeKind` bug. Phase H+I follow-up for the final v0.5.0.
+- **E-012** (new, v0.5) — `shacl 0.3.1` SHACL-SPARQL mode is a
+  documented upstream-gate (no constraint component +
+  `unimplemented!()` engine; upstream's own roadmap, rudof issues
+  #21/#94/#1). The `mode` arg ships forward-compatible; `'sparql'`
+  returns a deterministic structured report. Final for v0.5.0 as a
+  documented limitation, NOT a pgRDF defect.
+- **E-013** (new, v0.5) — **corrected/resolved**. The W3C SHACL Core
+  gate uses the `sh:conforms` invariant; its earlier "one W3C Core
+  fixture `prop-nodeKind-001` documented-excluded for an upstream
+  `sh:nodeKind` bug" claim was a G3 unverified assumption (the
+  fixture was committed straight into `fixtures/excluded/` so the
+  harness never ran it). A triple-verified investigation at
+  v0.5.0-rc1 found no upstream bug; the fixture is restored to
+  `fixtures/core/` and W3C SHACL Core is a **genuine 25/25 full-pass,
+  no exclusion**. No fork/MR/`[patch.crates-io]`.
 
 See [`specs/ERRATA.v0.2.md`](specs/ERRATA.v0.2.md),
 [`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md) and
@@ -148,10 +159,11 @@ See [`specs/ERRATA.v0.2.md`](specs/ERRATA.v0.2.md),
 
 This is a **release candidate**. The v0.5-FUTURE v0.5-gate scope
 (§3-§8) is COMPLETE. The final **v0.5.0** follows after **Phase
-H+I**: final hygiene, ERRATA close-outs, the `executor.rs`
-core-BGP carve catch-up, and the two E-012 / E-013 SHACL
-follow-ups (the SHACL-SPARQL upstream engine + the one excluded W3C
-Core fixture). Still 🚧 in
+H+I**: final hygiene, ERRATA close-outs, and the `executor.rs`
+core-BGP carve catch-up. E-013 is **resolved** (no upstream bug;
+§6 W3C SHACL Core is a genuine 25/25 full-pass). E-012 stays a
+documented upstream-gate (the SHACL-SPARQL upstream engine), final
+for v0.5.0. Still 🚧 in
 [`SPEC.pgRDF.LLD.v0.4.md`](specs/SPEC.pgRDF.LLD.v0.4.md):
 `heap_multi_insert` / `COPY BINARY` ingest (§12 phase B).
 

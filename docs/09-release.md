@@ -39,9 +39,14 @@ documented E-012 / E-013 follow-ups.
   E-012); pgRDF does not invoke it.
 - **New W3C SHACL Core manifest gate** — `just test-shacl-manifest`
   (`tests/w3c-shacl/`), wired into `ci.yml` on every PG major as a
-  real gate. Vendored hermetic W3C SHACL Core subset, **24/24
-  full-pass** on `sh:conforms` (ERRATA.v0.5 E-013); one W3C Core
-  fixture documented-excluded for an upstream `sh:nodeKind` bug.
+  real gate. Vendored hermetic W3C SHACL Core subset, genuine
+  **25/25 full-pass** on `sh:conforms`, **no exclusion** (ERRATA.v0.5
+  E-013). E-013's earlier "one W3C Core fixture documented-excluded
+  for an upstream `sh:nodeKind` bug" claim was a G3 unverified
+  assumption (the fixture was committed straight into
+  `fixtures/excluded/` so the harness never ran it); a triple-verified
+  investigation at v0.5.0-rc1 found no upstream bug — the fixture is
+  restored to `fixtures/core/` and PASSes.
 
 ### Control-version reconciliation (`-rc1`)
 
