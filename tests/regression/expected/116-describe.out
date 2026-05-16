@@ -1,0 +1,30 @@
+5
+age,city,knows,name,nick
+iri|http://example.com/a|literal|Alice|http://www.w3.org/2001/XMLSchema#string
+0
+4
+http://example.com/t1,http://example.com/t2
+2
+5
+http://example.com/b,http://example.com/t1,http://example.com/t2
+1
+http://example.com/b
+3
+p,q,r
+bnode|literal|leaf
+iri|http://example.com/r|bnode
+3
+link,p,p
+2
+city,nick
+DESCRIBE
+constant
+variable
+mixed
+[]
+[]
+i-redirect: t
+i-reject-select: t
+t
+
+1

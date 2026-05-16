@@ -297,10 +297,14 @@ SELECT pgrdf.sparql_parse(
    SELECT ?s ?n ?ag WHERE { ?s a ex:Person
      OPTIONAL { ?s ex:name ?n . ?s ex:age ?ag } }'
 )->'unsupported_algebra' AS o_optional_unsupported;
--- O. DESCRIBE is still NOT shipped (Phase F group F3) — it reports
--- form=DESCRIBE supported=false (a separate field; DESCRIBE was
--- never an `unsupported_algebra` entry).
-SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/alice>')->>'supported'
-  AS o_describe_supported;
+-- O. DESCRIBE now ships (Phase F group F3, LLD §11) — sparql_parse
+-- reports form="DESCRIBE" and an empty `unsupported_algebra`
+-- (DESCRIBE was never an `unsupported_algebra` entry; the §11
+-- acceptance is that it is NOT flagged). Multi-triple OPTIONAL (F1)
+-- still absent from unsupported above — not regressed.
+SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/alice>')->>'form'
+  AS o_describe_form;
+SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/alice>')
+  ->'unsupported_algebra' AS o_describe_unsupported;
 
 ROLLBACK;

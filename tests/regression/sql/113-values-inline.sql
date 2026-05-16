@@ -204,8 +204,8 @@ SELECT count(*)::int AS n_update_values_flags
 -- pgrdf.sparql_parse's `unsupported_algebra` (it used to push
 -- "Values (inline VALUES)"). The array is now empty for a
 -- VALUES-bearing query; the declared column vars surface in
--- `variables`. BIND-downstream / aggregates-over-UNION / DESCRIBE
--- remain unshipped (F2/F3) — DESCRIBE still reports supported=false.
+-- `variables`. DESCRIBE now ships (Phase F group F3, LLD §11) —
+-- sparql_parse reports form="DESCRIBE", NOT flagged unsupported.
 SELECT pgrdf.sparql_parse(
   'PREFIX ex: <http://example.com/>
    SELECT ?x ?y WHERE { ?x ex:p ?y } VALUES (?x) { (ex:a) (ex:b) }'
@@ -214,7 +214,9 @@ SELECT (pgrdf.sparql_parse(
   'PREFIX ex: <http://example.com/>
    SELECT ?x ?y WHERE { ?x ex:p ?y } VALUES (?x) { (ex:a) (ex:b) }'
 )->'variables' ? 'x')::text AS o_values_var_x_present;
-SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')->>'supported'
-  AS o_describe_still_unsupported;
+SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')->>'form'
+  AS o_describe_form;
+SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')
+  ->'unsupported_algebra' AS o_describe_unsupported;
 
 ROLLBACK;

@@ -21,9 +21,14 @@
 //!     Flags `Distinct` / `OrderBy` / `Group` / `Aggregate` wrappings
 //!     in `unsupported_algebra` — they panic at execute time per LLD
 //!     §6.2.
-//!   * DESCRIBE — recognised but reported as `supported: false`; the
-//!     executor doesn't handle it yet (carried forward to a later
-//!     v0.4 slice).
+//!   * DESCRIBE — Phase F group F3 enrichment (LLD v0.4 §11).
+//!     Reports `form: "DESCRIBE"` with a `describe` block (`kind`
+//!     ∈ constant/variable/mixed, `constant_iris`, `variable_terms`,
+//!     `has_where`) and a `where_shape` block over the residual
+//!     WHERE (the constant-`Extend` layers spargebra synthesises for
+//!     `DESCRIBE <iri>` terms are peeled first). `pgrdf.describe`
+//!     ships the form, so DESCRIBE is NOT flagged in
+//!     `unsupported_algebra` (only residual-WHERE algebra is).
 //!   * OPTIONAL / UNION / MINUS / FILTER / aggregates / BIND — the
 //!     parser walks through them; the executor supports them too,
 //!     so they are NOT flagged in `unsupported_algebra`.
@@ -43,7 +48,7 @@
 
 use pgrx::prelude::*;
 use serde_json::{json, Value};
-use spargebra::algebra::{GraphPattern, QueryDataset};
+use spargebra::algebra::{Expression, GraphPattern, QueryDataset};
 use spargebra::term::{GraphName, GraphNamePattern, NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 
@@ -118,9 +123,29 @@ fn serialize_query(q: &Query, raw: &str) -> Value {
                 "unsupported_algebra": unsupported,
             })
         }
-        Query::Describe { .. } => {
-            json!({ "form": "DESCRIBE", "supported": false,
-                    "reason": "DESCRIBE not in Phase 2.2 scope" })
+        Query::Describe { pattern, .. } => {
+            // Phase F group F3 — DESCRIBE enrichment, mirroring the
+            // slice-52 CONSTRUCT enrichment. `pgrdf.describe` ships
+            // DESCRIBE (LLD v0.4 §11), so the form is `"DESCRIBE"`
+            // and is NOT flagged in `unsupported_algebra`. spargebra
+            // normalises every DESCRIBE form into
+            // `Project { inner, variables }` where each constant
+            // `DESCRIBE <iri>` term is a leading
+            // `Extend { …, NamedNode(iri) }` layer wrapping the
+            // residual WHERE pattern. We peel the constant layers
+            // (reporting the constant IRIs + the variable terms) and
+            // analyse the residual WHERE with the same helpers
+            // CONSTRUCT uses, so callers can preview a DESCRIBE
+            // without running it.
+            let (describe_block, where_pattern) = analyse_describe(pattern);
+            let where_shape = analyse_where_shape(where_pattern);
+            let unsupported = detect_unsupported_algebra(where_pattern);
+            json!({
+                "form":                "DESCRIBE",
+                "describe":            describe_block,
+                "where_shape":         where_shape,
+                "unsupported_algebra": unsupported,
+            })
         }
     }
 }
@@ -555,6 +580,75 @@ fn named_node_pattern_to_json(n: &NamedNodePattern) -> Value {
 /// matching how the UPDATE path treats them. A `Slice` wrapper is
 /// likewise transparent. The inner variant — the BGP or composite —
 /// is what surfaces.
+/// Decompose a DESCRIBE `Project { inner, variables }` into a
+/// preview block + the residual WHERE pattern, mirroring the
+/// executor's `pgrdf.describe` peel. Each leading
+/// `Extend { …, NamedNode(iri) }` whose bound variable is one of the
+/// projected described terms is a constant `DESCRIBE <iri>`; the
+/// remaining projected variables are the `?x` / `*`-expanded WHERE
+/// terms. `kind` distinguishes the bare no-WHERE constant form
+/// (`Bgp { patterns: [] }` residual) from the variable / mixed
+/// forms so a caller can preview behaviour without running the
+/// query. Returns `(describe_block, &residual_where_pattern)`.
+fn analyse_describe(pattern: &GraphPattern) -> (Value, &GraphPattern) {
+    let (proj_vars, mut cur): (Vec<String>, &GraphPattern) = match pattern {
+        GraphPattern::Project { inner, variables } => (
+            variables.iter().map(|v| v.as_str().to_string()).collect(),
+            inner.as_ref(),
+        ),
+        // Defensive — spargebra 0.4.6 always emits the Project
+        // wrapper for DESCRIBE; if that ever changes, surface a
+        // shape the regression can still pin rather than panicking.
+        other => (Vec::new(), other),
+    };
+    let mut const_iris: Vec<String> = Vec::new();
+    let mut consumed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while let GraphPattern::Extend {
+        inner,
+        variable,
+        expression,
+    } = cur
+    {
+        let vname = variable.as_str().to_string();
+        if proj_vars.contains(&vname) {
+            if let Expression::NamedNode(n) = expression {
+                if !const_iris.iter().any(|i| i == n.as_str()) {
+                    const_iris.push(n.as_str().to_string());
+                }
+                consumed.insert(vname);
+                cur = inner;
+                continue;
+            }
+        }
+        break;
+    }
+    let mut variable_terms: Vec<String> = proj_vars
+        .iter()
+        .filter(|v| !consumed.contains(*v))
+        .cloned()
+        .collect();
+    variable_terms.sort();
+    // The bare `DESCRIBE <iri>` / `DESCRIBE <a> <b>` form has an
+    // empty-BGP residual and no variable terms; everything else has
+    // a real WHERE (variable, mixed, or `*`).
+    let is_bare_constant = variable_terms.is_empty()
+        && matches!(cur, GraphPattern::Bgp { patterns } if patterns.is_empty());
+    let kind = if is_bare_constant {
+        "constant"
+    } else if const_iris.is_empty() {
+        "variable"
+    } else {
+        "mixed"
+    };
+    let block = json!({
+        "kind":            kind,
+        "constant_iris":   const_iris,
+        "variable_terms":  variable_terms,
+        "has_where":       !is_bare_constant,
+    });
+    (block, cur)
+}
+
 fn analyse_where_shape(pattern: &GraphPattern) -> Value {
     let inner = peel_trivial_wrappers(pattern);
     let kind = where_shape_kind(inner);

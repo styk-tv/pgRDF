@@ -837,7 +837,81 @@ Concrete shape:
       explicitly out of scope per W3C 1.1 §16.2 — rejected with
       `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates
       not supported (W3C 1.1 §16.2)`.
-- ⏳ `DESCRIBE` — different output shape; v0.4
+- ✅ `DESCRIBE` — full surface (Phase F group F3, slices 26-24; LLD
+      v0.4 §11) — sibling UDF `pgrdf.describe(q TEXT) → SETOF JSONB`,
+      parallel to `pgrdf.construct` and **byte-identical** in row
+      shape (`{"subject": …, "predicate": …, "object": …}` with the
+      same `{"type": …, "value": …, "datatype"?: …, "language"?: …}`
+      structured term cells — the same encoders, no new shaper). The
+      caller signals intent at the SQL boundary (the §6.1 sibling-UDF
+      rationale): a DESCRIBE through `pgrdf.sparql` panics
+      `sparql: use pgrdf.describe(q) for DESCRIBE queries` (mirrors
+      how `pgrdf.construct` is the CONSTRUCT entry point);
+      `pgrdf.describe` on a non-DESCRIBE query panics
+      `pgrdf.describe: not a DESCRIBE query`.
+
+      DESCRIBE is **not** a CONSTRUCT template — there is no
+      `{ template }`. The "description" is the **closure** of each
+      described resource: for resource R (an IRI or blank node — a
+      literal can't be a subject so it yields an empty description),
+      every triple `(R, ?p, ?o)`, and whenever an emitted object
+      `?o` is a blank node, the closure recurses into that blank
+      node's triples and keeps following while the frontier object
+      stays a blank node ("transitively expanded one hop on blank
+      nodes" per W3C §16.4). Recursion only ever traverses
+      blank-node objects (IRI / literal objects are leaves), so it
+      terminates on any finite graph; a visited-set of blank-node
+      ids additionally makes blank-node cycles
+      (`_:b1 ex:p _:b2 . _:b2 ex:p _:b1`) terminate. Triples are
+      deduplicated across the whole result (set semantics — a
+      resource described twice emits its closure once; overlapping
+      closures emit each triple once).
+
+      Supported forms (spargebra normalises all of them to
+      `Project { inner, variables }` where each constant
+      `DESCRIBE <iri>` is a leading `Extend { …, NamedNode(iri) }`
+      layer over the residual WHERE, which the executor peels):
+
+      ```sql
+      -- Constant, no WHERE — every (iri, ?p, ?o); empty IRI → 0 rows
+      SELECT * FROM pgrdf.describe('DESCRIBE <http://example.com/a>');
+
+      -- Variable form — union of the closures of every ?x binding
+      SELECT * FROM pgrdf.describe(
+        'PREFIX ex: <http://example.com/>
+         DESCRIBE ?x WHERE { ?x a ex:Thing }');
+
+      -- Mixed constant + variable terms
+      SELECT * FROM pgrdf.describe(
+        'PREFIX ex: <http://example.com/>
+         DESCRIBE <http://example.com/b> ?x WHERE { ?x a ex:Thing }');
+
+      -- DESCRIBE * — every projected variable binding
+      SELECT * FROM pgrdf.describe(
+        'PREFIX ex: <http://example.com/>
+         DESCRIBE * WHERE { <http://example.com/a> ex:knows ?x }');
+
+      -- Blank-node closure: <r> ex:p _:b1 ; _:b1 ex:q _:b2 ;
+      -- _:b2 ex:r "leaf" → DESCRIBE <r> returns all 3 triples
+      -- (follows the bnode chain to the literal leaf)
+      SELECT * FROM pgrdf.describe('DESCRIBE <http://example.com/r>');
+
+      -- GRAPH-scoped: the closure is computed within the named
+      -- graph; other graphs' triples about <a> are excluded
+      SELECT * FROM pgrdf.describe(
+        'DESCRIBE <http://example.com/a>
+           WHERE { GRAPH <http://example.com/g1> { ?s ?p ?o } }');
+      ```
+
+      An unscoped DESCRIBE scans every graph (the slice-112 pgRDF
+      unscoped-BGP semantic). `pgrdf.sparql_parse` reports
+      `form:"DESCRIBE"` with a `describe` block
+      (`kind` ∈ `constant`/`variable`/`mixed`, `constant_iris`,
+      `variable_terms`, `has_where`) and a `where_shape` over the
+      residual WHERE; DESCRIBE is NOT flagged in
+      `unsupported_algebra` (the LLD §11 acceptance binding;
+      `80-unsupported-shapes` gap-6 retired in the same commit).
+      Regression-locked: `tests/regression/sql/116-describe.sql`.
 - ✅ Property paths (`^`, `+`, `*`, `?`, `\|` incl. `(a\|b)+`/`(a\|b)*`/`(a\|b)?`/`^(a\|b)`) + materialised-closure no-CTE fallback — shipped v0.4 Phase E (the §7.1 sequence-arm / sequence-inner remainder stays gated; negated sets out of v0.4 scope)
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4
 - ⏳ Aggregates over UNION; multi-triple OPTIONAL; BIND-in-FILTER — v0.4

@@ -115,14 +115,24 @@ SELECT _check_gap(
   'sparql: query form not supported yet'
 );
 
--- ─── Gap 6: DESCRIBE query form ──────────────────────────────────
--- W3C §16.4 — same output-shape constraint as CONSTRUCT.
-SELECT _check_gap(
-  'gap-6 DESCRIBE',
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   DESCRIBE ?s WHERE { ?s foaf:name "Alice" }',
-  'sparql: query form not supported yet'
-);
+-- ─── Gap 6 (RETIRED): DESCRIBE query form ────────────────────────
+-- LLD v0.4 §11 — Phase F group F3 (slices 26-24) ships DESCRIBE via
+-- the sibling UDF `pgrdf.describe(q TEXT) → SETOF JSONB` (parallel
+-- to `pgrdf.construct`; same {subject,predicate,object} structured-
+-- term shape). The "description" is the closure of each described
+-- resource — every triple with the resource as subject — transitively
+-- expanded one hop through blank-node objects per W3C §16.4 (cycle-
+-- safe, dedup'd); composes with GRAPH scoping. `DESCRIBE` through
+-- `pgrdf.sparql` now gives a clean redirect panic
+-- (`sparql: use pgrdf.describe(q) for DESCRIBE queries`) — the
+-- generic "query form not supported yet" no longer fires for it, so
+-- the old `_check_gap` here would emit `!!! unexpected success !!!`
+-- (the panic substring changed) and is removed per this file's
+-- self-documented contract ("if we genuinely add support, this file
+-- gets updated as part of the same commit"). `pgrdf.sparql_parse`
+-- now reports `form:"DESCRIBE"` and no longer flags DESCRIBE in
+-- `unsupported_algebra`. Positive coverage:
+-- `tests/regression/sql/116-describe.sql`.
 
 -- ─── Gap 7: Property path — the §7.1-gated remainder ─────────────
 -- W3C §9.1 — Phase E E1 (bare/`^`), E2 (`+`), E3 (`*`/`?`) AND E4

@@ -15,4 +15,5 @@ t
 INSERT_WHERE|1
 1
 []
-false
+DESCRIBE
+[]

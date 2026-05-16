@@ -1331,6 +1331,434 @@ fn expand_template_per_solution(template_rows: &[Value], n_solutions: usize) -> 
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Phase F group F3 (slices 26-24, LLD v0.4 §11) — SPARQL DESCRIBE
+//
+// `pgrdf.describe(q TEXT) → SETOF JSONB` is the sibling UDF to
+// `pgrdf.construct` (Phase D §6.1 sibling-UDF rationale: the caller
+// signals intent at the SQL boundary; the output shape — triples,
+// not solution rows — is identical to `pgrdf.construct`'s
+// `{subject,predicate,object}` structured-term JSONB). Per LLD §11
+// the "description" is NOT a CONSTRUCT template — there is no
+// `{ template }`. The description triples are the *closure* around
+// each described resource, emitted through the same construct
+// triple-output encoders so the row shape is byte-identical.
+//
+// Precise reading of W3C §16.4 + the LLD §11 bullet
+// ("…transitively expanded one hop on blank nodes…"):
+//
+//   For each described resource R (an IRI or blank node — literals
+//   can't be subjects, so a literal "described" term yields an empty
+//   closure), emit every triple `(R, ?p, ?o)` where R is the
+//   subject. Whenever an emitted object `?o` is itself a blank node,
+//   recurse into that blank node's `(?o, ?p2, ?o2)` triples, and
+//   keep following while the frontier object stays a blank node.
+//   "one hop" = each expansion step follows exactly one bnode edge;
+//   "transitively expanded" = repeat the step while the object is a
+//   blank node. Recursion ONLY ever traverses blank-node objects
+//   (never IRIs) — a Concise-Bounded-Description-style closure that
+//   terminates on any finite graph because IRI objects are leaves.
+//   A `visited` set of blank-node dict ids guarantees termination
+//   even on blank-node cycles (`_:b1 ex:p _:b2 . _:b2 ex:p _:b1`).
+//
+// spargebra normalises EVERY DESCRIBE form into the uniform shape
+//   `DESCRIBE * WHERE { SELECT <projection> WHERE { <bgp> } }`
+// so `Query::Describe.pattern` is always
+//   `Project { inner, variables }`
+// where each constant `DESCRIBE <iri>` term is lowered to a leading
+// `Extend { inner, variable, expression: NamedNode(iri) }` layer and
+// the projection `variables` list enumerates every described term
+// (synthetic-named for constants, real-named for `?x` / `*`). We
+// peel the constant `Extend` layers (collecting the constant IRIs),
+// run the residual WHERE pattern through the existing SELECT
+// pipeline projecting the remaining variables' dict ids, union the
+// constant + variable described-term ids (deduped, set semantics),
+// then compute + emit each resource's closure once.
+// ─────────────────────────────────────────────────────────────────────
+
+/// `pgrdf.describe(q TEXT) → SETOF JSONB` — SPARQL DESCRIBE.
+///
+/// Returns the closure of each described resource as
+/// `{subject,predicate,object}` structured-term rows, byte-identical
+/// to `pgrdf.construct`. Supports `DESCRIBE <iri>` (constant, no
+/// WHERE), `DESCRIBE ?v WHERE {…}` (every binding of `?v`), mixed
+/// constant + variable terms, and `DESCRIBE *`. Blank-node objects
+/// are transitively expanded one hop at a time per W3C §16.4
+/// (cycle-safe). Composes with `GRAPH <iri>` scoping (the closure is
+/// computed within the named graph). Triples are deduplicated across
+/// the whole result (a resource described twice emits once).
+///
+/// SQL: `pgrdf.describe(q TEXT) → SETOF JSONB`.
+#[pg_extern]
+fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    let parsed = SparqlParser::new()
+        .parse_query(query)
+        .unwrap_or_else(|e| panic!("pgrdf.describe: parse error: {e}"));
+
+    let pattern = match parsed {
+        Query::Describe { pattern, .. } => pattern,
+        Query::Select { .. } | Query::Ask { .. } | Query::Construct { .. } => {
+            panic!("pgrdf.describe: not a DESCRIBE query")
+        }
+    };
+
+    // spargebra always wraps the DESCRIBE body in an outer
+    // `Project { inner, variables }`. The `variables` list names
+    // every described term; `inner` is a chain of constant-`Extend`
+    // layers wrapping the residual WHERE pattern.
+    let (proj_vars, inner): (Vec<String>, &GraphPattern) = match &pattern {
+        GraphPattern::Project { inner, variables } => (
+            variables.iter().map(|v| v.as_str().to_string()).collect(),
+            inner.as_ref(),
+        ),
+        // Defensive: spargebra 0.4.6 always emits the Project wrapper
+        // for DESCRIBE (verified empirically); surface a stable
+        // prefix rather than silently mis-describing if that changes.
+        _ => panic!("pgrdf.describe: unexpected DESCRIBE algebra shape (no Project wrapper)"),
+    };
+
+    // Peel leading constant `Extend` layers. Each `Extend` whose
+    // bound variable is one of the projected described terms and
+    // whose expression is a constant `NamedNode` is a constant
+    // `DESCRIBE <iri>` term. (DESCRIBE syntactically only admits IRIs
+    // and variables; a literal can't be a subject so we only collect
+    // NamedNode expressions.) The variable name spargebra synthesises
+    // for the constant is consumed here so it is NOT treated as a
+    // WHERE-bound described variable below.
+    let mut const_iris: Vec<String> = Vec::new();
+    let mut consumed_vars: HashSet<String> = HashSet::new();
+    let mut cur = inner;
+    while let GraphPattern::Extend {
+        inner: ext_inner,
+        variable,
+        expression,
+    } = cur
+    {
+        let vname = variable.as_str().to_string();
+        if proj_vars.contains(&vname) {
+            if let Expression::NamedNode(n) = expression {
+                if !const_iris.iter().any(|i| i == n.as_str()) {
+                    const_iris.push(n.as_str().to_string());
+                }
+                consumed_vars.insert(vname);
+                cur = ext_inner;
+                continue;
+            }
+        }
+        // An `Extend` that is not a constant described term (e.g. a
+        // BIND inside the WHERE) — stop peeling; it belongs to the
+        // residual WHERE pattern walked below.
+        break;
+    }
+    let where_pattern = cur;
+
+    // The described *variables* are the projected terms not consumed
+    // as constants — the real `?x` / `*`-expanded WHERE variables.
+    let describe_vars: Vec<String> = proj_vars
+        .iter()
+        .filter(|v| !consumed_vars.contains(*v))
+        .cloned()
+        .collect();
+
+    // Determine the graph scope of the WHERE pattern. A literal
+    // `GRAPH <iri> { … }` wrapping the BGP scopes the WHERE *and*
+    // the closure to that graph_id (LLD §11 invariant G — the
+    // closure is computed within the named graph; other graphs'
+    // triples about the same subject are excluded). No GRAPH, a
+    // variable `GRAPH ?g`, or a bare `DESCRIBE <iri>` (no WHERE) →
+    // unscoped: the closure scans ALL graphs (the slice-112 pgRDF
+    // semantic for an unscoped BGP).
+    let scope_graph_id = literal_graph_scope(where_pattern);
+
+    // Collect the set of described-resource dict ids.
+    //   * constants  — resolve each IRI to its dict id (an IRI never
+    //                   interned → no closure, skipped, NOT an error
+    //                   per invariant B "empty description").
+    //   * variables  — run the residual WHERE through the SELECT
+    //                   pipeline projecting each described var's dict
+    //                   id; collect every non-NULL binding.
+    // Insertion-ordered + deduped: a resource described twice
+    // (explicit IRI AND a WHERE binding) is closed over exactly once
+    // (set semantics, LLD §11 correctness bullet).
+    let mut subject_ids: Vec<i64> = Vec::new();
+    let mut seen_subject: HashSet<i64> = HashSet::new();
+    for iri in &const_iris {
+        if let Some(id) = lookup_iri_dict_id(iri) {
+            if seen_subject.insert(id) {
+                subject_ids.push(id);
+            }
+        }
+    }
+    if !describe_vars.is_empty() {
+        let bound = collect_describe_var_bindings(where_pattern, &describe_vars);
+        for id in bound {
+            if seen_subject.insert(id) {
+                subject_ids.push(id);
+            }
+        }
+    }
+
+    // Compute + emit each resource's closure. A single per-call
+    // dict-resolve cache + global triple-dedup set spans every
+    // described resource so set semantics hold across the whole
+    // result (LLD §11: a resource described twice emits its triples
+    // once; overlapping closures emit each triple once).
+    let mut dict_cache: HashMap<i64, ResolvedTerm> = HashMap::new();
+    let mut emitted_triples: HashSet<(i64, i64, i64)> = HashSet::new();
+    let mut out: Vec<pgrx::JsonB> = Vec::new();
+    for sid in &subject_ids {
+        describe_closure(
+            *sid,
+            scope_graph_id,
+            &mut dict_cache,
+            &mut emitted_triples,
+            &mut out,
+        );
+    }
+    SetOfIterator::new(out.into_iter())
+}
+
+/// If `p` is (after peeling trivial wrappers) wrapped in a literal
+/// `GRAPH <iri> { … }`, return that graph's `graph_id` (or the
+/// `-1` sentinel when the IRI was never interned — a sentinel scope
+/// yields zero closure rows, spec-correct "no triples in that
+/// graph"). A variable `GRAPH ?g`, no GRAPH at all, or a bare
+/// no-WHERE DESCRIBE (`Bgp { patterns: [] }`) → `None` (unscoped:
+/// the closure scans every graph, the slice-112 pgRDF semantic).
+fn literal_graph_scope(p: &GraphPattern) -> Option<i64> {
+    match p {
+        GraphPattern::Graph {
+            name: NamedNodePattern::NamedNode(n),
+            ..
+        } => Some(lookup_graph_id(n.as_str()).unwrap_or(-1)),
+        GraphPattern::Project { inner, .. }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Filter { inner, .. } => literal_graph_scope(inner),
+        _ => None,
+    }
+}
+
+/// Resolve an IRI to its dictionary id without interning. Returns
+/// `None` when the IRI was never written — an IRI with no triples
+/// produces an empty description (LLD §11 invariant B), not an
+/// error. Mirrors the `lookup_graph_id` scalar-subselect idiom so
+/// SPI stays on the exactly-one-row path.
+fn lookup_iri_dict_id(iri: &str) -> Option<i64> {
+    Spi::get_one_with_args(
+        "SELECT (SELECT id FROM pgrdf._pgrdf_dictionary
+                  WHERE term_type = 1 AND lexical_value = $1 LIMIT 1)",
+        &[iri.into()],
+    )
+    .ok()
+    .flatten()
+}
+
+/// Run the residual WHERE pattern through the existing SELECT
+/// pipeline, projecting each described variable's dict id, and
+/// collect every non-NULL binding (the resources to describe). An
+/// empty BGP (the `DESCRIBE ?x` with no WHERE / `DESCRIBE *` with no
+/// WHERE degenerate forms) yields zero bindings — zero rows, NOT an
+/// error (LLD §11 correctness bullet "variable form with no WHERE
+/// matches → zero rows"). Reuses `build_from_and_where` so GRAPH
+/// scoping, OPTIONAL, VALUES, BIND, paths, etc. all compose exactly
+/// as they do for `pgrdf.sparql` / `pgrdf.construct`.
+fn collect_describe_var_bindings(
+    where_pattern: &GraphPattern,
+    describe_vars: &[String],
+) -> Vec<i64> {
+    params_clear();
+    let ps = parse_select(where_pattern);
+    // Degenerate: `DESCRIBE ?x` / `DESCRIBE *` with no WHERE — the
+    // residual pattern is an empty BGP. No solutions ⇒ no described
+    // resources ⇒ zero rows (spec-correct, not an error).
+    if ps.bgp.is_empty() && ps.union_branches.is_empty() {
+        return Vec::new();
+    }
+
+    // Only the described vars that the WHERE actually binds can
+    // resolve to a dict id; a `DESCRIBE *` projection lists every
+    // in-scope var (all bound), an explicit `DESCRIBE ?x` lists just
+    // `?x`. A described var the WHERE never binds contributes nothing
+    // (zero rows for it) rather than panicking — DESCRIBE is lenient.
+    let target_vars: Vec<&String> = describe_vars
+        .iter()
+        .filter(|v| ps.projected.contains(*v))
+        .collect();
+    if target_vars.is_empty() {
+        return Vec::new();
+    }
+
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    let (from_sql, where_clauses, plan) = build_from_and_where(
+        &ps.bgp,
+        &ps.filters,
+        &ps.optionals,
+        &ps.minuses,
+        &ps.values,
+        &mut anchors,
+        0,
+    );
+
+    // Project each described var's dict id (BIGINT). Graph-scope
+    // vars bind to a TEXT IRI off the `_pgrdf_graphs` join (slice
+    // 55) — those graph IRIs are NOT in `_pgrdf_dictionary` so they
+    // can never name an RDF subject; skip them (a `DESCRIBE ?g`
+    // where `?g` is only ever a GRAPH-scope var describes nothing).
+    let mut select_clauses: Vec<String> = Vec::new();
+    let mut col_vars: Vec<String> = Vec::new();
+    for var in &target_vars {
+        if plan.projection_scope(var).is_some() {
+            continue;
+        }
+        if let Some(&(alias_idx, col)) = anchors.get(*var) {
+            select_clauses.push(format!("q{alias_idx}.{col}"));
+            col_vars.push((*var).clone());
+        }
+    }
+    if select_clauses.is_empty() {
+        return Vec::new();
+    }
+
+    let sql = {
+        let mut s = format!("SELECT {} FROM {from_sql}", select_clauses.join(", "));
+        if !where_clauses.is_empty() {
+            s.push_str(" WHERE ");
+            s.push_str(&where_clauses.join(" AND "));
+        }
+        s
+    };
+    let params = params_take();
+
+    Spi::connect_mut(|client| {
+        let arg_oids: Vec<PgOid> = vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+        let datums: Vec<DatumWithOid<'_>> = params
+            .iter()
+            .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
+            .collect();
+        let prepared = client
+            .prepare(sql.as_str(), &arg_oids)
+            .expect("pgrdf.describe: WHERE-SELECT prepare failed");
+        let table = client
+            .select(&prepared, None, &datums)
+            .expect("pgrdf.describe: WHERE-SELECT failed");
+        let mut ids: Vec<i64> = Vec::new();
+        for row in table {
+            for i in 0..col_vars.len() {
+                if let Some(id) = row.get::<i64>(i + 1).ok().flatten() {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    })
+}
+
+/// Compute + emit the closure of one described resource. Emits every
+/// `(subject_id, ?p, ?o)` triple; whenever `?o` is a blank node,
+/// recurses into that blank node's triples (W3C §16.4 transitive
+/// one-hop-on-bnodes expansion). `visited` (seeded with the root +
+/// every blank node walked) makes a blank-node cycle terminate; the
+/// global `emitted` set deduplicates triples across overlapping
+/// closures (set semantics). `scope_graph_id`: `Some(g)` constrains
+/// to one graph (`GRAPH <iri>` scoping); `None` scans every graph
+/// (unscoped, slice-112 semantic); `Some(-1)` (unresolved scope IRI)
+/// matches no rows.
+fn describe_closure(
+    root_id: i64,
+    scope_graph_id: Option<i64>,
+    dict_cache: &mut HashMap<i64, ResolvedTerm>,
+    emitted: &mut HashSet<(i64, i64, i64)>,
+    out: &mut Vec<pgrx::JsonB>,
+) {
+    // BFS frontier over subjects to expand. Only the root (any term
+    // type) plus blank-node objects ever enter the frontier — IRI
+    // objects are leaves (we never chase an IRI), guaranteeing
+    // termination on any finite graph; `visited` additionally guards
+    // blank-node cycles.
+    let mut frontier: Vec<i64> = vec![root_id];
+    let mut visited: HashSet<i64> = HashSet::new();
+    visited.insert(root_id);
+
+    while let Some(subj_id) = frontier.pop() {
+        let triples = closure_one_hop(subj_id, scope_graph_id);
+        for (pred_id, obj_id) in triples {
+            if !emitted.insert((subj_id, pred_id, obj_id)) {
+                // This exact triple was already emitted via another
+                // described resource / another closure path — set
+                // semantics, emit once.
+                continue;
+            }
+            let s = resolve_dict_term(subj_id, dict_cache);
+            let p = resolve_dict_term(pred_id, dict_cache);
+            let o = resolve_dict_term(obj_id, dict_cache);
+            out.push(pgrx::JsonB(json!({
+                "subject":   encode_dict_term(&s),
+                "predicate": encode_dict_term(&p),
+                "object":    encode_dict_term(&o),
+            })));
+            // Transitive one-hop expansion: follow the object iff it
+            // is a blank node (term_type 2). IRIs/literals are
+            // leaves. `visited` prevents re-walking a blank node
+            // (cycle-safe + dedups overlapping bnode trees).
+            if o.term_type == 2 && visited.insert(obj_id) {
+                frontier.push(obj_id);
+            }
+        }
+    }
+}
+
+/// One hop of the closure: every `(predicate_id, object_id)` for a
+/// given subject id, optionally constrained to one graph. Returns a
+/// deterministically-ordered, de-duplicated list (the hexastore can
+/// hold the same `(s,p,o)` across multiple graphs; an unscoped
+/// DESCRIBE describes the resource once regardless of which graphs
+/// carry the triple). `Some(-1)` (unresolved scope IRI) → empty.
+fn closure_one_hop(subject_id: i64, scope_graph_id: Option<i64>) -> Vec<(i64, i64)> {
+    let (sql, params): (&str, Vec<i64>) = match scope_graph_id {
+        Some(g) => (
+            "SELECT DISTINCT predicate_id, object_id
+               FROM pgrdf._pgrdf_quads
+              WHERE subject_id = $1 AND graph_id = $2
+              ORDER BY predicate_id, object_id",
+            vec![subject_id, g],
+        ),
+        None => (
+            "SELECT DISTINCT predicate_id, object_id
+               FROM pgrdf._pgrdf_quads
+              WHERE subject_id = $1
+              ORDER BY predicate_id, object_id",
+            vec![subject_id],
+        ),
+    };
+    Spi::connect(|client| {
+        let arg_oids: Vec<PgOid> = vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); params.len()];
+        let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
+        let datums: Vec<DatumWithOid<'_>> = params
+            .iter()
+            .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
+            .collect();
+        let prepared = client
+            .prepare(sql, &arg_oids)
+            .expect("pgrdf.describe: closure prepare failed");
+        let table = client
+            .select(&prepared, None, &datums)
+            .expect("pgrdf.describe: closure select failed");
+        let mut rows: Vec<(i64, i64)> = Vec::new();
+        for row in table {
+            let p = row.get::<i64>(1).ok().flatten();
+            let o = row.get::<i64>(2).ok().flatten();
+            if let (Some(p), Some(o)) = (p, o) {
+                rows.push((p, o));
+            }
+        }
+        rows
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Plan
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1667,6 +2095,17 @@ fn translate(q: &Query) -> ExecPlan {
                 params: params_take(),
                 truncation_probes,
             }
+        }
+        // Phase F group F3 — DESCRIBE is a triple-output form (like
+        // CONSTRUCT); its SETOF JSONB shape diverges from the
+        // solution-bindings shape `pgrdf.sparql` returns, so the
+        // caller must signal intent at the SQL boundary by calling
+        // the sibling UDF. Mirror how `pgrdf.construct` is the
+        // CONSTRUCT entry point: a clean redirect, not a generic
+        // "unsupported". (CONSTRUCT keeps the generic catch-all
+        // message below — gap-5 in 80-unsupported-shapes locks it.)
+        Query::Describe { .. } => {
+            panic!("sparql: use pgrdf.describe(q) for DESCRIBE queries")
         }
         other => panic!("sparql: query form not supported yet (got {other:?})"),
     }
@@ -11674,8 +12113,10 @@ mod tests {
     }
 
     /// F2 invariant O (miniature) — LLD §11 acceptance: the shipped
-    /// forms no longer appear in `unsupported_algebra`, while DESCRIBE
-    /// (F3) still reports supported=false.
+    /// forms no longer appear in `unsupported_algebra`. Phase F group
+    /// F3 ships DESCRIBE, so the trailing assertion now pins
+    /// `form:"DESCRIBE"` (no longer `supported:false`) — see the
+    /// dedicated F3 coverage in `f3_*` + regression 116.
     #[pg_test]
     fn f2_sparql_parse_unsupported_narrowed() {
         let agg_union_unsupported: String = Spi::get_one(
@@ -11702,14 +12143,232 @@ mod tests {
             bind_dn_unsupported, "[]",
             "downstream BIND no longer flagged unsupported (LLD §11)"
         );
-        let describe_supported: String = Spi::get_one(
-            "SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')->>'supported'",
+        // Phase F group F3 — DESCRIBE now ships: `form:"DESCRIBE"`,
+        // and it is NOT flagged unsupported.
+        let describe_form: String =
+            Spi::get_one("SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')->>'form'")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            describe_form, "DESCRIBE",
+            "DESCRIBE now reports form:\"DESCRIBE\" (Phase F group F3, LLD §11)"
+        );
+        let describe_unsupported: String = Spi::get_one(
+            "SELECT pgrdf.sparql_parse(
+                 'DESCRIBE ?x WHERE { ?x a <http://example.com/T> }')\
+             ->>'unsupported_algebra'",
         )
         .unwrap()
         .unwrap();
         assert_eq!(
-            describe_supported, "false",
-            "DESCRIBE still unshipped (Phase F group F3)"
+            describe_unsupported, "[]",
+            "DESCRIBE no longer flagged unsupported (LLD §11 acceptance)"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Phase F group F3 (slices 26-24, LLD v0.4 §11) — DESCRIBE.
+    // `pgrdf.describe(q)` returns the closure of each described
+    // resource (every triple with it as subject), transitively
+    // expanded one hop through blank-node objects (cycle-safe),
+    // in the same {subject,predicate,object} structured-term JSONB
+    // shape as `pgrdf.construct`. Sibling-UDF surface; a DESCRIBE
+    // through `pgrdf.sparql` redirect-panics.
+    // ─────────────────────────────────────────────────────────────
+
+    /// F3 invariant A — bare `DESCRIBE <iri>` (constant, no WHERE)
+    /// returns every `(iri, ?p, ?o)` triple, deduped, in the
+    /// construct structured-term shape.
+    #[pg_test]
+    fn f3_describe_constant_no_where() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> . \
+                ex:a ex:p1 \"v1\" ; ex:p2 ex:b . \
+                ex:b ex:p3 \"other\" .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.describe(
+               'DESCRIBE <http://example.com/a>')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        // ex:a has exactly two triples; ex:b's are NOT included
+        // (ex:b is an IRI object, not a blank node — IRI objects are
+        // closure leaves).
+        assert_eq!(n, 2, "DESCRIBE <a> → its two triples only");
+        let lit: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.describe(
+               'DESCRIBE <http://example.com/a>') r
+              WHERE r->'object'->>'value' = 'v1'
+                AND r->'subject'->>'value' = 'http://example.com/a'
+                AND r->'object'->>'type' = 'literal'",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(lit, 1, "literal-object triple shaped like construct");
+    }
+
+    /// F3 invariant B — `DESCRIBE <iri>` on an IRI with no triples →
+    /// zero rows, NOT an error.
+    #[pg_test]
+    fn f3_describe_empty_is_zero_rows() {
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.describe(
+               'DESCRIBE <http://example.com/never-loaded>')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n, 0, "empty description → zero rows, no error");
+    }
+
+    /// F3 invariant C — `DESCRIBE ?x WHERE { ?x a ex:Thing }`
+    /// unions the closures of every `?x` binding and dedups across
+    /// bindings (set semantics).
+    #[pg_test]
+    fn f3_describe_variable_form_union_dedup() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> . \
+                @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> . \
+                ex:t1 rdf:type ex:Thing ; ex:p \"a\" . \
+                ex:t2 rdf:type ex:Thing ; ex:p \"b\" . \
+                ex:other rdf:type ex:NotThing ; ex:p \"c\" .', 0)",
+        )
+        .unwrap();
+        // t1: (type, p) = 2 triples; t2: (type, p) = 2 triples.
+        // ex:other is NOT a Thing → excluded.
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.describe(
+               'PREFIX ex: <http://example.com/> \
+                DESCRIBE ?x WHERE { ?x a ex:Thing }')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n, 4, "closure of t1 ∪ closure of t2 (2 + 2)");
+        // Dedup: a resource that matches the WHERE twice (here ex:t1
+        // bound by two predicates) still emits its closure once.
+        let dups: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.describe(
+               'PREFIX ex: <http://example.com/> \
+                DESCRIBE ?x WHERE { ?x ex:p ?v }') r
+              WHERE r->'subject'->>'value' = 'http://example.com/t1'",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(dups, 2, "ex:t1 closure emitted once (2 triples), no dup");
+    }
+
+    /// F3 invariant F — blank-node transitive one-hop expansion.
+    /// `<r> ex:p _:b1 . _:b1 ex:q _:b2 . _:b2 ex:r "leaf"`:
+    /// `DESCRIBE <r>` includes the `<r>` triple AND `_:b1`'s AND
+    /// `_:b2`'s, terminating at the literal — the closure follows
+    /// blank-node objects transitively.
+    #[pg_test]
+    fn f3_describe_bnode_transitive_expansion() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> . \
+                ex:r ex:p [ ex:q [ ex:r \"leaf\" ] ] .', 0)",
+        )
+        .unwrap();
+        // (r,p,_:b1) + (_:b1,q,_:b2) + (_:b2,r,\"leaf\") = 3 triples.
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.describe(
+               'DESCRIBE <http://example.com/r>')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(
+            n, 3,
+            "closure follows bnode objects transitively to the literal leaf"
+        );
+        let leaf: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.describe(
+               'DESCRIBE <http://example.com/r>') t
+              WHERE t->'object'->>'value' = 'leaf'
+                AND t->'subject'->>'type' = 'bnode'",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(leaf, 1, "the terminal bnode→literal triple is present");
+    }
+
+    /// F3 invariant F (cycle) — a blank-node cycle
+    /// (`_:b1 ex:p _:b2 . _:b2 ex:p _:b1`) reached from a described
+    /// IRI terminates with the correct finite row set (visited-set
+    /// cycle safety).
+    #[pg_test]
+    fn f3_describe_bnode_cycle_terminates() {
+        // <root> ex:link _:b1 ; _:b1 ex:p _:b2 ; _:b2 ex:p _:b1.
+        // Turtle can't easily express a bnode cycle with [] syntax,
+        // so build it with explicit labels via parse_turtle.
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+               '@prefix ex: <http://example.com/> . \
+                ex:root ex:link _:b1 . \
+                _:b1 ex:p _:b2 . \
+                _:b2 ex:p _:b1 .', 0)",
+        )
+        .unwrap();
+        // Closure: (root,link,_:b1), (_:b1,p,_:b2), (_:b2,p,_:b1).
+        // The cycle _:b1↔_:b2 is walked once each (visited-set);
+        // exactly 3 triples, terminates.
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.describe(
+               'DESCRIBE <http://example.com/root>')",
+        )
+        .unwrap()
+        .unwrap_or(-1);
+        assert_eq!(n, 3, "bnode cycle terminates with the finite 3-triple set");
+    }
+
+    /// F3 invariant H (miniature) — `pgrdf.sparql_parse` reports
+    /// `form:"DESCRIBE"` and does NOT flag it unsupported.
+    #[pg_test]
+    fn f3_sparql_parse_reports_describe_form() {
+        let form: String = Spi::get_one(
+            "SELECT pgrdf.sparql_parse(
+               'PREFIX ex: <http://example.com/> \
+                DESCRIBE <http://example.com/a> ?x WHERE { ?x a ex:T }')\
+             ->>'form'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(form, "DESCRIBE");
+        let kind: String = Spi::get_one(
+            "SELECT pgrdf.sparql_parse(
+               'PREFIX ex: <http://example.com/> \
+                DESCRIBE <http://example.com/a> ?x WHERE { ?x a ex:T }')\
+             ->'describe'->>'kind'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(kind, "mixed", "constant + variable terms → kind:mixed");
+        let unsup: String = Spi::get_one(
+            "SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')\
+             ->>'unsupported_algebra'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(unsup, "[]", "DESCRIBE not flagged unsupported");
+    }
+
+    /// F3 invariant I — a DESCRIBE through `pgrdf.sparql` redirects
+    /// to `pgrdf.describe` with a stable panic (mirrors how
+    /// `pgrdf.construct` is the CONSTRUCT entry point). The EXACT
+    /// message is locked here.
+    #[pg_test(error = "sparql: use pgrdf.describe(q) for DESCRIBE queries")]
+    fn f3_sparql_redirects_describe_to_pgrdf_describe() {
+        Spi::run("SELECT * FROM pgrdf.sparql('DESCRIBE <http://example.com/a>')").unwrap();
+    }
+
+    /// F3 — `pgrdf.describe` rejects a non-DESCRIBE query with a
+    /// stable prefix (parallel to `pgrdf.construct`'s
+    /// "not a CONSTRUCT query").
+    #[pg_test(error = "pgrdf.describe: not a DESCRIBE query")]
+    fn f3_describe_rejects_select_query() {
+        Spi::run("SELECT * FROM pgrdf.describe('SELECT ?s WHERE { ?s ?p ?o }')").unwrap();
     }
 }

@@ -233,16 +233,20 @@ SELECT (sparql->>'n')::int AS n_graph_scoped_count
 -- aggregates-over-UNION in `unsupported_algebra` (the parser always
 -- walked Group/Union; the gate was the executor panic, retired in
 -- 80-unsupported-shapes gap-8). Lock the empty array. DESCRIBE
--- still reports supported=false (F3). OPTIONAL/VALUES not regressed
--- (F1) — empty unsupported for an OPTIONAL+VALUES query too.
+-- now ships (Phase F group F3, LLD §11): form="DESCRIBE", NOT
+-- flagged unsupported (gap-6 retired in 80-unsupported-shapes).
+-- OPTIONAL/VALUES not regressed (F1) — empty unsupported for an
+-- OPTIONAL+VALUES query too.
 SELECT pgrdf.sparql_parse(
   'PREFIX ex: <http://example.com/>
    SELECT (COUNT(?p) AS ?n) WHERE {
      { ?x ex:cat "books" . ?x ex:price ?p }
      UNION { ?x ex:cat "tools" . ?x ex:price ?p } }'
 )->'unsupported_algebra' AS o_aggunion_unsupported;
-SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/i1>')->>'supported'
-  AS o_describe_still_unsupported;
+SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/i1>')->>'form'
+  AS o_describe_form;
+SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/i1>')
+  ->'unsupported_algebra' AS o_describe_unsupported;
 SELECT pgrdf.sparql_parse(
   'PREFIX ex: <http://example.com/>
    SELECT ?x ?y WHERE { ?x ex:cat ?y

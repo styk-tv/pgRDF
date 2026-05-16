@@ -129,7 +129,7 @@ Capability matrix for the v0.4 target:
 | `VALUES` inline tables | ⏳ deferred | §11 | ✅ F1 (slices 34-31) — `(VALUES …) AS vN(cols)` derived table joined on shared vars; constants resolved to dict ids ahead of execution; `UNDEF` → NULL cell (no constraint, §10); typed/lang literals datatype-aware; composes with GRAPH + OPTIONAL; inherited by `pgrdf.construct` + UPDATE WHERE |
 | `BIND` output in later FILTER / BGP | ⏳ deferred | §11 | ✅ F2 (slices 30-27) — AST substitution pass: BIND var rewritten into later FILTER / triple-slot join / chained BIND before the structural walk (no new translator surface); unbound-var BIND → NULL not error (§18.2.5); composes with GRAPH + F1 OPTIONAL/VALUES; inherited by `pgrdf.construct` + UPDATE WHERE |
 | Aggregates over `UNION` | ⏳ deferred | §11 | ✅ F2 (slices 30-27) — derived-table refactor (each branch → sub-SELECT projecting dict ids into the F1 `vK` pool; existing aggregate translator runs over `(<union>) qU`); COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING, GRAPH scoping, property-path branch; group-by on a GRAPH-scope-only var → v0.5-FUTURE §8 |
-| `DESCRIBE` | ⏳ deferred | §11 | 🚧 |
+| `DESCRIBE` | ⏳ deferred | §11 | ✅ F3 (slices 26-24) — sibling UDF `pgrdf.describe(q TEXT) → SETOF JSONB` (byte-identical to `pgrdf.construct`); closure of each described resource (every triple with it as subject) transitively expanded one hop through blank-node objects per W3C §16.4 (cycle-safe, dedup'd); `DESCRIBE <iri>` / `DESCRIBE ?v WHERE {…}` / mixed / `DESCRIBE *`; composes with GRAPH scoping; `pgrdf.sparql_parse` reports `form:"DESCRIBE"` (NOT flagged unsupported); DESCRIBE via `pgrdf.sparql` redirect-panics |
 | Real SHACL output | 🚧 stub | §9 | ✅ shipped `ac40bc2` |
 | Reasoning profile selector (RDFS / OWL-RL) | not yet | — | ⏳ v0.5-FUTURE §3 |
 | TriG / N-Quads ingest | not yet | — | ⏳ v0.5-FUTURE §4 |
@@ -1083,13 +1083,17 @@ These items were enumerated under "⏳ v0.4" in
 same machinery §4 (UPDATE) and §6 (CONSTRUCT) need. Ship together
 for economy. 🚧 (§11 overall stays 🚧 until Phase F group F4 — the
 v0.4.6 cut; F1 landed multi-triple OPTIONAL + VALUES, F2 landed
-BIND-downstream + aggregates-over-UNION.)
+BIND-downstream + aggregates-over-UNION, F3 landed DESCRIBE. After
+F3 the §11 surface backlog is functionally complete EXCEPT
+type-aware `ORDER BY` — F4 assesses/closes that remaining item
+alongside the W3C consolidation + the release cut.)
 
 Phase F dispatch grouping: **F1 (slices 34-31) — multi-triple
 OPTIONAL + VALUES (✅ landed)**; **F2 (slices 30-27) —
-BIND-downstream + aggregates-over-UNION (✅ landed)**; F3 —
-DESCRIBE (🚧); F4 — W3C consolidation + docs + the v0.4.6 release
-cut (🚧).
+BIND-downstream + aggregates-over-UNION (✅ landed)**; **F3
+(slices 26-24) — DESCRIBE (✅ landed)**; F4 — type-aware ORDER BY
+assessment + W3C consolidation + docs + the v0.4.6 release cut
+(🚧).
 
 - **Multi-triple `OPTIONAL { BGP }`.** ✅ **F1 landed.** The v0.3
   OPTIONAL handler supported only a single-triple right side. F1
@@ -1148,11 +1152,57 @@ cut (🚧).
   aggregate argument) on a variable that is ONLY ever a
   `GRAPH ?g`-scope var across the union — surfaced with a stable
   panic prefix (NOT a wrong answer), not a silent miscount.
-- **`DESCRIBE`.** 🚧 **F3 (not yet shipped).** Like CONSTRUCT but returning the closure around
-  the described subject (every triple where the subject is the
-  named term, transitively expanded one hop on blank nodes per
-  W3C §16.4). Routes through `pgrdf.construct` internally for the
-  triple-output shape.
+- **`DESCRIBE`.** ✅ **F3 landed (slices 26-24).** Like CONSTRUCT
+  but returning the *closure* around each described resource, via
+  the sibling UDF `pgrdf.describe(q TEXT) → SETOF JSONB` (parallel
+  to `pgrdf.construct`; the §6.1 sibling-UDF rationale — the caller
+  signals intent at the SQL boundary, not a `pgrdf.sparql` sentinel;
+  a DESCRIBE through `pgrdf.sparql` panics
+  `sparql: use pgrdf.describe(q) for DESCRIBE queries`). The output
+  is **byte-identical** to `pgrdf.construct`'s
+  `{subject,predicate,object}` structured-term JSONB (same encoders;
+  this is the "routes through `pgrdf.construct` internally for the
+  triple-output shape" requirement). DESCRIBE is **not** a CONSTRUCT
+  template — there is no `{ template }`; the description triples are
+  the matched closure itself.
+
+  **Precise reading of "transitively expanded one hop on blank
+  nodes" (W3C §16.4):** for each described resource R (an IRI or
+  blank node — a literal can't be a subject, so a literal described
+  term yields an empty description), emit every triple `(R, ?p, ?o)`
+  where R is the subject. Whenever an emitted object `?o` is itself
+  a blank node, recurse into that blank node's `(?o, ?p2, ?o2)`
+  triples, and keep following while the frontier object stays a
+  blank node. "one hop" = each expansion step follows exactly one
+  blank-node edge; "transitively expanded" = repeat the step while
+  the object is a blank node. Recursion **only ever traverses
+  blank-node objects** (never IRIs), so it terminates on any finite
+  graph (IRI/literal objects are leaves) — a Concise-Bounded-
+  Description-style closure; a visited-set of blank-node ids
+  additionally guarantees termination on blank-node cycles
+  (`_:b1 ex:p _:b2 . _:b2 ex:p _:b1`). Triples are deduplicated
+  across the whole result (set semantics — a resource described
+  twice, e.g. listed explicitly AND bound by WHERE, emits its
+  closure once; overlapping closures emit each triple once).
+
+  **Forms.** spargebra normalises every DESCRIBE form into
+  `DESCRIBE * WHERE { SELECT <projection> WHERE { <bgp> } }`, so
+  `Query::Describe.pattern` is always `Project { inner, variables }`;
+  each constant `DESCRIBE <iri>` term is a leading
+  `Extend { …, NamedNode(iri) }` layer over the residual WHERE.
+  Supported: `DESCRIBE <iri>` (constant, no WHERE — empty IRI → 0
+  rows, not an error), `DESCRIBE ?v WHERE {…}` (every binding of
+  `?v`), mixed constant + variable terms, `DESCRIBE *`. Composes
+  with `GRAPH <iri>` scoping — the closure is computed within the
+  named graph (other graphs' triples about the same subject are
+  excluded); an unscoped DESCRIBE scans every graph (the slice-112
+  pgRDF unscoped-BGP semantic). `pgrdf.sparql_parse` reports
+  `form:"DESCRIBE"` with a `describe` block
+  (`kind` ∈ constant/variable/mixed, `constant_iris`,
+  `variable_terms`, `has_where`) + a `where_shape` over the residual
+  WHERE; DESCRIBE is NOT flagged in `unsupported_algebra` (the §11
+  acceptance binding; 80-unsupported-shapes gap-6 retired in the
+  same commit). Regression-locked: `tests/regression/sql/116-describe.sql`.
 
 Acceptance criteria for each carry the v0.3 LLD's existing wording:
 the relevant regression file gains the deferred shape, the

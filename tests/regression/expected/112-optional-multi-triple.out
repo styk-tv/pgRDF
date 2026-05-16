@@ -21,4 +21,5 @@ http://example.com/g/people
 INSERT_WHERE|2
 2
 []
-false
+DESCRIBE
+[]

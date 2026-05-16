@@ -262,14 +262,17 @@ SELECT count(*)::int AS g2_update_flags
 -- longer flags BIND-downstream in `unsupported_algebra` (it never
 -- had a dedicated tag — the parser always walked through Extend —
 -- but lock the empty array so a future regression that re-adds a
--- BIND-downstream flag is caught). DESCRIBE still unshipped (F3);
+-- BIND-downstream flag is caught). DESCRIBE now ships (Phase F
+-- group F3, LLD §11): form="DESCRIBE", NOT flagged unsupported.
 -- OPTIONAL/VALUES still unflagged (F1 not regressed).
 SELECT pgrdf.sparql_parse(
   'PREFIX ex: <http://example.com/>
    SELECT ?s ?sum WHERE { ?s ex:x ?x . ?s ex:y ?y
      BIND(?x + ?y AS ?sum) FILTER(?sum > 10) }'
 )->'unsupported_algebra' AS o_bind_downstream_unsupported;
-SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')->>'supported'
-  AS o_describe_still_unsupported;
+SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')->>'form'
+  AS o_describe_form;
+SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')
+  ->'unsupported_algebra' AS o_describe_unsupported;
 
 ROLLBACK;
