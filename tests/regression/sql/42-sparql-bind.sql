@@ -1,7 +1,11 @@
 -- 42-sparql-bind — BIND(expr AS ?var) projects a computed value.
--- Today's restriction: BIND output is visible in the SELECT
--- projection only; referencing a BIND var in a later FILTER/BGP
--- isn't supported in this slice.
+-- This file locks the v0.3 BIND PROJECTION surface (it must keep
+-- working — F2 invariant E, "no regression of v0.3 behaviour").
+-- The v0.3 restriction "BIND output is projection-only" is LIFTED
+-- by Phase F group F2 (LLD v0.4 §11): a BIND var is now usable in a
+-- later FILTER, a BGP join, and a chained BIND. That downstream
+-- surface is covered by tests/regression/sql/114-bind-downstream.sql;
+-- the projection-only cases below are unchanged on purpose.
 
 SET client_min_messages = WARNING;
 CREATE EXTENSION IF NOT EXISTS pgrdf;

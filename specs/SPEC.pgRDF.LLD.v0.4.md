@@ -127,8 +127,8 @@ Capability matrix for the v0.4 target:
 | Materialised-closure no-CTE fallback | not yet | §7.2 / §7.3 | ✅ E4 (slices 37-35) — `+`/`*` over `rdfs:subClassOf` / `rdfs:subPropertyOf` / `owl:sameAs` with `is_inferred` rows present → direct match, no `CTE Scan` |
 | Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | ✅ F1 (slices 34-31) — N-triple OPTIONAL via LATERAL-style derived table inside the LEFT JOIN; atomic (all-or-nothing §6.1), nested OPTIONAL, OPTIONAL-internal FILTER, optional-var outer FILTER, GRAPH scoping, `+`-path-in-required composition; inherited by `pgrdf.construct` + UPDATE WHERE |
 | `VALUES` inline tables | ⏳ deferred | §11 | ✅ F1 (slices 34-31) — `(VALUES …) AS vN(cols)` derived table joined on shared vars; constants resolved to dict ids ahead of execution; `UNDEF` → NULL cell (no constraint, §10); typed/lang literals datatype-aware; composes with GRAPH + OPTIONAL; inherited by `pgrdf.construct` + UPDATE WHERE |
-| `BIND` output in later FILTER / BGP | ⏳ deferred | §11 | 🚧 |
-| Aggregates over `UNION` | ⏳ deferred | §11 | 🚧 |
+| `BIND` output in later FILTER / BGP | ⏳ deferred | §11 | ✅ F2 (slices 30-27) — AST substitution pass: BIND var rewritten into later FILTER / triple-slot join / chained BIND before the structural walk (no new translator surface); unbound-var BIND → NULL not error (§18.2.5); composes with GRAPH + F1 OPTIONAL/VALUES; inherited by `pgrdf.construct` + UPDATE WHERE |
+| Aggregates over `UNION` | ⏳ deferred | §11 | ✅ F2 (slices 30-27) — derived-table refactor (each branch → sub-SELECT projecting dict ids into the F1 `vK` pool; existing aggregate translator runs over `(<union>) qU`); COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING, GRAPH scoping, property-path branch; group-by on a GRAPH-scope-only var → v0.5-FUTURE §8 |
 | `DESCRIBE` | ⏳ deferred | §11 | 🚧 |
 | Real SHACL output | 🚧 stub | §9 | ✅ shipped `ac40bc2` |
 | Reasoning profile selector (RDFS / OWL-RL) | not yet | — | ⏳ v0.5-FUTURE §3 |
@@ -1082,12 +1082,14 @@ These items were enumerated under "⏳ v0.4" in
 (LATERAL-style derived-table refactor + AST substitution) is the
 same machinery §4 (UPDATE) and §6 (CONSTRUCT) need. Ship together
 for economy. 🚧 (§11 overall stays 🚧 until Phase F group F4 — the
-v0.4.6 cut; F1 has landed multi-triple OPTIONAL + VALUES.)
+v0.4.6 cut; F1 landed multi-triple OPTIONAL + VALUES, F2 landed
+BIND-downstream + aggregates-over-UNION.)
 
 Phase F dispatch grouping: **F1 (slices 34-31) — multi-triple
-OPTIONAL + VALUES (✅ landed)**; F2 — BIND-downstream +
-aggregates-over-UNION (🚧); F3 — DESCRIBE (🚧); F4 — W3C
-consolidation + docs + the v0.4.6 release cut (🚧).
+OPTIONAL + VALUES (✅ landed)**; **F2 (slices 30-27) —
+BIND-downstream + aggregates-over-UNION (✅ landed)**; F3 —
+DESCRIBE (🚧); F4 — W3C consolidation + docs + the v0.4.6 release
+cut (🚧).
 
 - **Multi-triple `OPTIONAL { BGP }`.** ✅ **F1 landed.** The v0.3
   OPTIONAL handler supported only a single-triple right side. F1
@@ -1111,16 +1113,41 @@ consolidation + docs + the v0.4.6 release cut (🚧).
   that variable for that row (W3C §10); typed/lang literals match
   datatype/lang-aware. Composes with GRAPH scoping + OPTIONAL;
   inherited by `pgrdf.construct` + UPDATE WHERE.
-- **`BIND` output downstream.** 🚧 **F2 (not yet shipped).** AST
-  substitution pass: every
-  reference to a `BIND`-introduced variable in a later FILTER or
-  BGP rewrites to the bound expression. The v0.3 limitation
-  (BIND projection-only) lifts.
-- **Aggregates over `UNION`.** 🚧 **F2 (not yet shipped).**
-  Derived-table refactor: the UNION becomes a sub-SELECT,
-  aggregation runs over its rows. Residual refinements after the
-  v0.4 cut move to
-  [`v0.5-FUTURE §8`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+- **`BIND` output downstream.** ✅ **F2 landed.** AST
+  substitution pass (the spec-named approach): every reference to a
+  `BIND`-introduced variable in a textually-later FILTER, triple
+  slot (BGP join key), or chained BIND is rewritten to the bound
+  expression BEFORE the structural walk, so the existing
+  `anchors`-driven translator resolves it with **no new translator
+  surface** (`FILTER(?v > 10)` with `BIND(?a+?b AS ?v)` becomes
+  `FILTER(?a+?b > 10)`). The v0.3 projection-only limitation lifts:
+  a BIND var is usable in (a) a later FILTER, (b) a later triple's
+  variable position (variable/term aliases substitute into the slot;
+  a *computed* expression as a triple join key stays v0.3-degenerate
+  — [`v0.5-FUTURE §8`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)), (c) a chained
+  BIND (resolved left-to-right), (d) projection (unchanged — no
+  regression). A BIND over an unbound variable yields an UNBOUND
+  result (SQL NULL), NOT a query error (W3C §18.2.5). Composes with
+  GRAPH scoping + F1 OPTIONAL/VALUES; inherited by `pgrdf.construct`
+  + SPARQL UPDATE WHERE (same `parse_select`). The substitution pass
+  stays in `src/query/executor.rs` (`substitute_binds` /
+  `subst_expr` / `subst_triple`) — see the Phase H carve note below.
+- **Aggregates over `UNION`.** ✅ **F2 landed.** Derived-table
+  refactor reusing the F1 `vK` derived-column contract verbatim:
+  each UNION branch becomes a sub-SELECT projecting the aggregate /
+  GROUP BY variables' **dict ids** into the `DERIVED_COLS` pool, the
+  branches `UNION ALL` into `(<union>) qU`, and the EXISTING
+  aggregate translator (`translate_aggregate` /
+  `translate_filter_with_aggregates`) runs over `qU` unchanged. The
+  full core set ships: COUNT/COUNT(\*)/COUNT(DISTINCT), SUM, AVG,
+  type-aware MIN/MAX, GROUP_CONCAT, SAMPLE, with/without GROUP BY,
+  with HAVING, under GRAPH scoping, with a property-path branch, and
+  inherited by `pgrdf.construct` (the same union-derived-table path).
+  **Residual refinements move to
+  [`v0.5-FUTURE §8`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)**: a GROUP BY (or
+  aggregate argument) on a variable that is ONLY ever a
+  `GRAPH ?g`-scope var across the union — surfaced with a stable
+  panic prefix (NOT a wrong answer), not a silent miscount.
 - **`DESCRIBE`.** 🚧 **F3 (not yet shipped).** Like CONSTRUCT but returning the closure around
   the described subject (every triple where the subject is the
   named term, transitively expanded one hop on blank nodes per

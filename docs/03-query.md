@@ -58,6 +58,8 @@ result rows ─► SETOF JSONB
 | OPTIONAL { BGP } | `LEFT JOIN LATERAL (SELECT <vars AS vK> FROM <inner BGP> WHERE <preds + correlation + inner FILTERs>) qOPT ON TRUE` | Phase F group F1: N-triple right side as one atomic LATERAL derived table (all-or-nothing, W3C §6.1); nested OPTIONAL recurses the same emitter; optional-only vars resolve as `qOPT.vK` |
 | `VALUES (?x …) { … }` | `CROSS JOIN (VALUES (id,…),(id,…)) AS vN(vK…)` + `(vN.vK IS NULL OR vN.vK = q{anchor}.{col})` correlation | Phase F group F1: constants → dict ids ahead of execution; `UNDEF` → NULL cell (no constraint, W3C §10) |
 | UNION { A } { B } | `(SELECT … FROM A) UNION ALL (SELECT … FROM B)` | Each branch SELECTs `NULL::TEXT` for vars it doesn't bind |
+| `BIND(expr AS ?v)` downstream | AST substitution: `?v` rewritten to `expr` in every later FILTER / triple slot / chained BIND **before** the structural walk | Phase F group F2: no new translator surface — `FILTER(?v>10)` with `BIND(?a+?b AS ?v)` becomes `FILTER(?a+?b>10)` and the existing anchors path resolves it; unbound-var BIND → `NULL::TEXT` (not an error, W3C §18.2.5); projection still emits the bind column (no v0.3 regression) |
+| Aggregate over UNION | `SELECT <agg(qU.vK)> FROM ((<branch1 dict-id projection>) UNION ALL (<branch2 …>)) qU [GROUP BY …] [HAVING …]` | Phase F group F2: each branch sub-SELECTs the agg/GROUP-BY vars' **dict ids** into the F1 `vK` pool; the EXISTING `translate_aggregate` runs over `qU` unchanged (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING); group-by on a GRAPH-scope-only var → stable panic (v0.5-FUTURE §8), never a wrong count |
 | MINUS { triple } | `WHERE NOT EXISTS (SELECT 1 FROM _pgrdf_quads qMIN_K WHERE …)` | Elided at translation time when there are no shared variables (SPARQL no-op) |
 | `GRAPH <iri> { … }` | `qN.graph_id = <resolved>` on every triple alias inside the block | IRI resolved against `_pgrdf_graphs.iri` at translate time; unresolved IRI binds to `-1` (zero rows, spec-correct "no solutions") |
 | `GRAPH ?g { … }` | `INNER JOIN _pgrdf_graphs g{S} ON g{S}.graph_id = q{first}.graph_id` + `qN.graph_id = q{first}.graph_id` for non-anchor triples | One JOIN per Variable scope; ?g projects as `g{S}.iri` (the IRI string); INNER matches W3C §13.3 — only mapped graphs bind ?g; multi-triple inner BGPs share the anchor's graph_id so triples can't stitch across graphs |
@@ -445,12 +447,73 @@ Concrete shape:
 - ✅ Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`,
       `SUM`, `AVG`, type-aware `MIN` / `MAX` (numeric path on
       `xsd:numeric`, lex fallback), `GROUP_CONCAT`, `SAMPLE` with
-      `GROUP BY`
+      `GROUP BY` — over a single BGP **or over a UNION** (Phase F
+      group F2; see "Aggregates over UNION" below)
 - ✅ `HAVING` — both by aggregate alias (`HAVING(?total > c)`)
-      AND inline (`HAVING(SUM(?v) > c)`)
-- ✅ `BIND(expr AS ?v)` for projection — Literal / NamedNode /
+      AND inline (`HAVING(SUM(?v) > c)`); also over an
+      aggregate-of-UNION
+- ✅ `BIND(expr AS ?v)` — projection (Literal / NamedNode /
       Variable, STR / LANG / DATATYPE / UCASE / LCASE / STRLEN,
-      arithmetic, CONCAT
+      arithmetic, CONCAT) **and downstream** (Phase F group F2; the
+      v0.3 projection-only limitation is lifted — see "Downstream
+      BIND" below)
+- ✅ Downstream `BIND` (Phase F group F2) — a `BIND`-introduced
+      variable is usable in a textually-later FILTER, a later
+      triple's variable position (BGP join key), and a chained BIND
+      (resolved left-to-right). Realised as an AST substitution pass
+      that rewrites the bind var to its expression **before** the
+      structural walk, so the existing anchors-driven translator
+      resolves it with no new surface. A BIND over an unbound
+      variable yields an UNBOUND result (NULL), NOT a query error
+      (W3C §18.2.5). Composes with GRAPH scoping + F1 OPTIONAL/VALUES;
+      inherited by `pgrdf.construct` and SPARQL UPDATE WHERE.
+
+      ```sql
+      -- BIND value reused in a later FILTER (was projection-only).
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT ?s ?sum
+           WHERE { ?s ex:x ?x . ?s ex:y ?y
+                   BIND(?x + ?y AS ?sum)
+                   FILTER(?sum > 10) }');
+
+      -- Chained BIND: ?c = (?x + 1) * 2, resolved left-to-right.
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT ?s ?c
+           WHERE { ?s ex:x ?x
+                   BIND(?x + 1 AS ?b) BIND(?b * 2 AS ?c) }');
+      ```
+- ✅ Aggregates over UNION (Phase F group F2) — the UNION becomes a
+      derived table whose branches each project the aggregate /
+      GROUP BY variables' dict ids into the F1 `vK` column pool; the
+      existing aggregate translator runs over `(<union>) qU`
+      unchanged. COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE,
+      `DISTINCT`, `GROUP BY`, `HAVING`, GRAPH scoping and a
+      property-path branch all compose; inherited by
+      `pgrdf.construct`. A GROUP BY (or aggregate argument) on a
+      variable that is ONLY ever a `GRAPH ?g`-scope var across the
+      union is deferred to `SPEC.pgRDF.LLD.v0.5-FUTURE §8` and
+      surfaces a stable panic (never a wrong count).
+
+      ```sql
+      -- COUNT over a 2-branch UNION.
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT (COUNT(?p) AS ?n) WHERE {
+           { ?x ex:cat "books" . ?x ex:price ?p }
+           UNION
+           { ?x ex:cat "tools" . ?x ex:price ?p } }');
+
+      -- SUM over a UNION with GROUP BY a union variable + HAVING.
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT ?c (SUM(?p) AS ?s) WHERE {
+           { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = "books") }
+           UNION
+           { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = "tools") } }
+         GROUP BY ?c HAVING(SUM(?p) > 20)');
+      ```
 - ✅ Named-graph `GRAPH <iri> { … }` — literal-IRI form (slice 114).
       Translate-time IRI → `graph_id` resolution via
       `_pgrdf_graphs.iri`; unresolved IRI binds to `-1` (zero

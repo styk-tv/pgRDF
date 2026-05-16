@@ -142,18 +142,26 @@ SELECT _check_gap(
   'nested recursive property path'
 );
 
--- ─── Gap 8: aggregates over UNION ────────────────────────────────
--- The executor explicitly panics; aggregate output construction
--- needs to happen after the union derived table, which isn't
--- wired today.
-SELECT _check_gap(
-  'gap-8 aggregates over UNION',
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT (COUNT(?n) AS ?c) WHERE {
-     { ?s foaf:name ?n } UNION { ?s foaf:age ?n }
-   }',
-  'sparql: aggregates on top of UNION not supported yet'
-);
+-- ─── Gap 8 (RETIRED): aggregates over UNION ──────────────────────
+-- LLD v0.4 §11 — Phase F group F2 (slices 30-27) ships aggregates
+-- over a UNION via a derived-table refactor: each branch becomes a
+-- sub-SELECT projecting the aggregate/GROUP-BY variables' dict ids
+-- into the F1 `vK` derived-column pool, the branches `UNION ALL`
+-- into a derived table, and the existing aggregate translator runs
+-- over `(<union>) qU` unchanged (COUNT/SUM/AVG/type-aware MIN-MAX/
+-- GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING). Positive
+-- coverage: `tests/regression/sql/115-aggregate-over-union.sql`.
+-- This gap entry is intentionally removed — the executor no longer
+-- panics on aggregate-over-UNION, so a `_check_gap` here would emit
+-- `!!! unexpected success !!!`.
+--
+-- (BIND-output-downstream — the other v0.3 SPARQL-surface gap closed
+-- in F2 — never had a gap entry here: it produced a "FILTER
+-- expression not translatable" / unbound-anchor failure rather than
+-- a dedicated stable panic, so there was nothing to lock. F2's AST
+-- substitution pass makes BIND vars usable in later FILTER / BGP
+-- joins / chained BIND; positive coverage:
+-- `tests/regression/sql/114-bind-downstream.sql`.)
 
 DROP FUNCTION _check_gap(TEXT, TEXT, TEXT);
 

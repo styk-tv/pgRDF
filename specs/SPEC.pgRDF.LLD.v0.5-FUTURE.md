@@ -220,9 +220,38 @@ to the same partition-DDL implementation.
 
 ## 8. Aggregates over UNION — residual refinements
 
-v0.4 §11 ships aggregates over UNION via a derived-table refactor.
-Residual cases not covered by the v0.4 cut surface in v0.5:
+v0.4 §11 (Phase F group F2, slices 30-27) ships aggregates over
+UNION via a derived-table refactor: each branch becomes a sub-SELECT
+projecting the aggregate / GROUP BY variables' dict ids into the F1
+`vK` column pool, and the existing aggregate translator runs over
+`(<union>) qU`. Residual cases not covered by the v0.4 cut surface
+in v0.5:
 
+- **GROUP BY (or aggregate argument) on a variable that is ONLY ever
+  a `GRAPH ?g`-scope var across the union.** Such a var has no dict
+  id in the per-branch derived table (it is resolved as
+  `g{S}.iri`, a text IRI, not a `BIGINT` id). The v0.4 build emits
+  a **stable panic** (`sparql: GROUP BY / aggregate over a
+  GRAPH-scope variable ?… across a UNION is deferred to
+  v0.5-FUTURE §8`) rather than a wrong count. v0.5 fix: project a
+  parallel text lane (or resolve the IRI back to its dict id) so
+  the group key is consistent across branches.
+- **A *computed* BIND expression used as a triple join key**
+  (`BIND(?a + 1 AS ?k) . ?k :p ?o`). F2's AST substitution
+  substitutes variable/term BIND aliases into a triple slot but
+  leaves a computed-expression alias as the original variable
+  (v0.3-degenerate behaviour preserved). v0.5 fix: emit the bind as
+  a derived `SELECT expr AS col` lateral the triple correlates on.
+- **A BIND variable used directly in a CONSTRUCT/DESCRIBE *template*
+  output position** (`CONSTRUCT { ?s :total ?sum } WHERE { …
+  BIND(?x+?y AS ?sum) }`). F2's substitution makes a BIND var
+  usable in the construct's *WHERE* (FILTER/BGP/chained) — that is
+  the inherited guarantee — but the construct emitter projects
+  per-template-var **dict ids** and resolves them through
+  `_pgrdf_dictionary`, whereas a BIND value is a query-time computed
+  lexical value with no pre-interned id. v0.5 fix: project the bind
+  expression as a lexical value and shape it as a literal term (or
+  intern it on the fly) in the construct row encoder.
 - Aggregates over nested UNION-of-UNION patterns.
 - `HAVING` clauses over UNION-derived aggregates with cross-branch
   variable references.

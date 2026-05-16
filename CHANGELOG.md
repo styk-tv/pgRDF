@@ -9,6 +9,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 ### Added
 
 - SPARQL multi-triple OPTIONAL + VALUES inline tables — Phase F group F1 (slices 34-31). OPTIONAL now accepts an N-triple BGP right side (LATERAL-style derived table inside the LEFT JOIN); nested OPTIONAL, OPTIONAL-internal FILTER, and optional-var outer FILTER all compose. VALUES materialises inline rows (incl. UNDEF, typed/lang literals) joined on shared variables. Both compose with GRAPH scoping + property paths and are inherited by pgrdf.construct and SPARQL UPDATE WHERE. `pgrdf.sparql_parse` no longer flags these in `unsupported_algebra` (LLD §11 acceptance).
+- SPARQL downstream BIND + aggregates over UNION — Phase F group F2 (slices 30-27). BIND-introduced variables are now usable in later FILTER, BGP joins, and chained BIND (v0.3 projection-only limitation lifted). Aggregates (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, with GROUP BY/HAVING/DISTINCT) now run over UNION'd patterns via a derived-table refactor. Both compose with GRAPH scoping, F1 OPTIONAL/VALUES, and property paths, and are inherited by pgrdf.construct + SPARQL UPDATE WHERE. `pgrdf.sparql_parse` no longer flags these in `unsupported_algebra` (LLD §11 acceptance). Residual aggregate-over-UNION refinements tracked in v0.5-FUTURE §8.
 
 ## [0.4.5] — 2026-05-16
 

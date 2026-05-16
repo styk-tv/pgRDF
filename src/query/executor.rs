@@ -1721,10 +1721,333 @@ fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
     sql
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Phase F group F2 (LLD v0.4 §11) — BIND output downstream.
+//
+// v0.3 limitation: `BIND(expr AS ?v)` was projection-only — a *later*
+// FILTER or BGP referencing `?v` couldn't see it. §11 fix: an AST
+// substitution pass. We rewrite the spargebra algebra tree BEFORE
+// `walk_select` so that every reference to a BIND-introduced variable
+// in a textually-later FILTER, triple slot, or chained BIND is
+// replaced by the bound expression (W3C §18.2.5: a BIND adds a
+// binding that is in scope for everything after it in the group).
+//
+// Why AST substitution (the spec-named approach) and not a SQL-level
+// derived column: the executor's whole filter/projection machinery is
+// `anchors`-driven — every `Expression::Variable(v)` resolves to
+// `q{idx}.{col}`. Substituting `?v` → its expression up-front means
+// `FILTER(?v > 10)` becomes `FILTER(?a + ?b > 10)`, which the
+// EXISTING `translate_filter` handles verbatim against the anchors of
+// `?a`/`?b` — zero new translator surface, composes for free with
+// GRAPH scoping, F1 OPTIONAL/VALUES, property paths, HAVING, and is
+// inherited by `pgrdf.construct` + SPARQL UPDATE WHERE (they route
+// the same `parse_select`). The `Extend` node itself is preserved so
+// the projection column (which already worked in v0.3) is unchanged
+// — substitution only rewrites the *consumers* of the bind var.
+//
+// Aggregate-rename `Extend`s (spargebra renames an aggregate's
+// synthetic `$agg` var to the user alias via an `Extend` whose
+// expression is a bare `Variable(<synth>)`) are NOT binds — they are
+// detected via the pre-collected aggregate-synth-name set and left
+// untouched so the existing aggregate path keeps working.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Collect every aggregate synthetic variable name (the hex-blob /
+/// `$agg_N` names spargebra mints inside a `Group`) anywhere in the
+/// tree, so the bind-substitution pass can tell an aggregate-rename
+/// `Extend` apart from a real `BIND`.
+fn collect_agg_synth_names(p: &GraphPattern, out: &mut HashSet<String>) {
+    match p {
+        GraphPattern::Group {
+            inner, aggregates, ..
+        } => {
+            for (v, _) in aggregates {
+                out.insert(v.as_str().to_string());
+            }
+            collect_agg_synth_names(inner, out);
+        }
+        GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Filter { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::Graph { inner, .. } => collect_agg_synth_names(inner, out),
+        GraphPattern::Join { left, right }
+        | GraphPattern::LeftJoin { left, right, .. }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right } => {
+            collect_agg_synth_names(left, out);
+            collect_agg_synth_names(right, out);
+        }
+        _ => {}
+    }
+}
+
+/// Substitute every free reference to a variable in `binds` with its
+/// bound expression, recursively (so a chained BIND that references an
+/// earlier BIND resolves transitively — the map is already built in
+/// evaluation order with earlier binds substituted into later ones).
+fn subst_expr(e: &Expression, binds: &HashMap<String, Expression>) -> Expression {
+    let b = |x: &Expression| Box::new(subst_expr(x, binds));
+    match e {
+        Expression::Variable(v) => match binds.get(v.as_str()) {
+            Some(repl) => repl.clone(),
+            None => e.clone(),
+        },
+        // `BOUND(?v)` where ?v is a BIND var: the bind is in scope
+        // here, so BOUND is TRUE iff the bound expression is itself
+        // non-NULL. We can't express "is this expression bound" as a
+        // plain Bound() on a substituted expression, so we leave
+        // Bound() referencing a bind var alone — the projection-time
+        // value is what the executor evaluates; a downstream
+        // BOUND(?bindvar) keeps v0.3 behaviour (rare; documented).
+        Expression::Bound(_) => e.clone(),
+        Expression::NamedNode(_) | Expression::Literal(_) => e.clone(),
+        Expression::Equal(a, c) => Expression::Equal(b(a), b(c)),
+        Expression::SameTerm(a, c) => Expression::SameTerm(b(a), b(c)),
+        Expression::Greater(a, c) => Expression::Greater(b(a), b(c)),
+        Expression::GreaterOrEqual(a, c) => Expression::GreaterOrEqual(b(a), b(c)),
+        Expression::Less(a, c) => Expression::Less(b(a), b(c)),
+        Expression::LessOrEqual(a, c) => Expression::LessOrEqual(b(a), b(c)),
+        Expression::And(a, c) => Expression::And(b(a), b(c)),
+        Expression::Or(a, c) => Expression::Or(b(a), b(c)),
+        Expression::Add(a, c) => Expression::Add(b(a), b(c)),
+        Expression::Subtract(a, c) => Expression::Subtract(b(a), b(c)),
+        Expression::Multiply(a, c) => Expression::Multiply(b(a), b(c)),
+        Expression::Divide(a, c) => Expression::Divide(b(a), b(c)),
+        Expression::UnaryPlus(a) => Expression::UnaryPlus(b(a)),
+        Expression::UnaryMinus(a) => Expression::UnaryMinus(b(a)),
+        Expression::Not(a) => Expression::Not(b(a)),
+        Expression::If(a, c, d) => Expression::If(b(a), b(c), b(d)),
+        Expression::In(op, list) => {
+            Expression::In(b(op), list.iter().map(|x| subst_expr(x, binds)).collect())
+        }
+        Expression::Coalesce(list) => {
+            Expression::Coalesce(list.iter().map(|x| subst_expr(x, binds)).collect())
+        }
+        Expression::FunctionCall(f, args) => Expression::FunctionCall(
+            f.clone(),
+            args.iter().map(|x| subst_expr(x, binds)).collect(),
+        ),
+        // EXISTS subpattern: leave intact — its scope is a fresh
+        // group; substituting outer binds into it is out of scope for
+        // F2 (documented; v0.5-FUTURE if a need surfaces).
+        Expression::Exists(_) => e.clone(),
+    }
+}
+
+/// If a BIND's bound expression is a plain term (Variable / NamedNode
+/// / Literal) it can be substituted directly into a *triple slot* —
+/// `BIND(?a AS ?x) . ?x :p ?o` becomes `?a :p ?o` (the join key is
+/// just an alias). Returns the substituted `TermPattern` or the
+/// original when no bind applies / the bind expression is not a term
+/// (a computed expression as a join key is degenerate and stays
+/// unsubstituted — v0.3 behaviour, documented as v0.5-FUTURE §8).
+fn subst_term_pattern(t: &TermPattern, binds: &HashMap<String, Expression>) -> TermPattern {
+    if let TermPattern::Variable(v) = t {
+        if let Some(repl) = binds.get(v.as_str()) {
+            return match repl {
+                Expression::Variable(rv) => TermPattern::Variable(rv.clone()),
+                Expression::NamedNode(n) => TermPattern::NamedNode(n.clone()),
+                Expression::Literal(l) => TermPattern::Literal(l.clone()),
+                // Computed expression as a triple subject/object — not
+                // expressible as a term; keep the original variable
+                // (degenerate; v0.3 behaviour preserved).
+                _ => t.clone(),
+            };
+        }
+    }
+    t.clone()
+}
+
+fn subst_named_node_pattern(
+    n: &NamedNodePattern,
+    binds: &HashMap<String, Expression>,
+) -> NamedNodePattern {
+    if let NamedNodePattern::Variable(v) = n {
+        if let Some(Expression::NamedNode(nn)) = binds.get(v.as_str()) {
+            return NamedNodePattern::NamedNode(nn.clone());
+        }
+    }
+    n.clone()
+}
+
+fn subst_triple(tp: &TriplePattern, binds: &HashMap<String, Expression>) -> TriplePattern {
+    TriplePattern {
+        subject: subst_term_pattern(&tp.subject, binds),
+        predicate: subst_named_node_pattern(&tp.predicate, binds),
+        object: subst_term_pattern(&tp.object, binds),
+    }
+}
+
+/// The AST substitution pass. Walks the algebra tree carrying the
+/// in-scope BIND map (`var → already-fully-substituted expression`).
+/// Returns the rewritten pattern. Evaluation order in spargebra: an
+/// `Extend` node's `inner` is everything BEFORE the BIND; nodes that
+/// reference the BIND var wrap AROUND the `Extend` (a `Filter`,
+/// `Join`, `LeftJoin`, or a chained `Extend`). So we rewrite bottom-up
+/// — recurse into `inner`/arms first, then apply the accumulated map
+/// to the current node's own expressions / triples.
+fn substitute_binds(
+    p: &GraphPattern,
+    binds: &mut HashMap<String, Expression>,
+    agg_synth: &HashSet<String>,
+) -> GraphPattern {
+    match p {
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
+            let new_inner = substitute_binds(inner, binds, agg_synth);
+            // An aggregate-rename Extend (`Extend{expr: Variable(synth)}`
+            // where synth is an aggregate's internal name) is NOT a
+            // BIND — leave it for the aggregate path, don't record it.
+            let is_agg_rename = matches!(
+                expression,
+                Expression::Variable(v) if agg_synth.contains(v.as_str())
+            );
+            let new_expr = subst_expr(expression, binds);
+            if !is_agg_rename {
+                // Record this BIND with all earlier binds already
+                // substituted in (chained-BIND transitive resolution).
+                binds.insert(variable.as_str().to_string(), new_expr.clone());
+            }
+            GraphPattern::Extend {
+                inner: Box::new(new_inner),
+                variable: variable.clone(),
+                expression: new_expr,
+            }
+        }
+        GraphPattern::Filter { expr, inner } => {
+            let new_inner = substitute_binds(inner, binds, agg_synth);
+            GraphPattern::Filter {
+                expr: subst_expr(expr, binds),
+                inner: Box::new(new_inner),
+            }
+        }
+        GraphPattern::Bgp { patterns } => GraphPattern::Bgp {
+            patterns: patterns.iter().map(|tp| subst_triple(tp, binds)).collect(),
+        },
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => GraphPattern::Path {
+            subject: subst_term_pattern(subject, binds),
+            path: path.clone(),
+            object: subst_term_pattern(object, binds),
+        },
+        GraphPattern::Join { left, right } => {
+            // A `Join` is a conjunction; spargebra puts the
+            // `Extend`-bearing side as one arm and the BIND-consuming
+            // BGP as the other. Bind scope flows across the whole
+            // group, so walk left then right with the SAME map.
+            let l = substitute_binds(left, binds, agg_synth);
+            let r = substitute_binds(right, binds, agg_synth);
+            GraphPattern::Join {
+                left: Box::new(l),
+                right: Box::new(r),
+            }
+        }
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
+            let l = substitute_binds(left, binds, agg_synth);
+            // The OPTIONAL right side is its own scope for binds
+            // introduced INSIDE it; binds from the left ARE visible
+            // (left-to-right). Use a child map seeded from the
+            // accumulated left-side binds.
+            let mut right_binds = binds.clone();
+            let r = substitute_binds(right, &mut right_binds, agg_synth);
+            GraphPattern::LeftJoin {
+                left: Box::new(l),
+                right: Box::new(r),
+                expression: expression.as_ref().map(|e| subst_expr(e, binds)),
+            }
+        }
+        GraphPattern::Union { left, right } => {
+            // Each UNION branch is an independent scope.
+            let mut lb = binds.clone();
+            let mut rb = binds.clone();
+            GraphPattern::Union {
+                left: Box::new(substitute_binds(left, &mut lb, agg_synth)),
+                right: Box::new(substitute_binds(right, &mut rb, agg_synth)),
+            }
+        }
+        GraphPattern::Minus { left, right } => {
+            let l = substitute_binds(left, binds, agg_synth);
+            // MINUS right side is an independent scope.
+            let mut rb = binds.clone();
+            let r = substitute_binds(right, &mut rb, agg_synth);
+            GraphPattern::Minus {
+                left: Box::new(l),
+                right: Box::new(r),
+            }
+        }
+        GraphPattern::Graph { name, inner } => GraphPattern::Graph {
+            name: name.clone(),
+            inner: Box::new(substitute_binds(inner, binds, agg_synth)),
+        },
+        GraphPattern::Project { inner, variables } => GraphPattern::Project {
+            inner: Box::new(substitute_binds(inner, binds, agg_synth)),
+            variables: variables.clone(),
+        },
+        GraphPattern::Distinct { inner } => GraphPattern::Distinct {
+            inner: Box::new(substitute_binds(inner, binds, agg_synth)),
+        },
+        GraphPattern::Reduced { inner } => GraphPattern::Reduced {
+            inner: Box::new(substitute_binds(inner, binds, agg_synth)),
+        },
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => GraphPattern::Slice {
+            inner: Box::new(substitute_binds(inner, binds, agg_synth)),
+            start: *start,
+            length: *length,
+        },
+        GraphPattern::OrderBy { inner, expression } => GraphPattern::OrderBy {
+            inner: Box::new(substitute_binds(inner, binds, agg_synth)),
+            expression: expression.clone(),
+        },
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
+            // Binds BELOW a Group feed the grouped rows; recurse so a
+            // `Group { inner: <…BIND…> }` still substitutes. The
+            // aggregates/group-vars themselves are synthetic — leave.
+            GraphPattern::Group {
+                inner: Box::new(substitute_binds(inner, binds, agg_synth)),
+                variables: variables.clone(),
+                aggregates: aggregates.clone(),
+            }
+        }
+        // Values / Service / lifecycle leaves — nothing to rewrite.
+        other => other.clone(),
+    }
+}
+
 /// Walk the algebra wrappers around the SELECT's inner BGP,
 /// recording projection, filters, DISTINCT, ORDER BY, LIMIT, OFFSET
 /// as we go. The walk terminates at the innermost `Bgp { patterns }`.
 fn parse_select(p: &GraphPattern) -> ParsedSelect {
+    // Phase F group F2: rewrite BIND-introduced variables in
+    // downstream FILTER / triple / chained-BIND positions BEFORE the
+    // structural walk, so the existing anchors-driven translator
+    // resolves them with no new surface (LLD v0.4 §11).
+    let mut agg_synth: HashSet<String> = HashSet::new();
+    collect_agg_synth_names(p, &mut agg_synth);
+    let mut bind_map: HashMap<String, Expression> = HashMap::new();
+    let rewritten = substitute_binds(p, &mut bind_map, &agg_synth);
+    let p = &rewritten;
     let mut ps = ParsedSelect::default();
     walk_select(p, &mut ps);
     // For aggregate queries, any filter that names an aggregate
@@ -1855,6 +2178,73 @@ fn translate_bind_expression(
         return Some(format!("concat({})", parts.join(", ")));
     }
     None
+}
+
+/// Collect every variable name that appears anywhere in `e`
+/// (including inside `BOUND`). Used by the BIND projection to detect
+/// a reference to a variable that is not bound by any pattern.
+fn collect_expr_vars(e: &Expression, out: &mut HashSet<String>) {
+    match e {
+        Expression::Variable(v) | Expression::Bound(v) => {
+            out.insert(v.as_str().to_string());
+        }
+        Expression::NamedNode(_) | Expression::Literal(_) => {}
+        Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            collect_expr_vars(a, out);
+            collect_expr_vars(b, out);
+        }
+        Expression::UnaryPlus(a) | Expression::UnaryMinus(a) | Expression::Not(a) => {
+            collect_expr_vars(a, out)
+        }
+        Expression::If(a, b, c) => {
+            collect_expr_vars(a, out);
+            collect_expr_vars(b, out);
+            collect_expr_vars(c, out);
+        }
+        Expression::In(op, list) => {
+            collect_expr_vars(op, out);
+            for x in list {
+                collect_expr_vars(x, out);
+            }
+        }
+        Expression::Coalesce(list) | Expression::FunctionCall(_, list) => {
+            for x in list {
+                collect_expr_vars(x, out);
+            }
+        }
+        // EXISTS introduces its own scope; its inner vars are not
+        // outer free vars for the unbound-check purpose.
+        Expression::Exists(_) => {}
+    }
+}
+
+/// W3C SPARQL 1.1 §18.2.5: a `BIND(expr AS ?v)` whose `expr`
+/// references a variable that is not bound in the group yields an
+/// UNBOUND `?v` for that solution — it is NOT a query error. Our
+/// model represents unbound as SQL NULL, so the BIND projection
+/// emits `NULL::TEXT` (instead of panicking "not translatable")
+/// exactly when the expression's only obstruction is an unbound
+/// variable reference. A genuinely untranslatable construct (an
+/// unsupported function over *bound* vars) still panics with the
+/// locked message.
+fn bind_expr_has_unbound_var(
+    e: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> bool {
+    let mut vars: HashSet<String> = HashSet::new();
+    collect_expr_vars(e, &mut vars);
+    vars.iter().any(|v| !anchors.contains_key(v))
 }
 
 /// Does any sub-expression of `e` reference a variable in `names`?
@@ -2739,7 +3129,10 @@ fn tp_object_var(tp: &TriplePattern) -> Option<String> {
 fn build_bgp_sql(ps: &ParsedSelect) -> String {
     if !ps.union_branches.is_empty() {
         if !ps.aggregates.is_empty() {
-            panic!("sparql: aggregates on top of UNION not supported yet");
+            // Phase F group F2 (LLD v0.4 §11): aggregates over a UNION
+            // — the UNION becomes a derived table the aggregation
+            // runs over (was a hard panic in v0.3).
+            return build_aggregate_over_union_sql(ps);
         }
         return build_union_sql(ps);
     }
@@ -2773,6 +3166,13 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
     let mut select_clauses: Vec<String> = Vec::new();
     for var in &ps.projected {
         if let Some(bind) = ps.binds.iter().find(|b| &b.output_var == var) {
+            // Phase F group F2: a BIND over an unbound variable is
+            // UNBOUND, not an error (W3C §18.2.5) — emit NULL rather
+            // than panicking "not translatable".
+            if bind_expr_has_unbound_var(&bind.expression, &anchors) {
+                select_clauses.push(format!("NULL::TEXT AS {}", quote_identifier(var)));
+                continue;
+            }
             let expr_sql =
                 translate_bind_expression(&bind.expression, &anchors).unwrap_or_else(|| {
                     panic!(
@@ -3224,6 +3624,197 @@ fn build_branch_sql(branch: &UnionBranch, projected: &[String]) -> String {
     if !where_clauses.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&where_clauses.join(" AND "));
+    }
+    sql
+}
+
+/// Phase F group F2 (LLD v0.4 §11) — aggregates over `UNION`.
+///
+/// v0.3 limitation: `SELECT (COUNT(?x) AS ?n) WHERE { {…} UNION {…} }`
+/// panicked ("aggregates on top of UNION not supported yet"). §11 fix:
+/// a derived-table refactor — the UNION becomes a sub-SELECT and the
+/// aggregation runs over its rows.
+///
+/// Realisation reuses the F1 derived-column contract verbatim: each
+/// UNION branch is emitted as a sub-SELECT projecting, per variable
+/// the aggregate / GROUP BY / HAVING needs, that variable's **dict
+/// id** (a `BIGINT`) into a stable `vK` column (the `DERIVED_COLS`
+/// pool — `&'static str`, so the existing
+/// `anchors: HashMap<String,(usize,&'static str)>` machinery is
+/// untouched). The branches `UNION ALL` into `(…) qU(v0,v1,…)`; the
+/// outer query registers `var → (qU_idx, vK)` in `anchors` and then
+/// the EXISTING `translate_aggregate` / `translate_filter_with_aggregates`
+/// emit `(SELECT lexical_value FROM dict WHERE id = qU.vK)` /
+/// numeric-cast CASE over `qU.vK` exactly as for a single BGP — so
+/// COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE,
+/// DISTINCT, GROUP BY, and HAVING all work with no aggregate-path
+/// changes. `COUNT(*)` (no arg var) needs no projected column.
+///
+/// UNION set-semantics: SPARQL UNION is multiset union of solution
+/// sequences (the v0.3 UNION path already uses `UNION ALL`); the
+/// aggregate then runs over those rows, matching the existing
+/// single-branch bag semantics. `COUNT(DISTINCT ?x)` dedups at the
+/// aggregate, `COUNT(?x)` counts every contributing row.
+///
+/// Deferred to v0.5-FUTURE §8 (documented, NOT silently wrong): a
+/// GROUP BY on a variable that is ONLY ever a `GRAPH ?g`-scope var
+/// across the union (the branch derived table has no dict id for it)
+/// — surfaced with a stable panic prefix rather than a wrong answer.
+fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
+    // The variables the outer aggregation must see: every aggregate
+    // argument var + every GROUP BY var. HAVING/ORDER reference
+    // aggregate outputs or group vars, so they need no extra columns.
+    let mut needed: Vec<String> = Vec::new();
+    for v in &ps.group_vars {
+        if !needed.contains(v) {
+            needed.push(v.clone());
+        }
+    }
+    for a in &ps.aggregates {
+        if let Some(av) = &a.arg_var {
+            if !needed.contains(av) {
+                needed.push(av.clone());
+            }
+        }
+    }
+    // Stable column assignment: var → vK index, shared across every
+    // branch so the `UNION ALL` row shape lines up.
+    let col_of: HashMap<String, usize> = needed
+        .iter()
+        .enumerate()
+        .map(|(k, v)| (v.clone(), k))
+        .collect();
+
+    // Emit each branch as a sub-SELECT projecting the dict id (or
+    // NULL::BIGINT when the branch doesn't bind that var — a
+    // legitimate per-branch shape) for every needed var, in vK order.
+    let mut branch_sqls: Vec<String> = Vec::new();
+    for branch in &ps.union_branches {
+        let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+        let (from_sql, where_clauses, plan) = build_from_and_where(
+            &branch.bgp,
+            &branch.filters,
+            &branch.optionals,
+            &branch.minuses,
+            &branch.values,
+            &mut anchors,
+            0,
+        );
+        let mut select_clauses: Vec<String> = Vec::new();
+        for var in &needed {
+            let k = col_of[var];
+            let col = derived_col(k);
+            // Variable bound by an ordinary quad/derived alias →
+            // project its raw dict id. A `GRAPH ?g`-scope-only var has
+            // no dict id in this branch: per v0.5-FUTURE §8 a GROUP BY
+            // on such a var over UNION is deferred (stable panic, not
+            // a wrong answer). An aggregate ARG that is graph-scoped
+            // is equally degenerate and deferred the same way.
+            if let Some(&(alias_idx, src)) = anchors.get(var) {
+                select_clauses.push(format!("q{alias_idx}.{src} AS {col}"));
+            } else if plan.projection_scope(var).is_some() {
+                panic!(
+                    "sparql: GROUP BY / aggregate over a GRAPH-scope variable ?{var} \
+                     across a UNION is deferred to v0.5-FUTURE §8 (LLD v0.4 §11); \
+                     aggregate the object/subject variable instead"
+                );
+            } else {
+                select_clauses.push(format!("NULL::BIGINT AS {col}"));
+            }
+        }
+        // A `COUNT(*)`-only union (no needed vars) still needs at
+        // least one column so the derived table is well-formed.
+        if select_clauses.is_empty() {
+            select_clauses.push("1 AS v0".to_string());
+        }
+        let mut sql = format!("SELECT {} FROM {from_sql}", select_clauses.join(", "));
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+        branch_sqls.push(sql);
+    }
+    let union_inner = branch_sqls.join(" UNION ALL ");
+
+    // The derived table is alias q0; every needed var anchors to
+    // (0, vK). The existing aggregate translators consume this map
+    // unchanged.
+    let qu_idx = 0usize;
+    let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+    for (var, &k) in &col_of {
+        anchors.insert(var.clone(), (qu_idx, derived_col(k)));
+    }
+    let from_sql = format!("({union_inner}) AS q{qu_idx}");
+
+    // GROUP BY exprs — dict-lookup over the derived id column (same
+    // shape as the single-BGP path; group-on-graph-var is the
+    // deferred case handled by the per-branch panic above).
+    let mut group_exprs: Vec<(String, String)> = Vec::new();
+    for var in &ps.group_vars {
+        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+            panic!("sparql: GROUP BY variable ?{var} not bound in any UNION branch")
+        });
+        let expr = format!(
+            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
+        );
+        group_exprs.push((var.clone(), expr));
+    }
+
+    let mut select_clauses: Vec<String> = Vec::new();
+    for var in &ps.projected {
+        if let Some((_, expr)) = group_exprs.iter().find(|(v, _)| v == var) {
+            select_clauses.push(format!("{expr} AS {}", quote_identifier(var)));
+        } else if let Some(agg) = ps.aggregates.iter().find(|a| &a.output_var == var) {
+            select_clauses.push(format!(
+                "{}::TEXT AS {}",
+                translate_aggregate(agg, &anchors),
+                quote_identifier(var)
+            ));
+        } else {
+            panic!(
+                "sparql: projected variable ?{var} is neither a GROUP BY variable nor an aggregate output"
+            );
+        }
+    }
+
+    let mut sql = format!("SELECT {} FROM {from_sql}", select_clauses.join(", "));
+    if !group_exprs.is_empty() {
+        let group_by_parts: Vec<&str> = group_exprs.iter().map(|(_, e)| e.as_str()).collect();
+        sql.push_str(" GROUP BY ");
+        sql.push_str(&group_by_parts.join(", "));
+    }
+    if !ps.having_filters.is_empty() {
+        let mut having_parts: Vec<String> = Vec::new();
+        for expr in &ps.having_filters {
+            let sql_pred =
+                translate_filter_with_aggregates(expr, &anchors, &ps.aggregates, &group_exprs)
+                    .unwrap_or_else(|| {
+                        panic!("sparql: HAVING expression not translatable: {expr:?}")
+                    });
+            having_parts.push(sql_pred);
+        }
+        sql.push_str(" HAVING ");
+        sql.push_str(&having_parts.join(" AND "));
+    }
+    if !ps.order_by.is_empty() {
+        let mut order_parts: Vec<String> = Vec::new();
+        for (var, ascending) in &ps.order_by {
+            let dir = if *ascending { "ASC" } else { "DESC" };
+            if !ps.projected.contains(var) {
+                panic!(
+                    "sparql: ORDER BY ?{var} on an aggregate-over-UNION query must \
+                     reference a projected variable (group var or aggregate output)"
+                );
+            }
+            order_parts.push(format!("{} {dir} NULLS LAST", quote_identifier(var)));
+        }
+        sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
+    }
+    if let Some(limit) = ps.limit {
+        sql.push_str(&format!(" LIMIT {limit}"));
+    }
+    if ps.offset > 0 {
+        sql.push_str(&format!(" OFFSET {}", ps.offset));
     }
     sql
 }
@@ -10968,5 +11559,157 @@ mod tests {
                   SELECT ?s ?o WHERE { ?s (ex:knows/ex:knows|ex:likes) ?o }')",
         )
         .unwrap();
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Phase F group F2 (LLD v0.4 §11) — downstream BIND + aggregates
+    // over UNION. Each pgrx test runs in an auto-rollback txn, so the
+    // dataset is exactly what the test loads.
+    // ───────────────────────────────────────────────────────────────
+
+    /// F2 invariant A — a BIND var is usable in a textually-later
+    /// FILTER. `?sum = ?x + ?y`; FILTER(?sum > 10) keeps only the
+    /// row whose sum exceeds 10 (was projection-only in v0.3).
+    #[pg_test]
+    fn f2_bind_then_filter_downstream() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://example.com/> . \
+             ex:a ex:x 3 ; ex:y 8 . ex:b ex:x 5 ; ex:y 5 . ex:c ex:x 1 ; ex:y 2 .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?sum WHERE { ?s ex:x ?x . ?s ex:y ?y \
+                  BIND(?x + ?y AS ?sum) FILTER(?sum > 10) }')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1, "only a (3+8=11) passes FILTER(?sum > 10)");
+        let sum: String = Spi::get_one(
+            "SELECT j->>'sum' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?sum WHERE { ?s ex:x ?x . ?s ex:y ?y \
+                  BIND(?x + ?y AS ?sum) FILTER(?sum > 10) }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(sum, "11", "BIND value visible downstream AND projected");
+    }
+
+    /// F2 invariant C — chained BIND resolves left-to-right:
+    /// ?b2 = ?x + 1, ?c = ?b2 * 2. For x=3 → b2=4, c=8.
+    #[pg_test]
+    fn f2_chained_bind() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://example.com/> . \
+             ex:a ex:x 3 .', 0)",
+        )
+        .unwrap();
+        let c: String = Spi::get_one(
+            "SELECT j->>'c' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?c WHERE { ?s ex:x ?x \
+                  BIND(?x + 1 AS ?b2) BIND(?b2 * 2 AS ?c) }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(c, "8", "chained BIND: (3+1)*2 = 8");
+    }
+
+    /// F2 invariant H — COUNT over a 2-branch UNION (no GROUP BY).
+    /// Branch1 = 2 rows, branch2 = 1 row → COUNT = 3 (was a hard
+    /// "aggregates on top of UNION not supported yet" panic in v0.3).
+    #[pg_test]
+    fn f2_count_over_union() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://example.com/> . \
+             ex:a ex:p 1 . ex:b ex:p 2 . ex:c ex:q 3 .', 0)",
+        )
+        .unwrap();
+        let n: String = Spi::get_one(
+            "SELECT j->>'n' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT (COUNT(?v) AS ?n) WHERE { \
+                  { ?s ex:p ?v } UNION { ?s ex:q ?v } }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, "3", "2 ex:p + 1 ex:q rows, COUNT over the union = 3");
+    }
+
+    /// F2 invariant I — SUM over UNION with GROUP BY a union var.
+    /// Group "books" = 10+12 = 22; group "tools" = 5. Two groups.
+    #[pg_test]
+    fn f2_aggregate_over_union_group_by() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://example.com/> . \
+             ex:i1 ex:cat \"books\" ; ex:price 10 . \
+             ex:i2 ex:cat \"books\" ; ex:price 12 . \
+             ex:t1 ex:cat \"tools\" ; ex:price 5 .', 0)",
+        )
+        .unwrap();
+        let groups: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?c (SUM(?p) AS ?s) WHERE { \
+                  { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"books\") } \
+                  UNION { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"tools\") } } \
+                  GROUP BY ?c') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(groups, 2, "two GROUP BY groups over the union");
+        let books_sum: String = Spi::get_one(
+            "SELECT j->>'s' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?c (SUM(?p) AS ?s) WHERE { \
+                  { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"books\") } \
+                  UNION { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"tools\") } } \
+                  GROUP BY ?c') AS s(j) WHERE j->>'c' = 'books'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(books_sum, "22", "SUM over the books branch = 10+12");
+    }
+
+    /// F2 invariant O (miniature) — LLD §11 acceptance: the shipped
+    /// forms no longer appear in `unsupported_algebra`, while DESCRIBE
+    /// (F3) still reports supported=false.
+    #[pg_test]
+    fn f2_sparql_parse_unsupported_narrowed() {
+        let agg_union_unsupported: String = Spi::get_one(
+            "SELECT pgrdf.sparql_parse(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT (COUNT(?v) AS ?n) WHERE { \
+                  { ?s ex:p ?v } UNION { ?s ex:q ?v } }')->>'unsupported_algebra'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            agg_union_unsupported, "[]",
+            "aggregates-over-UNION no longer flagged unsupported (LLD §11)"
+        );
+        let bind_dn_unsupported: String = Spi::get_one(
+            "SELECT pgrdf.sparql_parse(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?z WHERE { ?s ex:x ?x BIND(?x + 1 AS ?z) \
+                  FILTER(?z > 2) }')->>'unsupported_algebra'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            bind_dn_unsupported, "[]",
+            "downstream BIND no longer flagged unsupported (LLD §11)"
+        );
+        let describe_supported: String = Spi::get_one(
+            "SELECT pgrdf.sparql_parse('DESCRIBE <http://example.com/a>')->>'supported'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            describe_supported, "false",
+            "DESCRIBE still unshipped (Phase F group F3)"
+        );
     }
 }
