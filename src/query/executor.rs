@@ -418,10 +418,12 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
             return SetOfIterator::new(rows.into_iter());
         }
         let sql = build_bgp_sql(&ps);
+        let truncation_probes = collect_truncation_probes(&ps);
         let plan = ExecPlan {
             projected: ps.projected,
             sql,
             params: params_take(),
+            truncation_probes,
         };
         let solutions = execute(&plan).len();
         let rows = expand_template_per_solution(&template_rows, solutions);
@@ -1284,6 +1286,37 @@ struct ExecPlan {
     /// Resolved dict ids in `$1`-onwards order. Bound at execute
     /// time as `INT8` Datums alongside the cached prepared plan.
     params: Vec<i64>,
+    /// Phase E group E2 (LLD v0.4 §7.2 depth-guard accounting): one
+    /// `(probe_sql, probe_params)` per `+` path in the query. After
+    /// the main result is materialised, `execute` runs each probe;
+    /// any that returns `'t'` means the `pgrdf.path_max_depth` guard
+    /// actually cut a continuable path → bump `path_depth_truncations`
+    /// once. The detector never under-counts (it asks whether any
+    /// depth-cap row still has an outgoing edge); it may benignly
+    /// over-count per §7.2 (continuation already reached via a
+    /// shorter path) — which the spec explicitly permits.
+    truncation_probes: Vec<(String, Vec<i64>)>,
+}
+
+/// Collect every `+` path's truncation probe from a parsed query
+/// (single-branch BGP + every UNION branch's BGP). Each becomes a
+/// post-execution probe in the `ExecPlan` (LLD v0.4 §7.2).
+fn collect_truncation_probes(ps: &ParsedSelect) -> Vec<(String, Vec<i64>)> {
+    let mut out: Vec<(String, Vec<i64>)> = Vec::new();
+    let mut take = |st: &ScopedTriple| {
+        if let Some(rel) = &st.path {
+            out.push((rel.probe_sql.clone(), rel.probe_params.clone()));
+        }
+    };
+    for st in &ps.bgp {
+        take(st);
+    }
+    for b in &ps.union_branches {
+        for st in &b.bgp {
+            take(st);
+        }
+    }
+    out
 }
 
 /// Slice 112: per-pattern graph scope. A `GraphScope` decorates each
@@ -1314,10 +1347,24 @@ enum GraphScope {
 /// A triple pattern with optional graph scope. Used by mandatory
 /// BGPs (one per alias) and by the MINUS triple list (one per
 /// triple — the GRAPH block can wrap part of the MINUS body).
+///
+/// Phase E group E2: `path` carries a recursive-CTE-derived relation
+/// when this entry came from a `+` (one-or-more) property path. When
+/// `Some`, `build_from_and_where` emits the CTE subquery as the FROM
+/// alias instead of `pgrdf._pgrdf_quads`, and binds ONLY the subject
+/// / object variables (the relation exposes `subject_id` /
+/// `object_id` — and `graph_id` for the `GRAPH ?g` case — exactly
+/// like a quad alias, so the existing var-binder is reused unchanged;
+/// there is no predicate column and the graph scope is baked into the
+/// CTE, so the predicate / scope clauses are skipped for path rows).
+/// `triple` still holds the subject/object terms (predicate is a
+/// placeholder, ignored for path rows) so SELECT-* projection
+/// enrichment, anchors, and the ScopePlan keep working untouched.
 #[derive(Clone)]
 struct ScopedTriple {
     triple: TriplePattern,
     scope: Option<GraphScope>,
+    path: Option<crate::query::path::PathRelation>,
 }
 
 /// A MINUS block — a list of triples plus the (shared, since MINUS
@@ -1466,10 +1513,12 @@ fn translate(q: &Query) -> ExecPlan {
                 panic!("sparql: empty BGP");
             }
             let sql = build_bgp_sql(&ps);
+            let truncation_probes = collect_truncation_probes(&ps);
             ExecPlan {
                 projected: ps.projected,
                 sql,
                 params: params_take(),
+                truncation_probes,
             }
         }
         Query::Ask { pattern, .. } => {
@@ -1479,6 +1528,9 @@ fn translate(q: &Query) -> ExecPlan {
             if ps.bgp.is_empty() && ps.union_branches.is_empty() {
                 panic!("sparql: ASK with empty BGP");
             }
+            // Collect `+` truncation probes before the projection
+            // reset below (the BGP itself is untouched by the reset).
+            let truncation_probes = collect_truncation_probes(&ps);
             // Force a stable single-row projection so build_*_sql
             // doesn't fail looking for projected vars in anchors —
             // we'll discard the inner SELECT below.
@@ -1497,6 +1549,7 @@ fn translate(q: &Query) -> ExecPlan {
                 projected: vec!["_ask".to_string()],
                 sql,
                 params: params_take(),
+                truncation_probes,
             }
         }
         other => panic!("sparql: query form not supported yet (got {other:?})"),
@@ -1749,6 +1802,93 @@ fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec 
     }
 }
 
+/// Build a `ScopedTriple` from a `GraphPattern::Path` (Phase E
+/// groups E1 + E2, LLD v0.4 §7). Single chokepoint shared by the
+/// UNION-branch walker and the single-branch walker so both routes
+/// treat property paths identically.
+///
+/// * E1 lower-to-triple set (bare predicate, `^p`, nested `^(^…)`)
+///   → an ordinary triple, `path: None`. Composes for free with
+///   GRAPH scope, joins, OPTIONAL/UNION/MINUS — exactly a BGP triple.
+/// * E2 `+` set (`p+`, `^p+`, `(^p)+`) → a recursive-CTE-derived
+///   relation in `path: Some(_)`. The carried `triple` keeps the
+///   subject/object terms (predicate slot reuses the path's
+///   predicate as a harmless placeholder — never emitted for a path
+///   row) so SELECT-* enrichment / anchors / ScopePlan are untouched.
+///
+/// Recursive `*`/`?`, alternation `|`, negated sets, sequence, and a
+/// `+` with a nested-recursive inner panic with their stable rollout
+/// preview prefix inside `crate::query::path` (E3/E4/out-of-scope).
+fn scoped_triple_from_path(
+    subject: &TermPattern,
+    path: &spargebra::algebra::PropertyPathExpression,
+    object: &TermPattern,
+    scope: Option<GraphScope>,
+) -> ScopedTriple {
+    use crate::query::path::{
+        build_one_or_more_relation_sql, classify_path, PathGraphScope, PathPlan,
+    };
+    match classify_path(subject, path, object) {
+        PathPlan::Triple(tp) => ScopedTriple {
+            triple: *tp,
+            scope,
+            path: None,
+        },
+        PathPlan::OneOrMore { predicate, swapped } => {
+            // Resolve the single walked predicate to its dict id
+            // (sentinel -1 ⇒ zero rows = spec-correct "no solutions"
+            // when the IRI was never interned).
+            let pred_id = lookup_iri_id(predicate.as_str()).unwrap_or(-1);
+            // Map the BGP graph scope to the CTE's scope flavour.
+            // Literal id resolves at translate time; a Variable
+            // scope keeps the walk inside one named graph and
+            // surfaces `graph_id` for the `?g` JOIN the builder adds.
+            let (path_scope, graph_ph, probe_gid): (PathGraphScope, Option<String>, Option<i64>) =
+                match &scope {
+                    None => (PathGraphScope::AllGraphs, None, None),
+                    Some(GraphScope::Literal(gid)) => {
+                        (PathGraphScope::Literal(*gid), None, Some(*gid))
+                    }
+                    Some(GraphScope::Variable { .. }) => (PathGraphScope::Variable, None, None),
+                };
+            // Emit the predicate placeholder (and, for a Literal
+            // scope, the graph placeholder) at THIS point so the
+            // PARAM_BUF ordinal matches where a normal triple's
+            // `pattern_clauses` would have pushed them — keeping the
+            // surrounding SQL's `$N` numbering consistent.
+            let predicate_placeholder = id_placeholder(pred_id);
+            let graph_placeholder = match (&path_scope, &graph_ph) {
+                (PathGraphScope::Literal(gid), _) => Some(id_placeholder(*gid)),
+                _ => None,
+            };
+            let max_depth = crate::query::guc::path_max_depth();
+            let rel = build_one_or_more_relation_sql(
+                &predicate_placeholder,
+                graph_placeholder.as_deref(),
+                &path_scope,
+                swapped,
+                max_depth,
+                pred_id,
+                probe_gid,
+            );
+            // Placeholder triple: the subject/object terms drive
+            // var-binding + SELECT-*; the predicate slot is unused
+            // for path rows (build_from_and_where skips
+            // bind_predicate when `path.is_some()`).
+            let placeholder_triple = TriplePattern {
+                subject: subject.clone(),
+                predicate: NamedNodePattern::NamedNode(predicate),
+                object: object.clone(),
+            };
+            ScopedTriple {
+                triple: placeholder_triple,
+                scope,
+                path: Some(rel),
+            }
+        }
+    }
+}
+
 /// Walk a single UNION branch. `current_scope` is the GRAPH scope in
 /// effect for triples discovered at this level (inherited from an
 /// enclosing GRAPH block, if any) — `None` at the branch root.
@@ -1764,6 +1904,7 @@ fn walk_branch(
                 ub.bgp.push(ScopedTriple {
                     triple: tp.clone(),
                     scope: current_scope.cloned(),
+                    path: None,
                 });
             }
         }
@@ -1772,19 +1913,19 @@ fn walk_branch(
             path,
             object,
         } => {
-            // Phase E group E1 (LLD v0.4 §7): a property-path pattern
-            // inside a UNION branch. The E1-supported operators
-            // (bare predicate, `^` inverse, nested `^(^…)`) lower to
-            // an ordinary triple — push it like a BGP triple so it
-            // composes with the branch's GRAPH scope, joins, and
-            // OPTIONAL/MINUS exactly as a plain triple would.
-            // Recursive operators panic with their stable rollout
-            // preview prefix inside `translate_property_path`.
-            let tp = crate::query::path::translate_property_path(subject, path, object);
-            ub.bgp.push(ScopedTriple {
-                triple: tp,
-                scope: current_scope.cloned(),
-            });
+            // Phase E groups E1 + E2 (LLD v0.4 §7): a property-path
+            // pattern inside a UNION branch. E1 lower-to-triple set
+            // composes like a BGP triple; E2 `+` becomes a recursive-
+            // CTE relation. Both routed through the shared chokepoint
+            // so the branch's GRAPH scope / joins / OPTIONAL / MINUS
+            // compose for free. Deferred operators panic with their
+            // stable rollout preview prefix inside `crate::query::path`.
+            ub.bgp.push(scoped_triple_from_path(
+                subject,
+                path,
+                object,
+                current_scope.cloned(),
+            ));
         }
         GraphPattern::Filter { expr, inner } => {
             ub.filters.push(expr.clone());
@@ -1821,6 +1962,18 @@ fn walk_branch(
             // OPTIONAL / MINUS triples inherit this scope (W3C §13.3).
             let scope = make_scope(name, scope_counter);
             walk_branch(inner, ub, Some(&scope), scope_counter);
+        }
+        GraphPattern::Join { left, right } => {
+            // Phase E group E2: spargebra represents a property-path
+            // pattern sitting next to ordinary triples as
+            // `Join { Path, Bgp }` (a `+` is NOT folded into the BGP
+            // the way E1's `^p`/bare-predicate `Path` is). A `Join`
+            // is a plain conjunction at this level — walk BOTH arms
+            // into the same branch so the path relation and the BGP
+            // triples land in one `ub.bgp` and join across shared
+            // variables exactly as a multi-pattern BGP would.
+            walk_branch(left, ub, current_scope, scope_counter);
+            walk_branch(right, ub, current_scope, scope_counter);
         }
         other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
     }
@@ -2041,6 +2194,7 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
                 ps.bgp.push(ScopedTriple {
                     triple: tp.clone(),
                     scope: current_scope.cloned(),
+                    path: None,
                 });
             }
         }
@@ -2049,23 +2203,24 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
             path,
             object,
         } => {
-            // Phase E group E1 (LLD v0.4 §7) — the single chokepoint.
-            // SELECT / ASK / CONSTRUCT / INSERT-WHERE / DELETE-WHERE
-            // all route their WHERE through `parse_select` →
-            // `walk_select_scoped`, so recognising `Path` here makes
-            // property paths available to every consumer at once.
-            // `translate_property_path` lowers the E1 operator set
-            // (bare predicate, `^` inverse, nested `^(^…)`) to an
-            // ordinary triple — pushed exactly like a BGP triple, so
-            // it composes for free with GRAPH scoping, multi-pattern
-            // joins, and OPTIONAL/UNION/MINUS. Recursive operators
-            // (`*`/`+`/`?`), alternation (`|`) and negated sets panic
-            // with a STABLE rollout-preview prefix (E2/E3/E4).
-            let tp = crate::query::path::translate_property_path(subject, path, object);
-            ps.bgp.push(ScopedTriple {
-                triple: tp,
-                scope: current_scope.cloned(),
-            });
+            // Phase E groups E1 + E2 (LLD v0.4 §7) — the single
+            // chokepoint. SELECT / ASK / CONSTRUCT / INSERT-WHERE /
+            // DELETE-WHERE all route their WHERE through
+            // `parse_select` → `walk_select_scoped`, so recognising
+            // `Path` here makes property paths available to every
+            // consumer at once. The shared `scoped_triple_from_path`
+            // lowers the E1 set to an ordinary triple (composes for
+            // free with GRAPH scoping, joins, OPTIONAL/UNION/MINUS)
+            // and the E2 `+` set to a recursive-CTE relation. The
+            // deferred operators (`*`/`?` → E3, `|` → E4, negated set
+            // / nested-recursive `+` → out-of-scope/E4) panic with a
+            // STABLE rollout-preview prefix inside `crate::query::path`.
+            ps.bgp.push(scoped_triple_from_path(
+                subject,
+                path,
+                object,
+                current_scope.cloned(),
+            ));
         }
         GraphPattern::Graph { name, inner } => {
             // Slice 112: a GRAPH block mints a scope and walks
@@ -2075,6 +2230,18 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
             // GRAPH block. Nested GRAPH blocks override per W3C §13.3.
             let scope = make_scope(name, &mut ps.graph_scope_counter);
             walk_select_scoped(inner, ps, Some(&scope));
+        }
+        GraphPattern::Join { left, right } => {
+            // Phase E group E2: spargebra emits `Join { Path, Bgp }`
+            // when a property-path pattern sits beside ordinary
+            // triples (a `+` is not folded into the BGP). A `Join`
+            // is a plain conjunction here — walk BOTH arms into the
+            // same `ps` so the `+` relation and the plain triples
+            // share one BGP and join across shared variables, just
+            // like a multi-pattern BGP. Inherits the current GRAPH
+            // scope so `GRAPH <g> { ?s p+ ?o . ?o q ?z }` composes.
+            walk_select_scoped(left, ps, current_scope);
+            walk_select_scoped(right, ps, current_scope);
         }
         other => panic!("sparql: unsupported algebra in select wrapper: {other:?}"),
     }
@@ -2791,12 +2958,41 @@ fn build_from_and_where(
     // appended after the mandatory triples).
     for (i, st) in bgp.iter().enumerate() {
         let qi = alias_offset + i + 1;
-        let mut clauses = pattern_clauses(&st.triple, qi, anchors);
-        if let Some(scope) = &st.scope {
-            scope_constraint_clauses_anchor_q(scope, qi, &plan, &mut clauses);
-        }
+        // Phase E group E2: a `+` path row substitutes a recursive-
+        // CTE-derived relation for the quad alias. It exposes
+        // `subject_id` / `object_id` (+ `graph_id` for `GRAPH ?g`)
+        // exactly like a quad alias, so the subject/object var-binder
+        // is reused verbatim — but there is NO predicate column (the
+        // predicate is fixed inside the CTE) so predicate binding is
+        // skipped, and the per-hop graph filter is baked into the CTE
+        // so the Literal / unscoped graph clause is skipped (a
+        // Literal-scope path alias has no `graph_id` column at all).
+        // A `GRAPH ?g` path DOES surface `graph_id`, so the cross-
+        // alias graph equality + the `_pgrdf_graphs g{S}` JOIN below
+        // still tie `?g` consistently — keep the Variable scope clause.
+        let (from_src, mut clauses) = if let Some(rel) = &st.path {
+            let mut c = Vec::new();
+            bind_path_subject_object(&st.triple, qi, anchors, &mut c);
+            if let Some(GraphScope::Variable { .. }) = &st.scope {
+                scope_constraint_clauses_anchor_q(st.scope.as_ref().unwrap(), qi, &plan, &mut c);
+            }
+            (
+                format!(
+                    "{frag} AS q{qi}{cols}",
+                    frag = rel.from_fragment,
+                    cols = rel.columns
+                ),
+                c,
+            )
+        } else {
+            let mut c = pattern_clauses(&st.triple, qi, anchors);
+            if let Some(scope) = &st.scope {
+                scope_constraint_clauses_anchor_q(scope, qi, &plan, &mut c);
+            }
+            (format!("pgrdf._pgrdf_quads q{qi}"), c)
+        };
         if i == 0 {
-            from_sql.push_str(&format!("pgrdf._pgrdf_quads q{qi}"));
+            from_sql.push_str(&from_src);
             where_clauses.append(&mut clauses);
         } else {
             let on = if clauses.is_empty() {
@@ -2804,7 +3000,7 @@ fn build_from_and_where(
             } else {
                 clauses.join(" AND ")
             };
-            from_sql.push_str(&format!(" INNER JOIN pgrdf._pgrdf_quads q{qi} ON ({on})"));
+            from_sql.push_str(&format!(" INNER JOIN {from_src} ON ({on})"));
         }
     }
     // INNER JOIN to `_pgrdf_graphs g{S}` — one per Variable scope
@@ -3494,6 +3690,24 @@ fn pattern_clauses(
     clauses
 }
 
+/// Phase E group E2: bind ONLY the subject + object of a `+` path
+/// row. The recursive-CTE relation aliased `q{qi}` exposes
+/// `subject_id` / `object_id` columns (same names a `_pgrdf_quads`
+/// alias has), so `bind_subject` / `bind_object` work verbatim —
+/// constants emit `q{qi}.subject_id = $N`, variables anchor/equate
+/// across the join exactly as for a plain triple. There is no
+/// predicate column (the walked predicate is fixed inside the CTE),
+/// so `bind_predicate` is deliberately NOT called.
+fn bind_path_subject_object(
+    tp: &TriplePattern,
+    qi: usize,
+    anchors: &mut HashMap<String, (usize, &'static str)>,
+    clauses: &mut Vec<String>,
+) {
+    bind_subject(tp, qi, anchors, clauses);
+    bind_object(tp, qi, anchors, clauses);
+}
+
 fn bind_subject(
     tp: &TriplePattern,
     qi: usize,
@@ -3711,6 +3925,39 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
                 rows.push(pgrx::JsonB(Value::Object(obj)));
             }
         });
+
+        // Phase E group E2 (LLD v0.4 §7.2): depth-guard accounting.
+        // Run each `+` path's truncation probe AFTER the main result.
+        // The probe returns `1` iff a `walk` row sat at the depth cap
+        // with a still-continuable `$P` edge — i.e. the guard cut a
+        // path. Bump `path_depth_truncations` once per such probe.
+        // The detector never under-counts (any continuation past the
+        // cap fires it); benign over-count per §7.2 is acceptable. A
+        // probe is a standalone read with its own single `$1` (the
+        // predicate dict id) — graph scope is inlined. Uses the same
+        // `.select(_, Some(1), _)` + `get::<i64>(1)` scalar idiom as
+        // every other probe in this file.
+        for (probe_sql, probe_params) in &plan.truncation_probes {
+            let arg_oids: Vec<PgOid> =
+                vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); probe_params.len()];
+            let prepared = client
+                .prepare(probe_sql.as_str(), &arg_oids)
+                .expect("sparql: path truncation probe prepare failed");
+            let pdatums: Vec<DatumWithOid<'_>> = probe_params
+                .iter()
+                .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
+                .collect();
+            let hit = client
+                .select(&prepared, Some(1), &pdatums)
+                .expect("sparql: path truncation probe failed")
+                .into_iter()
+                .next()
+                .and_then(|r| r.get::<i64>(1).ok().flatten())
+                .unwrap_or(0);
+            if hit != 0 {
+                crate::storage::shmem_cache::note_path_depth_truncation();
+            }
+        }
         rows
     })
 }
@@ -9401,15 +9648,152 @@ mod tests {
         );
     }
 
-    /// A recursive operator preview-panics with the EXACT stable
-    /// message (pgrx-tests needs the literal — slice number included;
-    /// it is the single source of truth in `crate::query::path`).
-    #[pg_test(error = "pgrdf: property path operator '+' lands in Phase E group E2 (slice 45)")]
-    fn property_path_one_or_more_preview_panics() {
+    // ─── Phase E group E2 — `+` one-or-more recursive CTE ──────────
+
+    /// `+` chain traversal (LLD v0.4 §7.3 acceptance, the A invariant
+    /// in miniature): a `subClassOf` chain c1→c2→…→c6 resolves all
+    /// transitive ancestors. `?x p+ <c6>` returns c1..c5 (5 rows),
+    /// NON-reflexive (c6 is not its own ancestor).
+    #[pg_test]
+    fn property_path_one_or_more_chain_traversal() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:c1 ex:sub ex:c2 . ex:c2 ex:sub ex:c3 .
+                 ex:c3 ex:sub ex:c4 . ex:c4 ex:sub ex:c5 .
+                 ex:c5 ex:sub ex:c6 .',
+                9200)",
+        )
+        .unwrap();
+        let ancestors: String = Spi::get_one(
+            "SELECT string_agg(j->>'x', ',' ORDER BY j->>'x') \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?x WHERE { ?x ex:sub+ ex:c6 }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ancestors,
+            "http://example.com/c1,http://example.com/c2,\
+             http://example.com/c3,http://example.com/c4,\
+             http://example.com/c5",
+            "`?x p+ <c6>` is the non-reflexive transitive closure (c1..c5)"
+        );
+    }
+
+    /// `+` is cycle-safe (the C invariant in miniature): a 3-cycle
+    /// a→b→c→a does NOT infinite-loop; `<a> p+ ?o` terminates and
+    /// `UNION` dedups to exactly {a, b, c}.
+    #[pg_test]
+    fn property_path_one_or_more_cycle_safe() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:rel ex:b . ex:b ex:rel ex:c . ex:c ex:rel ex:a .',
+                9201)",
+        )
+        .unwrap();
+        let reached: String = Spi::get_one(
+            "SELECT string_agg(j->>'o', ',' ORDER BY j->>'o') \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?o WHERE { ex:a ex:rel+ ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            reached, "http://example.com/a,http://example.com/b,http://example.com/c",
+            "a 3-cycle terminates and dedups to {{a,b,c}} (UNION, not UNION ALL)"
+        );
+    }
+
+    /// `+` depth guard (the D invariant in miniature): with
+    /// `pgrdf.path_max_depth = 3` over a length-5 chain the result is
+    /// TRUNCATED (not errored) and `pgrdf.stats().path_depth_truncations`
+    /// moves off 0; a complete-under-cap traversal leaves it at 0
+    /// (no false truncation).
+    ///
+    /// `path_depth_truncations` is a PROCESS-GLOBAL shmem counter that
+    /// pgrx's per-test transaction rollback does NOT isolate (and
+    /// `#[pg_test]` ordering across the suite is not fixed). So each
+    /// stat assertion here is bracketed by an immediately-preceding
+    /// `shmem_reset()` and measures ONLY the single query that ran
+    /// between the reset and the read — robust regardless of what
+    /// other path tests did. The deterministic row-count truncation
+    /// (5 → 3) is the primary invariant; the persistent-DB regression
+    /// `109-property-path-plus.sql` invariant D is the authoritative
+    /// end-to-end depth-guard coverage.
+    #[pg_test]
+    fn property_path_one_or_more_depth_guard_bumps_stat() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:d1 ex:sub ex:d2 . ex:d2 ex:sub ex:d3 .
+                 ex:d3 ex:sub ex:d4 . ex:d4 ex:sub ex:d5 .
+                 ex:d5 ex:sub ex:d6 .',
+                9202)",
+        )
+        .unwrap();
+
+        // Complete-under-cap walk (chain depth 5 < default cap 64).
+        // Reset immediately before so the stat read measures ONLY
+        // this query: it must NOT bump (no false positive).
+        Spi::run("SELECT pgrdf.shmem_reset()").unwrap();
+        let pre: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?o WHERE { ex:d1 ex:sub+ ?o }')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(pre, 5, "d1 reaches d2..d6 (5 nodes) under the default cap");
+        let trunc_clean: i64 =
+            Spi::get_one("SELECT (pgrdf.stats()->>'path_depth_truncations')::bigint")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            trunc_clean, 0,
+            "a traversal completing under the cap must NOT bump the stat"
+        );
+
+        // Cap at 3 — the length-5 chain is cut. Reset immediately
+        // before so the post-read measures ONLY this capped query.
+        Spi::run("SET pgrdf.path_max_depth = 3").unwrap();
+        Spi::run("SELECT pgrdf.shmem_reset()").unwrap();
+        let capped: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?o WHERE { ex:d1 ex:sub+ ?o }')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            capped, 3,
+            "depth cap 3 → only d2,d3,d4 (truncated, not errored)"
+        );
+        let trunc_after: i64 =
+            Spi::get_one("SELECT (pgrdf.stats()->>'path_depth_truncations')::bigint")
+                .unwrap()
+                .unwrap();
+        assert!(
+            trunc_after > 0,
+            "hitting the depth cap with a continuable edge bumps path_depth_truncations \
+             (got {trunc_after})"
+        );
+        Spi::run("RESET pgrdf.path_max_depth").unwrap();
+    }
+
+    /// `*` still preview-panics with the EXACT stable message
+    /// (pgrx-tests 0.16 needs the literal — slice number included; it
+    /// is the single source of truth in `crate::query::path`, locked
+    /// here verbatim per the E1 convention).
+    #[pg_test(error = "pgrdf: property path operator '*' lands in Phase E group E3 (slice 40)")]
+    fn property_path_zero_or_more_still_preview_panics() {
         Spi::run(
             "SELECT * FROM pgrdf.sparql(
                  'PREFIX ex: <http://example.com/> \
-                  SELECT ?s ?o WHERE { ?s ex:knows+ ?o }')",
+                  SELECT ?s ?o WHERE { ?s ex:knows* ?o }')",
         )
         .unwrap();
     }

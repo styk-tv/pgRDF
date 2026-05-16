@@ -134,7 +134,7 @@ coverage:
 plus W3C-shape fixtures 24 / 25 / 26 under
 [`tests/w3c-sparql/`](../tests/w3c-sparql/).
 
-## Property paths (LLD v0.4 §7 — Phase E, group E1 shipped)
+## Property paths (LLD v0.4 §7 — Phase E, groups E1 + E2 shipped)
 
 SPARQL property paths arrive in the spargebra algebra as
 `GraphPattern::Path { subject, path, object }`. The shared WHERE
@@ -142,48 +142,87 @@ walker (`walk_select_scoped` / `walk_branch`) recognises `Path` at
 the single chokepoint every query form routes through — SELECT, ASK,
 `pgrdf.construct`, and the UPDATE WHERE bodies all inherit path
 support at once (it is not special-cased per consumer).
-`query::path::translate_property_path` lowers the supported operators
-to an ordinary triple, which then flows through the existing
-`pattern_clauses` machinery — so paths compose for free with
-named-graph scoping, multi-pattern BGP joins, and
-OPTIONAL/UNION/MINUS.
+`query::path::scoped_triple_from_path` classifies the operator: the
+E1 non-recursive set lowers to an ordinary triple, and the E2 `+`
+set lowers to a recursive-CTE-derived FROM relation that exposes the
+same `subject_id` / `object_id` columns a quad alias does. Either
+way the result flows through the existing `pattern_clauses` /
+var-binder machinery — so paths compose for free with named-graph
+scoping, multi-pattern BGP joins, and OPTIONAL/UNION/MINUS.
 
 | Operator | SPARQL | Semantics | Status |
 |---|---|---|---|
 | bare predicate | `?s p ?o` (as a `Path`) | direct triple | ✅ E1 — lowers to `?s p ?o` |
 | `^` inverse | `?s ^p ?o` | `?o p ?s` | ✅ E1 — subject/object swap, no recursion; `^(^p)` folds by parity |
-| `+` one-or-more | `?s p+ ?o` | transitive closure | 🚧 group E2 (recursive CTE) |
+| `+` one-or-more | `?s p+ ?o` | transitive closure (non-reflexive) | ✅ E2 — `WITH RECURSIVE` CTE; cycle-safe `UNION` dedup; `^p+`/`(^p)+` inverse-composition; depth guard enforced |
 | `*` zero-or-more | `?s p* ?o` | reflexive transitive closure | 🚧 group E3 |
 | `?` zero-or-one | `?s p? ?o` | equal-or-linked | 🚧 group E3 |
 | `\|` alternation | `?s (a\|b) ?o` | per-predicate union | 🚧 group E4 (gated stretch) |
 | `!(...)` negated set | `?s !(p) ?o` | — | out of v0.4 scope (panics) |
 | sequence `p1/p2` | `?s p1/p2 ?o` | — | use a multi-pattern BGP (`{ ?s p1 ?m . ?m p2 ?o }`); E1 rejects an explicit `Sequence` path-expr with a pointer to the BGP form |
 
-The not-yet-landed operators **preview-panic** with a stable prefix
+The still-deferred operators **preview-panic** with a stable prefix
 (`pgrdf: property path operator '<op>' lands in Phase E group EN
-(slice NN)` — `+`→E2, `*`/`?`→E3; `|` is the gated-stretch message
-for E4). Substring-match the prefix; the slice-number tail is
-advisory and shifts with the cycle countdown. `sparql_parse` does
-NOT panic on these — it lowers the E1 set into the `bgp` shape and
-flags the recursive forms in `unsupported_algebra` (parse-time
+(slice NN)` — `*`/`?`→E3; `|` is the gated-stretch message for E4; a
+`+` whose inner box is itself recursive/alternation/sequence — e.g.
+`(p*)+` — panics with the nested-recursive E4 message). Substring-
+match the prefix; the slice-number tail is advisory and shifts with
+the cycle countdown. `sparql_parse` does NOT panic on these — it
+lowers the executable set (E1 ∪ `+`) into the `bgp` shape and flags
+only the still-deferred forms in `unsupported_algebra` (parse-time
 analysis, mirroring how Phase C reports not-yet-shipped UPDATE
 forms).
 
-**`pgrdf.path_max_depth` GUC.** Integer, `GucContext::Userset`,
-default **64**, range **1..1024**, registered in `_PG_init`
-(`query::guc`). Bounds the recursive-path walk depth. E1 only
-registers + exposes it (`SHOW pgrdf.path_max_depth` /
-`current_setting('pgrdf.path_max_depth')`); enforcement lands with
-the recursive operators in group E2 (a depth guard is meaningless
-without recursion). Over-depth queries will *truncate* (not error)
-once E2 ships; the count surfaces on `pgrdf.stats()` as
-`path_depth_truncations` (a cross-backend shmem counter, 0 in E1,
-zeroed by `pgrdf.shmem_reset()`).
+**`+` chain example.** Over a `subClassOf`-style chain
+`c1 → c2 → … → c11`:
+
+```sparql
+PREFIX ex: <http://example.org/>
+SELECT ?x WHERE { ?x ex:sub+ ex:c11 }    -- → c1 … c10 (10 ancestors, non-reflexive)
+```
+
+`+` is the strict transitive closure: a node is **not** its own
+ancestor (that is `*`, group E3). Cycles are safe — the recursive
+CTE uses Postgres's `CYCLE src, dst SET is_cycle USING path` clause
+(PG14+), which stops extending a path the moment a `(src,dst)` pair
+repeats on it, so a cyclic graph terminates after one lap (a bare
+`UNION` can't do this once the working tuple carries `depth` for the
+guard). `^ex:sub+` / `(^ex:sub)+` walk the inverse edge (the inverse
+of a transitive closure equals the transitive closure of the
+inverse). A `p+` pattern joins to ordinary triple
+patterns, GRAPH scoping, and `pgrdf.construct` exactly like a plain
+triple.
+
+**`pgrdf.path_max_depth` GUC + depth guard.** Integer,
+`GucContext::Userset`, default **64**, range **1..1024**, registered
+in `_PG_init` (`query::guc`). Bounds the recursive-path walk depth.
+**Enforced from E2:** the `+` CTE's recursive arm carries
+`WHERE w.depth < pgrdf.path_max_depth` (read at translate time —
+re-`SET`ting it mints a distinct cached plan, so a changed cap takes
+effect on the next query). A query whose traversal would go beyond
+the cap returns the **truncated** solution set (it does **not**
+error), and `pgrdf.stats()->>'path_depth_truncations'` increments:
+
+```sparql
+SET pgrdf.path_max_depth = 3;
+PREFIX ex: <http://example.org/>
+SELECT ?o WHERE { ex:c1 ex:sub+ ?o }     -- → c2,c3,c4 only (truncated)
+-- SELECT pgrdf.stats()->>'path_depth_truncations'  → > 0
+```
+
+`path_depth_truncations` is a cross-backend shmem counter zeroed by
+`pgrdf.shmem_reset()`. The truncation detector never under-counts (a
+traversal that completes under the cap leaves the counter at 0; any
+path the guard actually cut bumps it); it may benignly over-count
+when the cut node was already reached by a shorter path (LLD v0.4
+§7.2 explicitly permits this).
 
 Implementation:
-[`src/query/path.rs`](../src/query/path.rs),
+[`src/query/path.rs`](../src/query/path.rs) (classifier + recursive-
+CTE builder + truncation probe — the executor only calls into it),
 [`src/query/guc.rs`](../src/query/guc.rs); regression coverage:
-[`108-property-path-inverse.sql`](../tests/regression/sql/108-property-path-inverse.sql).
+[`108-property-path-inverse.sql`](../tests/regression/sql/108-property-path-inverse.sql)
++ [`109-property-path-plus.sql`](../tests/regression/sql/109-property-path-plus.sql).
 W3C-shape property-path fixtures are deferred to group E4 (mirrors
 how Phase D deferred its W3C consolidation).
 

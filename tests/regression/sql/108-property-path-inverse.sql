@@ -12,10 +12,13 @@
 --   * nested `^(^p)`                → `?s p ?o`  (parity fold;
 --     `^^` is reserved for typed literals in the W3C grammar)
 --
--- Recursive operators (`*`/`+`/`?`), alternation (`|`) and negated
--- property sets are NOT executable in E1 — they panic with a STABLE
--- rollout-preview prefix (groups E2/E3/E4) so downstream tooling can
--- preview the schedule without depending on the slice-number tail.
+-- `+` (and `^(p+)`) GRADUATED in Phase E group E2 — they now
+-- execute (full coverage in 109-property-path-plus.sql); this file
+-- only sanity-checks that they no longer panic. `*` / `?` (E3),
+-- alternation `|` (E4) and negated property sets (out of scope)
+-- remain NOT executable — they panic with a STABLE rollout-preview
+-- prefix so downstream tooling can preview the schedule without
+-- depending on the slice-number tail.
 --
 -- Invariants locked by this file:
 --
@@ -33,9 +36,11 @@
 --   H. `pgrdf.path_max_depth` GUC present + bounded (default 64,
 --      range 1..1024; out-of-range SET rejected).
 --   I. `path_depth_truncations` present in `pgrdf.stats()`, value 0
---      after `pgrdf.shmem_reset()` (E1 scaffold; E2 increments).
---   J. Recursive operators / alternation / negated sets preview-panic
---      with their stable prefixes.
+--      after `pgrdf.shmem_reset()` (no `+` query truncates here;
+--      depth-guard accounting is exercised in 109 invariant D).
+--   J. `*` / `?` / `|` / negated sets preview-panic with their
+--      stable prefixes; `+` and `^(p+)` GRADUATED in E2 (they now
+--      execute — full coverage in 109); `*` (E3) stays panicking.
 --
 -- All expected values hand-computed; never ACCEPT=1 baselined.
 
@@ -281,10 +286,13 @@ SELECT _check_error(
   $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows* ?o }')$$,
   $$lands in Phase E group E3$$
 );
-SELECT _check_error(
-  'one-or-more-preview-panic',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows+ ?o }')$$,
-  $$lands in Phase E group E2$$
+-- `+` GRADUATED in Phase E group E2: `?s ex:knows+ ?o` no longer
+-- preview-panics — it executes (full coverage lives in
+-- 109-property-path-plus.sql). Here we just confirm it runs without
+-- the E1 panic (returns the transitive closure of the seed `knows`
+-- graph; at least the direct edges, so a positive row count).
+SELECT (count(*) > 0) AS one_or_more_executes FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows+ ?o }'
 );
 SELECT _check_error(
   'zero-or-one-preview-panic',
@@ -302,18 +310,25 @@ SELECT _check_error(
   $$negated property sets are out of scope for v0.4$$
 );
 
--- A recursive operator under a `^` wrapper still routes to the
--- recursive group (the reverse wrapper doesn't change ownership).
+-- `^(ex:knows+)` (= inverse of one-or-more) ALSO graduated in E2 —
+-- the `^` wrapper composes with `+` (inverse of a transitive closure
+-- = transitive closure of the inverse). It executes; full inverse-
+-- of-plus coverage is invariant E in 109. `*` under `^` still
+-- preview-panics (E3 — the reverse wrapper doesn't change ownership).
+SELECT (count(*) >= 0) AS reverse_of_plus_executes FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ^(ex:knows+) ?o }'
+);
 SELECT _check_error(
-  'reverse-of-recursive-still-previews',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ^(ex:knows+) ?o }')$$,
-  $$lands in Phase E group E2$$
+  'reverse-of-star-still-previews',
+  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ^(ex:knows*) ?o }')$$,
+  $$lands in Phase E group E3$$
 );
 
--- ─── sparql_parse analysis: E1 path NOT flagged unsupported ───────
+-- ─── sparql_parse analysis: E1+E2 path NOT flagged unsupported ────
 -- `?s ^ex:knows ?o` lowers to a BGP triple — parse reports it in the
--- bgp shape and does NOT flag `unsupported_algebra`. The recursive
--- form IS flagged (parse-time, no panic).
+-- bgp shape and does NOT flag `unsupported_algebra`. `?s ex:knows+
+-- ?o` is now executable too (E2) so it is ALSO not flagged. `*`
+-- (E3) remains flagged (parse-time, no panic).
 SELECT jsonb_array_length(
   pgrdf.sparql_parse(
     'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ^ex:knows ?o }'
@@ -324,7 +339,13 @@ SELECT jsonb_array_length(
   pgrdf.sparql_parse(
     'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows+ ?o }'
   )->'unsupported_algebra'
-) AS recursive_unsupported_count;
+) AS plus_unsupported_count;
+
+SELECT jsonb_array_length(
+  pgrdf.sparql_parse(
+    'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows* ?o }'
+  )->'unsupported_algebra'
+) AS star_unsupported_count;
 
 DROP FUNCTION _check_error(TEXT, TEXT, TEXT);
 

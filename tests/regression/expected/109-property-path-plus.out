@@ -1,0 +1,68 @@
+
+0
+10
+http://example.org/c1
+http://example.org/c10
+http://example.org/c2
+http://example.org/c3
+http://example.org/c4
+http://example.org/c5
+http://example.org/c6
+http://example.org/c7
+http://example.org/c8
+http://example.org/c9
+10
+http://example.org/c10
+http://example.org/c11
+http://example.org/c2
+http://example.org/c3
+http://example.org/c4
+http://example.org/c5
+http://example.org/c6
+http://example.org/c7
+http://example.org/c8
+http://example.org/c9
+10
+false
+f
+1
+3
+http://example.org/a
+http://example.org/b
+http://example.org/c
+3
+
+10
+0
+http://example.org/c2
+http://example.org/c3
+http://example.org/c4
+3
+t
+
+0
+t
+t
+55
+2
+2
+http://example.org/n2
+http://example.org/n3
+2
+2
+t
+2
+http://example.org/c3|three
+http://example.org/c7|seven
+10
+t
+zero-or-more-still-E3: t
+zero-or-one-still-E3: t
+alternation-still-E4-gated: t
+nested-star-plus-E4: t
+nested-alternation-plus-E4: t
+negated-set-still-out-of-scope: t
+0
+1
+
+16

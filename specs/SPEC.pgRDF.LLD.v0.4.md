@@ -709,17 +709,18 @@ Consumers traversing transitive class hierarchies via
 direct predicate matches are supported. v0.4 adds the core path
 operators across **Phase E**, grouped into four dispatches:
 **E1** (plumbing + `^` inverse + `pgrdf.path_max_depth` GUC +
-`path_depth_truncations` stat scaffold) — **landed**; **E2** (`+`);
-**E3** (`*` / `?`); **E4** (closure-detect + the gated `|` stretch +
-W3C-shape consolidation + the v0.4.5 release). The section keeps the
-🚧 until E4 ships the full set. 🚧
+`path_depth_truncations` stat scaffold) — **landed**; **E2** (`+`
+recursive CTE + depth-guard enforcement + the `src/query/path.rs`
+carve) — **landed**; **E3** (`*` / `?`); **E4** (closure-detect + the
+gated `|` stretch + W3C-shape consolidation + the v0.4.5 release).
+The section keeps the 🚧 until E4 ships the full set. 🚧
 
 ### 7.1 Surface
 
 | Operator | SPARQL syntax | Semantics | Status |
 |---|---|---|---|
 | `^` inverse | `?s ^ex:knows ?o` | Equivalent to `?o ex:knows ?s`. | **Landed (E1).** No recursion — a subject/object swap on the scan. Nested `^(^p)` folds by parity. |
-| `+` one-or-more | `?s ex:knows+ ?o` | Transitive closure (non-reflexive). | 🚧 group E2 — recursive CTE. |
+| `+` one-or-more | `?s ex:knows+ ?o` | Transitive closure (non-reflexive). | **Landed (E2).** `WITH RECURSIVE` CTE as a derived FROM relation; `UNION` (cycle-safe dedup); `^p+`/`(^p)+` inverse-composition; depth guard enforced (truncate at `pgrdf.path_max_depth`, never error). |
 | `*` zero-or-more | `?s ex:knows* ?o` | Reflexive transitive closure of `ex:knows`. | 🚧 group E3. |
 | `?` zero-or-one | `?s ex:knows? ?o` | Either equal or directly linked. | 🚧 group E3. |
 | `\|` alternation | `?s (ex:a\|ex:b) ?o` | Stretch goal — included if the translator refactor is cheap; explicitly gated. | 🚧 group E4 (gated). |
@@ -791,19 +792,46 @@ GUC `pgrdf.path_max_depth` (`GucContext::Userset`, integer, range
 truncated, not errored — the count surfaces on `pgrdf.stats()` as
 `path_depth_truncations`.
 
-E1 builds the **scaffold**: the GUC is registered in `_PG_init`
+E1 built the **scaffold**: the GUC is registered in `_PG_init`
 (`pgrx::guc::GucRegistry::define_int_guc`, name exactly
 `pgrdf.path_max_depth`) and is readable via `SHOW` /
 `current_setting`; `path_depth_truncations` is a cross-backend shmem
 `AtomicU64` (next to the dict-cache counters in
 `storage::shmem_cache`), initialised to 0, zeroed by
-`pgrdf.shmem_reset()`, and surfaced by `pgrdf.stats()`. **Actual
-enforcement** (reading `path_max_depth` to bound the recursive walk,
-and incrementing the counter on truncation) lands in **group E2**
-when the recursive CTE first exists — a depth guard is meaningless
-without recursion. The accessor `query::guc::path_max_depth()` and
-the `shmem_cache::note_path_depth_truncation()` increment helper are
-in place for E2 to call without re-touching the plumbing.
+`pgrdf.shmem_reset()`, and surfaced by `pgrdf.stats()`.
+
+**E2 lands the actual enforcement** (the `+` recursive CTE first
+exists in E2 — a depth guard is meaningless without recursion). The
+`+` CTE's recursive arm carries `WHERE w.depth < query::guc::
+path_max_depth()` (read once at translate time and baked into the
+SQL — a re-`SET` mints a distinct plan-cache key, so a changed cap
+takes effect on the next query). **Cycle handling:** the §7.2 sketch
+above used a bare `UNION` for "natural cycle handling", but the
+working tuple must carry `depth` for the guard and `UNION` dedups on
+the whole row — so `(a,b,1)` and `(a,b,4)` are distinct and a cycle
+would spin to the depth cap (wasted work + a spurious truncation
+report). E2 realises the spec's intent correctly with Postgres's
+`CYCLE src, dst SET is_cycle USING path` clause (PG14+) over
+`UNION ALL`: it stops extending a path the instant a `(src,dst)`
+pair repeats on it, so a cyclic graph terminates after one lap and
+the depth cap only ever bounds genuinely-long ACYCLIC paths.
+Truncation accounting runs a per-`+` probe AFTER the main result: it
+asks whether any **non-cycle** `walk` row sat at `depth == MAX_DEPTH`
+while its `dst` still had an outgoing predicate edge (in the active
+graph scope) — i.e. the guard cut a *continuable* acyclic path (a
+cycle never reaches the cap, so a fully-resolved cyclic query
+correctly reports NO truncation) — and calls
+`shmem_cache::note_path_depth_truncation()` once if so. This detector
+**never under-counts** (any continuation past the cap fires it); it
+may benignly **over-count** in the §7.2-permitted case where the
+continuation node was already reached via a shorter path (the spec
+allows slight over-counting; claiming-complete-when-truncated is the
+only unacceptable error). The closure-detect no-CTE optimisation
+above is still 🚧 (group E4); E2 always emits the CTE. The
+`src/query/path.rs` carve (E1 created the module; E2 keeps ALL
+property-path SQL generation — classifier, recursive-CTE builder,
+truncation probe, preview-panics — inside it; `executor.rs` only
+calls into `path::…`) is the structural half of E2.
 
 ### 7.3 Acceptance criteria (v0.4 gate)
 

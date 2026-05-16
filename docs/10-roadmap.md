@@ -1020,7 +1020,7 @@ shaper. Sibling UDF rather than overloading `pgrdf.sparql` — callers
 signal intent at the SQL boundary. See
 [LLD v0.4 §6](../specs/SPEC.pgRDF.LLD.v0.4.md#6-construct-deferred-from-v03-now-in-scope).
 
-### Track 5 — Property paths (Phase E countdown — group E1 ✅)
+### Track 5 — Property paths (Phase E countdown — groups E1 ✅ E2 ✅)
 
 `*`, `+`, `?`, `^`, with alternation `p1|p2` as a stretch goal.
 Recursive operators translate to recursive Postgres CTEs with a
@@ -1045,8 +1045,28 @@ is grouped into four dispatches:
   host-only `query::path` unit tests). Sequence paths rejected with
   a pointer to the equivalent multi-pattern BGP; negated property
   sets out of v0.4 scope.
-- 🚧 **Group E2 — `+` (one-or-more).** First recursive CTE; wires
-  depth enforcement + the `path_depth_truncations` increment.
+- ✅ **Group E2 (slices 45 → 42) — `+` (one-or-more) + depth guard +
+  the `src/query/path.rs` carve.** First recursive CTE: `+` lowers to
+  the LLD v0.4 §7.2 `WITH RECURSIVE walk(src, dst, depth)` as a
+  derived FROM relation (exposes `subject_id`/`object_id` like a quad
+  alias, so it joins through the unchanged BGP machinery — composes
+  with GRAPH scoping / BGP joins / OPTIONAL-UNION-MINUS /
+  `pgrdf.construct` for free). Postgres's `CYCLE src, dst` clause
+  makes cyclic graphs terminate after one lap (a bare `UNION` can't,
+  once the working tuple carries the depth column); `^p+`/`(^p)+`
+  walk the inverse edge. **Depth guard now
+  enforced:** the recursive arm caps at `pgrdf.path_max_depth`
+  (truncate, never error) and a per-`+` post-execution probe bumps
+  `path_depth_truncations` when the cap actually cut a continuable
+  path (never under-counts; benign over-count per §7.2). All
+  property-path SQL generation now lives in `src/query/path.rs`
+  (classifier + recursive-CTE builder + truncation probe +
+  preview-panics); `executor.rs` only calls `path::…`. New
+  regression `109-property-path-plus.sql`; the E1 `+`-preview pgrx
+  test is replaced by chain / cycle / depth-guard `#[pg_test]`s +
+  a `*`-still-panics negative; `108`'s `+`-related asserts re-targeted
+  to E2 reality. `*`/`?` (E3), `|` (E4), nested-recursive `+` (E4),
+  and negated sets still preview-panic with stable prefixes.
 - 🚧 **Group E3 — `*` / `?`.** Reflexive / zero-or-one closures.
 - 🚧 **Group E4 — closure-detect + gated `|` + W3C-shape
   consolidation + the v0.4.5 release.**

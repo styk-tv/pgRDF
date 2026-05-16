@@ -384,7 +384,19 @@ fn walk(
             walk(left, vars, bgp, unsupported);
             walk(right, vars, bgp, unsupported);
         }
-        GraphPattern::Join { .. } => unsupported.push("Join (non-BGP)"),
+        GraphPattern::Join { left, right } => {
+            // Phase E group E2: spargebra emits `Join { Path, Bgp }`
+            // when a property-path pattern (a `+` — not folded into
+            // the BGP the way E1's `^p` is) sits beside ordinary
+            // triples. A `Join` is a plain conjunction the executor
+            // now flattens into one BGP — walk BOTH arms so their
+            // combined shape is reported and an executable
+            // `+`-with-triple query is NOT spuriously flagged
+            // unsupported. A still-deferred path inside either arm
+            // self-flags via the `Path` arm below.
+            walk(left, vars, bgp, unsupported);
+            walk(right, vars, bgp, unsupported);
+        }
         GraphPattern::Graph { name, inner } => {
             // Slice 114: `GRAPH <iri> { … }` (literal-IRI form) is
             // supported by the executor — translate-time resolution
@@ -415,19 +427,19 @@ fn walk(
             path,
             object,
         } => {
-            // Phase E group E1 (LLD v0.4 §7) — property paths. The
-            // E1-supported operators (bare predicate, `^` inverse,
-            // nested `^(^…)`) lower to an ordinary triple, so report
-            // them in the `bgp` array + collect their variables just
-            // like a BGP triple (the executor handles them). The
-            // recursive operators (`*`/`+`/`?`), alternation (`|`)
-            // and negated sets are not yet executable — flag them in
+            // Phase E groups E1 + E2 (LLD v0.4 §7) — property paths.
+            // The executable surface — E1 lower-to-triple (bare
+            // predicate, `^p`, nested `^(^…)`) PLUS E2 `+` (`p+`,
+            // `^p+`, `(^p)+`) — surfaces its subject/object variables
+            // and a `bgp`-array entry just like an ordinary triple
+            // (the executor handles execution). The still-deferred
+            // forms (`*`/`?` → E3, `|` → E4, negated set / sequence /
+            // nested-recursive `+`) are flagged in
             // `unsupported_algebra` here (parse-time, no panic),
             // mirroring how Phase C reports not-yet-shipped UPDATE
             // forms. Execution of those still panics with a stable
             // rollout-preview prefix (see `query::path`).
-            if crate::query::path::is_e1_supported(path) {
-                let tp = crate::query::path::translate_property_path(subject, path, object);
+            if let Some(tp) = crate::query::path::analysis_triple(subject, path, object) {
                 bgp.push(triple_to_json(&tp));
                 collect_vars(&tp, vars);
             } else {
@@ -608,12 +620,13 @@ fn count_bgp_triples(p: &GraphPattern) -> usize {
         | GraphPattern::Slice { inner, .. }
         | GraphPattern::Group { inner, .. }
         | GraphPattern::Service { inner, .. } => count_bgp_triples(inner),
-        // Phase E group E1: an E1-supported property path lowers to
-        // exactly one triple (bare predicate / `^` inverse); count it
-        // as 1 so CONSTRUCT-side `where_shape.triple_count` is
-        // accurate. Not-yet-supported recursive forms contribute 0
-        // (they never reach execution). `Values` carries no triples.
-        GraphPattern::Path { path, .. } => usize::from(crate::query::path::is_e1_supported(path)),
+        // Phase E groups E1 + E2: an executable property path (E1
+        // lower-to-triple OR E2 `+`) contributes exactly one BGP
+        // relation; count it as 1 so CONSTRUCT-side
+        // `where_shape.triple_count` is accurate. Still-deferred
+        // recursive/alternation forms contribute 0 (they never reach
+        // execution). `Values` carries no triples.
+        GraphPattern::Path { path, .. } => usize::from(crate::query::path::is_executable(path)),
         GraphPattern::Values { .. } => 0,
         _ => 0,
     }
@@ -675,16 +688,20 @@ fn collect_pattern_vars(p: &GraphPattern, out: &mut Vec<String>) {
                 }
             }
         }
-        // Phase E group E1: surface a property path's variables the
-        // same way a BGP triple's would be — only for the E1-supported
-        // set (the lowered triple is well-defined). Recursive forms
-        // never reach execution, so they contribute no analysis vars.
+        // Phase E groups E1 + E2: surface a property path's
+        // variables the same way a BGP triple's would be — for the
+        // executable set (E1 lower-to-triple OR E2 `+`). The
+        // analysis-triple view is well-defined for both (a `+` walks
+        // a fixed predicate, so only subject/object can be vars).
+        // Still-deferred forms never reach execution → no analysis
+        // vars (analysis_triple returns None, the arm falls through).
         GraphPattern::Path {
             subject,
             path,
             object,
-        } if crate::query::path::is_e1_supported(path) => {
-            let tp = crate::query::path::translate_property_path(subject, path, object);
+        } if crate::query::path::analysis_triple(subject, path, object).is_some() => {
+            let tp = crate::query::path::analysis_triple(subject, path, object)
+                .expect("analysis_triple checked Some in the guard");
             if let TermPattern::Variable(v) = &tp.subject {
                 push_unique(out, format!("?{}", v.as_str()));
             }
