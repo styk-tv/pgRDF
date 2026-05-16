@@ -4,9 +4,10 @@ Spec deltas accumulated during the v0.5 cycle. v0.4-era and v0.2-era
 entries that remain live are cross-linked to
 [`ERRATA.v0.4.md`](ERRATA.v0.4.md) /
 [`ERRATA.v0.2.md`](ERRATA.v0.2.md) rather than duplicated. This file
-opens per [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)
-§0 ("v0.5 may open its own ERRATA file once a v0.5-era delta
-appears") — E-012 is that first delta.
+is the v0.5-era spec-deltas log for the authoritative
+[`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md) contract
+(shipped in v0.5.0); it opened in Phase G group G3 when the first
+v0.5-era delta appeared — E-012 is that first delta.
 
 ## v0.4 / v0.2 entries still live in v0.5
 
@@ -24,11 +25,11 @@ appears") — E-012 is that first delta.
 |---|---|
 | Filed | 2026-05-16 |
 | Status | **documented upstream-gate (final for v0.5.0)** — two independent upstream gaps, scoped; pgRDF ships an honest deterministic short-circuit; a documented limitation, NOT a pgRDF defect |
-| Affects | [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md) §5.2 / §5.3 #1, §6.1 #2 |
+| Affects | [`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md) §5.2 / §5.3 #1, §6.1 #2 |
 | Crate | `shacl 0.3.1` (rudof project, 2026-05-12) |
 | Upstream | `rudof-project/rudof` issues #21, #94, #1 (SHACL-SPARQL constraint component + `SparqlEngine` are upstream's own unscheduled roadmap) |
 
-#### Claim (v0.5-FUTURE §5.2 / §5.3 #1)
+#### Claim (LLD v0.5 §5.2 / §5.3 #1)
 
 > `shacl 0.3` exposes a `Sparql` validation mode in addition to
 > `Native`. […] A shape with `sh:select` (SPARQL-based constraint)
@@ -149,7 +150,7 @@ known-state assertion stay exactly as they are):
   exactly `{"conforms":null}`; regression `122-shacl-modes.sql` +
   pgrx `validate_sparql_mode_structured_unavailable`). The gate is
   NOT weakened — it asserts a bounded known state, not a raw failure.
-- v0.5-FUTURE §5.3 acceptance **#1** is **upstream-unimplementable**
+- LLD v0.5 §5.3 acceptance **#1** is **upstream-unimplementable**
   with the pinned dependency; #2 is fully met (it uses `'native'`).
 - This is a **documented limitation, consistent with the
   RDF-1.2 / `reasonable#50` (E-011) precedent** — an honest,
@@ -178,7 +179,7 @@ constraint parsing, at which point pgRDF promotes the §5.3 #1 / §6.1
 |---|---|
 | Filed | 2026-05-16 |
 | Status | **resolved / corrected** — investigated at tag v0.5.0-rc1; the asserted upstream `sh:nodeKind` bug does **not** exist; fixture restored; §6 is a genuine 25/25 full-pass |
-| Affects | [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md) §6.1 #1 |
+| Affects | [`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md) §6.1 #1 |
 | Crate | `shacl 0.3.1` (rudof project) |
 
 #### Gate invariant — `sh:conforms` (not violation count)

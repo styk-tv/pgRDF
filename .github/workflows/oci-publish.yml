@@ -1,0 +1,69 @@
+name: oci-publish
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag e.g. v0.5.0"
+        required: true
+permissions:
+  contents: read
+  packages: write
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    env:
+      REG: ghcr.io/styk-tv/pgrdf-bundle
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve tag/version
+        id: v
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          echo "tag=$TAG"      >> "$GITHUB_OUTPUT"
+          echo "ver=${TAG#v}"  >> "$GITHUB_OUTPUT"
+      - name: Install ORAS
+        uses: oras-project/setup-oras@v1
+      - name: Download release tarballs (no rebuild)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist && cd dist
+          gh release download "${{ steps.v.outputs.tag }}" \
+            --repo styk-tv/pgRDF \
+            --pattern 'pgrdf-*.tar.gz' --pattern 'SHA256SUMS'
+          sha256sum -c SHA256SUMS
+      - name: ghcr login
+        run: echo "${{ github.token }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Push per-PG+arch artifacts
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          VER="${{ steps.v.outputs.ver }}"
+          for pg in 14 15 16 17; do
+            for arch in amd64 arm64; do
+              f="pgrdf-${VER}-pg${pg}-glibc-${arch}.tar.gz"
+              [ -f "$f" ] || { echo "missing $f"; exit 1; }
+              oras push "${REG}:${VER}-pg${pg}-${arch}" \
+                --artifact-type application/vnd.styk.pgrdf.bundle.v1+tar \
+                --annotation "org.opencontainers.image.source=https://github.com/styk-tv/pgRDF" \
+                --annotation "org.opencontainers.image.version=${VER}" \
+                --annotation "io.styk.pgrdf.pg=${pg}" \
+                --annotation "io.styk.pgrdf.arch=${arch}" \
+                "${f}:application/vnd.styk.pgrdf.tarball.v1+gzip"
+            done
+          done
+      - name: Build aggregate indexes :VER and :vTAG
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          VER="${{ steps.v.outputs.ver }}"
+          REFS=""
+          for pg in 14 15 16 17; do for arch in amd64 arm64; do
+            REFS="$REFS ${REG}:${VER}-pg${pg}-${arch}"
+          done; done
+          oras manifest index create "${REG}:${VER}" $REFS
+          oras manifest index create "${REG}:${{ steps.v.outputs.tag }}" $REFS

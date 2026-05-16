@@ -13,9 +13,11 @@ build before reading a single line of low-level design.*
 - **Status:** authoritative feature catalogue for the **v0.4 surface
   on `main` today**, plus the **v0.5 forward edge** (clearly marked).
   This document is the canonical "what" — not the "how". For the
-  "how", read [`SPEC.pgRDF.LLD.v0.4.md`](SPEC.pgRDF.LLD.v0.4.md)
-  and its forward sibling
-  [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+  "how", read the authoritative shipped contract
+  [`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md) (v0.5.0),
+  [`SPEC.pgRDF.LLD.v0.4.md`](SPEC.pgRDF.LLD.v0.4.md) (the v0.4.x
+  record), and the forward sibling
+  [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md).
 - **Audience:** non-implementers.
   - **Project managers** — to scope what pgRDF can absorb from a
     backlog without bespoke services.
@@ -656,12 +658,12 @@ or drift between the base and inferred sets.
 `base_triples = 0` on an empty graph; non-negative inferred
 count).
 
-### 4.5 🚀 v0.5 forward edge — profile selector
+### 4.5 ✅ v0.5 — profile selector (shipped in v0.5.0)
 
 `pgrdf.materialize(graph_id, profile TEXT DEFAULT 'owl-rl')`
-will let consumers pick `'rdfs'`, `'owl-rl'`, or
-`'owl-rl-ext'` per call.
-See [`SPEC.pgRDF.LLD.v0.5-FUTURE.md §3`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+lets consumers pick `'rdfs'` or `'owl-rl'` per call (the
+reserved-future `'owl-rl-ext'` is named but not yet wired).
+See [`SPEC.pgRDF.LLD.v0.5.md §3`](SPEC.pgRDF.LLD.v0.5.md).
 
 ---
 
@@ -778,12 +780,17 @@ SELECT v ->> 'focusNode' AS who,
 notification, archive them in an audit table, or aggregate
 them across runs — without parsing a non-database artefact.
 
-### 5.5 🚀 v0.5 forward edge — SHACL-SPARQL + manifest runner
+### 5.5 ✅ v0.5 — SHACL `mode` arg + W3C SHACL Core manifest gate (shipped in v0.5.0)
 
-The v0.5 cycle adds **SHACL-SPARQL** constraint components
-(custom SPARQL-defined constraints), and wires the **W3C SHACL
-manifest runner** into CI for full-suite conformance.
-See [`SPEC.pgRDF.LLD.v0.5-FUTURE.md §5–§6`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+v0.5 ships the **`pgrdf.validate(data, shapes, mode)`** argument
+and wires the **W3C SHACL Core manifest runner** into CI as a real
+gate — a genuine 25/25 full-pass. SHACL-SPARQL *constraint
+execution* (`mode => 'sparql'`) is a documented upstream-gate:
+`shacl 0.3.1` has no SHACL-SPARQL constraint component and its
+SPARQL engine is an upstream stub, so the `'sparql'` surface ships
+honest + forward-compatible (ERRATA.v0.5 **E-012**), NOT a pgRDF
+defect.
+See [`SPEC.pgRDF.LLD.v0.5.md §5–§6`](SPEC.pgRDF.LLD.v0.5.md).
 
 ---
 
@@ -909,12 +916,17 @@ full set):
   [`typescript.md`](../guide/clients/typescript.md),
   [`go.md`](../guide/clients/go.md).
 - **Authoritative contracts:**
-  - [`SPEC.pgRDF.LLD.v0.4.md`](SPEC.pgRDF.LLD.v0.4.md) — current
-    in-progress cycle (named graphs, UPDATE, lifecycle UDFs,
+  - [`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md) — the
+    authoritative shipped contract (v0.5.0): profile selector,
+    TriG/N-Quads ingest, SHACL `mode` arg, W3C SHACL Core manifest
+    gate, IRI-overload ergonomics, agg-over-UNION residuals.
+  - [`SPEC.pgRDF.LLD.v0.4.md`](SPEC.pgRDF.LLD.v0.4.md) — the
+    v0.4.x-cut record (named graphs, UPDATE, lifecycle UDFs,
     CONSTRUCT, paths, SHACL real-impl).
-  - [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)
-    — forward edge (profile selector, TriG/N-Quads, SHACL-SPARQL,
-    W3C SHACL manifest runner, IRI-overload ergonomics).
+  - [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md)
+    — forward edge (v1.0: RDF 1.2 triple terms, incremental
+    materialisation, federated SERVICE, the post-v0.5.0
+    `executor.rs` carve).
   - [`SPEC.pgRDF.INSTALL.v0.2.md`](SPEC.pgRDF.INSTALL.v0.2.md)
     — drop-in install on stock PG containers.
   - [`ERRATA.v0.2.md`](ERRATA.v0.2.md),

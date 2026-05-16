@@ -20,8 +20,10 @@ and OWL 2 RL reasoning.**
   v0.4-cycle item — SHACL real-impl — landed on `main`). v0.3
   remains the verbatim record of the v0.3.0-cut surface; v0.4 is
   the authoritative contract for surfaces shipping in the v0.4
-  cycle. The next forward-look beyond v0.4 is
-  [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+  cycle. [`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md) is the
+  authoritative shipped contract for the v0.5.0 cut; the next
+  forward-look beyond v0.5 is
+  [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md).
 - **Reason for v0.3:** v0.2 captured the architecture + the
   initial Phase-by-Phase progression. After 12 Phase-3 SPARQL
   slices shipped, the v0.2 phase numbering and scoped surface no

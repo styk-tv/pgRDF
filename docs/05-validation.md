@@ -256,8 +256,8 @@ version (the `features = ["rdf-12"]` opt-in stays).
 - Implementation: [`src/validation/shacl.rs`](../src/validation/shacl.rs)
 - Spec: [`specs/SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md) §9
   (real SHACL Core) +
-  [`specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md)
-  §5 / §6 (the `mode` arg + the W3C SHACL Core gate)
+  [`specs/SPEC.pgRDF.LLD.v0.5.md`](../specs/SPEC.pgRDF.LLD.v0.5.md)
+  §5 / §6 (the `mode` arg + the W3C SHACL Core gate, shipped in v0.5.0)
 - ERRATA: [`E-011`](../specs/ERRATA.v0.4.md) — fork patch +
   unblock vehicle.
 - ERRATA: [`E-012`](../specs/ERRATA.v0.5.md) — `shacl 0.3.1`

@@ -38,7 +38,7 @@ pgrdf.materialize(graph_id BIGINT, profile TEXT DEFAULT 'owl-rl') → JSONB
 The bare `pgrdf.materialize(g)` form is **unchanged** — it defaults
 `profile => 'owl-rl'` and is behaviourally identical to the v0.3 /
 v0.4 surface. v0.5 adds the profile selector
-([v0.5-FUTURE §3](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md)):
+([LLD v0.5 §3](../specs/SPEC.pgRDF.LLD.v0.5.md), shipped in v0.5.0):
 
 | Profile | Behaviour |
 |---|---|
@@ -53,7 +53,7 @@ only a fused OWL-RL fixpoint, so pgRDF computes the RDFS closure
 itself — restricted to the six productive RDFS rules so it stays a
 true subset of OWL-RL (the §3.1 subset + agreement criteria hold by
 construction). Full rationale in
-[v0.5-FUTURE §3.2](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+[LLD v0.5 §3.2](../specs/SPEC.pgRDF.LLD.v0.5.md).
 
 ```sql
 -- RDFS-only entailment (e.g. for an RDFS-scoped workload class):
@@ -159,6 +159,7 @@ Fast under partition-pruning. The base graph is preserved. The next
   [`117-materialize-rdfs.sql`](../tests/regression/sql/117-materialize-rdfs.sql) (the `'rdfs'` profile: subset of owl-rl + RDFS-axiom agreement + unknown-profile error + no-CTE compose — Phase G group G1).
 - ERRATA: [`E-002`](../specs/ERRATA.v0.2.md) — narrows the LLD §2
   reference from "Datalog reasoner" to "OWL 2 RL".
-- Reasoning profile selector: shipped Phase G group G1 —
-  [`specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md) §3 / §3.2
+- Reasoning profile selector: shipped Phase G group G1, released
+  in v0.5.0 —
+  [`specs/SPEC.pgRDF.LLD.v0.5.md`](../specs/SPEC.pgRDF.LLD.v0.5.md) §3 / §3.2
   (route + precise `'rdfs'` semantics).

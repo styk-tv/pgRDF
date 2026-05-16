@@ -30,9 +30,13 @@ and OWL 2 RL reasoning.**
 - **Supersedes:** [`SPEC.pgRDF.LLD.v0.3.md`](SPEC.pgRDF.LLD.v0.3.md)
   at the contract level for surfaces shipped in the v0.4 cycle.
   v0.3 LLD remains the verbatim record of the v0.3.0-cut surface.
-- **Forward-looking sibling:** [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)
-  is the draft target spec for the next cut beyond v0.4. The
-  `-FUTURE` postfix on that sibling signals it is aspirational.
+- **Superseded for the v0.5 cycle by:** [`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md)
+  — the authoritative shipped contract for the v0.5.0 cut (the
+  residual v0.4-deferred surface + the IRI ergonomics). v0.4 LLD
+  remains the verbatim record of the v0.4.x-cut surface. The next
+  forward-look beyond v0.5 is
+  [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md)
+  (the `-FUTURE` postfix signals it is aspirational).
 - **Carries forward:** [`SPEC.pgRDF.INSTALL.v0.2.md`](SPEC.pgRDF.INSTALL.v0.2.md)
   (no install-spec changes anticipated for v0.4) and
   [`ERRATA.v0.4.md`](ERRATA.v0.4.md) (authoritative for v0.4-era spec
@@ -46,8 +50,8 @@ and OWL 2 RL reasoning.**
   traversing transitive class hierarchies via `rdfs:subClassOf*`-style
   paths — start running into the same handful of gaps. v0.4 closes
   the highest-leverage gaps as a coherent group; the residual items
-  carried over move to
-  [`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+  carried over moved to — and shipped in —
+  [`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md) (v0.5.0).
 - **Tense discipline:** v0.4 is authoritative-in-progress. Shipped
   items (✅) describe reality in present tense. In-progress items
   (🚧) use future tense ("will land", "ships with") until they
@@ -129,14 +133,14 @@ Capability matrix for the v0.4 target:
 | Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | ✅ F1 (slices 34-31) — N-triple OPTIONAL via LATERAL-style derived table inside the LEFT JOIN; atomic (all-or-nothing §6.1), nested OPTIONAL, OPTIONAL-internal FILTER, optional-var outer FILTER, GRAPH scoping, `+`-path-in-required composition; inherited by `pgrdf.construct` + UPDATE WHERE |
 | `VALUES` inline tables | ⏳ deferred | §11 | ✅ F1 (slices 34-31) — `(VALUES …) AS vN(cols)` derived table joined on shared vars; constants resolved to dict ids ahead of execution; `UNDEF` → NULL cell (no constraint, §10); typed/lang literals datatype-aware; composes with GRAPH + OPTIONAL; inherited by `pgrdf.construct` + UPDATE WHERE |
 | `BIND` output in later FILTER / BGP | ⏳ deferred | §11 | ✅ F2 (slices 30-27) — AST substitution pass: BIND var rewritten into later FILTER / triple-slot join / chained BIND before the structural walk (no new translator surface); unbound-var BIND → NULL not error (§18.2.5); composes with GRAPH + F1 OPTIONAL/VALUES; inherited by `pgrdf.construct` + UPDATE WHERE |
-| Aggregates over `UNION` | ⏳ deferred | §11 | ✅ F2 (slices 30-27) — derived-table refactor (each branch → sub-SELECT projecting dict ids into the F1 `vK` pool; existing aggregate translator runs over `(<union>) qU`); COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING, GRAPH scoping, property-path branch; group-by on a GRAPH-scope-only var → v0.5-FUTURE §8 |
+| Aggregates over `UNION` | ⏳ deferred | §11 | ✅ F2 (slices 30-27) — derived-table refactor (each branch → sub-SELECT projecting dict ids into the F1 `vK` pool; existing aggregate translator runs over `(<union>) qU`); COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING, GRAPH scoping, property-path branch; group-by on a GRAPH-scope-only var → [LLD v0.5 §8](SPEC.pgRDF.LLD.v0.5.md) (✅ shipped) |
 | `DESCRIBE` | ⏳ deferred | §11 | ✅ F3 (slices 26-24) — sibling UDF `pgrdf.describe(q TEXT) → SETOF JSONB` (byte-identical to `pgrdf.construct`); closure of each described resource (every triple with it as subject) transitively expanded one hop through blank-node objects per W3C §16.4 (cycle-safe, dedup'd); `DESCRIBE <iri>` / `DESCRIBE ?v WHERE {…}` / mixed / `DESCRIBE *`; composes with GRAPH scoping; `pgrdf.sparql_parse` reports `form:"DESCRIBE"` (NOT flagged unsupported); DESCRIBE via `pgrdf.sparql` redirect-panics |
 | Type-aware `ORDER BY` (§15.1) | ⏳ deferred | §11 | ✅ F4 (slices 23-22) — value-space ordering: kind rank (numeric < dateTime < boolean < other) + per-kind comparator (numerics numerically `2<10`, `xsd:dateTime` chronologically, `xsd:boolean` false<true, strings by codepoint `COLLATE "C"`) + codepoint tiebreak; total/stable, never raises; `DESC` + multi-key + expression sort keys (`ORDER BY STRLEN(?s)`); all four SQL builders + `SELECT DISTINCT` wrap; expr keys on aggregate/UNION shapes a documented narrow deferral |
 | Real SHACL output | 🚧 stub | §9 | ✅ shipped `ac40bc2` |
-| Reasoning profile selector (RDFS / OWL-RL) | not yet | — | ⏳ v0.5-FUTURE §3 |
-| TriG / N-Quads ingest | not yet | — | ⏳ v0.5-FUTURE §4 |
-| Incremental materialisation | not yet | — | ⏳ v1.0 (v0.5-FUTURE §9) |
-| RDF 1.2 triple terms | not yet | — | ⏳ v1.0 (v0.5-FUTURE §9; gated on E-009) |
+| Reasoning profile selector (RDFS / OWL-RL) | not yet | — | ✅ shipped [LLD v0.5 §3](SPEC.pgRDF.LLD.v0.5.md) (v0.5.0) |
+| TriG / N-Quads ingest | not yet | — | ✅ shipped [LLD v0.5 §4](SPEC.pgRDF.LLD.v0.5.md) (v0.5.0) |
+| Incremental materialisation | not yet | — | ⏳ v1.0 ([LLD v0.6-FUTURE §8](SPEC.pgRDF.LLD.v0.6-FUTURE.md)) |
+| RDF 1.2 triple terms | not yet | — | ⏳ v1.0 ([LLD v0.6-FUTURE §5](SPEC.pgRDF.LLD.v0.6-FUTURE.md); gated on E-009/E-011) |
 | Federated `SERVICE` | ❌ | — | ❌ out of scope (§14) |
 
 ## 3. Named-graph scoping and IRI mapping (NEW)
@@ -212,7 +216,7 @@ With slice 115 landed the §3.2 UDF surface is now fully shipped
 interchangeable at the UDF boundary. `pgrdf.put_quad`,
 `pgrdf.count_quads`, and the lifecycle UDFs in §5 retain their
 `BIGINT graph_id` argument forms; an IRI-keyed overload moves to
-[`v0.5-FUTURE §7`](SPEC.pgRDF.LLD.v0.5-FUTURE.md). SPARQL
+[`LLD v0.5 §7`](SPEC.pgRDF.LLD.v0.5.md). SPARQL
 `GRAPH { … }` translation lands next in slices 114-110.
 
 ### 3.3 SPARQL GRAPH support
@@ -490,7 +494,7 @@ partitioning. 🚧
 | `pgrdf.move_graph(src BIGINT, dst BIGINT)` | ✅ slice 96 | `BIGINT` | Migrates every quad from `src` to `dst`, removes `src`. v0.4.2 implementation is a compose: `pgrdf.copy_graph(src, dst)` then `pgrdf.drop_graph(src, cascade => TRUE)`. Returns triples moved (== row count at copy time). The §5.2 "metadata-only DETACH/ATTACH rebind" claim is aspirational; tractable metadata-only is a v0.5 perf optimisation. |
 
 IRI overloads (`pgrdf.drop_graph(iri TEXT)`, etc.) deferred to
-[`v0.5-FUTURE §7`](SPEC.pgRDF.LLD.v0.5-FUTURE.md); in v0.4 callers
+[`LLD v0.5 §7`](SPEC.pgRDF.LLD.v0.5.md); in v0.4 callers
 route IRI input through `pgrdf.graph_id(iri)` explicitly.
 
 ### 5.2 Implementation notes
@@ -842,7 +846,7 @@ Path-operator mapping:
 
 **Materialised-closure detection (landed, group E4).** If the graph
 has been materialised under a profile (OWL-RL or RDFS — see
-[`v0.5-FUTURE §3`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)) that already
+[`LLD v0.5 §3`](SPEC.pgRDF.LLD.v0.5.md)) that already
 entails the closure of the path's predicate, the translator falls
 back to a direct BGP match against the materialised triples. No
 recursion is emitted.
@@ -934,12 +938,12 @@ structural half of E2.
   `pgrdf.path_max_depth` returns the truncated solution set and
   bumps `path_depth_truncations` in `pgrdf.stats()`.
 
-## 8. Reasoning profile selector — moved to v0.5-FUTURE
+## 8. Reasoning profile selector — shipped in v0.5
 
-The reasoning-profile selector on `pgrdf.materialize` (RDFS vs OWL-RL
-vs `owl-rl-ext`) is deferred to v0.5. See
-[`SPEC.pgRDF.LLD.v0.5-FUTURE §3`](SPEC.pgRDF.LLD.v0.5-FUTURE.md) for
-the surface sketch and acceptance criteria. v0.4 keeps
+The reasoning-profile selector on `pgrdf.materialize` (RDFS vs
+OWL-RL) ✅ **shipped in v0.5.0**. See
+[`SPEC.pgRDF.LLD.v0.5 §3`](SPEC.pgRDF.LLD.v0.5.md) for the
+authoritative surface and acceptance criteria. v0.4 keeps
 `pgrdf.materialize(graph_id) → JSONB` unchanged from v0.3.
 
 ## 9. SHACL real integration (✅ shipped in v0.4 cycle)
@@ -1062,18 +1066,21 @@ required `ex:age`):
 }
 ```
 
-### 9.5 Forward look — moved to v0.5-FUTURE
+### 9.5 Forward look — shipped in v0.5
 
-Validation-against-materialised-graph, SHACL-SPARQL constraint mode,
-and the W3C SHACL manifest runner all move forward to
-[`SPEC.pgRDF.LLD.v0.5-FUTURE §5/§6`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
-v0.4 ships the Core-`Native` mode only.
+Validation-against-materialised-graph, the SHACL `mode` argument,
+and the W3C SHACL Core manifest runner ✅ **shipped in v0.5.0** —
+see
+[`SPEC.pgRDF.LLD.v0.5 §5/§6`](SPEC.pgRDF.LLD.v0.5.md) (the
+SHACL-SPARQL `'sparql'` constraint engine is an upstream-gated
+forward item, ERRATA.v0.5 E-012). v0.4 ships the Core-`Native`
+mode only.
 
-## 10. TriG / N-Quads ingest — moved to v0.5-FUTURE
+## 10. TriG / N-Quads ingest — shipped in v0.5
 
-TriG and N-Quads ingest UDFs (`pgrdf.parse_trig`, `pgrdf.parse_nquads`)
-move forward to
-[`SPEC.pgRDF.LLD.v0.5-FUTURE §4`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+TriG and N-Quads ingest UDFs (`pgrdf.parse_trig`,
+`pgrdf.parse_nquads`) ✅ **shipped in v0.5.0** — see
+[`SPEC.pgRDF.LLD.v0.5 §4`](SPEC.pgRDF.LLD.v0.5.md).
 v0.4 retains Turtle-only ingest from v0.3.
 
 ## 11. SPARQL surface backlog (deferred from v0.3, now in scope)
@@ -1088,7 +1095,7 @@ backlog (multi-triple OPTIONAL, VALUES, BIND-downstream,
 aggregates-over-UNION, DESCRIBE, type-aware ORDER BY) shipped across
 the Phase F countdown and is released in **v0.4.6**. Residual
 aggregate-over-UNION refinements are tracked, not lost, in
-[`v0.5-FUTURE §8`](SPEC.pgRDF.LLD.v0.5-FUTURE.md) (stable panics,
+[`LLD v0.5 §8`](SPEC.pgRDF.LLD.v0.5.md) (stable panics,
 never wrong answers).
 
 Phase F dispatch grouping: **F1 (slices 34-31) — multi-triple
@@ -1131,7 +1138,7 @@ the v0.4.6 release cut (✅ landed)**.
   a BIND var is usable in (a) a later FILTER, (b) a later triple's
   variable position (variable/term aliases substitute into the slot;
   a *computed* expression as a triple join key stays v0.3-degenerate
-  — [`v0.5-FUTURE §8`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)), (c) a chained
+  — [`LLD v0.5 §8`](SPEC.pgRDF.LLD.v0.5.md)), (c) a chained
   BIND (resolved left-to-right), (d) projection (unchanged — no
   regression). A BIND over an unbound variable yields an UNBOUND
   result (SQL NULL), NOT a query error (W3C §18.2.5). Composes with
@@ -1151,7 +1158,7 @@ the v0.4.6 release cut (✅ landed)**.
   with HAVING, under GRAPH scoping, with a property-path branch, and
   inherited by `pgrdf.construct` (the same union-derived-table path).
   **Residual refinements move to
-  [`v0.5-FUTURE §8`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)**: a GROUP BY (or
+  [`LLD v0.5 §8`](SPEC.pgRDF.LLD.v0.5.md)**: a GROUP BY (or
   aggregate argument) on a variable that is ONLY ever a
   `GRAPH ?g`-scope var across the union — surfaced with a stable
   panic prefix (NOT a wrong answer), not a silent miscount.
@@ -1320,13 +1327,18 @@ is that every UDF and every translator path takes its own file.
   callers fetch externally and invoke `pgrdf.load_turtle` or
   `pgrdf.parse_trig` directly.
 
-## 15. Forward look — see v0.5-FUTURE
+## 15. Forward look — shipped in v0.5, see v0.6-FUTURE for v1.0
 
-The detailed forward look (reasoning-profile selector, TriG/N-Quads
-ingest, SHACL-SPARQL mode, W3C SHACL manifest runner, lifecycle IRI
-overloads, aggregates-over-UNION refinements, RDF 1.2 triple terms,
-incremental materialisation, federated `SERVICE`) lives in
-[`SPEC.pgRDF.LLD.v0.5-FUTURE.md`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+The v0.4-deferred residual surface (reasoning-profile selector,
+TriG/N-Quads ingest, SHACL `mode` argument, W3C SHACL Core
+manifest runner, lifecycle IRI overloads, aggregates-over-UNION
+residuals) ✅ **shipped in v0.5.0** — see
+[`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md). The
+genuinely-deferred v1.0 forward look (RDF 1.2 triple terms,
+incremental materialisation, federated `SERVICE`, Postgres
+custom-scan hooks, the post-v0.5.0 `executor.rs` core-BGP carve)
+lives in
+[`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md).
 
 ## 16. Errata
 

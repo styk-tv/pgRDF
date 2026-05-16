@@ -1,6 +1,7 @@
 # tests/w3c-shacl — W3C SHACL conformance harness
 
-v0.5-FUTURE §6. The third correctness gate, alongside
+[LLD v0.5 §6](../../specs/SPEC.pgRDF.LLD.v0.5.md) (shipped in
+v0.5.0). The third correctness gate, alongside
 [`tests/w3c-sparql/`](../w3c-sparql/) (W3C SPARQL-shape) and
 `tests/regression/` (pg_regress). Wired into `ci.yml` on every PG
 major and runnable locally via `just test-shacl-manifest`.

@@ -449,7 +449,7 @@ default partition; subsequent `add_graph(g)` calls don't move
 them — the partition-creation order is the caller's
 responsibility.
 
-### TriG / N-Quads ingest (✅ Phase G group G2, v0.5-FUTURE §4)
+### TriG / N-Quads ingest (✅ Phase G group G2, LLD v0.5 §4)
 
 Quad-format siblings of `parse_turtle`. Both honour graph IRIs and
 reuse the same batched-insert path (`flush_batch` /
@@ -638,7 +638,7 @@ shared dictionary, SPARQL `GRAPH <iri>` projection survival post-copy,
 and the drop-then-rebind loop. Per-UDF files (88/89/90/91) lock each
 UDF's invariants in isolation; slice 95 pins their interactions.
 
-### IRI-keyed overloads (✅ Phase G group G1, v0.5-FUTURE §7)
+### IRI-keyed overloads (✅ Phase G group G1, LLD v0.5 §7)
 
 Each lifecycle UDF gains an IRI-keyed overload so callers don't have
 to wrap every IRI in `pgrdf.graph_id(iri)`:
@@ -687,7 +687,7 @@ contrast, and composition with the v0.4 §4 SPARQL UPDATE lifecycle
 algebra (drop-by-IRI then `CREATE GRAPH <same-iri>` rebinds).
 Pgrx integration tests in `src/storage/graphs.rs`.
 
-Spec: [LLD v0.5-FUTURE §7](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+Spec: [LLD v0.5 §7](../specs/SPEC.pgRDF.LLD.v0.5.md).
 
 ## 2.5 What's NOT in storage
 

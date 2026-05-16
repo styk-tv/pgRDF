@@ -1,4 +1,4 @@
-# **SPEC.pgRDF.LLD.v0.5-FUTURE**
+# **SPEC.pgRDF.LLD.v0.5**
 
 **pgRDF: A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL,
 and OWL 2 RL reasoning.**
@@ -9,36 +9,54 @@ and OWL 2 RL reasoning.**
 
 ## 0. Document status and supersession
 
-- **Status:** draft / forward-looking / **target: pgRDF v0.5 cut**.
-- **Authoritative contract for the in-progress cycle:**
-  [`SPEC.pgRDF.LLD.v0.4.md`](SPEC.pgRDF.LLD.v0.4.md). v0.4 LLD is the
-  authoritative-in-progress contract; this document is a sibling
-  forward look at v0.5, not a replacement.
+- **Status:** authoritative — **shipped in pgRDF v0.5.0**. Every
+  v0.5-gate track (§3 reasoning-profile selector, §4 TriG/N-Quads
+  ingest, §5 SHACL `mode` argument + materialised-graph validation,
+  §6 W3C SHACL Core manifest gate genuine 25/25, §7 IRI lifecycle
+  overloads, §8 aggregates-over-UNION residuals) is ✅ shipped on
+  `main` and released as v0.5.0. Present tense describes shipped
+  reality; the only future-tense content is the genuinely-deferred
+  v1.0 forward look + the documented post-0.5 hygiene, which now
+  lives in
+  [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md).
+- **Supersedes:** [`SPEC.pgRDF.LLD.v0.4.md`](SPEC.pgRDF.LLD.v0.4.md)
+  at the contract level for surfaces shipped in the v0.5 cycle.
+  v0.4 LLD remains the verbatim record of the v0.4.x-cut surface
+  (named-graph, UPDATE, lifecycle UDFs, CONSTRUCT, paths, SPARQL
+  §11 backlog, SHACL real-impl).
+- **Forward-looking sibling:** [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md)
+  is the draft target spec for the next cut beyond v0.5 (the v1.0
+  forward look + the documented post-0.5 deferrals). The `-FUTURE`
+  postfix on that sibling signals it is aspirational, not
+  authoritative.
 - **Carries forward:** [`SPEC.pgRDF.INSTALL.v0.2.md`](SPEC.pgRDF.INSTALL.v0.2.md)
-  (no install-spec changes anticipated for v0.5) and
-  [`ERRATA.v0.4.md`](ERRATA.v0.4.md) (carried forward into the v0.5
-  cycle). [`ERRATA.v0.5.md`](ERRATA.v0.5.md) opens in Phase G group
-  G3 with **E-012** (`shacl 0.3.1` SHACL-SPARQL mode is a documented
-  upstream-gate) and **E-013** (W3C SHACL Core gate invariant;
-  corrected/resolved — the earlier "one excluded fixture for an
-  upstream `sh:nodeKind` bug" claim was a G3 unverified assumption,
-  no upstream bug, §6 is a genuine 25/25 full-pass).
+  (no install-spec changes in v0.5) and
+  [`ERRATA.v0.5.md`](ERRATA.v0.5.md) (authoritative for v0.5-era spec
+  deltas: **E-012** — `shacl 0.3.1` SHACL-SPARQL mode is a documented
+  upstream-gate, final for v0.5.0; **E-013** — W3C SHACL Core gate
+  invariant, corrected/resolved, §6 is a genuine 25/25 full-pass with
+  no exclusion). [`ERRATA.v0.4.md`](ERRATA.v0.4.md) remains live for
+  v0.4-era items (E-011 — the upstream `reasonable` patch /
+  crates.io-publish gate, carried forward through the v0.5 cycle).
   [`ERRATA.v0.2.md`](ERRATA.v0.2.md) remains live for
   pre-v0.3 items still open. **E-009** (SHACL upstream conflict) is
-  resolved in v0.4 cycle via E-011; the v0.5 cycle inherits the
+  resolved in the v0.4 cycle via E-011; the v0.5 cycle inherits the
   resolved state and tracks final upstream-merge close-out under
   E-011.
 - **Reason for v0.5:** v0.4 closes the highest-leverage gaps from
   v0.3 as a coherent group (named-graph, UPDATE, lifecycle UDFs,
   CONSTRUCT, paths, SHACL real-impl). v0.5 cleans up the residual
   surface — reasoning-profile selection, TriG/N-Quads ingest,
-  SHACL-SPARQL mode, the W3C SHACL manifest runner — and adds the
-  IRI-overload ergonomics that v0.4 deliberately omitted to keep its
-  surface focused.
-- **Tense discipline:** v0.5 is forward-looking. Future tense
-  ("will land", "ships with") is the default throughout. Where
-  v0.5 builds on shipped v0.4 mechanism, that mechanism is named
-  in present tense and explicitly cross-linked to v0.4.
+  SHACL `mode` argument, the W3C SHACL Core manifest runner — and
+  adds the IRI-overload ergonomics that v0.4 deliberately omitted to
+  keep its surface focused. The genuinely-deferred items (v1.0
+  forward look, post-0.5 hygiene) move to
+  [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md).
+- **Tense discipline:** v0.5 is authoritative / shipped. Shipped
+  items (✅) describe reality in present tense. The only future-tense
+  content is genuinely-deferred work, named explicitly and
+  cross-linked to
+  [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md).
 
 ## 1. Mission (carry forward from v0.4 / v0.3)
 
@@ -52,8 +70,9 @@ inside Postgres, with four engines:
 2. **SPARQL Engine** — `pgrdf.sparql(q TEXT) → SETOF JSONB`;
    spargebra parser; dynamic-SQL executor with prepared-plan cache.
 3. **Inference Engine** — OWL 2 RL materialisation via `reasonable`.
-   v0.5 adds the RDFS / OWL-RL / `owl-rl-ext` profile selector
-   (§3).
+   v0.5 ✅ adds the RDFS / OWL-RL profile selector (§3); the
+   reserved-future `'owl-rl-ext'` profile is named but not yet
+   wired (returns the unknown-profile error until a later cycle).
 4. **Validation Engine** — SHACL Core via `shacl 0.3.x` (rudof
    project). Real W3C-shape report ✅ shipped in v0.4 cycle (LLD
    v0.4 §9). v0.5 ✅ adds the `pgrdf.validate(…, mode)` argument
@@ -61,8 +80,10 @@ inside Postgres, with four engines:
    full-pass, no exclusion),
    and validation-against-materialised-graph coverage (§5.1).
    SHACL-SPARQL constraint-mode is upstream-stubbed in `shacl
-   0.3.1` ([`ERRATA.v0.5.md`](ERRATA.v0.5.md) E-012); the surface
-   ships forward-compatible.
+   0.3.1` ([`ERRATA.v0.5.md`](ERRATA.v0.5.md) E-012); the `'sparql'`
+   mode-arg surface ships honest + forward-compatible (a
+   documented upstream-gate, NOT a pgRDF defect — same posture as
+   E-011 / RDF-1.2).
 
 ## 2. Scope of v0.5
 
@@ -74,18 +95,21 @@ inside Postgres, with four engines:
 | §6 | W3C SHACL manifest runner wired to CI | was v0.4-FUTURE §9.5 / §13 | ✅ shipped — Phase G group G3 (slices 13-12); Core genuine 25/25 full-pass (`conforms` invariant), no exclusion (ERRATA.v0.5 E-013 corrected — no upstream bug) |
 | §7 | IRI overloads for lifecycle UDFs (`drop_graph(iri)`, etc.) | was v0.4-FUTURE §5.1 forward note | ✅ shipped — Phase G group G1 (slices 21-18) |
 | §8 | Aggregates-over-UNION refinements not landed in v0.4 §11 | was v0.4-FUTURE §11 | ✅ shipped — Phase G group G2 (slices 15-14) |
-| §9 | v1.0 contents (forward look) | was v0.4-FUTURE §15 | forward look |
+| §9 | v1.0 contents + post-0.5 deferrals (forward look) | was v0.4-FUTURE §15 | moved to [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md) |
 
-> **v0.5-gate scope COMPLETE.** With Phase G group G3 (this cut),
-> every v0.5-gate track §3–§8 is ✅ shipped. §5.3 #1 carries one
-> documented honest caveat (ERRATA.v0.5 **E-012** — `shacl 0.3.1`
-> SHACL-SPARQL is a documented upstream-gate, upstream's own
-> roadmap, final for v0.5.0). §6.1 #1 is a **genuine 25/25
-> full-pass with no exclusion**: E-013's earlier "one excluded W3C
-> Core fixture for an upstream `sh:nodeKind` bug" claim was a G3
-> unverified assumption (corrected at v0.5.0-rc1 — no upstream bug,
-> fixture restored to `fixtures/core/`). §9 stays a forward look
-> (v1.0). This is the headline of v0.5.0-rc1.
+> **v0.5-gate scope COMPLETE and SHIPPED in v0.5.0.** Every
+> v0.5-gate track §3–§8 is ✅ shipped on `main` and released as
+> v0.5.0. §5.3 #1 carries one documented honest caveat (ERRATA.v0.5
+> **E-012** — `shacl 0.3.1` SHACL-SPARQL is a documented
+> upstream-gate, upstream's own roadmap, final for v0.5.0; the
+> `'sparql'` mode-arg ships honest + forward-compatible, NOT a pgRDF
+> defect). §6.1 #1 is a **genuine 25/25 full-pass with no
+> exclusion**: E-013's earlier "one excluded W3C Core fixture for an
+> upstream `sh:nodeKind` bug" claim was a G3 unverified assumption
+> (corrected at v0.5.0-rc1 — no upstream bug, fixture restored to
+> `fixtures/core/`, resolved). The v1.0 forward look + the documented
+> post-0.5 deferrals (formerly §9 here) are now in
+> [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md).
 
 ## 3. Reasoning profile selector ✅ shipped (Phase G group G1)
 
@@ -476,9 +500,10 @@ in v0.5:
   id in the per-branch derived table (it is resolved as
   `g{S}.iri`, a text IRI, not a `BIGINT` id). The v0.4 build emits
   a **stable panic** (`sparql: GROUP BY / aggregate over a
-  GRAPH-scope variable ?… across a UNION is deferred to
-  v0.5-FUTURE §8`) rather than a wrong count. v0.5 fix: project a
-  parallel text lane (or resolve the IRI back to its dict id) so
+  GRAPH-scope variable ?… across a UNION`) rather than a wrong
+  count for the genuinely-mixed degenerate shape; the six §8
+  residuals proper are ✅ shipped (this section). v0.5 fix: project
+  a parallel text lane (or resolve the IRI back to its dict id) so
   the group key is consistent across branches.
 - **A *computed* BIND expression used as a triple join key**
   (`BIND(?a + 1 AS ?k) . ?k :p ?o`). F2's AST substitution
@@ -514,34 +539,24 @@ in v0.5:
   stable panics for cases 1–6 are gone; `pgrdf.sparql_parse` does
   not flag these — locked in `121` `acc_unsupported`.)*
 
-## 9. Forward look — v1.0 and beyond
+## 9. Forward look — moved to v0.6-FUTURE
 
-**v1.0 contents (planned):**
-
-- **Incremental (delta-driven) materialisation:**
-  `pgrdf.materialize_delta(graph_id, since_xid TEXT)` — forward-chain
-  only over quads added since a recorded transaction id. Targets a
-  common optimisation pattern in reasoning pipelines but does not
-  gate any v0.x surface.
-- **RDF 1.2 triple terms** — enable `oxrdf`'s `rdf-12` feature once
-  upstream (`reasonable` + `shacl_validation`) supports it
-  unanimously. [`ERRATA.v0.2`](ERRATA.v0.2.md) E-009 tracks the
-  conflict; the v0.4 cycle's E-011 unblocks coexistence locally via
-  the styk-tv fork, but full v1.0 surfacing of triple terms in
-  `pgrdf.sparql` / `pgrdf.materialize` is gated on upstream
-  unanimous support.
-- **Federated `SERVICE`** — explicitly deferred to v1.0; remains
-  out of scope for v0.x.
-- **Postgres custom-scan hooks** — if not landed in v0.4 §12 (it
-  may slip per LLD v0.4 §12), v1.0 picks it up.
-
-No domain-specific motivation appears in this section; the items
-are listed as engineering targets only.
+The detailed forward look (v1.0 contents — incremental
+delta-driven materialisation, RDF 1.2 triple terms, federated
+`SERVICE`, Postgres custom-scan hooks) **plus** the documented
+post-v0.5.0 deferrals (the `executor.rs` core-BGP module carve,
+`heap_multi_insert` / `COPY BINARY` ingest phase B, a real
+SHACL-SPARQL engine when upstream rudof ships
+`IRComponent::Sparql` / E-012) now live in
+[`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md) —
+the next forward-look sibling beyond v0.5. None of those items
+gate the v0.5.0 surface.
 
 ## 10. Out of scope (carry forward from v0.4 §14)
 
 - Streaming replication / logical decoding of RDF state.
-- Federated SPARQL `SERVICE` — not in v0.5 (planned for v1.0 per §9).
+- Federated SPARQL `SERVICE` — not in v0.5 (planned for v1.0; see
+  [`SPEC.pgRDF.LLD.v0.6-FUTURE.md`](SPEC.pgRDF.LLD.v0.6-FUTURE.md)).
 - Full OWL 2 (EL / QL) reasoning ([`ERRATA.v0.2.md`](ERRATA.v0.2.md)
   E-002 — pgRDF ships OWL 2 RL only via `reasonable`).
 - Backup/restore for opaque binary state (tracked by future
@@ -552,25 +567,25 @@ are listed as engineering targets only.
 
 ## 11. Errata
 
-- This document is the **draft** v0.5 contract. It is not yet
-  authoritative; v0.4 LLD remains the in-progress authoritative
-  contract.
-- Spec corrections discovered during v0.5 implementation land in
-  [`ERRATA.v0.5.md`](ERRATA.v0.5.md) (opened in Phase G group G3).
-  **E-012** — `shacl 0.3.1` SHACL-SPARQL mode is a documented
+- This document is the **authoritative** v0.5 contract, shipped in
+  pgRDF v0.5.0. It supersedes v0.4 LLD at the contract level for
+  surfaces shipped in the v0.5 cycle.
+- Spec corrections discovered during v0.5 implementation are logged
+  in [`ERRATA.v0.5.md`](ERRATA.v0.5.md) (opened in Phase G group
+  G3). **E-012** — `shacl 0.3.1` SHACL-SPARQL mode is a documented
   upstream-gate (no constraint component + `unimplemented!()`
   engine; upstream's own roadmap, rudof issues #21/#94/#1); the
   §5.2 `mode` arg ships forward-compatible, `'sparql'` returns a
-  deterministic structured report — final for v0.5.0, not a pgRDF
-  defect. **E-013** — the W3C SHACL Core gate uses the `sh:conforms`
-  invariant and is a **genuine 25/25 full-pass with no exclusion**;
-  its earlier "one W3C Core fixture `prop-nodeKind-001`
-  documented-excluded for an upstream `sh:nodeKind` bug" claim was a
-  G3 unverified assumption (the fixture was committed straight into
-  `fixtures/excluded/` so the harness never ran it) — corrected at
-  v0.5.0-rc1, no upstream bug, fixture restored to `fixtures/core/`,
-  resolved. E-012 stays spec-permitted for v0.5.0-rc1 as a
-  documented upstream-gate.
+  deterministic structured report — **final for v0.5.0, a documented
+  upstream-gated limitation (consistent with the E-011 / RDF-1.2
+  precedent), NOT a pgRDF defect**. **E-013** — the W3C SHACL Core
+  gate uses the `sh:conforms` invariant and is a **genuine 25/25
+  full-pass with no exclusion**; its earlier "one W3C Core fixture
+  `prop-nodeKind-001` documented-excluded for an upstream
+  `sh:nodeKind` bug" claim was a G3 unverified assumption (the
+  fixture was committed straight into `fixtures/excluded/` so the
+  harness never ran it) — corrected at v0.5.0-rc1, no upstream bug,
+  fixture restored to `fixtures/core/`, **resolved**.
 - **E-009** (SHACL upstream conflict) is resolved in v0.4 cycle via
   E-011 (patched `reasonable` fork). The v0.5 cycle inherits the
   resolved state; final close-out gates on the upstream

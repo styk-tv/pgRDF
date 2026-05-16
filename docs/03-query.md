@@ -59,7 +59,7 @@ result rows ─► SETOF JSONB
 | `VALUES (?x …) { … }` | `CROSS JOIN (VALUES (id,…),(id,…)) AS vN(vK…)` + `(vN.vK IS NULL OR vN.vK = q{anchor}.{col})` correlation | Phase F group F1: constants → dict ids ahead of execution; `UNDEF` → NULL cell (no constraint, W3C §10) |
 | UNION { A } { B } | `(SELECT … FROM A) UNION ALL (SELECT … FROM B)` | Each branch SELECTs `NULL::TEXT` for vars it doesn't bind |
 | `BIND(expr AS ?v)` downstream | AST substitution: `?v` rewritten to `expr` in every later FILTER / triple slot / chained BIND **before** the structural walk | Phase F group F2: no new translator surface — `FILTER(?v>10)` with `BIND(?a+?b AS ?v)` becomes `FILTER(?a+?b>10)` and the existing anchors path resolves it; unbound-var BIND → `NULL::TEXT` (not an error, W3C §18.2.5); projection still emits the bind column (no v0.3 regression) |
-| Aggregate over UNION | `SELECT <agg(qU.vK)> FROM ((<branch1 dict-id projection>) UNION ALL (<branch2 …>)) qU [GROUP BY …] [HAVING …]` | Phase F group F2: each branch sub-SELECTs the agg/GROUP-BY vars' **dict ids** into the F1 `vK` pool; the EXISTING `translate_aggregate` runs over `qU` unchanged (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING); group-by on a GRAPH-scope-only var → stable panic (v0.5-FUTURE §8), never a wrong count |
+| Aggregate over UNION | `SELECT <agg(qU.vK)> FROM ((<branch1 dict-id projection>) UNION ALL (<branch2 …>)) qU [GROUP BY …] [HAVING …]` | Phase F group F2: each branch sub-SELECTs the agg/GROUP-BY vars' **dict ids** into the F1 `vK` pool; the EXISTING `translate_aggregate` runs over `qU` unchanged (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING); group-by on a GRAPH-scope-only var (genuinely-mixed degenerate) → stable panic (LLD v0.5 §8), never a wrong count |
 | MINUS { triple } | `WHERE NOT EXISTS (SELECT 1 FROM _pgrdf_quads qMIN_K WHERE …)` | Elided at translation time when there are no shared variables (SPARQL no-op) |
 | `GRAPH <iri> { … }` | `qN.graph_id = <resolved>` on every triple alias inside the block | IRI resolved against `_pgrdf_graphs.iri` at translate time; unresolved IRI binds to `-1` (zero rows, spec-correct "no solutions") |
 | `GRAPH ?g { … }` | `INNER JOIN _pgrdf_graphs g{S} ON g{S}.graph_id = q{first}.graph_id` + `qN.graph_id = q{first}.graph_id` for non-anchor triples | One JOIN per Variable scope; ?g projects as `g{S}.iri` (the IRI string); INNER matches W3C §13.3 — only mapped graphs bind ?g; multi-triple inner BGPs share the anchor's graph_id so triples can't stitch across graphs |
@@ -493,8 +493,10 @@ Concrete shape:
       property-path branch all compose; inherited by
       `pgrdf.construct`. A GROUP BY (or aggregate argument) on a
       variable that is ONLY ever a `GRAPH ?g`-scope var across the
-      union is deferred to `SPEC.pgRDF.LLD.v0.5-FUTURE §8` and
-      surfaces a stable panic (never a wrong count).
+      union is the genuinely-mixed degenerate of
+      `SPEC.pgRDF.LLD.v0.5 §8` (the six §8 residuals proper are
+      shipped in v0.5.0) and surfaces a stable panic (never a
+      wrong count).
 
       ```sql
       -- COUNT over a 2-branch UNION.
