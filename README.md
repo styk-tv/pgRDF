@@ -6,16 +6,17 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20v0.4.5%20%E2%80%94%20SPARQL%201.1%20query%20%2B%20update%20%2B%20paths-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-230%20pgrx%20%2B%2073%20regression%20%2B%2041%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
-[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20ASK%20%2F%20UPDATE%20%2F%20CONSTRUCT%20%2F%20PATHS%20%2F%20GRAPH%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
+[![Status](https://img.shields.io/badge/status-v0.5.0%20%E2%80%94%20RDF%20%2F%20SPARQL%201.1%20%2F%20SHACL%20%2F%20OWL-brightgreen)](docs/10-roadmap.md)
+[![Tests](https://img.shields.io/badge/tests-274%20pgrx%20%2B%2085%20regression%20%2B%2051%20W3C%20%2B%2025%20SHACL%20%2B%203%20LUBM-brightgreen)](#tests)
+[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20ASK%20%2F%20CONSTRUCT%20%2F%20DESCRIBE%20%2F%20UPDATE%20%2F%20PATHS%20%2F%20GRAPH%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![BulkIngest](https://img.shields.io/badge/bulk%20ingest-LLD%20%C2%A74.3%20phase%20A-yellow)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20via%20reasonable-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Validation](https://img.shields.io/badge/SHACL%20validate-SHACL%20Core%20via%20shacl%200.3.1-success)](docs/05-validation.md)
 [![CI](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml/badge.svg)](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml)
-[![W3C](https://img.shields.io/badge/W3C%20SPARQL%201.1-41%20shape%20tests-blue)](tests/w3c-sparql/)
+[![W3C](https://img.shields.io/badge/W3C%20SPARQL%201.1-51%20shape%20tests-blue)](tests/w3c-sparql/)
+[![W3C SHACL](https://img.shields.io/badge/W3C%20SHACL%20Core-25%2F25-blue)](docs/05-validation.md)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
@@ -25,9 +26,9 @@
 
 | | |
 |---|---|
-| **Status** | **Alpha — v0.4.5 engine surface, all four engines real** (storage · SPARQL 1.1 · OWL 2 RL inference · SHACL Core validation).<br><br>**Query** — SPARQL SELECT/ASK over N-pattern BGPs · FILTER · DISTINCT/LIMIT/OFFSET/ORDER BY · OPTIONAL · UNION · MINUS · aggregates (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE) · HAVING · BIND · named-graph scoping (`GRAPH <iri>` + `GRAPH ?g` + composition) · **CONSTRUCT** (constant/variable/blank-node/multi-triple templates · WHERE-shorthand · round-trip ingest) · **property paths** (`^` `+` `*` `?` · `\|` alternation · materialised-closure no-CTE fallback · `pgrdf.path_max_depth` guard).<br>**Update** — full SPARQL UPDATE: INSERT/DELETE DATA · INSERT/DELETE WHERE · DELETE+INSERT WHERE · `WITH <iri>` scoping · lifecycle algebra (`DROP`/`CLEAR`/`CREATE GRAPH` × `DEFAULT`/`NAMED`/`ALL`).<br>**Storage** — CRUD + Turtle ingest · per-graph LIST partitions · lifecycle UDFs (`drop`/`clear`/`copy`/`move_graph`) · shmem dict cache (§4.1) + prepared-plan cache (§4.2) + prepared bulk-INSERT (§4.3 phase A).<br>**Inference** — `pgrdf.materialize` (OWL 2 RL via `reasonable`). **Validation** — `pgrdf.validate` → real W3C `sh:ValidationReport` JSONB (SHACL Core via `shacl 0.3.1`, [ERRATA E-011](specs/ERRATA.v0.4.md)).<br><br>**Shipped on the v0.4 countdown:** `v0.4.0` SHACL · `v0.4.1` named-graph §3 · `v0.4.2` lifecycle UDFs §5 · `v0.4.3` SPARQL UPDATE §4 · `v0.4.4` CONSTRUCT §6 · **`v0.4.5` property paths §7**.<br>**Ahead for v0.5:** §11 SPARQL backlog — multi-triple OPTIONAL, VALUES, BIND-downstream, aggregates-over-UNION, DESCRIBE, type-aware ORDER BY (→ `v0.4.6`) · reasoning-profile selector + TriG/N-Quads ingest (→ `v0.5.0-rc1`) · `heap_multi_insert` phase B · RDF 1.2 triple terms (gated on upstream, ERRATA E-011). |
-| **Supported PG** | 14, 15, 16, 17. PG 18 support has landed upstream in pgrx 0.18.0 but adoption is deferred to v0.4 — 0.18.0 still fails to build locally and changes the schema-gen model. See [ERRATA](specs/ERRATA.v0.2.md) E-006 (re-checked 2026-05-14). |
-| **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
+| **Status** | **v0.5.0 — final, GitHub Latest. All four engines real and complete** (storage · SPARQL 1.1 · OWL 2 RL / RDFS inference · SHACL Core validation).<br><br>**Query** — SPARQL SELECT/ASK over N-pattern BGPs · FILTER · DISTINCT/LIMIT/OFFSET · **type-aware ORDER BY** · **multi-triple OPTIONAL** · UNION · MINUS · aggregates (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE) **incl. over UNION** · HAVING · **downstream BIND** · **VALUES** · named-graph scoping (`GRAPH <iri>` + `GRAPH ?g` + composition) · **CONSTRUCT** (constant/variable/blank-node/multi-triple templates · WHERE-shorthand · round-trip ingest) · **DESCRIBE** (W3C §16.4 CBD via `pgrdf.describe`) · **property paths** (`^` `+` `*` `?` · `\|` alternation · materialised-closure no-CTE fallback · `pgrdf.path_max_depth` guard).<br>**Update** — full SPARQL UPDATE: INSERT/DELETE DATA · INSERT/DELETE WHERE · DELETE+INSERT WHERE · `WITH <iri>` scoping · lifecycle algebra (`DROP`/`CLEAR`/`CREATE GRAPH` × `DEFAULT`/`NAMED`/`ALL`).<br>**Storage** — CRUD + Turtle / **TriG** / **N-Quads** ingest (`parse_turtle` / `parse_trig` / `parse_nquads`) · per-graph LIST partitions · lifecycle UDFs (`drop`/`clear`/`copy`/`move_graph`, **BIGINT + IRI overloads**) · shmem dict cache (§4.1) + prepared-plan cache (§4.2) + prepared bulk-INSERT (§4.3 phase A).<br>**Inference** — `pgrdf.materialize(graph_id, profile)` — **`owl-rl` and `rdfs`** profiles. **Validation** — `pgrdf.validate(data, shapes, mode)` → real W3C `sh:ValidationReport` JSONB; SHACL Core native (genuine W3C SHACL Core 25/25); `mode=>'sparql'` is shipped + honest, upstream-gated ([ERRATA E-012](specs/ERRATA.v0.5.md)).<br><br>**Shipped on the v0.4/v0.5 countdown:** `v0.4.0` SHACL · `v0.4.1` named-graph §3 · `v0.4.2` lifecycle UDFs §5 · `v0.4.3` SPARQL UPDATE §4 · `v0.4.4` CONSTRUCT §6 · `v0.4.5` property paths §7 · `v0.4.6` §11 SPARQL backlog · **`v0.5.0` — the complete surface** (DESCRIBE, TriG/N-Quads, IRI lifecycle overloads, `rdfs`+`owl-rl` profiles, native SHACL Core 25/25).<br>**Documented upstream gates** (honest, not defects): [E-011](specs/ERRATA.v0.4.md) — RDF 1.2 triple terms + crates.io publish gated on `gtfierro/reasonable#50`; [E-012](specs/ERRATA.v0.5.md) — SHACL-SPARQL constraint execution gated on `rudof` (#21/#94); the `mode=>'sparql'` surface ships honest.<br>**Deferred → v0.6-FUTURE:** executor.rs core-BGP carve · `heap_multi_insert` phase B · real SHACL-SPARQL engine · federated SERVICE · incremental materialisation · RDF 1.2 (see [SPEC.pgRDF.LLD.v0.6-FUTURE](specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md)). |
+| **Supported PG** | 14, 15, 16, 17. PG 18 adoption stays deferred — pgrx 0.16 pin; 0.18.0 still fails to build locally and changes the schema-gen model. See [ERRATA](specs/ERRATA.v0.2.md) E-006. |
+| **Install** | Two paths, no image rebuild. **GitHub-release tarball** — per-file `:ro` bind-mount of `.so`/`.control`/`.sql` into stock `postgres:17.4-bookworm` (8 tarballs: pg14-17 × amd64/arm64 + SHA256SUMS). **Anonymous OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:v0.5.0` (zero credentials, public). Per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
 
 ## What you can do today
@@ -175,7 +176,7 @@ just psql             # opens a psql shell to the pgrdf database
 # 2. Inside psql
 pgrdf=# CREATE EXTENSION pgrdf;
 pgrdf=# SELECT pgrdf.version();
-        --  → 0.4.3
+        --  → 0.5.0
 pgrdf=# SELECT pgrdf.parse_turtle('@prefix ex: <http://e.com/> . ex:a ex:p ex:b .', 1);
         --  → 1
 ```
@@ -225,10 +226,11 @@ For people working on pgRDF itself.
 
 ### Authoritative specs
 
-- [SPEC.pgRDF.LLD.v0.3.md](specs/SPEC.pgRDF.LLD.v0.3.md) — **current** low-level design (supersedes v0.2)
-- [SPEC.pgRDF.LLD.v0.2.md](specs/SPEC.pgRDF.LLD.v0.2.md) — historical (§4.1/§4.2/§4.3 internals still referenced)
-- [SPEC.pgRDF.INSTALL.v0.2.md](specs/SPEC.pgRDF.INSTALL.v0.2.md) — runtime install on stock PG containers (unchanged in v0.3)
-- [ERRATA.v0.2.md](specs/ERRATA.v0.2.md) — corrections discovered during implementation
+- [SPEC.pgRDF.LLD.v0.5.md](specs/SPEC.pgRDF.LLD.v0.5.md) — **current** authoritative low-level design (supersedes v0.4)
+- [SPEC.pgRDF.LLD.v0.6-FUTURE.md](specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md) — forward backlog (executor.rs core-BGP carve, `heap_multi_insert` phase B, real SHACL-SPARQL engine, federated SERVICE, incremental materialisation, RDF 1.2)
+- [SPEC.pgRDF.LLD.v0.3.md](specs/SPEC.pgRDF.LLD.v0.3.md) — historical (§4.1/§4.2/§4.3 internals still referenced)
+- [SPEC.pgRDF.INSTALL.v0.2.md](specs/SPEC.pgRDF.INSTALL.v0.2.md) — runtime install on stock PG containers
+- [ERRATA.v0.5.md](specs/ERRATA.v0.5.md) / [ERRATA.v0.4.md](specs/ERRATA.v0.4.md) / [ERRATA.v0.2.md](specs/ERRATA.v0.2.md) — corrections + documented upstream gates discovered during implementation
 
 ## Tests
 
@@ -248,20 +250,25 @@ For people working on pgRDF itself.
 smoke-cold` is the cold-compose verification (use after touching
 anything in `compose/`, `fixtures/`, or the test SQL fixtures).
 
-Current bar — **133 pgrx + 54 pg_regress + 26 W3C-shape + 3
-LUBM-shape = 216 tests** green across the full pgrx PG 14-17
-matrix and the compose-based regression runtime (PG 17). Covers:
-- Storage CRUD + Turtle ingest (Phase 2.0-2.2).
-- SPARQL SELECT/ASK surface (Phase 3 steps 1-12, plus inline
-  `HAVING(SUM(?v) > c)` and type-aware MIN/MAX brought forward
-  from v0.4).
+Current bar — **274 pgrx + 85 pg_regress + 51 W3C-sparql + 25
+W3C SHACL Core + 3 LUBM-shape** green across the full pgrx PG
+14-17 matrix and the compose-based regression runtime (PG 17).
+Covers:
+- Storage CRUD + Turtle / TriG / N-Quads ingest.
+- The full SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE surface
+  (type-aware ORDER BY, multi-triple OPTIONAL, UNION, MINUS,
+  VALUES, downstream BIND, aggregates incl. over UNION, HAVING,
+  property paths).
+- SPARQL UPDATE (INSERT/DELETE DATA + WHERE, DELETE+INSERT,
+  `WITH` scoping, lifecycle algebra).
 - Storage performance (shmem dict cache, prepared-plan cache,
   prepared bulk-INSERT).
-- OWL 2 RL inference (`pgrdf.materialize`) + the
-  materialize → SPARQL integration round-trip.
-- Real SHACL Core validation (`pgrdf.validate`) emitting a
-  W3C `sh:ValidationReport`-shape JSONB; unblocked via ERRATA
-  E-011 (patched `reasonable` fork + `shacl 0.3.x`).
+- OWL 2 RL + RDFS inference (`pgrdf.materialize`, `owl-rl` /
+  `rdfs` profiles) + the materialize → SPARQL round-trip.
+- Genuine W3C SHACL Core validation (`pgrdf.validate`) — 25/25
+  SHACL Core conformance, emitting a W3C `sh:ValidationReport`
+  JSONB; `mode=>'sparql'` shipped + honest, upstream-gated
+  (ERRATA E-012).
 - Named-graph surface (LLD v0.4 §3) — `_pgrdf_graphs` system
   table + `pg_extension_config_dump` registration for pg_dump
   round-trip; the five-UDF surface

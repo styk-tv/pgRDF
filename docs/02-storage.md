@@ -578,8 +578,10 @@ partition-constraint dance that a true metadata-only swap would
 require (every row's `graph_id` column would need updating to
 satisfy the post-rebind LIST constraint, which itself is a row
 scan). The §5.2 "metadata-only" claim is therefore aspirational
-for v0.4.2; flagged as a v0.5 perf optimisation. For small-graph
-workloads the compose is fast; for very large graphs it scans
+for the v0.4.2 compose; deferred as a v0.6-FUTURE perf
+optimisation (see `specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md`). For
+small-graph workloads the compose is fast; for very large graphs
+it scans
 twice (once during copy, once during drop's pre-count).
 
 Guards (stable error prefixes per the error-message contract):

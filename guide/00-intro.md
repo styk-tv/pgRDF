@@ -70,11 +70,11 @@ SELECT * FROM pgrdf.sparql(
 | Operator surface — `pgrdf.stats()`, `pgrdf.shmem_reset()`, `pgrdf.plan_cache_clear()` | ✅ |
 | Regression suite + W3C-shape SPARQL harness + W3C SHACL Core manifest gate in CI (PR-gate, every PG major) | ✅ v0.5 |
 | SHACL Core validation — real W3C-shape report (`pgrdf.validate(data, shapes [, mode])`); SHACL-SPARQL mode upstream-stubbed ([ERRATA.v0.5 E-012](../specs/ERRATA.v0.5.md)) | ✅ v0.4 / v0.5 |
-| 2× ingest target (true COPY BINARY / heap_multi_insert) | ⏳ v0.4 |
-| Full W3C SPARQL 1.1 TTL-manifest runner against `w3c/rdf-tests` | ⏳ v0.4 |
-| LUBM-10 / LUBM-100 cross-engine benchmarks (Jena TDB, Apache AGE) | ⏳ v0.4 |
-| SPARQL surface — property paths (`^`/`+`/`*`/`?`/`\|`) | ✅ v0.4.5 |
-| SPARQL surface — VALUES, multi-triple OPTIONAL, DESCRIBE, aggregates over UNION, BIND-in-FILTER | ⏳ v0.4 |
+| 2× ingest target (true COPY BINARY / `heap_multi_insert` phase B) | ⏳ v0.6-FUTURE |
+| Full W3C SPARQL 1.1 TTL-manifest runner against `w3c/rdf-tests` | ⏳ v0.6-FUTURE |
+| LUBM-10 / LUBM-100 cross-engine benchmarks (Jena TDB, Apache AGE) | ⏳ v0.6-FUTURE |
+| SPARQL surface — property paths (`^`/`+`/`*`/`?`/`\|` alternation) | ✅ v0.4.5 |
+| SPARQL surface — VALUES, multi-triple OPTIONAL, DESCRIBE, type-aware ORDER BY, aggregates over UNION, downstream BIND | ✅ v0.5 |
 
 For the long-form plan see
 [`docs/10-roadmap.md`](../docs/10-roadmap.md).
@@ -86,10 +86,12 @@ For the long-form plan see
 - **Not a full OWL 2 reasoner.** The OWL 2 RL profile is supported via
   the `reasonable` crate; EL/QL profiles aren't.
 - **Not RDF-star.** Quoted triples in subject / object position are
-  rejected at load time; pgRDF v0.3 treats them as out-of-scope.
-  Adding RDF 1.2 triple-term support is tracked under
-  [ERRATA E-009](../specs/ERRATA.v0.2.md) (the same feature-unification
-  issue that blocks the real SHACL impl).
+  rejected at load time; the v0 series treats them as out-of-scope.
+  Adding RDF 1.2 triple-term support is a documented upstream gate
+  under [ERRATA E-011](../specs/ERRATA.v0.4.md) (gated on
+  `gtfierro/reasonable#50` — the same patch that gates the crates.io
+  publish), with the forward design in
+  [SPEC.pgRDF.LLD.v0.6-FUTURE](../specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md).
 - **Not a replacement for a graph database when you don't already
   have Postgres.** If you're starting from zero with a 100M-edge
   social graph, Neo4j or DuckDB-graph are likely better fits. pgRDF

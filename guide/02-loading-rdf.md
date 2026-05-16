@@ -203,11 +203,14 @@ Once a graph is allocated, scope SPARQL queries to it with
 `GRAPH <iri> { … }` or `GRAPH ?g { … }` — see
 [03-querying.md → Named graphs](03-querying.md#named-graphs).
 
-### Graph lifecycle (v0.4.2)
+### Graph lifecycle
 
 Four partition-level lifecycle UDFs live alongside `add_graph` — all
 return `BIGINT` row counts and are idempotent on absent / empty
-sources:
+sources. Each takes either a `BIGINT` graph id (shown below) or an
+IRI `TEXT` (the v0.5.0 IRI overloads — e.g.
+`pgrdf.drop_graph('http://example.org/g1')`, error
+`drop_graph: unknown iri` on an unbound IRI):
 
 ```sql
 -- Drop a graph entirely: detaches the partition, deletes the

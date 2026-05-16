@@ -384,7 +384,7 @@ Concrete shape:
   same shape but different IRI constants → 1 miss + 1 hit; a
   structurally distinct query → 1 miss + 0 hits.
 
-## Surface today (v0.3 SPARQL surface complete; v0.4 §3.3 GRAPH, §4 UPDATE, §6 CONSTRUCT, §7 property paths, §11 backlog all shipped — v0.4.6)
+## Surface today (complete in v0.5.0 — §3.3 GRAPH, §4 UPDATE, §6 CONSTRUCT, §7 property paths, §11 backlog incl. DESCRIBE / type-aware ORDER BY / multi-triple OPTIONAL / VALUES / downstream BIND / aggregates-over-UNION all shipped)
 
 - ✅ Basic Graph Patterns (1..N triples)
 - ✅ `SELECT` (explicit projection or `SELECT *`); `ASK`
