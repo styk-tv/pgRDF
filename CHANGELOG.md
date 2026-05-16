@@ -6,6 +6,21 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.5.0-rc1] — 2026-05-16
+
+**Release candidate — all v0.5-FUTURE v0.5-gate tracks (§3-§8)
+complete.** Phase G closes the v0.5 capability scope: reasoning-
+profile selector, IRI lifecycle overloads, TriG/N-Quads ingest,
+aggregates-over-UNION residuals, the SHACL `mode` argument, and the
+W3C SHACL Core manifest gate. Two documented honest caveats carry
+to the final v0.5.0 after Phase H+I hygiene: ERRATA.v0.5 **E-012**
+(`shacl 0.3.1` SHACL-SPARQL mode is an upstream stub — the `mode`
+arg ships forward-compatible) and **E-013** (one W3C SHACL Core
+fixture excluded for an upstream `sh:nodeKind` bug; Core is
+otherwise 24/24 full-pass). crates.io publish stays gated on
+gtfierro/reasonable#50 (E-011); this rc ships the 8 platform
+tarballs via release.yml only.
+
 ### Added
 
 - SHACL-SPARQL constraint mode + W3C SHACL manifest gate — Phase G group G3 (slices 13-12). `pgrdf.validate(data, shapes, mode TEXT DEFAULT 'native')` adds `'sparql'` mode (sh:select SPARQL constraints) alongside `'native'`; JSONB gains a `mode` field; unknown modes error (`validate: unknown mode`). Validation against a materialised data graph reports violations against entailed triples (regression-locked). New `just test-shacl-manifest` harness runs the W3C SHACL Core + SHACL-SPARQL suites, wired into CI on every PG major. Closes v0.5-FUTURE §5 + §6 — all v0.5-FUTURE v0.5-gate tracks (§3-§8) complete.

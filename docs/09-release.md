@@ -4,11 +4,92 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is `v0.4.6`. Cargo.toml reads `version = "0.4.6"`
-(bumped from `0.4.5` during the v0.4.6 release pre-flight, Phase F
-countdown group F4 / slice 22). See `CHANGELOG.md` for the running
-set of `[Unreleased]` entries that move into the next `[N.M.P]`
-block at tag time.
+The current cut is `v0.5.0-rc1` (a **prerelease** — flagged
+`isPrerelease=true` so it does not supersede `v0.4.6` as "latest").
+Cargo.toml reads `version = "0.5.0-rc1"` (bumped from `0.4.6`
+during the v0.5.0-rc1 release pre-flight, Phase G countdown group
+G3 / slice 12). See `CHANGELOG.md` for the running set of
+`[Unreleased]` entries that move into the next `[N.M.P]` block at
+tag time.
+
+## v0.5.0-rc1 — 2026-05-16
+
+Phase G closes the v0.5 capability scope across three grouped
+dispatches (G1 → G3, countdown 21 → 12). **All v0.5-FUTURE
+v0.5-gate tracks §3-§8 are shipped** — this is the v0.5.0-rc1
+headline. This is a **release candidate**: the tag is flagged a
+GitHub *prerelease* so it does not become "latest" over `v0.4.6`;
+the final `v0.5.0` follows after Phase H+I hygiene + the two
+documented E-012 / E-013 follow-ups.
+
+### Engine surface delta vs v0.4.6
+
+- **Storage / inference / SPARQL UPDATE / CONSTRUCT / property
+  paths / §11 backlog / TriG-N-Quads / reasoning-profile** —
+  unchanged from the v0.4.x + Phase G G1/G2 surface; no breaking
+  changes. Table shapes (`_pgrdf_graphs`, `_pgrdf_quads`,
+  `_pgrdf_dictionary`) unchanged.
+- **`pgrdf.validate` gains a third optional arg** —
+  `pgrdf.validate(data, shapes, mode TEXT DEFAULT 'native')`. The
+  2-arg form is byte-identical to v0.4 (defaults `'native'`). JSONB
+  gains a `mode` field; unknown mode →
+  `validate: unknown mode` (validated before any work).
+  `'sparql'` returns a deterministic structured report — the
+  upstream `shacl 0.3.1` SparqlEngine is a stub (ERRATA.v0.5
+  E-012); pgRDF does not invoke it.
+- **New W3C SHACL Core manifest gate** — `just test-shacl-manifest`
+  (`tests/w3c-shacl/`), wired into `ci.yml` on every PG major as a
+  real gate. Vendored hermetic W3C SHACL Core subset, **24/24
+  full-pass** on `sh:conforms` (ERRATA.v0.5 E-013); one W3C Core
+  fixture documented-excluded for an upstream `sh:nodeKind` bug.
+
+### Control-version reconciliation (`-rc1`)
+
+`Cargo.toml` `version`, `pgrdf.control` `default_version`, the
+`cargo pgrx package` SQL filename, and the Postgres `extversion`
+are **all identically `0.5.0-rc1`** — no reconciliation needed.
+Verified empirically: `cargo metadata` accepts the SemVer
+pre-release; `cargo pgrx package` (pgrx 0.16.1) emits
+`pgrdf--0.5.0-rc1.sql`; `CREATE EXTENSION pgrdf` on PG 17 succeeds
+and `pgrdf.version()` / `pg_extension.extversion` both report
+`0.5.0-rc1`. Postgres only forbids `--` and leading/trailing `-`
+in an extension version; a single internal `-rc1` is valid in the
+control file, the `pgrdf--<ver>.sql` filename, and Postgres's
+extension-version parser. `00-smoke.out` literals updated to
+`0.5.0-rc1`.
+
+### Cut file set (mirrors the v0.4.6 cut exactly)
+
+`Cargo.toml` (version only) + `Cargo.lock` (`cargo update -p
+pgrdf`) + `pgrdf.control` (`default_version`) +
+`compose/compose.yml` (the single SQL bind-mount line
+`pgrdf--0.5.0-rc1.sql`, the v0.4.6 F4 one-line pattern) +
+`tests/regression/expected/00-smoke.out` (version literals) +
+`CHANGELOG.md` (`[Unreleased]` → `[0.5.0-rc1]`) + `RELEASE_NOTES.md`
+(full rewrite) + `docs/09-release.md` (this section). Same 8-file
+shape as the v0.4.6 / v0.4.5 cuts.
+
+**Ritual deviations vs the v0.4.6 cut:** README.md NOT touched — a
+parallel docs session owns it, same deviation as the
+v0.4.6 / v0.4.5 / v0.4.4 cuts. The roadmap / spec / guide / docs
+§5/§6 coherence edits + the new `specs/ERRATA.v0.5.md` landed in
+the FEATURE commit, not here, mirroring how every prior cut kept
+those out of the release commit. No `src/` fmt sweep needed
+(`cargo fmt --all -- --check` clean). The compose SQL mount is a
+one-line bump (`pgrdf--0.4.6.sql` → `pgrdf--0.5.0-rc1.sql`), the
+same net surface as the v0.4.6 cut's F4 single-version mount —
+no accumulation.
+
+**Prerelease flag:** an rc MUST be a GitHub *prerelease* so it does
+not supersede `v0.4.6` as "latest". If `release.yml` does not
+auto-mark prereleases, the cut sets it explicitly
+(`gh release edit v0.5.0-rc1 --prerelease`).
+
+E-011 carried: `publish-crate.yml` stays disabled until upstream
+[`gtfierro/reasonable#50`](https://github.com/gtfierro/reasonable/pull/50)
+merges. The v0.5.0-rc1 tag fires `release.yml` only (8 platform
+tarballs PG14-17 × amd64/arm64 + SHA256SUMS); **no crates.io
+publish this cut**.
 
 ## v0.4.6 — 2026-05-16
 
