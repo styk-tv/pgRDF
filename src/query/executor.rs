@@ -113,6 +113,7 @@ use spargebra::algebra::{
 use spargebra::term::{
     GraphName, GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern, Literal,
     NamedNode, NamedNodePattern, NamedOrBlankNode, QuadPattern, Term, TermPattern, TriplePattern,
+    Variable,
 };
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
 use std::cell::RefCell;
@@ -152,6 +153,31 @@ fn id_placeholder(id: i64) -> String {
         v.push(id);
         format!("${}", v.len())
     })
+}
+
+/// Phase F group F1: a fixed pool of `'static` synthetic column
+/// names. A derived table (LATERAL OPTIONAL subquery / VALUES inline
+/// table) exposes its k-th bound variable as column `vK`, and the
+/// outer query's `anchors` map records `(qN, "vK")`. Keeping the
+/// names `&'static str` means the entire existing `anchors:
+/// HashMap<String,(usize,&'static str)>` projection/FILTER machinery
+/// (~50 call sites, all `Copy`-destructuring `&(idx, col)`) works
+/// verbatim — no anchor-type refactor. 64 columns is far past any
+/// realistic single-derived-table arity (a VALUES / OPTIONAL group
+/// rarely exceeds a handful of distinct variables).
+const DERIVED_COLS: [&str; 64] = [
+    "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14",
+    "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27",
+    "v28", "v29", "v30", "v31", "v32", "v33", "v34", "v35", "v36", "v37", "v38", "v39", "v40",
+    "v41", "v42", "v43", "v44", "v45", "v46", "v47", "v48", "v49", "v50", "v51", "v52", "v53",
+    "v54", "v55", "v56", "v57", "v58", "v59", "v60", "v61", "v62", "v63",
+];
+
+fn derived_col(k: usize) -> &'static str {
+    DERIVED_COLS
+        .get(k)
+        .copied()
+        .expect("sparql: derived-table arity exceeded 64 distinct variables")
 }
 
 /// Execute a SPARQL query (SELECT / ASK / UPDATE) and return one JSONB
@@ -501,6 +527,7 @@ fn execute_construct_per_solution_path(
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
+        &ps.values,
         &mut anchors,
         0,
     );
@@ -1252,6 +1279,7 @@ fn build_construct_constant_where_sql(ps: &ParsedSelect) -> String {
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
+        &ps.values,
         &mut anchors,
         0,
     );
@@ -1425,6 +1453,10 @@ struct ParsedSelect {
     /// optional FILTER. Multiple chained OPTIONALs land here in
     /// left-to-right order; build_bgp_sql emits one LEFT JOIN per.
     optionals: Vec<OptionalBlock>,
+    /// Phase F group F1: top-level / group-level `VALUES` inline
+    /// tables. Each becomes a `(VALUES …) AS vN(cols)` derived table
+    /// the BGP joins on shared variables.
+    values: Vec<ValuesBlock>,
     /// Each MINUS block — a list of triple patterns. Translates
     /// to `WHERE NOT EXISTS (SELECT 1 FROM q_min_1, q_min_2, …
     /// WHERE join-shared-vars AND inner-pattern-predicates)`.
@@ -1470,19 +1502,65 @@ struct ParsedSelect {
     graph_scope_counter: usize,
 }
 
+/// Phase F group F1 (LLD v0.4 §11): an OPTIONAL block now holds an
+/// **N-triple** inner BGP (the v0.3 single-triple restriction is
+/// lifted). The whole right side translates to a LATERAL-style
+/// derived table inside the LEFT JOIN — `LEFT JOIN LATERAL (SELECT …)
+/// qOPT ON TRUE` — so the optional group matches **atomically**
+/// (all-or-nothing per W3C §6.1): every inner variable binds together
+/// or every one comes back NULL. Nested OPTIONAL (`OPTIONAL inside
+/// OPTIONAL`), an OPTIONAL-internal FILTER, and the `LeftJoin.expression`
+/// (`OPTIONAL { … FILTER(…) }`) all compose by recursing the same
+/// derived-table emitter.
 struct OptionalBlock {
-    triple: TriplePattern,
-    /// The filter inside `OPTIONAL { … FILTER(...) }`, if any.
-    /// Translated into the LEFT JOIN's ON clause so rejected rows
-    /// still survive with the optional variables NULL.
-    filter: Option<Expression>,
-    /// Slice 112: graph scope that applies to this OPTIONAL's
-    /// triple alias. `None` (= scan every partition) when the
-    /// OPTIONAL sits outside any GRAPH; carries the scope of the
-    /// enclosing `GRAPH <iri> { … }` or `GRAPH ?g { … }` when the
-    /// OPTIONAL nests inside one, OR a brand-new scope when the
-    /// OPTIONAL itself is `OPTIONAL { GRAPH … { … } }`.
+    /// The inner BGP triples (one or more — possibly mixed with `+`
+    /// path relations, exactly like the mandatory BGP).
+    triples: Vec<ScopedTriple>,
+    /// VALUES inline tables that appear inside this OPTIONAL's group.
+    values: Vec<ValuesBlock>,
+    /// Nested OPTIONALs inside this OPTIONAL's group (W3C §6.1
+    /// composition — `OPTIONAL { … OPTIONAL { … } }`).
+    nested: Vec<OptionalBlock>,
+    /// FILTERs that sit **inside** the OPTIONAL group (a SPARQL
+    /// `OPTIONAL { ?s :p ?o FILTER(?o > 5) }` arrives either as the
+    /// `LeftJoin.expression` or as a `Filter` wrapping the right BGP;
+    /// both land here). Applied inside the derived table so a row
+    /// failing the filter makes the whole optional unmatched.
+    filters: Vec<Expression>,
+    /// The `LeftJoin.expression` join condition (the join FILTER form
+    /// of `OPTIONAL { … } FILTER(…)`), kept distinct from the
+    /// group-internal `filters` only for documentation; both are
+    /// applied inside the derived table (sound for the LEFT JOIN
+    /// LATERAL ON TRUE shape — an unmatched optional yields NULLs).
+    join_filter: Option<Expression>,
+    /// Slice 112: graph scope inherited from an enclosing
+    /// `GRAPH <iri>|?g { … }`, OR a fresh scope when the OPTIONAL is
+    /// itself `OPTIONAL { GRAPH … { … } }`. Applied to every inner
+    /// triple that doesn't carry its own (nested-GRAPH) scope.
     scope: Option<GraphScope>,
+}
+
+/// Phase F group F1 (LLD v0.4 §11): a SPARQL `VALUES (?x ?y) { (a 1)
+/// (b UNDEF) }` inline table. Constants are resolved to dictionary
+/// ids ahead of execution (mirroring CONSTRUCT constant-template
+/// resolution, slice 59); `UNDEF` becomes a NULL cell that places no
+/// constraint on that variable for that row. Translates to a
+/// `(VALUES (…),(…)) AS vN("?x","?y")` derived table the surrounding
+/// BGP joins against on the shared variables.
+#[derive(Clone)]
+struct ValuesBlock {
+    /// Declared column variables, in order.
+    variables: Vec<String>,
+    /// One row per binding tuple. `None` = `UNDEF` (NULL cell, no
+    /// constraint); `Some(id)` = the resolved dictionary id (or the
+    /// sentinel `-1` when the constant was never interned, which
+    /// makes the join produce zero matches — spec-correct).
+    ///
+    /// Note: a `VALUES` table has no graph column of its own — any
+    /// enclosing `GRAPH <iri>|?g` scope applies to the BGP triples
+    /// it joins against (each of which carries its own scope), not
+    /// to the inline rows, so no scope field is needed here.
+    rows: Vec<Vec<Option<i64>>>,
 }
 
 struct BindSpec {
@@ -1535,6 +1613,8 @@ struct UnionBranch {
     filters: Vec<Expression>,
     optionals: Vec<OptionalBlock>,
     minuses: Vec<MinusBlock>,
+    /// Phase F group F1: VALUES inline tables inside this branch.
+    values: Vec<ValuesBlock>,
 }
 
 fn translate(q: &Query) -> ExecPlan {
@@ -1608,6 +1688,7 @@ fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
                     &b.filters,
                     &b.optionals,
                     &b.minuses,
+                    &b.values,
                     &mut anchors,
                     0,
                 );
@@ -1627,6 +1708,7 @@ fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
+        &ps.values,
         &mut anchors,
         0,
     );
@@ -1683,10 +1765,20 @@ fn parse_select(p: &GraphPattern) -> ParsedSelect {
                     push_unique(&mut ps.projected, scope_var_name(&st.scope));
                 }
                 for opt in &branch.optionals {
-                    push_unique(&mut ps.projected, tp_subject_var(&opt.triple));
-                    push_unique(&mut ps.projected, tp_predicate_var(&opt.triple));
-                    push_unique(&mut ps.projected, tp_object_var(&opt.triple));
+                    // Phase F group F1: an OPTIONAL group's whole
+                    // variable surface (N triples + nested + inner
+                    // VALUES) is projectable.
+                    let mut ov = Vec::new();
+                    optional_block_vars(opt, &mut ov);
+                    for v in ov {
+                        push_unique(&mut ps.projected, Some(v));
+                    }
                     push_unique(&mut ps.projected, scope_var_name(&opt.scope));
+                }
+                for vb in &branch.values {
+                    for v in &vb.variables {
+                        push_unique(&mut ps.projected, Some(v.clone()));
+                    }
                 }
                 for m in &branch.minuses {
                     push_unique(&mut ps.projected, scope_var_name(&m.scope));
@@ -1700,10 +1792,17 @@ fn parse_select(p: &GraphPattern) -> ParsedSelect {
                 push_unique(&mut ps.projected, scope_var_name(&st.scope));
             }
             for opt in &ps.optionals {
-                push_unique(&mut ps.projected, tp_subject_var(&opt.triple));
-                push_unique(&mut ps.projected, tp_predicate_var(&opt.triple));
-                push_unique(&mut ps.projected, tp_object_var(&opt.triple));
+                let mut ov = Vec::new();
+                optional_block_vars(opt, &mut ov);
+                for v in ov {
+                    push_unique(&mut ps.projected, Some(v));
+                }
                 push_unique(&mut ps.projected, scope_var_name(&opt.scope));
+            }
+            for vb in &ps.values {
+                for v in &vb.variables {
+                    push_unique(&mut ps.projected, Some(v.clone()));
+                }
             }
             for m in &ps.minuses {
                 push_unique(&mut ps.projected, scope_var_name(&m.scope));
@@ -2157,14 +2256,11 @@ fn walk_branch(
             expression,
         } => {
             walk_branch(left, ub, current_scope, scope_counter);
-            // The right arm of OPTIONAL today is a single triple, OR
-            // a single GRAPH wrapping a single triple (slice 112).
-            let (triple, opt_scope) = extract_optional_triple(right, current_scope, scope_counter);
-            ub.optionals.push(OptionalBlock {
-                triple,
-                filter: expression.clone(),
-                scope: opt_scope,
-            });
+            // Phase F group F1: N-triple OPTIONAL group inside a UNION
+            // branch — same derived-table machinery as the top level.
+            let block =
+                build_optional_block(right, expression.clone(), current_scope, scope_counter);
+            ub.optionals.push(block);
         }
         GraphPattern::Minus { left, right } => {
             walk_branch(left, ub, current_scope, scope_counter);
@@ -2195,6 +2291,14 @@ fn walk_branch(
             walk_branch(left, ub, current_scope, scope_counter);
             walk_branch(right, ub, current_scope, scope_counter);
         }
+        GraphPattern::Values {
+            variables,
+            bindings,
+        } => {
+            // Phase F group F1: a `VALUES` inline table inside a UNION
+            // branch joins against that branch's BGP on shared vars.
+            ub.values.push(make_values_block(variables, bindings));
+        }
         other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
     }
 }
@@ -2219,42 +2323,128 @@ fn make_scope(name: &NamedNodePattern, scope_counter: &mut usize) -> GraphScope 
     }
 }
 
-/// Extract the single triple of an OPTIONAL's right arm, peeling off
-/// a wrapping `GRAPH` to produce the triple's scope. The wrapping
-/// scope (if any) wins over the surrounding `current_scope` — that's
-/// the `OPTIONAL { GRAPH <g> { ?s :p ?o } }` shape.
-fn extract_optional_triple(
+/// Phase F group F1 (LLD v0.4 §11): walk an OPTIONAL's right arm into
+/// an [`OptionalBlock`] holding an **N-triple** inner BGP plus any
+/// nested OPTIONALs / inner FILTERs / inner VALUES. The v0.3
+/// single-triple restriction is gone — the whole right side becomes a
+/// LATERAL derived table (see `emit_optional_lateral`).
+///
+/// Scope rules (W3C §13.3) are unchanged: `OPTIONAL { GRAPH <g> { …
+/// } }` overrides the surrounding `current_scope`; a plain `OPTIONAL
+/// { … }` inherits it. The `LeftJoin.expression` (the join-FILTER
+/// form) is passed in by the caller and recorded on the block.
+fn build_optional_block(
     right: &GraphPattern,
+    join_filter: Option<Expression>,
     current_scope: Option<&GraphScope>,
     scope_counter: &mut usize,
-) -> (TriplePattern, Option<GraphScope>) {
-    match right {
-        GraphPattern::Graph { name, inner } => {
-            let scope = make_scope(name, scope_counter);
-            // Inner of an `OPTIONAL { GRAPH … { … } }` is a single-triple BGP.
-            match inner.as_ref() {
-                GraphPattern::Bgp { patterns } if patterns.len() == 1 => {
-                    (patterns[0].clone(), Some(scope))
-                }
-                GraphPattern::Bgp { patterns } => panic!(
-                    "sparql: OPTIONAL today only supports a single triple pattern (got {} triples)",
-                    patterns.len()
-                ),
-                other => panic!(
-                    "sparql: OPTIONAL today only supports a single triple pattern (got {other:?})"
-                ),
+) -> OptionalBlock {
+    let mut block = OptionalBlock {
+        triples: Vec::new(),
+        values: Vec::new(),
+        nested: Vec::new(),
+        filters: Vec::new(),
+        join_filter,
+        scope: current_scope.cloned(),
+    };
+    collect_optional_inner(right, &mut block, current_scope, scope_counter);
+    block
+}
+
+/// Recursively populate an [`OptionalBlock`] from the OPTIONAL group's
+/// algebra. Mirrors `walk_select_scoped`'s structural cases but
+/// accumulates into the block so the whole group emits as ONE
+/// atomic (all-or-nothing) LATERAL derived table.
+fn collect_optional_inner(
+    p: &GraphPattern,
+    block: &mut OptionalBlock,
+    current_scope: Option<&GraphScope>,
+    scope_counter: &mut usize,
+) {
+    match p {
+        GraphPattern::Bgp { patterns } => {
+            for tp in patterns {
+                block.triples.push(ScopedTriple {
+                    triple: tp.clone(),
+                    scope: current_scope.cloned(),
+                    path: None,
+                });
             }
         }
-        GraphPattern::Bgp { patterns } if patterns.len() == 1 => {
-            (patterns[0].clone(), current_scope.cloned())
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => {
+            block.triples.push(scoped_triple_from_path(
+                subject,
+                path,
+                object,
+                current_scope.cloned(),
+            ));
         }
-        GraphPattern::Bgp { patterns } => panic!(
-            "sparql: OPTIONAL today only supports a single triple pattern (got {} triples)",
-            patterns.len()
+        GraphPattern::Join { left, right } => {
+            collect_optional_inner(left, block, current_scope, scope_counter);
+            collect_optional_inner(right, block, current_scope, scope_counter);
+        }
+        GraphPattern::Filter { expr, inner } => {
+            block.filters.push(expr.clone());
+            collect_optional_inner(inner, block, current_scope, scope_counter);
+        }
+        GraphPattern::Graph { name, inner } => {
+            let scope = make_scope(name, scope_counter);
+            collect_optional_inner(inner, block, Some(&scope), scope_counter);
+        }
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
+            // A nested OPTIONAL inside this OPTIONAL group (W3C §6.1
+            // composition). The nested block recurses the same
+            // derived-table machinery; its left arm contributes to
+            // THIS group's required side.
+            collect_optional_inner(left, block, current_scope, scope_counter);
+            let nested =
+                build_optional_block(right, expression.clone(), current_scope, scope_counter);
+            block.nested.push(nested);
+        }
+        GraphPattern::Values {
+            variables,
+            bindings,
+        } => {
+            block.values.push(make_values_block(variables, bindings));
+        }
+        other => panic!(
+            "sparql: OPTIONAL group contains an unsupported sub-pattern: {other:?} \
+             (BIND-downstream → F2, DESCRIBE → F3 not yet shipped)"
         ),
-        other => {
-            panic!("sparql: OPTIONAL today only supports a single triple pattern (got {other:?})")
-        }
+    }
+}
+
+/// Phase F group F1: resolve a spargebra `Values { variables,
+/// bindings }` into a [`ValuesBlock`]. Constants resolve to
+/// dictionary ids **ahead of execution** (slice 59 CONSTRUCT-constant
+/// pattern); `UNDEF` (`None`) stays `None` → a NULL cell that places
+/// no constraint on that variable for that row. A constant that was
+/// never interned resolves to the sentinel `-1` so the join yields no
+/// match for that row (spec-correct "no solutions").
+fn make_values_block(variables: &[Variable], bindings: &[Vec<Option<GroundTerm>>]) -> ValuesBlock {
+    let vars: Vec<String> = variables.iter().map(|v| v.as_str().to_string()).collect();
+    let rows: Vec<Vec<Option<i64>>> = bindings
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| {
+                    cell.as_ref()
+                        .map(|gt| lookup_ground_term_id(gt).unwrap_or(-1))
+                })
+                .collect()
+        })
+        .collect();
+    ValuesBlock {
+        variables: vars,
+        rows,
     }
 }
 
@@ -2337,17 +2527,18 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
             // Walk the left arm first — it may itself be another
             // LeftJoin (chained OPTIONALs) or a Filter wrapping a BGP.
             walk_select_scoped(left, ps, current_scope);
-            // OPTIONAL's right arm: peel a wrapping GRAPH to get the
-            // optional's effective scope. `OPTIONAL { GRAPH … { … } }`
-            // overrides the outer scope; plain `OPTIONAL { … }`
-            // inherits `current_scope` (W3C §13.3).
-            let (triple, opt_scope) =
-                extract_optional_triple(right, current_scope, &mut ps.graph_scope_counter);
-            ps.optionals.push(OptionalBlock {
-                triple,
-                filter: expression.clone(),
-                scope: opt_scope,
-            });
+            // Phase F group F1: the OPTIONAL's right arm is now an
+            // N-triple group (BGP / GRAPH-wrapped / nested OPTIONAL /
+            // inner FILTER / inner VALUES / path). `OPTIONAL { GRAPH …
+            // { … } }` overrides the outer scope; a plain `OPTIONAL {
+            // … }` inherits `current_scope` (W3C §13.3).
+            let block = build_optional_block(
+                right,
+                expression.clone(),
+                current_scope,
+                &mut ps.graph_scope_counter,
+            );
+            ps.optionals.push(block);
         }
         GraphPattern::Union { left, right } => {
             // Chained `A UNION B UNION C` arrives as a left-leaning
@@ -2463,6 +2654,16 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
             walk_select_scoped(left, ps, current_scope);
             walk_select_scoped(right, ps, current_scope);
         }
+        GraphPattern::Values {
+            variables,
+            bindings,
+        } => {
+            // Phase F group F1: a `VALUES` inline table — top-level or
+            // joined alongside the BGP (`Join { Bgp, Values }` /
+            // `Join { Values, Bgp }`). Each becomes a `(VALUES …) AS
+            // vN(cols)` derived table joined on shared variables.
+            ps.values.push(make_values_block(variables, bindings));
+        }
         other => panic!("sparql: unsupported algebra in select wrapper: {other:?}"),
     }
 }
@@ -2558,6 +2759,7 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
+        &ps.values,
         &mut anchors,
         0,
     );
@@ -2662,6 +2864,7 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
+        &ps.values,
         &mut anchors,
         0,
     );
@@ -2988,6 +3191,7 @@ fn build_branch_sql(branch: &UnionBranch, projected: &[String]) -> String {
         &branch.filters,
         &branch.optionals,
         &branch.minuses,
+        &branch.values,
         &mut anchors,
         0,
     );
@@ -3041,20 +3245,15 @@ struct ScopePlan {
     /// get an `INNER JOIN _pgrdf_graphs g{S}` JOIN anchored on the
     /// first BGP alias that carries this scope.
     mandatory_join_ids: Vec<usize>,
-    /// Scope ids that ONLY appear inside OPTIONALs — these get a
-    /// `LEFT JOIN _pgrdf_graphs g{S}` JOIN, so an unmatched OPTIONAL
-    /// leaves `?g` unbound (NULL) rather than dropping the outer row.
-    optional_join_ids: Vec<usize>,
     /// scope_id → first BGP alias (qN) carrying that scope. The
     /// `_pgrdf_graphs g{S}` join anchors on `q{first_qi}.graph_id`,
     /// and every other triple alias in scope S equates its
     /// `graph_id` to the same anchor — so the JOIN's textual order
     /// (graphs joined AFTER mandatory triples) is unambiguous.
+    /// Phase F group F1: OPTIONAL groups no longer register scopes
+    /// here (they self-scope inside their LATERAL subquery, or
+    /// correlate to a mandatory `?g` anchor via `first_qi_for`).
     mandatory_first_qi: HashMap<usize, usize>,
-    /// scope_id → opt-triple alias (qOPT_i) for scopes born inside
-    /// an OPTIONAL. The LEFT JOIN to `_pgrdf_graphs g{S}` anchors on
-    /// this alias.
-    optional_first_qi: HashMap<usize, usize>,
     /// Maps variable name to its anchor scope_id (the first scope_id
     /// in this context binding that name). Used both for projection
     /// and for consistency equality between sibling scopes.
@@ -3067,23 +3266,21 @@ struct ScopePlan {
 }
 
 impl ScopePlan {
-    /// Build the plan by scanning every BGP + OPTIONAL scope. MINUS
-    /// scopes are handled inside `translate_minus`.
+    /// Build the plan by scanning the mandatory BGP scopes. Phase F
+    /// group F1: OPTIONAL groups now translate to self-contained
+    /// LATERAL derived tables (`emit_optional_lateral`) that handle
+    /// their own graph scoping — a `Literal` scope inside the
+    /// subquery, or correlation to the mandatory `?g` anchor for an
+    /// inherited `GRAPH ?g` (resolved via `first_qi_for`). MINUS
+    /// scopes stay internal to their NOT EXISTS subquery. So only
+    /// the mandatory side registers here.
     fn build(bgp: &[ScopedTriple], optionals: &[OptionalBlock], alias_offset: usize) -> Self {
+        let _ = optionals;
         let mut plan = ScopePlan::default();
-        // Mandatory-BGP scopes first so the "first scope binding ?g
-        // wins" rule favours the mandatory side.
         for (i, st) in bgp.iter().enumerate() {
             let qi = alias_offset + i + 1;
             if let Some(GraphScope::Variable { name, scope_id }) = &st.scope {
                 plan.register_mandatory(name.clone(), *scope_id, qi);
-            }
-        }
-        let first_opt_qi = alias_offset + bgp.len() + 1;
-        for (i, opt) in optionals.iter().enumerate() {
-            let this_qi = first_opt_qi + i;
-            if let Some(GraphScope::Variable { name, scope_id }) = &opt.scope {
-                plan.register_optional(name.clone(), *scope_id, this_qi);
             }
         }
         plan
@@ -3093,19 +3290,6 @@ impl ScopePlan {
         if !self.mandatory_join_ids.contains(&scope_id) {
             self.mandatory_join_ids.push(scope_id);
             self.mandatory_first_qi.insert(scope_id, qi);
-        }
-        self.register_name(name, scope_id);
-    }
-
-    fn register_optional(&mut self, name: String, scope_id: usize, qi: usize) {
-        // Skip if already counted as mandatory (i.e. an OPTIONAL
-        // inheriting the outer mandatory scope).
-        if self.mandatory_join_ids.contains(&scope_id) {
-            return;
-        }
-        if !self.optional_join_ids.contains(&scope_id) {
-            self.optional_join_ids.push(scope_id);
-            self.optional_first_qi.insert(scope_id, qi);
         }
         self.register_name(name, scope_id);
     }
@@ -3140,10 +3324,7 @@ impl ScopePlan {
     /// for both the `_pgrdf_graphs` JOIN and the per-triple graph_id
     /// equality on the second-and-later triples of the same scope.
     fn first_qi_for(&self, scope_id: usize) -> Option<usize> {
-        self.mandatory_first_qi
-            .get(&scope_id)
-            .or_else(|| self.optional_first_qi.get(&scope_id))
-            .copied()
+        self.mandatory_first_qi.get(&scope_id).copied()
     }
 }
 
@@ -3159,11 +3340,13 @@ impl ScopePlan {
 /// need INNER vs LEFT joins to `_pgrdf_graphs`. The returned
 /// `ScopePlan` is used by the caller's SELECT-list builder so a
 /// projected `?g` resolves to the right `g{S}.iri`.
+#[allow(clippy::too_many_arguments)]
 fn build_from_and_where(
     bgp: &[ScopedTriple],
     filters: &[Expression],
     optionals: &[OptionalBlock],
     minuses: &[MinusBlock],
+    values: &[ValuesBlock],
     anchors: &mut HashMap<String, (usize, &'static str)>,
     alias_offset: usize,
 ) -> (String, Vec<String>, ScopePlan) {
@@ -3258,52 +3441,42 @@ fn build_from_and_where(
             where_clauses.push(format!("g{scope_id}.graph_id = g{anchor}.graph_id"));
         }
     }
-    // OPTIONAL blocks — each becomes a LEFT JOIN whose ON includes
-    // the OPTIONAL's inner FILTER (if any). Vars only bound in the
-    // OPTIONAL come back NULL when the LEFT JOIN doesn't match.
+    // Phase F group F1 (LLD v0.4 §11): VALUES inline tables. Each
+    // becomes a `(VALUES (id,…),(id,…)) AS vN("?x","?y")` derived
+    // table CROSS JOINed in; the surrounding BGP correlates on shared
+    // variables via the `anchors` equality (a shared var already
+    // anchored to a quad alias adds `vN."?x" = q{anchor}.{col}`; a
+    // var first seen here anchors to `vN."?x"`). UNDEF cells are
+    // NULL → `col = NULL` is UNKNOWN, dropping that row's match for
+    // that pairing, which is the spec-correct "no constraint vs a
+    // bound value" outcome only when the var is unconstrained
+    // elsewhere; when it IS constrained the NULL simply fails to
+    // join (W3C §10 — UNDEF contributes a solution that is
+    // compatible with anything only on the UNDEF column).
     let mut next_qi = alias_offset + bgp.len() + 1;
-    let mut emitted_left_join_scopes: Vec<usize> = Vec::new();
+    for vb in values {
+        let vqi = next_qi;
+        next_qi += 1;
+        emit_values_table(vb, vqi, anchors, &mut from_sql, &mut where_clauses);
+    }
+    // OPTIONAL blocks — Phase F group F1: each is an N-triple group
+    // emitted as a `LEFT JOIN LATERAL (SELECT … ) qOPT_N ON TRUE`.
+    // The lateral subquery binds the whole inner group atomically
+    // (all-or-nothing per W3C §6.1): it yields exactly one row of
+    // dict-id columns when the group matches, zero rows otherwise,
+    // and the LEFT JOIN turns "zero rows" into NULLs for every
+    // optional variable. Shared variables correlate to the outer
+    // aliases (visible to a LATERAL subquery); optional-only
+    // variables are projected as `vK` columns and registered in the
+    // outer `anchors` so the existing projection / FILTER / BOUND
+    // machinery resolves them unchanged.
     for opt in optionals {
         let opt_qi = next_qi;
         next_qi += 1;
-        let mut clauses = pattern_clauses(&opt.triple, opt_qi, anchors);
-        if let Some(scope) = &opt.scope {
-            scope_constraint_clauses_anchor_q(scope, opt_qi, &plan, &mut clauses);
-        }
-        if let Some(filter_expr) = &opt.filter {
-            let sql = translate_filter(filter_expr, anchors).unwrap_or_else(|| {
-                panic!("sparql: OPTIONAL FILTER not translatable: {filter_expr:?}")
-            });
-            clauses.push(sql);
-        }
-        let on = if clauses.is_empty() {
-            "TRUE".to_string()
-        } else {
-            clauses.join(" AND ")
-        };
+        let subquery = emit_optional_lateral(opt, opt_qi, &plan, anchors, &mut next_qi);
         from_sql.push_str(&format!(
-            " LEFT JOIN pgrdf._pgrdf_quads q{opt_qi} ON ({on})"
+            " LEFT JOIN LATERAL ({subquery}) q{opt_qi} ON TRUE"
         ));
-        // OPTIONAL-born Variable scopes get a LEFT JOIN to
-        // `_pgrdf_graphs g{S}` so an unmatched OPTIONAL leaves both
-        // qOPT_i.* and g{S}.iri NULL (?g unbound).
-        if let Some(GraphScope::Variable { scope_id, .. }) = &opt.scope {
-            if plan.optional_join_ids.contains(scope_id)
-                && !emitted_left_join_scopes.contains(scope_id)
-            {
-                // Slice 55: same default-graph exclusion as the
-                // mandatory side. An OPTIONAL `GRAPH ?g { … }` that
-                // would have matched a default-graph quad now leaves
-                // `?g` unbound — consistent with W3C §13.3 + LEFT
-                // JOIN's NULL semantics.
-                from_sql.push_str(&format!(
-                    " LEFT JOIN pgrdf._pgrdf_graphs g{scope_id} \
-                     ON (g{scope_id}.graph_id = q{opt_qi}.graph_id \
-                         AND g{scope_id}.graph_id <> 0)"
-                ));
-                emitted_left_join_scopes.push(*scope_id);
-            }
-        }
     }
     // Top-level / branch-level FILTERs — applied to the joined
     // result. NULL comparisons drop the row (SPARQL "type error →
@@ -3322,6 +3495,344 @@ fn build_from_and_where(
         }
     }
     (from_sql, where_clauses, plan)
+}
+
+/// Phase F group F1: collect every variable name a triple binds
+/// (subject / predicate / object), in positional order.
+fn triple_var_names(tp: &TriplePattern, out: &mut Vec<String>) {
+    if let Some(v) = tp_subject_var(tp) {
+        out.push(v);
+    }
+    if let Some(v) = tp_predicate_var(tp) {
+        out.push(v);
+    }
+    if let Some(v) = tp_object_var(tp) {
+        out.push(v);
+    }
+}
+
+/// Phase F group F1: collect every variable an OPTIONAL block (and
+/// its nested OPTIONALs / inner VALUES) introduces, deduplicated and
+/// in first-seen order.
+fn optional_block_vars(opt: &OptionalBlock, out: &mut Vec<String>) {
+    for st in &opt.triples {
+        let mut vs = Vec::new();
+        triple_var_names(&st.triple, &mut vs);
+        for v in vs {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    for vb in &opt.values {
+        for v in &vb.variables {
+            if !out.contains(v) {
+                out.push(v.clone());
+            }
+        }
+    }
+    for n in &opt.nested {
+        optional_block_vars(n, out);
+    }
+}
+
+/// Phase F group F1 (LLD v0.4 §11): emit a `VALUES` inline table as a
+/// `(VALUES (id,…),(id,…)) AS vN("?a","?b")` derived table CROSS
+/// JOINed into the FROM list, plus the correlation equalities into
+/// `where_clauses`. Constant ids were resolved ahead of execution
+/// (see `make_values_block`); they are passed as positional `$K`
+/// params here for plan-cache stability. `UNDEF` (NULL) cells stay
+/// NULL — a NULL VALUES cell joined against a bound var via
+/// `IS NOT DISTINCT FROM` would over-match, so per W3C §10 a row's
+/// UNDEF column places **no** constraint: we emit
+/// `(vN.col IS NULL OR vN.col = q{anchor}.{col})` for a var that is
+/// also bound elsewhere, and simply anchor on `vN.col` for a var
+/// first introduced by the VALUES table.
+fn emit_values_table(
+    vb: &ValuesBlock,
+    vqi: usize,
+    anchors: &mut HashMap<String, (usize, &'static str)>,
+    from_sql: &mut String,
+    where_clauses: &mut Vec<String>,
+) {
+    if vb.variables.is_empty() || vb.rows.is_empty() {
+        // A VALUES with no columns or no rows. An empty-row VALUES is
+        // the empty solution (no-op); a zero-column one binds
+        // nothing. Emit nothing — joining against it would be a
+        // no-op (1-row) or eliminate all rows (0-row). The 0-row
+        // case (genuine empty result) is rare; treat the common
+        // shapes only and leave exotic emptiness to spec edge work.
+        if vb.rows.is_empty() && !vb.variables.is_empty() {
+            // Zero rows with declared columns → no solutions.
+            where_clauses.push("FALSE".to_string());
+        }
+        return;
+    }
+    // Column list: each declared variable becomes one synthetic
+    // `vK` column (the `DERIVED_COLS` pool) so the anchor stays a
+    // `&'static str` and the existing `q{qi}.{col}` projection /
+    // FILTER machinery resolves it verbatim (zero anchor refactor).
+    let col_idents: Vec<String> = (0..vb.variables.len())
+        .map(derived_col)
+        .map(String::from)
+        .collect();
+    // Row tuples: each cell is a positional `$K` param (resolved
+    // dict id) or `NULL` for UNDEF. Cast the first row's non-NULL
+    // cells to BIGINT so Postgres infers the column type even when
+    // the leading row has UNDEF.
+    let mut row_sqls: Vec<String> = Vec::with_capacity(vb.rows.len());
+    for (ri, row) in vb.rows.iter().enumerate() {
+        let mut cells: Vec<String> = Vec::with_capacity(row.len());
+        for cell in row {
+            match cell {
+                Some(id) => {
+                    let p = id_placeholder(*id);
+                    // Cast on the FIRST row so the VALUES column type
+                    // is BIGINT regardless of which rows are UNDEF.
+                    if ri == 0 {
+                        cells.push(format!("{p}::BIGINT"));
+                    } else {
+                        cells.push(p);
+                    }
+                }
+                None => {
+                    if ri == 0 {
+                        cells.push("NULL::BIGINT".to_string());
+                    } else {
+                        cells.push("NULL".to_string());
+                    }
+                }
+            }
+        }
+        row_sqls.push(format!("({})", cells.join(", ")));
+    }
+    from_sql.push_str(&format!(
+        " CROSS JOIN (VALUES {rows}) AS q{vqi}({cols})",
+        rows = row_sqls.join(", "),
+        cols = col_idents.join(", "),
+    ));
+    // Correlation / anchoring per declared variable.
+    for (k, var) in vb.variables.iter().enumerate() {
+        let col = derived_col(k);
+        match anchors.get(var).copied() {
+            Some((aqi, acol)) => {
+                // Var also bound elsewhere → constrain, but a NULL
+                // (UNDEF) cell must NOT constrain (W3C §10): a row
+                // whose cell is UNDEF is compatible with any value
+                // the var takes from the BGP.
+                where_clauses.push(format!(
+                    "(q{vqi}.{col} IS NULL OR q{vqi}.{col} = q{aqi}.{acol})"
+                ));
+            }
+            None => {
+                // First occurrence → this VALUES column anchors the
+                // variable for the rest of the query.
+                anchors.insert(var.clone(), (vqi, col));
+            }
+        }
+    }
+}
+
+/// Phase F group F1 (LLD v0.4 §11): emit a multi-triple OPTIONAL
+/// group as a LATERAL derived-table subquery. The caller wraps the
+/// returned string as `LEFT JOIN LATERAL (<this>) q{opt_qi} ON TRUE`.
+///
+/// The subquery:
+///   * INNER-joins the OPTIONAL's N inner triples (or `+`-path
+///     relations) — so the group matches **atomically**: either
+///     every inner triple matches (one row out) or none do (zero
+///     rows out → the outer LEFT JOIN yields NULLs for every
+///     optional variable, W3C §6.1).
+///   * recurses `opt.nested` as further `LEFT JOIN LATERAL`s (nested
+///     OPTIONAL composition).
+///   * CROSS-joins any inner `VALUES` table.
+///   * applies the OPTIONAL-internal FILTERs and the
+///     `LeftJoin.expression` join-FILTER inside its WHERE (sound
+///     under LEFT JOIN LATERAL ON TRUE — a row failing the filter
+///     simply means the optional did not match).
+///   * correlates shared variables to the OUTER aliases (visible to
+///     a LATERAL subquery) and projects every optional-introduced
+///     variable as a `vK` dict-id column.
+///
+/// Each newly-introduced optional variable is registered in the
+/// caller's `anchors` as `(opt_qi, "vK")` so the existing projection
+/// / FILTER / BOUND machinery resolves it from `q{opt_qi}.vK`
+/// unchanged.
+fn emit_optional_lateral(
+    opt: &OptionalBlock,
+    opt_qi: usize,
+    outer_plan: &ScopePlan,
+    outer_anchors: &mut HashMap<String, (usize, &'static str)>,
+    next_qi: &mut usize,
+) -> String {
+    // Local anchors seed from the outer so shared vars correlate to
+    // `q{outer}.{col}` on first occurrence inside the subquery; new
+    // optional-only vars get fresh inner aliases.
+    let mut local: HashMap<String, (usize, &'static str)> = outer_anchors.clone();
+    // Track which variables existed BEFORE this subquery (outer or
+    // an earlier sibling) so we only project the genuinely
+    // optional-introduced ones up as `vK` columns.
+    let pre_existing: std::collections::HashSet<String> = outer_anchors.keys().cloned().collect();
+
+    let mut inner_from = String::new();
+    let mut inner_where: Vec<String> = Vec::new();
+
+    // ---- inner triples (atomic INNER-join group) ----
+    let mut emitted_first = false;
+    for st in &opt.triples {
+        let qi = *next_qi;
+        *next_qi += 1;
+        let (from_src, mut clauses) = if let Some(rel) = &st.path {
+            let mut c = Vec::new();
+            bind_path_subject_object(&st.triple, qi, &mut local, &mut c);
+            optional_scope_clauses(&st.scope, qi, outer_plan, &mut c);
+            (
+                format!(
+                    "{frag} AS q{qi}{cols}",
+                    frag = rel.from_fragment,
+                    cols = rel.columns
+                ),
+                c,
+            )
+        } else {
+            let mut c = pattern_clauses(&st.triple, qi, &mut local);
+            optional_scope_clauses(&st.scope, qi, outer_plan, &mut c);
+            (format!("pgrdf._pgrdf_quads q{qi}"), c)
+        };
+        if !emitted_first {
+            inner_from.push_str(&from_src);
+            inner_where.append(&mut clauses);
+            emitted_first = true;
+        } else {
+            let on = if clauses.is_empty() {
+                "TRUE".to_string()
+            } else {
+                clauses.join(" AND ")
+            };
+            inner_from.push_str(&format!(" INNER JOIN {from_src} ON ({on})"));
+        }
+    }
+    // An OPTIONAL group with only VALUES / nested and no triples:
+    // seed FROM with a single-row anchor so the joins have a base.
+    if !emitted_first && (!opt.values.is_empty() || !opt.nested.is_empty()) {
+        inner_from.push_str("(SELECT 1) AS q_opt_base");
+        emitted_first = true;
+    }
+    if !emitted_first {
+        // Degenerate empty OPTIONAL — matches the outer row with no
+        // new bindings. `SELECT 1` yields one row → LEFT JOIN keeps
+        // the outer row (a no-op OPTIONAL).
+        return "SELECT 1 AS _m".to_string();
+    }
+
+    // ---- inner VALUES ----
+    for vb in &opt.values {
+        let vqi = *next_qi;
+        *next_qi += 1;
+        emit_values_table(vb, vqi, &mut local, &mut inner_from, &mut inner_where);
+    }
+
+    // ---- nested OPTIONALs (recurse) ----
+    for nested in &opt.nested {
+        let nqi = *next_qi;
+        *next_qi += 1;
+        let sub = emit_optional_lateral(nested, nqi, outer_plan, &mut local, next_qi);
+        inner_from.push_str(&format!(" LEFT JOIN LATERAL ({sub}) q{nqi} ON TRUE"));
+    }
+
+    // ---- inner FILTERs + join-FILTER ----
+    for f in &opt.filters {
+        let sql = translate_filter(f, &local)
+            .unwrap_or_else(|| panic!("sparql: OPTIONAL inner FILTER not translatable: {f:?}"));
+        inner_where.push(sql);
+    }
+    if let Some(jf) = &opt.join_filter {
+        let sql = translate_filter(jf, &local)
+            .unwrap_or_else(|| panic!("sparql: OPTIONAL join FILTER not translatable: {jf:?}"));
+        inner_where.push(sql);
+    }
+
+    // ---- projection: every optional-introduced var → vK ----
+    // Determine the full optional variable set (this block + nested
+    // + inner VALUES), then project only those not pre-existing.
+    let mut group_vars: Vec<String> = Vec::new();
+    optional_block_vars(opt, &mut group_vars);
+    let mut select_cols: Vec<String> = Vec::new();
+    let mut k = 0usize;
+    for var in &group_vars {
+        if pre_existing.contains(var) {
+            // Shared with the outer — already projectable from the
+            // outer alias; the subquery only correlated it.
+            continue;
+        }
+        let col = derived_col(k);
+        k += 1;
+        match local.get(var).copied() {
+            Some((aqi, acol)) => {
+                select_cols.push(format!("q{aqi}.{acol} AS {col}"));
+                outer_anchors.insert(var.clone(), (opt_qi, col));
+            }
+            None => {
+                // Variable named in the group but never actually
+                // bound (e.g. only inside a nested OPTIONAL that the
+                // nested lateral already projected as its own vK and
+                // registered in `local`). Fall back to NULL so the
+                // column still exists for outer projection.
+                select_cols.push(format!("NULL::BIGINT AS {col}"));
+                outer_anchors.insert(var.clone(), (opt_qi, col));
+            }
+        }
+    }
+    if select_cols.is_empty() {
+        // No new variables (all shared / correlation-only) — still
+        // need a column so the subquery is well-formed and yields a
+        // row iff the group matched.
+        select_cols.push("1 AS _m".to_string());
+    }
+
+    let mut sql = format!(
+        "SELECT {sel} FROM {inner_from}",
+        sel = select_cols.join(", "),
+    );
+    if !inner_where.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&inner_where.join(" AND "));
+    }
+    sql
+}
+
+/// Phase F group F1: graph-scope constraint for an OPTIONAL inner
+/// triple. A `Literal(gid)` scope adds `q{qi}.graph_id = $gid`. A
+/// `Variable` scope inherited from an enclosing `GRAPH ?g { … }`
+/// correlates the inner triple's `graph_id` to the OUTER scope
+/// anchor's `graph_id` (the `?g` binding lives on the mandatory
+/// side; the lateral subquery sees that alias). A `Variable` scope
+/// first introduced **inside** a multi-triple OPTIONAL is deferred
+/// (rare; F-future) — it panics with the stable rollout prefix.
+fn optional_scope_clauses(
+    scope: &Option<GraphScope>,
+    qi: usize,
+    outer_plan: &ScopePlan,
+    clauses: &mut Vec<String>,
+) {
+    match scope {
+        None => {}
+        Some(GraphScope::Literal(gid)) => {
+            let p = id_placeholder(*gid);
+            clauses.push(format!("q{qi}.graph_id = {p}"));
+        }
+        Some(GraphScope::Variable { scope_id, name }) => {
+            if let Some(anchor_qi) = outer_plan.first_qi_for(*scope_id) {
+                clauses.push(format!("q{qi}.graph_id = q{anchor_qi}.graph_id"));
+            } else {
+                panic!(
+                    "sparql: rollout-preview: `GRAPH ?{name}` introduced inside a \
+                     multi-triple OPTIONAL is not yet supported (Phase F-future); \
+                     scope the GRAPH block around the whole pattern instead"
+                );
+            }
+        }
+    }
 }
 
 /// Emit the graph-id constraint clauses for a triple alias whose
@@ -5123,6 +5634,7 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
+        &ps.values,
         &mut anchors,
         0,
     );
@@ -5415,6 +5927,7 @@ fn execute_delete_where(
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
+        &ps.values,
         &mut anchors,
         0,
     );
@@ -5736,6 +6249,7 @@ fn execute_delete_insert_where(
         &ps.filters,
         &ps.optionals,
         &ps.minuses,
+        &ps.values,
         &mut anchors,
         0,
     );
@@ -7316,6 +7830,192 @@ mod tests {
         .unwrap_or(0);
         // FILTER(BOUND(?r)) prunes b's row (no q match → ?r NULL).
         assert_eq!(rows, 1);
+    }
+
+    /// Phase F group F1 (LLD v0.4 §11) — multi-triple OPTIONAL.
+    /// `OPTIONAL { ?s ex:name ?n . ?s ex:age ?ag }` binds the
+    /// 2-triple group ATOMICALLY (all-or-nothing per W3C §6.1):
+    /// alice (name+age) + carol (name+age) match; bob (name, NO
+    /// age) → BOTH ?n and ?ag NULL even though bob has a name;
+    /// dave (neither) → both NULL. 4 rows preserved; exactly 2 with
+    /// ?n bound (the all-or-nothing proof).
+    #[pg_test]
+    fn sparql_optional_multi_triple_atomic() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:alice a ex:Person ; ex:name \"Alice\" ; ex:age 30 .
+                 ex:bob   a ex:Person ; ex:name \"Bob\"  .
+                 ex:carol a ex:Person ; ex:name \"Carol\" ; ex:age 17 .
+                 ex:dave  a ex:Person .',
+                8044)",
+        )
+        .unwrap();
+
+        let total: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?s ?n ?ag
+                  WHERE { ?s a ex:Person
+                          OPTIONAL { ?s ex:name ?n . ?s ex:age ?ag } }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(total, 4, "left-side count preserved");
+
+        let n_bound: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?s ?n ?ag
+                  WHERE { ?s a ex:Person
+                          OPTIONAL { ?s ex:name ?n . ?s ex:age ?ag } }'
+             ) WHERE sparql->'n' != 'null'::jsonb",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        // Atomic: bob HAS a name but the 2-triple group failed (no
+        // age) so his ?n is NULL too → only alice + carol.
+        assert_eq!(
+            n_bound, 2,
+            "atomic optional: ?n bound iff whole group matched"
+        );
+    }
+
+    /// Phase F group F1 — nested OPTIONAL (OPTIONAL inside OPTIONAL,
+    /// W3C §6.1 composition). Outer optional binds ?n for the named
+    /// persons; the inner optional binds ?ag independently. bob has
+    /// a name but no age → ?n="Bob", ?ag NULL (the inner optional
+    /// missing does NOT unbind the outer ?n).
+    #[pg_test]
+    fn sparql_optional_nested() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:alice a ex:Person ; ex:name \"Alice\" ; ex:age 30 .
+                 ex:bob   a ex:Person ; ex:name \"Bob\"  .
+                 ex:dave  a ex:Person .',
+                8045)",
+        )
+        .unwrap();
+
+        let n_bound: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?s ?n ?ag
+                  WHERE { ?s a ex:Person
+                          OPTIONAL { ?s ex:name ?n
+                                     OPTIONAL { ?s ex:age ?ag } } }'
+             ) WHERE sparql->'n' != 'null'::jsonb",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(n_bound, 2, "alice + bob have a name; dave does not");
+
+        let ag_bound: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?s ?n ?ag
+                  WHERE { ?s a ex:Person
+                          OPTIONAL { ?s ex:name ?n
+                                     OPTIONAL { ?s ex:age ?ag } } }'
+             ) WHERE sparql->'ag' != 'null'::jsonb",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(ag_bound, 1, "only alice has an age");
+    }
+
+    /// Phase F group F1 — VALUES inline table joined on the shared
+    /// variable. `VALUES (?x) { (ex:a) (ex:c) (ex:zzz) }` joined to
+    /// `?x ex:p ?y` returns only the listed subjects that also have
+    /// an ex:p (a, c) — zzz has none.
+    #[pg_test]
+    fn sparql_values_join() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p 1 . ex:b ex:p 2 . ex:c ex:p 3 .',
+                8046)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?x ?y
+                  WHERE { ?x ex:p ?y }
+                  VALUES (?x) { (ex:a) (ex:c) (ex:zzz) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 2, "a + c match; zzz has no ex:p");
+    }
+
+    /// Phase F group F1 — VALUES with `UNDEF`. Row `(ex:a UNDEF)`
+    /// constrains ?x to a but places NO constraint on ?y (W3C §10),
+    /// so it matches a's actual ?y. Row `(ex:zzz 2)` has no ex:p →
+    /// no match. Net = 1 row.
+    #[pg_test]
+    fn sparql_values_undef() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p 1 . ex:b ex:p 2 .',
+                8047)",
+        )
+        .unwrap();
+
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.sparql(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?x ?y
+                  WHERE { ?x ex:p ?y }
+                  VALUES (?x ?y) { (ex:a UNDEF) (ex:zzz 2) }'
+             )",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(rows, 1, "UNDEF ?y matches a's value; zzz has no ex:p");
+    }
+
+    /// Phase F group F1 — LLD §11 acceptance criterion: a
+    /// multi-triple OPTIONAL and a VALUES query no longer appear in
+    /// `pgrdf.sparql_parse`'s `unsupported_algebra` (the array is
+    /// empty for these shapes now that the executor translates
+    /// them).
+    #[pg_test]
+    fn sparql_parse_optional_values_no_longer_unsupported() {
+        let opt_unsup: pgrx::JsonB = Spi::get_one(
+            "SELECT pgrdf.sparql_parse(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?s ?n ?ag WHERE { ?s a ex:Person
+                  OPTIONAL { ?s ex:name ?n . ?s ex:age ?ag } }'
+             )->'unsupported_algebra'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            opt_unsup.0,
+            serde_json::json!([]),
+            "multi-triple OPTIONAL must not be flagged unsupported"
+        );
+
+        let val_unsup: pgrx::JsonB = Spi::get_one(
+            "SELECT pgrdf.sparql_parse(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?x ?y WHERE { ?x ex:p ?y }
+                  VALUES (?x) { (ex:a) (ex:b) }'
+             )->'unsupported_algebra'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            val_unsup.0,
+            serde_json::json!([]),
+            "VALUES must not be flagged unsupported"
+        );
     }
 
     /// SELECT DISTINCT — deduplication on the projected variables.

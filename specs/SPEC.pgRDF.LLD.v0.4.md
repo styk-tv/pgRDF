@@ -125,8 +125,8 @@ Capability matrix for the v0.4 target:
 | Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | ✅ E1 `^` (slices 49-46) / E2 `+` (slices 45-42) / E3 `*`,`?` (slices 41-38) — full W3C §9.3 zero-length semantics, depth-guard GUC, cycle-safe CTE |
 | Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | ✅ E4 (slices 37-35) — `a\|b`, n-ary `a\|b\|c`, `(a\|b)+`/`(a\|b)*`/`(a\|b)?`, `^(a\|b)`; sequence/recursive-arm remainder gated per §7.1 |
 | Materialised-closure no-CTE fallback | not yet | §7.2 / §7.3 | ✅ E4 (slices 37-35) — `+`/`*` over `rdfs:subClassOf` / `rdfs:subPropertyOf` / `owl:sameAs` with `is_inferred` rows present → direct match, no `CTE Scan` |
-| Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | 🚧 |
-| `VALUES` inline tables | ⏳ deferred | §11 | 🚧 |
+| Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | ✅ F1 (slices 34-31) — N-triple OPTIONAL via LATERAL-style derived table inside the LEFT JOIN; atomic (all-or-nothing §6.1), nested OPTIONAL, OPTIONAL-internal FILTER, optional-var outer FILTER, GRAPH scoping, `+`-path-in-required composition; inherited by `pgrdf.construct` + UPDATE WHERE |
+| `VALUES` inline tables | ⏳ deferred | §11 | ✅ F1 (slices 34-31) — `(VALUES …) AS vN(cols)` derived table joined on shared vars; constants resolved to dict ids ahead of execution; `UNDEF` → NULL cell (no constraint, §10); typed/lang literals datatype-aware; composes with GRAPH + OPTIONAL; inherited by `pgrdf.construct` + UPDATE WHERE |
 | `BIND` output in later FILTER / BGP | ⏳ deferred | §11 | 🚧 |
 | Aggregates over `UNION` | ⏳ deferred | §11 | 🚧 |
 | `DESCRIBE` | ⏳ deferred | §11 | 🚧 |
@@ -1081,24 +1081,47 @@ These items were enumerated under "⏳ v0.4" in
 §4-§7 because the same translator machinery they need
 (LATERAL-style derived-table refactor + AST substitution) is the
 same machinery §4 (UPDATE) and §6 (CONSTRUCT) need. Ship together
-for economy. 🚧
+for economy. 🚧 (§11 overall stays 🚧 until Phase F group F4 — the
+v0.4.6 cut; F1 has landed multi-triple OPTIONAL + VALUES.)
 
-- **Multi-triple `OPTIONAL { BGP }`.** The v0.3 OPTIONAL handler
-  supports a single-triple right side. v0.4 extends it to N-triple
-  BGPs by emitting a LATERAL-style derived-table inside the LEFT
-  JOIN.
-- **`VALUES` inline tables.** Translates to a derived-table /
-  CTE that materialises the inline rows; the BGP joins against it
-  on the bound variables.
-- **`BIND` output downstream.** AST substitution pass: every
+Phase F dispatch grouping: **F1 (slices 34-31) — multi-triple
+OPTIONAL + VALUES (✅ landed)**; F2 — BIND-downstream +
+aggregates-over-UNION (🚧); F3 — DESCRIBE (🚧); F4 — W3C
+consolidation + docs + the v0.4.6 release cut (🚧).
+
+- **Multi-triple `OPTIONAL { BGP }`.** ✅ **F1 landed.** The v0.3
+  OPTIONAL handler supported only a single-triple right side. F1
+  emits the whole N-triple right side as a LATERAL-style derived
+  table inside the LEFT JOIN (`LEFT JOIN LATERAL (SELECT …) qOPT ON
+  TRUE`), so the optional group binds **atomically** (all-or-nothing
+  per W3C §6.1). Nested OPTIONAL, OPTIONAL-internal FILTER, the
+  `LeftJoin.expression` join-FILTER, the optional-var outer FILTER,
+  GRAPH `<iri>`/`?g` scoping, and `+`-path-in-required composition
+  all compose; `pgrdf.construct` (CONSTRUCT WHERE) and SPARQL
+  UPDATE's WHERE inherit it (same BGP walker). The translator stays
+  in `src/query/executor.rs` (`build_optional_block` /
+  `emit_optional_lateral`) — OPTIONAL/VALUES are core BGP
+  translation, too entangled with `anchors`/`ScopePlan`/projection
+  for a clean additive carve; flagged as a Phase H carve candidate.
+- **`VALUES` inline tables.** ✅ **F1 landed.** Translates to a
+  `(VALUES (id,…),(id,…)) AS vN(cols)` derived table the BGP joins
+  on the shared variables. Constants resolve to dictionary ids
+  ahead of execution (mirroring slice-59 CONSTRUCT-constant
+  resolution); `UNDEF` → a NULL cell that places NO constraint on
+  that variable for that row (W3C §10); typed/lang literals match
+  datatype/lang-aware. Composes with GRAPH scoping + OPTIONAL;
+  inherited by `pgrdf.construct` + UPDATE WHERE.
+- **`BIND` output downstream.** 🚧 **F2 (not yet shipped).** AST
+  substitution pass: every
   reference to a `BIND`-introduced variable in a later FILTER or
   BGP rewrites to the bound expression. The v0.3 limitation
   (BIND projection-only) lifts.
-- **Aggregates over `UNION`.** Derived-table refactor: the UNION
-  becomes a sub-SELECT, aggregation runs over its rows. Residual
-  refinements after the v0.4 cut move to
+- **Aggregates over `UNION`.** 🚧 **F2 (not yet shipped).**
+  Derived-table refactor: the UNION becomes a sub-SELECT,
+  aggregation runs over its rows. Residual refinements after the
+  v0.4 cut move to
   [`v0.5-FUTURE §8`](SPEC.pgRDF.LLD.v0.5-FUTURE.md).
-- **`DESCRIBE`.** Like CONSTRUCT but returning the closure around
+- **`DESCRIBE`.** 🚧 **F3 (not yet shipped).** Like CONSTRUCT but returning the closure around
   the described subject (every triple where the subject is the
   named term, transitively expanded one hop on blank nodes per
   W3C §16.4). Routes through `pgrdf.construct` internally for the

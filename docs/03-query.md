@@ -54,8 +54,9 @@ result rows ─► SETOF JSONB
 | FILTER identity (`=`, `!=`, `sameTerm`) | dict-id equality | Sound because `_pgrdf_dictionary` dedups by (type, lex, datatype, lang) |
 | FILTER numeric ordering | `CASE WHEN datatype_iri_id IN (…XSD numeric…) THEN lex::numeric ELSE NULL END` | Type-safe; non-numeric drops the row via NULL comparison |
 | FILTER REGEX | Postgres `~` / `~*` against `lexical_value` | `i` flag → case-insensitive |
-| FILTER BOUND | `qN.col IS NOT NULL` | Correct for OPTIONAL vars (nullable); trivially TRUE for mandatory |
-| OPTIONAL { triple } | `LEFT JOIN _pgrdf_quads qOPT_K ON (…)` | Per-block FILTER lands in the ON clause |
+| FILTER BOUND | `qN.col IS NOT NULL` | Correct for OPTIONAL vars (nullable, resolved via `qOPT.vK`); trivially TRUE for mandatory |
+| OPTIONAL { BGP } | `LEFT JOIN LATERAL (SELECT <vars AS vK> FROM <inner BGP> WHERE <preds + correlation + inner FILTERs>) qOPT ON TRUE` | Phase F group F1: N-triple right side as one atomic LATERAL derived table (all-or-nothing, W3C §6.1); nested OPTIONAL recurses the same emitter; optional-only vars resolve as `qOPT.vK` |
+| `VALUES (?x …) { … }` | `CROSS JOIN (VALUES (id,…),(id,…)) AS vN(vK…)` + `(vN.vK IS NULL OR vN.vK = q{anchor}.{col})` correlation | Phase F group F1: constants → dict ids ahead of execution; `UNDEF` → NULL cell (no constraint, W3C §10) |
 | UNION { A } { B } | `(SELECT … FROM A) UNION ALL (SELECT … FROM B)` | Each branch SELECTs `NULL::TEXT` for vars it doesn't bind |
 | MINUS { triple } | `WHERE NOT EXISTS (SELECT 1 FROM _pgrdf_quads qMIN_K WHERE …)` | Elided at translation time when there are no shared variables (SPARQL no-op) |
 | `GRAPH <iri> { … }` | `qN.graph_id = <resolved>` on every triple alias inside the block | IRI resolved against `_pgrdf_graphs.iri` at translate time; unresolved IRI binds to `-1` (zero rows, spec-correct "no solutions") |
@@ -389,7 +390,56 @@ Concrete shape:
       ordering, REGEX, IN, STR, LANG, DATATYPE, UCASE, LCASE,
       STRLEN, CONTAINS, STRSTARTS, STRENDS, arithmetic
 - ✅ Solution modifiers — DISTINCT, REDUCED, LIMIT, OFFSET, ORDER BY
-- ✅ OPTIONAL (single triple per block, chained)
+- ✅ OPTIONAL — single AND multi-triple groups, chained, nested
+      (Phase F group F1). The whole N-triple right side emits as a
+      `LEFT JOIN LATERAL (SELECT …) qOPT ON TRUE` so the group binds
+      **atomically** (all-or-nothing, W3C §6.1): either every inner
+      variable binds or every one comes back NULL. OPTIONAL-internal
+      FILTER, the `OPTIONAL { … } FILTER(…)` join-FILTER, the
+      optional-var outer FILTER, GRAPH scoping, and a `+`-path in
+      the required part all compose; inherited by `pgrdf.construct`
+      and SPARQL UPDATE WHERE.
+
+      ```sql
+      -- 2-triple OPTIONAL: alice/carol (name+age) bind both;
+      -- bob (name, no age) → BOTH ?n and ?ag NULL (atomic).
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT ?s ?n ?ag
+           WHERE { ?s a ex:Person
+                   OPTIONAL { ?s ex:name ?n . ?s ex:age ?ag } }');
+
+      -- Nested OPTIONAL — the inner optional binds ?ag
+      -- independently of the outer ?n.
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT ?s ?n ?ag
+           WHERE { ?s a ex:Person
+                   OPTIONAL { ?s ex:name ?n
+                              OPTIONAL { ?s ex:age ?ag } } }');
+      ```
+- ✅ `VALUES` inline tables (Phase F group F1) — top-level or joined
+      alongside a BGP. Translates to a `(VALUES (id,…),(id,…)) AS
+      vN(cols)` derived table joined on the shared variables;
+      constants resolve to dictionary ids ahead of execution;
+      `UNDEF` is a NULL cell that places **no** constraint on that
+      variable for that row (W3C §10); typed/lang literals match
+      datatype-aware. Composes with GRAPH scoping + OPTIONAL;
+      inherited by `pgrdf.construct` and SPARQL UPDATE WHERE.
+
+      ```sql
+      -- Only the listed subjects that also have an ex:p.
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT ?x ?y WHERE { ?x ex:p ?y }
+         VALUES (?x) { (ex:a) (ex:c) }');
+
+      -- UNDEF places no constraint on ?y for that row.
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT ?x ?y WHERE { ?x ex:p ?y }
+         VALUES (?x ?y) { (ex:a UNDEF) (ex:b 2) }');
+      ```
 - ✅ UNION (n-way; per-branch FILTERs / OPTIONALs / MINUSes)
 - ✅ MINUS — single AND multi-triple sub-pattern, shared-var keyed
 - ✅ Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`,

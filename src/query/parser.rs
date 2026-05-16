@@ -367,9 +367,10 @@ fn walk(
         GraphPattern::OrderBy { inner, .. } => walk(inner, vars, bgp, unsupported),
         GraphPattern::Filter { inner, .. } => walk(inner, vars, bgp, unsupported),
         GraphPattern::LeftJoin { left, right, .. } => {
-            // OPTIONAL — supported by the executor (single-triple
-            // right side only, today). Walk both arms to collect
-            // their BGP shape; the executor enforces the constraint.
+            // OPTIONAL — Phase F group F1 (LLD v0.4 §11): now fully
+            // supported including an N-triple right side (LATERAL
+            // derived table inside the LEFT JOIN). Walk both arms to
+            // collect the combined BGP shape; nothing is flagged.
             walk(left, vars, bgp, unsupported);
             walk(right, vars, bgp, unsupported);
         }
@@ -452,7 +453,19 @@ fn walk(
                 unsupported.push("Path (recursive/alternation property path)");
             }
         }
-        GraphPattern::Values { .. } => unsupported.push("Values (inline VALUES)"),
+        GraphPattern::Values { variables, .. } => {
+            // Phase F group F1 (LLD v0.4 §11): `VALUES` inline tables
+            // are now translated (a `(VALUES …) AS vN(cols)` derived
+            // table joined on shared variables). Surface the declared
+            // column variables so the parsed shape is visible; do NOT
+            // flag it unsupported any more (§11 acceptance criterion).
+            for v in variables {
+                let name = v.as_str().to_string();
+                if !vars.contains(&name) {
+                    vars.push(name);
+                }
+            }
+        }
         GraphPattern::Service { .. } => unsupported.push("Service (federation)"),
 
         _ => unsupported.push("other"),

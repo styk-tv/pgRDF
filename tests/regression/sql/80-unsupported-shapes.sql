@@ -75,28 +75,24 @@ $$;
 -- Positive coverage now lives at
 -- `tests/w3c-sparql/22-having-inline-aggregate/`.
 
--- ─── Gap 2: multi-triple OPTIONAL ────────────────────────────────
--- W3C §6 allows OPTIONAL blocks with N>=1 triples. pgRDF handles
--- only single-triple OPTIONAL; multi-triple needs a derived-table
--- refactor inside the LEFT JOIN.
-SELECT _check_gap(
-  'gap-2 multi-triple OPTIONAL',
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n ?a WHERE {
-     ?s foaf:name ?n
-     OPTIONAL { ?s foaf:age ?a . ?s foaf:name ?n2 }
-   }',
-  'sparql: OPTIONAL today only supports a single triple pattern'
-);
+-- ─── Gap 2 (RETIRED): multi-triple OPTIONAL ──────────────────────
+-- W3C §6.1 — Phase F group F1 (slices 34-31, LLD v0.4 §11) lifts the
+-- v0.3 single-triple restriction. An `OPTIONAL { ?s :p ?n . ?s :q
+-- ?ag }` N-triple group now translates to a LATERAL-style derived
+-- table inside the LEFT JOIN (all-or-nothing per §6.1). Positive
+-- coverage: `tests/regression/sql/112-optional-multi-triple.sql`.
+-- This gap entry is intentionally removed — the executor no longer
+-- panics on multi-triple OPTIONAL, so a `_check_gap` here would emit
+-- `!!! unexpected success !!!`.
 
--- ─── Gap 3: VALUES inline data block ─────────────────────────────
--- W3C §10.2 — pgRDF parses but does not translate.
-SELECT _check_gap(
-  'gap-3 VALUES inline data',
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n WHERE { ?s foaf:name ?n . VALUES ?n { "Alice" "Bob" } }',
-  'sparql: unsupported algebra'
-);
+-- ─── Gap 3 (RETIRED): VALUES inline data block ───────────────────
+-- W3C §10 — Phase F group F1 ships `VALUES`. It translates to a
+-- `(VALUES …) AS vN(cols)` derived table joined on the shared
+-- variables (constants resolved to dict ids ahead of execution;
+-- UNDEF → a NULL cell that places no constraint). Positive
+-- coverage: `tests/regression/sql/113-values-inline.sql`. The
+-- executor no longer flags VALUES unsupported, so a `_check_gap`
+-- here would emit `!!! unexpected success !!!`.
 
 -- ─── Gap 4 (RETIRED): GRAPH ?g { … } variable form ──────────────
 -- W3C §13.3 — both literal-IRI (`GRAPH <iri> { … }`, slice 114) and
