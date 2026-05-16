@@ -4,13 +4,105 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is `v0.5.0-rc1` (a **prerelease** — flagged
-`isPrerelease=true` so it does not supersede `v0.4.6` as "latest").
-Cargo.toml reads `version = "0.5.0-rc1"` (bumped from `0.4.6`
-during the v0.5.0-rc1 release pre-flight, Phase G countdown group
-G3 / slice 12). See `CHANGELOG.md` for the running set of
-`[Unreleased]` entries that move into the next `[N.M.P]` block at
-tag time.
+The current cut is **`v0.5.0`** — the final v0.5 release. It is
+flagged `isPrerelease=false` + `isLatest=true` and **supersedes
+`v0.4.6` as "latest"** (the `v0.5.0-rc1` tag stays a prerelease,
+preserved as the rc record). Cargo.toml reads `version = "0.5.0"`
+(bumped from `0.5.0-rc1` during the v0.5.0 release pre-flight,
+Phase H). See `CHANGELOG.md` for the running set of `[Unreleased]`
+entries that move into the next `[N.M.P]` block at tag time.
+
+## v0.5.0 — 2026-05-16
+
+The final v0.5 cut. Phase H promotes `SPEC.pgRDF.LLD.v0.5-FUTURE.md`
+to the authoritative `SPEC.pgRDF.LLD.v0.5.md` (shipped contract),
+opens `SPEC.pgRDF.LLD.v0.6-FUTURE.md`, adds the `oci-publish.yml`
+workflow, and cuts **v0.5.0** — the complete RDF / SPARQL / SHACL /
+OWL surface. **This release is NOT a prerelease**: it is marked
+`isLatest=true` and supersedes `v0.4.6`.
+
+### Engine surface delta vs v0.5.0-rc1
+
+- **No engine change.** v0.5.0 is byte-identical to v0.5.0-rc1 at
+  the `src/` level — the v0.5-gate surface (§3-§8) shipped in the
+  Phase G groups G1/G2/G3 and is unchanged. v0.5.0 is the version
+  bump + spec promotion + the OCI-publish workflow only.
+- E-013 is **resolved** (no upstream `sh:nodeKind` bug; the W3C
+  SHACL Core gate is a genuine **25/25 full-pass, no exclusion** —
+  established at v0.5.0-rc1, carried into the final cut unchanged).
+- E-012 is a **documented upstream-gate, final for v0.5.0** (the
+  `shacl 0.3.1` SHACL-SPARQL stub; the `mode => 'sparql'` surface
+  ships honest + forward-compatible, not a pgRDF defect).
+
+### Control-version reconciliation
+
+`Cargo.toml` `version`, `pgrdf.control` `default_version`, the
+`cargo pgrx package` SQL filename, and the Postgres `extversion`
+are **all identically `0.5.0`** — no reconciliation needed (a clean
+semver with no pre-release tag; `cargo pgrx package` emits
+`pgrdf--0.5.0.sql`; `CREATE EXTENSION pgrdf` reports `0.5.0`).
+`00-smoke.out` literals updated to `0.5.0`.
+
+### Cut file set (mirrors the v0.4.6 / v0.5.0-rc1 cut exactly)
+
+`Cargo.toml` (version only — metadata untouched) + `Cargo.lock`
+(`cargo update -p pgrdf`) + `pgrdf.control` (`default_version`) +
+`compose/compose.yml` (the single SQL bind-mount line
+`pgrdf--0.5.0.sql`, the v0.4.6 F4 one-line pattern) +
+`tests/regression/expected/00-smoke.out` (version literals) +
+`CHANGELOG.md` (`[Unreleased]` + `[0.5.0-rc1]` → `[0.5.0]`) +
+`RELEASE_NOTES.md` (full rewrite for the final cut) +
+`docs/09-release.md` (this section). Same 8-file shape as the
+v0.4.6 / v0.5.0-rc1 cuts.
+
+**Ritual deviations vs the v0.4.6 cut:** README.md NOT touched — a
+parallel docs session owns it, same deviation as every prior cut.
+The spec promotion + the new `oci-publish.yml` + the v0.5-FUTURE
+cross-ref sweep + the Phase H CHANGELOG entry landed in the **prep
+commit**, not here, mirroring how every prior cut keeps the
+non-version-bump surface out of the release commit. No `src/` fmt
+sweep needed (`cargo fmt --all -- --check` clean).
+
+**Latest, NOT prerelease.** v0.5.0-rc1 was explicitly flagged a
+prerelease (`gh release edit v0.5.0-rc1 --prerelease`); v0.5.0 is
+the opposite — after `release.yml` creates the release, the cut
+asserts `gh release view v0.5.0 --json isPrerelease,isLatest` and,
+if needed, `gh release edit v0.5.0 --prerelease=false --latest` so
+it ends `isPrerelease=false`, `isDraft=false`, `isLatest=true`,
+superseding `v0.4.6`.
+
+### OCI publish (ghcr.io/styk-tv/pgrdf-bundle)
+
+The new `.github/workflows/oci-publish.yml` triggers on
+`release: [published]` (and `workflow_dispatch` with a `tag`
+input). It installs ORAS, downloads the release tarballs +
+`SHA256SUMS` (no rebuild — the artifacts are exactly the
+release.yml output), verifies the checksums, then pushes one OCI
+artifact per PG×arch (`:0.5.0-pg17-amd64`, …) and builds the
+aggregate `:0.5.0` / `:v0.5.0` index manifests.
+
+**One-time maintainer make-public step (manual).** The Actions
+`GITHUB_TOKEN` can push packages (`packages: write`) but **cannot**
+change package visibility (`admin:packages` is not grantable to the
+workflow token). `styk-tv` is a **user** account, so the first
+publish lands `ghcr.io/styk-tv/pgrdf-bundle` **private**. To allow
+anonymous `oras pull`, a maintainer flips it public once:
+
+- UI: GitHub → your packages → `pgrdf-bundle` → Package settings →
+  Danger Zone → Change visibility → Public; **or**
+- API: `gh api -X PUT \
+    /users/styk-tv/packages/container/pgrdf-bundle/visibility \
+    -f visibility=public` (run by a maintainer with `admin:packages`).
+
+This is a flagged maintainer action, **not** part of the automated
+cut — the OCI workflow succeeding with a private package is the
+expected first-publish state.
+
+E-011 carried: `publish-crate.yml` stays disabled until upstream
+[`gtfierro/reasonable#50`](https://github.com/gtfierro/reasonable/pull/50)
+merges. The v0.5.0 tag fires `release.yml` (8 platform tarballs
+PG14-17 × amd64/arm64 + SHA256SUMS) and `oci-publish.yml` (the OCI
+bundle); **no crates.io publish this cut**.
 
 ## v0.5.0-rc1 — 2026-05-16
 

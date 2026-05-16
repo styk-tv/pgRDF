@@ -1,196 +1,82 @@
-# pgRDF v0.5.0-rc1
+# pgRDF v0.5.0 — the complete RDF / SPARQL / SHACL / OWL surface
 
-**Release candidate — all v0.5-FUTURE v0.5-gate tracks (§3-§8)
-complete.** Phase G closes the v0.5 capability scope across three
-grouped dispatches (G1 → G3, countdown 21 → 12) on top of the v0.4
-cycle. This is a **release candidate**: the final **v0.5.0** follows
-after Phase H+I hygiene + the two documented honest follow-ups
-(ERRATA.v0.5 E-012, E-013). An rc tag is flagged a GitHub
-*prerelease* so it does not supersede v0.4.6 as "latest".
+**pgRDF v0.5.0 is the complete in-database RDF toolkit for PostgreSQL.** Storage, SPARQL 1.1 query + update, OWL 2 RL / RDFS reasoning, and W3C SHACL Core validation all run natively inside Postgres — no external triple store, no sidecar service. This is the final v0.5.0 cut: it supersedes the `v0.5.0-rc1` prerelease and becomes the latest release.
 
-## Headline — the full v0.5 capability surface
+## Capability surface (everything that ships)
 
-Everything the v0.5-FUTURE LLD gates (§3 through §8) ships:
+- **Storage** — dictionary-encoded terms in `_pgrdf_dictionary`; quads in `_pgrdf_quads` LIST-partitioned by `graph_id`; hexastore covering indexes (SPO, POS, OSP). Turtle, **TriG** and **N-Quads** ingest (`pgrdf.load_turtle`, `pgrdf.parse_trig`, `pgrdf.parse_nquads`) — TriG/N-Quads honour inline / 4th-position graph IRIs (auto-allocate, or reject under `strict`).
+- **SPARQL SELECT / ASK / CONSTRUCT / DESCRIBE** — `pgrdf.sparql(q) → SETOF JSONB`, `pgrdf.construct(q)`, `pgrdf.describe(q)`; spargebra parser + dynamic-SQL executor with a prepared-plan cache. Full property paths (`^` `+` `*` `?` `|`, recursive `WITH RECURSIVE` lowering, materialised-closure fast path). The §11 SPARQL backlog — multi-triple OPTIONAL, VALUES, downstream BIND, aggregates over UNION (incl. the six v0.5 residuals), DESCRIBE — plus type-aware ORDER BY across the SPARQL 1.1 §15.1 value space.
+- **SPARQL UPDATE** — INSERT DATA / DELETE DATA / INSERT…WHERE / DELETE…WHERE / DELETE…INSERT…WHERE, graph-scoped (`WITH <iri>`, inline `GRAPH <iri> { … }`), and the CREATE/DROP/CLEAR/COPY/MOVE lifecycle algebra.
+- **Named graphs + lifecycle UDFs** — `GRAPH <iri>` / `GRAPH ?g`, the `_pgrdf_graphs` IRI↔id map (pg_dump round-trip), and `pgrdf.{drop,clear,copy,move}_graph` with both BIGINT and **IRI-keyed overloads** (`drop_graph('http://…')`).
+- **OWL 2 RL + RDFS reasoning** — `pgrdf.materialize(graph_id, profile TEXT DEFAULT 'owl-rl')`. The bare 1-arg form is byte-identical to v0.4 (`'owl-rl'`). `'rdfs'` runs a strict, sound, complete RDFS rule subset (a true subset of OWL-RL). Unknown profiles error with no silent fallback.
+- **SHACL Core validation** — `pgrdf.validate(data_graph_id, shapes_graph_id, mode TEXT DEFAULT 'native')`. The 2-arg form is byte-identical to v0.4. JSONB gains a `mode` field; unknown modes error before any work. Validation against a `pgrdf.materialize`-d graph reports violations against entailed triples. The vendored **W3C SHACL Core** manifest gate is a genuine **25 / 25 full-pass** on the `sh:conforms` invariant, wired into CI on every PG major.
 
-- **Named-graph scoping + IRI map** (v0.4.1) —
-  `GRAPH <iri>`/`GRAPH ?g`, `_pgrdf_graphs`, `pg_dump` round-trip.
-- **SPARQL UPDATE** (v0.4.3) — INSERT/DELETE DATA, INSERT/DELETE
-  WHERE, DELETE-INSERT-WHERE, graph-scoped, the lifecycle algebra.
-- **Graph lifecycle UDFs** (v0.4.2) — `drop/clear/copy/move_graph`,
-  BIGINT + (v0.5) IRI-keyed overloads.
-- **SPARQL CONSTRUCT** (v0.4.4) — constant/variable/blank-node/
-  multi-triple templates, `CONSTRUCT WHERE` shorthand, round-trip.
-- **Property paths** (v0.4.5) — `^` `+` `*` `?` `|`, recursive
-  `WITH RECURSIVE` lowering, materialised-closure fast path.
-- **§11 SPARQL backlog** (v0.4.6) — multi-triple OPTIONAL, VALUES,
-  downstream BIND, aggregates over UNION, DESCRIBE, type-aware
-  ORDER BY (SPARQL 1.1 §15.1 value-space).
-- **Reasoning-profile selector** (v0.5, Phase G G1) —
-  `pgrdf.materialize(g, profile TEXT DEFAULT 'owl-rl')`; `'rdfs'`
-  adds a strict, sound, complete RDFS rule subset; unknown profiles
-  error. Closes the last ONTOSYS P1 capability gap.
-- **IRI lifecycle overloads** (v0.5, Phase G G1) —
-  `pgrdf.{drop,clear,copy,move}_graph(iri TEXT, …)`.
-- **TriG / N-Quads ingest** (v0.5, Phase G G2) —
-  `pgrdf.parse_trig`, `pgrdf.parse_nquads` honour inline /
-  4th-position graph IRIs, reusing the batched-insert path.
-- **Aggregates-over-UNION residuals** (v0.5, Phase G G2) — the six
-  F2 stable panics are lifted (correct answers).
-- **SHACL `mode` argument** (v0.5, Phase G G3) —
-  `pgrdf.validate(data, shapes, mode TEXT DEFAULT 'native')`; the
-  JSONB gains a `mode` field; unknown modes error; validation
-  against a materialised data graph reports violations against
-  entailed triples.
-- **W3C SHACL Core manifest gate** (v0.5, Phase G G3) — a vendored,
-  hermetic W3C SHACL Core subset, genuine 25/25 full-pass (no
-  exclusion), wired into CI on every PG major.
+## Documented limitations (honest, scoped, upstream-gated)
 
-## Phase G group G3 — SHACL `mode` + W3C SHACL Core gate
+These are documented upstream gates — NOT pgRDF defects — exactly the posture used for E-011 / RDF 1.2.
 
-### §5 — `pgrdf.validate(data, shapes, mode TEXT DEFAULT 'native')`
+- **E-011 — crates.io publish is gated.** pgRDF depends on a patched `reasonable` (the `styk-tv/reasonable` `rdf12-passthrough` fork wired via `[patch.crates-io]`) until upstream [`gtfierro/reasonable#50`](https://github.com/gtfierro/reasonable/pull/50) merges. A crate with a `[patch.crates-io]` line cannot be published to crates.io, so the **supported distribution path is the GitHub release tarballs and the OCI bundle below** — `publish-crate.yml` stays disabled.
+- **E-012 — SHACL-SPARQL constraint execution is upstream-gated.** `shacl 0.3.1` (rudof) has no SHACL-SPARQL constraint component and its `SparqlEngine` is an `unimplemented!()` stub (rudof issues #21/#94/#1). `pgrdf.validate(…, 'sparql')` therefore does NOT invoke the broken engine — it returns a clean deterministic structured report (`conforms:null` + an `error` naming the upstream gap), never a panic. The `mode` argument, the JSONB shape, and the validation path are exactly what they will be the day rudof ships the engine — one guard is deleted and `'sparql'` routes through with no signature change. This is documented in ERRATA.v0.5 E-012 and is final for v0.5.0.
 
-The `mode` argument ships fully: accepted, validated, echoed in a
-new JSONB `mode` field. The 2-arg `pgrdf.validate(d, s)` form
-defaults `'native'` and is byte-identical to the v0.4 surface — no
-regression. An unknown mode raises
-`validate: unknown mode "<x>" (supported: 'native', 'sparql')`
-**before** any work (no silent fallback — mirrors §3's
-`materialize: unknown profile`).
+## Install — GitHub release tarballs (stock postgres:17.4)
 
-```sql
-SELECT pgrdf.validate(data_g, shapes_g);            -- 'native' (default)
-SELECT pgrdf.validate(data_g, shapes_g, 'native');  -- explicit
-SELECT pgrdf.validate(data_g, shapes_g, 'sparql');  -- see E-012
+Each platform tarball (`pgrdf-0.5.0-pg<PG>-glibc-<arch>.tar.gz`, PG 14-17 × amd64/arm64) unpacks to the `SPEC.pgRDF.INSTALL.v0.2 §3` layout (`lib/pgrdf.so`, `share/extension/pgrdf.control`, `share/extension/pgrdf--0.5.0.sql`, `LICENSE`, `NOTICE`, `SHA256SUMS`). Verify, then bind-mount into a stock Postgres container:
+
+```bash
+tar xzf pgrdf-0.5.0-pg17-glibc-amd64.tar.gz
+( cd pgrdf-0.5.0-pg17-glibc-amd64 && sha256sum -c SHA256SUMS )
+
+docker run -d --name pg \
+  -e POSTGRES_PASSWORD=pw \
+  -v "$PWD/pgrdf-0.5.0-pg17-glibc-amd64/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro" \
+  -v "$PWD/pgrdf-0.5.0-pg17-glibc-amd64/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro" \
+  -v "$PWD/pgrdf-0.5.0-pg17-glibc-amd64/share/extension/pgrdf--0.5.0.sql:/usr/share/postgresql/17/extension/pgrdf--0.5.0.sql:ro" \
+  postgres:17.4
+docker exec -it pg psql -U postgres -c 'CREATE EXTENSION pgrdf;'
 ```
 
-**Validation against a materialised graph (§5.3 #2 — fully met).**
-`pgrdf.materialize` then `pgrdf.validate` validates the entailed
-closure: a shape requiring chain membership reaches a focus node
-bound ONLY by RDFS entailment (regression `122-shacl-modes.sql` §E
-+ pgrx `validate_materialised_graph_entailed`).
+The aggregate `SHA256SUMS` asset on the release verifies every tarball.
 
-**`'sparql'` mode — honest scope (ERRATA.v0.5 E-012).** `shacl
-0.3.1` has no SHACL-SPARQL constraint component (the parser
-silently drops `sh:sparql`) **and** its `SparqlEngine` is an
-upstream stub — `unimplemented!()` in every target-resolution
-method, so invoking it panics. pgRDF does **not** invoke the broken
-engine; `'sparql'` returns a clean, deterministic structured report
-(`conforms:null` + an `error` naming the gap + E-012), never a
-panic. The surface is forward-compatible: the day a rudof release
-ships the engine, one guard is deleted and `'sparql'` routes
-through with no signature change.
+## OCI artifacts (ghcr.io/styk-tv/pgrdf-bundle)
 
-### §6 — W3C SHACL Core manifest gate
+```
+oras pull ghcr.io/styk-tv/pgrdf-bundle:v0.5.0-pg17-amd64
+oras manifest fetch ghcr.io/styk-tv/pgrdf-bundle:v0.5.0   # index of all 8 PG×arch
+# digest-pin (recommended): oras pull ghcr.io/styk-tv/pgrdf-bundle@sha256:<digest>
+# NOTE: anonymous pull requires the package be public (one-time maintainer setting).
+```
 
-New `just test-shacl-manifest` harness (`tests/w3c-shacl/`,
-structured like `tests/w3c-sparql/`). A vendored subset of the W3C
-`data-shapes-test-suite` SHACL Core tests — hermetic (checked in,
-never fetched at test time). Wired into `ci.yml` on every PG major
-(14-17) as a **real gate** (no `continue-on-error`/`if:false`).
-
-The vendored W3C SHACL **Core** suite is a genuine **full-pass —
-25 / 25** on the W3C `sh:conforms` invariant, **with no exclusion**.
-Per ERRATA.v0.5 **E-013** the gate compares `conforms` (not the
-violation *count*, which drifts ±1 from pgRDF's blank-node-relabelling
-dictionary rehydrate for blank-node *focus* nodes — a serialization
-artifact that does not flip conformance, the same reason focus-node
-IRIs are excluded). E-013's earlier "`prop-nodeKind-001`
-documented-excluded for a true upstream `sh:nodeKind` bug" claim was
-a **G3 unverified assumption** (the fixture was committed straight
-into `fixtures/excluded/`, so `run.sh` — which globs only
-`fixtures/core/*.ttl` — never ran it); a triple-verified investigation
-at v0.5.0-rc1 found **no upstream bug**: pgRDF produces the
-W3C-authoritative `conforms:false` / 27 violations, and the fixture
-is now graded in `fixtures/core/` and PASSing. No fork, no MR, no
-`[patch.crates-io]`. `--sparql` asserts the E-012 known state
-(`conforms:null` for every fixture).
+The `oci-publish` workflow runs on `release: [published]`, downloads the release tarballs (no rebuild), and pushes one OCI artifact per PG×arch plus the aggregate `:0.5.0` / `:v0.5.0` index manifests. **Anonymous pull requires the GHCR package be set public** — the Actions `GITHUB_TOKEN` lacks `admin:packages`, so the first publish lands the package private and a maintainer flips it public once (GitHub → Package settings → visibility Public, or `gh api`). A **digest pin** (`@sha256:<digest>`) is recommended for reproducible deployments.
 
 ## Test bar
 
+All hand-computed / hand-derived — no `ACCEPT=1` autobaselining of new query or SHACL coverage.
+
 ```
-pgrx integration  274  (was 270 — +4 §5 SHACL-mode tests)
-pg_regress         85  (was 84  — +1: 122-shacl-modes)
-w3c-sparql         51  (was 47  — +4 Phase G fixtures
-                        48-reasoning-profile-rdfs …
-                        51-nquads-loaded)
-w3c-shacl Core      25  (NEW — vendored W3C SHACL Core gate,
-                        genuine 25/25 full-pass on sh:conforms,
-                        no exclusion; E-013)
-LUBM-shape          3  (unchanged)
+pgrx integration   274  (PG14-17 matrix in CI)
+pg_regress          85
+W3C-shape SPARQL    51
+W3C SHACL Core      25  (genuine 25/25 full-pass on sh:conforms, no exclusion)
+LUBM-shape           3
 Total: 438 green across six layers, plus the pg_dump round-trip
-gate and the w3c-shacl --sparql E-012 known-state assertion.
+gate and the W3C SHACL --sparql E-012 known-state assertion.
 ```
-
-All hand-computed / hand-derived; no `ACCEPT=1` autobaselining of
-new query or SHACL coverage. The W3C SHACL expecteds are
-hand-derived from each fixture's W3C `mf:result` block.
-
-## ERRATA
-
-- **E-006** — pgrx 0.17+/0.18 do not build on current rustc;
-  pinned to PG 17 + pgrx 0.16 (carried).
-- **E-011** — `reasonable` rdf-12 passthrough patch carried; the
-  `publish-crate.yml` workflow stays **disabled** until upstream
-  [`gtfierro/reasonable#50`](https://github.com/gtfierro/reasonable/pull/50)
-  merges. The v0.5.0-rc1 tag fires `release.yml` only (8 platform
-  tarballs PG14-17 × amd64/arm64 + SHA256SUMS); **no crates.io
-  publish this cut**.
-- **E-012** (new, v0.5) — `shacl 0.3.1` SHACL-SPARQL mode is a
-  documented upstream-gate (no constraint component +
-  `unimplemented!()` engine; upstream's own roadmap, rudof issues
-  #21/#94/#1). The `mode` arg ships forward-compatible; `'sparql'`
-  returns a deterministic structured report. Final for v0.5.0 as a
-  documented limitation, NOT a pgRDF defect.
-- **E-013** (new, v0.5) — **corrected/resolved**. The W3C SHACL Core
-  gate uses the `sh:conforms` invariant; its earlier "one W3C Core
-  fixture `prop-nodeKind-001` documented-excluded for an upstream
-  `sh:nodeKind` bug" claim was a G3 unverified assumption (the
-  fixture was committed straight into `fixtures/excluded/` so the
-  harness never ran it). A triple-verified investigation at
-  v0.5.0-rc1 found no upstream bug; the fixture is restored to
-  `fixtures/core/` and W3C SHACL Core is a **genuine 25/25 full-pass,
-  no exclusion**. No fork/MR/`[patch.crates-io]`.
-
-See [`specs/ERRATA.v0.2.md`](specs/ERRATA.v0.2.md),
-[`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md) and
-[`specs/ERRATA.v0.5.md`](specs/ERRATA.v0.5.md) for the full text.
-
-## Release candidate — what follows
-
-This is a **release candidate**. The v0.5-FUTURE v0.5-gate scope
-(§3-§8) is COMPLETE. The final **v0.5.0** follows after **Phase
-H+I**: final hygiene, ERRATA close-outs, and the `executor.rs`
-core-BGP carve catch-up. E-013 is **resolved** (no upstream bug;
-§6 W3C SHACL Core is a genuine 25/25 full-pass). E-012 stays a
-documented upstream-gate (the SHACL-SPARQL upstream engine), final
-for v0.5.0. Still 🚧 in
-[`SPEC.pgRDF.LLD.v0.4.md`](specs/SPEC.pgRDF.LLD.v0.4.md):
-`heap_multi_insert` / `COPY BINARY` ingest (§12 phase B).
 
 ## Upgrading from v0.4.6
 
-pgRDF v0.x reserves the right to break schema between minor
-releases. `ALTER EXTENSION pgrdf UPDATE` is not supported in
-v0.x. Drop and recreate:
+pgRDF v0.x reserves the right to break schema between minor releases; `ALTER EXTENSION pgrdf UPDATE` is not supported. Drop and recreate (dump first if you care about your data):
 
 ```sql
--- Dump first if you care about your data
 DROP EXTENSION pgrdf CASCADE;
--- Install v0.5.0-rc1 artifacts
+-- install the v0.5.0 artifacts
 CREATE EXTENSION pgrdf;
--- Re-ingest
+-- re-ingest
 ```
 
-The table shapes (`_pgrdf_graphs`, `_pgrdf_quads`,
-`_pgrdf_dictionary`) are unchanged from v0.4.6; `pgrdf.validate`
-gains an optional third argument (the 2-arg form is unchanged) and
-the `parse_trig`/`parse_nquads` ingest UDFs landed in G2. A
-`pg_dump` from v0.4.6 restores against a v0.5.0-rc1 install via the
-documented `DROP/CREATE EXTENSION; pg_restore` path. See
-[`docs/06-installation.md` § Upgrade between v0.x versions](docs/06-installation.md#upgrade-between-v0x-versions).
+The table shapes (`_pgrdf_graphs`, `_pgrdf_quads`, `_pgrdf_dictionary`) are unchanged from v0.4.6; `pgrdf.validate` gains an optional third argument (the 2-arg form is unchanged) and the `parse_trig`/`parse_nquads` ingest UDFs landed in the v0.5 cycle. A `pg_dump` from v0.4.6 restores against a v0.5.0 install via the documented DROP/CREATE EXTENSION; pg_restore path. See [`docs/06-installation.md` § Upgrade between v0.x versions](docs/06-installation.md#upgrade-between-v0x-versions).
 
 ## License
 
 Apache 2.0. Copyright 2026 Peter Styk &lt;peter@styk.tv&gt;.
 
-Full changelog: [`CHANGELOG.md`](CHANGELOG.md).
+Full changelog: [`CHANGELOG.md`](CHANGELOG.md). Spec: [`specs/SPEC.pgRDF.LLD.v0.5.md`](specs/SPEC.pgRDF.LLD.v0.5.md) (authoritative, shipped in v0.5.0); errata [`specs/ERRATA.v0.5.md`](specs/ERRATA.v0.5.md).

@@ -6,40 +6,35 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-### Changed
+## [0.5.0] — 2026-05-16
 
-- Spec promotion (Phase H) — `specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md` promoted to authoritative `specs/SPEC.pgRDF.LLD.v0.5.md` via `git mv` (history preserved). The promoted file's §0 status flips from "draft / forward-looking" to "authoritative — shipped in pgRDF v0.5.0"; future-tense framing for every v0.5-gate track (§3 reasoning-profile selector, §4 TriG/N-Quads ingest, §5 SHACL `mode` arg + materialised-graph validation, §6 W3C SHACL Core manifest gate genuine 25/25, §7 IRI lifecycle overloads, §8 aggregates-over-UNION residuals) converted to present-tense shipped reality. §5.3 #1 (SHACL-SPARQL constraint execution) is documented in v0.5 as an upstream-gated limitation (ERRATA.v0.5 E-012 — `shacl 0.3.1` has no constraint component + an `unimplemented!()` engine; the `mode => 'sparql'` surface ships honest + forward-compatible, NOT a pgRDF defect, consistent with the E-011/RDF-1.2 posture). Every `v0.5-FUTURE` cross-reference (≈14 docs/spec files) rewired: now-shipped §§ point at `SPEC.pgRDF.LLD.v0.5.md`, forward/v1.0 items point at the new `SPEC.pgRDF.LLD.v0.6-FUTURE.md`. Mirrors the `761b82f` v0.4→v0.4 promotion precedent.
-
-### Added
-
-- `specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md` (Phase H) — the next forward-look sibling beyond v0.5. Carries the v1.0 forward look (incremental delta-driven materialisation, RDF 1.2 triple terms gated on gtfierro/reasonable#50 / E-011, federated `SERVICE`, Postgres custom-scan hooks) **plus** the documented post-v0.5.0 deferrals: the **`executor.rs` core-BGP module carve** (explicitly deferred post-v0.5.0 — a large behaviour-neutral refactor, too risky to gate the v0.5.0 cut on), `heap_multi_insert`/`COPY BINARY` ingest phase B (LLD v0.4 §12, perf, non-gating), and a real SHACL-SPARQL engine (when upstream rudof ships `IRComponent::Sparql` / E-012 re-check trigger fires). Structured like the original v0.5-FUTURE (forward-looking, acceptance-criteria stubs).
-- `.github/workflows/oci-publish.yml` (Phase H) — publishes the release tarballs as OCI artifacts to `ghcr.io/styk-tv/pgrdf-bundle` (pgRDF's roadmapped target per `ERRATA.v0.2.md` / `docs/10-roadmap.md` / `INSTALL.v0.2.md`). Triggers on `release: [published]` (and `workflow_dispatch`); downloads the existing release tarballs (no rebuild), pushes per-PG×arch artifacts via ORAS, and builds aggregate `:VER` / `:vTAG` index manifests. Anonymous pull requires the GHCR package be made public (a one-time maintainer step — the Actions `GITHUB_TOKEN` lacks `admin:packages`).
-
-## [0.5.0-rc1] — 2026-05-16
-
-**Release candidate — all v0.5 v0.5-gate tracks (§3-§8)
-complete.** Phase G closes the v0.5 capability scope: reasoning-
-profile selector, IRI lifecycle overloads, TriG/N-Quads ingest,
-aggregates-over-UNION residuals, the SHACL `mode` argument, and the
-W3C SHACL Core manifest gate. Two documented honest caveats carry
-to the final v0.5.0 after Phase H+I hygiene: ERRATA.v0.5 **E-012**
-(`shacl 0.3.1` SHACL-SPARQL mode is a documented upstream-gate — the
-`mode` arg ships forward-compatible). **E-013** is corrected/resolved:
-its earlier "one W3C SHACL Core fixture excluded for an upstream
-`sh:nodeKind` bug" claim was a G3 unverified assumption (the fixture
-was committed straight into `fixtures/excluded/` so the harness never
-ran it); investigation at v0.5.0-rc1 found no upstream bug, the
-fixture is restored to `fixtures/core/`, and W3C SHACL Core is a
-**genuine 25/25 full-pass, no exclusion**. crates.io publish stays
-gated on
-gtfierro/reasonable#50 (E-011); this rc ships the 8 platform
-tarballs via release.yml only.
+**The complete RDF / SPARQL / SHACL / OWL surface.** v0.5.0 is the
+final cut of the v0.5 cycle (supersedes the v0.5.0-rc1
+prerelease). Every v0.5-gate track §3–§8 is shipped: the
+reasoning-profile selector, IRI lifecycle overloads, TriG/N-Quads
+ingest, the aggregates-over-UNION residuals, the SHACL `mode`
+argument, and the W3C SHACL Core manifest gate (genuine 25/25
+full-pass, no exclusion — ERRATA.v0.5 **E-013** resolved). One
+documented honest limitation carries: ERRATA.v0.5 **E-012**
+(`shacl 0.3.1` SHACL-SPARQL constraint execution is an upstream
+stub — the `mode => 'sparql'` surface ships honest +
+forward-compatible, NOT a pgRDF defect, consistent with the
+E-011/RDF-1.2 posture). crates.io publish stays gated on
+gtfierro/reasonable#50 (E-011); v0.5.0 ships the 8 platform
+tarballs + SHA256SUMS via release.yml and the OCI bundle via the
+new oci-publish workflow.
 
 ### Added
 
-- SHACL-SPARQL constraint mode + W3C SHACL manifest gate — Phase G group G3 (slices 13-12). `pgrdf.validate(data, shapes, mode TEXT DEFAULT 'native')` adds `'sparql'` mode (sh:select SPARQL constraints) alongside `'native'`; JSONB gains a `mode` field; unknown modes error (`validate: unknown mode`). Validation against a materialised data graph reports violations against entailed triples (regression-locked). New `just test-shacl-manifest` harness runs the W3C SHACL Core + SHACL-SPARQL suites, wired into CI on every PG major. Closes LLD v0.5 §5 + §6 — all v0.5 v0.5-gate tracks (§3-§8) complete.
+- SHACL `mode` argument + W3C SHACL Core manifest gate — Phase G group G3 (slices 13-12). `pgrdf.validate(data, shapes, mode TEXT DEFAULT 'native')` adds the `mode` argument (`'native'` | `'sparql'`) alongside the byte-identical 2-arg form; JSONB gains a `mode` field; unknown modes error (`validate: unknown mode`, no silent fallback). Validation against a materialised data graph reports violations against entailed triples (regression-locked). `'sparql'` mode returns a deterministic structured "unavailable" report (ERRATA.v0.5 E-012 — the upstream `shacl 0.3.1` SHACL-SPARQL constraint component + `SparqlEngine` are unimplemented; pgRDF never invokes the broken engine, forward-compatible). New `just test-shacl-manifest` harness runs the vendored W3C SHACL Core suite (genuine 25/25 full-pass on `sh:conforms`, no exclusion — E-013 resolved) + the `--sparql` E-012 known-state assertion, wired into CI on every PG major. Closes LLD v0.5 §5 + §6 — all v0.5-gate tracks (§3-§8) complete.
 - TriG / N-Quads ingest + aggregates-over-UNION residual refinements — Phase G group G2 (slices 17-14). `pgrdf.parse_trig(content, default_graph_id, strict)` and `pgrdf.parse_nquads(...)` honour inline/4th-position graph IRIs (auto-allocate via v0.4 §3.2, or reject under `strict`), reusing the v0.3 batched-insert path. Closes the six LLD v0.5 §8 aggregate-over-UNION residuals (GRAPH-scope group key, computed-BIND join key, BIND in CONSTRUCT/DESCRIBE template, nested UNION-of-UNION, cross-branch HAVING, GROUP_CONCAT DISTINCT+SEPARATOR) — the F2 stable panics are lifted. Closes LLD v0.5 §4 + §8.
 - Reasoning-profile selector + IRI lifecycle overloads — Phase G group G1 (slices 21-18). `pgrdf.materialize(graph_id, profile TEXT DEFAULT 'owl-rl')` adds `'rdfs'` (RDFS rule subset) alongside `'owl-rl'`; JSONB gains a `profile` field; unknown profiles error (`materialize: unknown profile`, no silent fallback). The bare `pgrdf.materialize(g)` form is unchanged. IRI-keyed overloads `pgrdf.{drop,clear,copy,move}_graph(iri TEXT, …)` resolve via `_pgrdf_graphs` and dispatch to the v0.4 §5 partition-DDL path (error `<fn>: unknown iri` on an unbound IRI, distinct from the BIGINT no-op). Closes LLD v0.5 §3 (last ONTOSYS P1 gap) + §7.
+- `specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md` (Phase H) — the next forward-look sibling beyond v0.5. Carries the v1.0 forward look (incremental delta-driven materialisation, RDF 1.2 triple terms gated on gtfierro/reasonable#50 / E-011, federated `SERVICE`, Postgres custom-scan hooks) **plus** the documented post-v0.5.0 deferrals: the **`executor.rs` core-BGP module carve** (explicitly deferred post-v0.5.0 — a large behaviour-neutral refactor, too risky to gate the v0.5.0 cut on), `heap_multi_insert`/`COPY BINARY` ingest phase B (LLD v0.4 §12, perf, non-gating), and a real SHACL-SPARQL engine (when upstream rudof ships `IRComponent::Sparql` / E-012 re-check trigger fires).
+- `.github/workflows/oci-publish.yml` (Phase H) — publishes the release tarballs as OCI artifacts to `ghcr.io/styk-tv/pgrdf-bundle` (pgRDF's roadmapped target per `ERRATA.v0.2.md` / `docs/10-roadmap.md` / `INSTALL.v0.2.md`). Triggers on `release: [published]` (and `workflow_dispatch`); downloads the existing release tarballs (no rebuild), pushes per-PG×arch artifacts via ORAS, and builds aggregate `:VER` / `:vTAG` index manifests. Anonymous pull requires the GHCR package be made public (a one-time maintainer step — the Actions `GITHUB_TOKEN` lacks `admin:packages`).
+
+### Changed
+
+- Spec promotion (Phase H) — `specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md` promoted to authoritative `specs/SPEC.pgRDF.LLD.v0.5.md` via `git mv` (history preserved). The promoted file's §0 status flips from "draft / forward-looking" to "authoritative — shipped in pgRDF v0.5.0"; future-tense framing for every v0.5-gate track (§3–§8) converted to present-tense shipped reality. §5.3 #1 (SHACL-SPARQL constraint execution) is documented in v0.5 as an upstream-gated limitation (ERRATA.v0.5 E-012 — consistent with the E-011/RDF-1.2 posture). Every `v0.5-FUTURE` cross-reference (≈14 docs/spec files) rewired: now-shipped §§ point at `SPEC.pgRDF.LLD.v0.5.md`, forward/v1.0 items point at the new `SPEC.pgRDF.LLD.v0.6-FUTURE.md`. Mirrors the `761b82f` v0.4→v0.4 promotion precedent.
 
 ## [0.4.6] — 2026-05-16
 
