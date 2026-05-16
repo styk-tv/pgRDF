@@ -6,6 +6,8 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-05-16
+
 ### Added
 
 - SPARQL multi-triple OPTIONAL + VALUES inline tables — Phase F group F1 (slices 34-31). OPTIONAL now accepts an N-triple BGP right side (LATERAL-style derived table inside the LEFT JOIN); nested OPTIONAL, OPTIONAL-internal FILTER, and optional-var outer FILTER all compose. VALUES materialises inline rows (incl. UNDEF, typed/lang literals) joined on shared variables. Both compose with GRAPH scoping + property paths and are inherited by pgrdf.construct and SPARQL UPDATE WHERE. `pgrdf.sparql_parse` no longer flags these in `unsupported_algebra` (LLD §11 acceptance).

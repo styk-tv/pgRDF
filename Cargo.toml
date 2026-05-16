@@ -1,6 +1,6 @@
 [package]
 name = "pgrdf"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2021"
 # MSRV. Matches the CI build container (compose/builder.Containerfile
 # `FROM rust:1.91-bookworm`) — the only Rust version pgRDF artifacts

@@ -4,11 +4,135 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is `v0.4.5`. Cargo.toml reads `version = "0.4.5"`
-(bumped from `0.4.4` during the v0.4.5 release pre-flight, Phase E
-countdown slice 35). See `CHANGELOG.md` for the running set of
-`[Unreleased]` entries that move into the next `[N.M.P]` block at
-tag time.
+The current cut is `v0.4.6`. Cargo.toml reads `version = "0.4.6"`
+(bumped from `0.4.5` during the v0.4.6 release pre-flight, Phase F
+countdown group F4 / slice 22). See `CHANGELOG.md` for the running
+set of `[Unreleased]` entries that move into the next `[N.M.P]`
+block at tag time.
+
+## v0.4.6 — 2026-05-16
+
+Phase F closes with a four-group countdown (34 → 22) shipping the
+full LLD v0.4 §11 SPARQL surface backlog, plus the release cut
+(group F4 / slice 22). Multi-triple OPTIONAL, VALUES, downstream
+BIND, aggregates over UNION, DESCRIBE, and **type-aware ORDER BY**
+all execute end-to-end on the SQL engine. **§11 is complete.**
+
+### Engine surface delta vs v0.4.5
+
+- **Storage / OWL 2 RL inference / SHACL / SPARQL UPDATE /
+  CONSTRUCT / property paths** — unchanged; no breaking changes to
+  existing surfaces. No new user-facing UDF this cut — type-aware
+  ORDER BY is internal to the query translator (behind the
+  existing `pgrdf.sparql`); `pgrdf.describe` shipped in F3.
+- **SPARQL §11 backlog (LLD v0.4 §11)** — **shipped end-to-end
+  across the Phase F countdown 34 → 22**. Per group:
+    - **F1 (34 → 31)** — multi-triple `OPTIONAL { BGP }` (N-triple
+      right side as a LATERAL-style derived table inside the LEFT
+      JOIN; atomic, W3C §6.1) + `VALUES` inline tables
+      (`(VALUES …) AS vN(cols)` derived table; `UNDEF` →
+      no-constraint NULL, W3C §10).
+    - **F2 (30 → 27)** — downstream `BIND` (AST substitution pass:
+      a BIND var rewritten into a later FILTER / BGP join key /
+      chained BIND before the structural walk; unbound-var BIND →
+      NULL not error, W3C §18.2.5) + aggregates over `UNION`
+      (derived-table refactor; COUNT/SUM/AVG/type-aware
+      MIN-MAX/GROUP_CONCAT/SAMPLE, GROUP BY, HAVING).
+    - **F3 (26 → 24)** — `DESCRIBE` via the sibling UDF
+      `pgrdf.describe(q TEXT) → SETOF JSONB` (byte-identical to
+      `pgrdf.construct`; W3C §16.4 closure, transitive one-hop
+      blank-node expansion, cycle-safe, dedup'd).
+    - **F4 (23 → 22)** — **type-aware ORDER BY** (this cut's
+      marquee). Every sort key expands into the SPARQL 1.1 §15.1
+      value-space term list: a kind rank (numeric < dateTime <
+      boolean < other) + per-kind comparator (numerics
+      **numerically** so `2 < 10`, `xsd:dateTime` chronologically,
+      `xsd:boolean` false<true, strings by Unicode codepoint via
+      `COLLATE "C"`) + codepoint tiebreak; total/stable, never
+      raises (regex-guarded casts fall through to the codepoint
+      tier). `DESC()` + multi-key + expression sort keys
+      (`ORDER BY (?a+?b)`, `ORDER BY STRLEN(?s)`); all four SQL
+      builders + `SELECT DISTINCT` compose (an expression key on
+      the aggregate/UNION shapes is a documented narrow deferral —
+      stable panic, never a wrong answer). ORDER BY was already an
+      unflagged SELECT modifier — no `unsupported_algebra` /
+      `80-unsupported-shapes` entry to retire. Plus the Phase F
+      W3C-shape consolidation (6 fixtures `42-optional-multi-triple`
+      … `47-order-by-type-aware`, 41 → 47; the `46-describe`
+      fixture introduced a `describe` per-fixture kind alongside
+      the slice-51 `construct` kind) and the compose infra-debt
+      fix (`compose/compose.yml`: the five stale per-version SQL
+      bind-mount lines `pgrdf--0.4.1.sql … pgrdf--0.4.5.sql`
+      collapsed to a single per-file mount of the current
+      `default_version`'s `pgrdf--<ver>.sql` — a clean
+      `cargo pgrx package` emits exactly that one file; the older
+      lines only ever resolved from a warm BuildKit cache and were
+      the source of the recurring hand-create-a-copy + cold-restart
+      workaround. A directory mount was rejected: it shadows the
+      stock Postgres extension dir and crash-loops `initdb` on the
+      fresh-cluster path CI takes — the F4 feature commit's
+      directory-mount attempt failed CI on exactly that and was
+      fixed-forward to the per-file single-version mount).
+- **`pgrdf.sparql_parse`** — OPTIONAL / VALUES / BIND-downstream /
+  aggregate-over-UNION / DESCRIBE no longer flagged in
+  `unsupported_algebra` (the LLD §11 acceptance binding).
+
+### Test bar at the v0.4.6 cut
+
+```
+pgrx integration  250  (was 248 at v0.4.5 / Phase F3)
+pg_regress         79  (was 78 — +1 100-sparql-order-by-type-aware;
+                        111 expected corrected to §15.1 codepoint
+                        order)
+w3c-sparql         47  (was 41 — +6 Phase F fixtures 42-47)
+LUBM-shape          3  (unchanged)
+Total: 379 green, plus the pg_dump round-trip gate.
+```
+
+### Version touches
+
+- `Cargo.toml` `0.4.5` → `0.4.6` (+ the `Cargo.lock` pgrdf entry).
+- `pgrdf.control` `default_version = '0.4.6'`.
+- `tests/regression/expected/00-smoke.out` `0.4.5` → `0.4.6`.
+- `RELEASE_NOTES.md` rewritten for v0.4.6;
+  `CHANGELOG.md` `[Unreleased]` → `[0.4.6] — 2026-05-16`.
+
+**`compose/compose.yml` reconciliation with the Part-3 fix:** the
+v0.4.5 cut *added* a `pgrdf--0.4.5.sql` bind-mount line (on top of
+0.4.1-0.4.4). The Phase F group F4 *feature* commit then collapsed
+that five-line stale block to a **single** per-file mount of the
+current `default_version`'s SQL (a clean `cargo pgrx package`
+emits exactly one SQL file; the older lines only resolved from a
+warm BuildKit cache — the recurring infra-debt). So the v0.4.6
+release cut's compose touch is a **one-line** change
+(`pgrdf--0.4.5.sql` → `pgrdf--0.4.6.sql`), tracking the bumped
+`default_version` — the same net surface as every prior cut's
+single SQL line, just with no stale-version accumulation. The
+release-cut file set is therefore the **same 8 files** as the
+v0.4.5 cut (`git show 5cdebdd --stat`): Cargo.toml, Cargo.lock,
+pgrdf.control, tests/regression/expected/00-smoke.out,
+compose/compose.yml, CHANGELOG.md, RELEASE_NOTES.md,
+docs/09-release.md.
+
+**CI-gate fix-forward (F4-specific):** the F4 feature commit first
+attempted a *directory* mount for the Part-3 fix; that shadows the
+stock Postgres extension dir and crash-looped `initdb` on CI's
+fresh-cluster path (`extension "plpgsql" is not available`). It
+was fixed-forward in a separate commit to the per-file
+single-version mount before this release cut — the CI gate is
+green on that fix-forward commit.
+
+**Ritual deviations vs the v0.4.5 cut:** README.md NOT touched — a
+parallel docs session owns it, same deviation as the
+v0.4.5 / v0.4.4 cuts. The roadmap / spec / guide / docs §11
+coherence edits landed in the FEATURE commit, not here, mirroring
+how the v0.4.5 cut kept those out of the release commit. No `src/`
+fmt sweep needed (`cargo fmt --all -- --check` clean this cut).
+
+E-011 carried: `publish-crate.yml` stays disabled until upstream
+[`gtfierro/reasonable#50`](https://github.com/gtfierro/reasonable/pull/50)
+merges. The v0.4.6 tag fires `release.yml` only (8 platform
+tarballs PG14-17 × amd64/arm64 + SHA256SUMS).
 
 ## v0.4.5 — 2026-05-16
 
