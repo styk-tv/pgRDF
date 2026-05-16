@@ -41,25 +41,39 @@ services:
       # mounts require the files to exist on the host first - produced
       # by `just build-ext` (see compose/README.md).
       #
-      # Phase F group F4 (infra-debt fix): the per-version SQL files
-      # used to be pinned one bind-mount line each
-      # (pgrdf--0.4.1.sql … pgrdf--0.4.5.sql). `just build-ext` does
-      # `rm -rf compose/extensions/share` then exports only what
-      # `cargo pgrx package` generates for the *current* version, so a
-      # stale per-version pin (e.g. pgrdf--0.4.1.sql) referenced a
-      # source file that no longer exists — every dispatch had to
-      # hand-create a gitignored copy + cold-restart. The mount is now
-      # the whole share/extension/ directory: version-agnostic, so no
-      # release cut or rebuild ever needs to touch this line again.
-      # pgrdf.so + pgrdf.control are mounted directly (the directory
-      # carries them too, but the explicit lib mount keeps the $libdir
-      # path correct). Postgres' built-in plpgsql is created at initdb
-      # into the already-initialised ./pg-data cluster and does not
-      # consult $sharedir/extension at CREATE EXTENSION pgrdf time, so
-      # shadowing the stock extension dir here is safe for this
-      # single-extension dev stack.
+      # Phase F group F4 (infra-debt fix). Two problems with the old
+      # block, both fixed here:
+      #
+      #  1. It pinned five per-version SQL files
+      #     (`pgrdf--0.4.1.sql` … `pgrdf--0.4.5.sql`) by hardcoded
+      #     bind-mount line. `just build-ext` does
+      #     `rm -rf compose/extensions/share` then exports exactly
+      #     what `cargo pgrx package` generates — and a CLEAN build
+      #     emits only the *current* `default_version`'s
+      #     `pgrdf--<ver>.sql` (the older files only ever appeared
+      #     because a warm BuildKit `/work/target` cache had retained
+      #     them across rebuilds — non-deterministic). So every stale
+      #     per-version line referenced a source file a clean build
+      #     does not produce, and each dispatch had to hand-create a
+      #     gitignored copy + cold-restart. Now exactly one SQL line,
+      #     tracking the current version. `CREATE EXTENSION pgrdf`
+      #     only ever needs `pgrdf--<default_version>.sql` (pgRDF v0.x
+      #     does not support `ALTER EXTENSION … UPDATE`), so a single
+      #     line is complete; a release cut changes just this one line
+      #     to the new version (same surface as every prior cut, no
+      #     accumulation).
+      #
+      #  2. It must stay a PER-FILE mount, never a directory mount
+      #     over `$sharedir/extension`: a directory mount shadows the
+      #     stock Postgres extension dir and `initdb` then cannot find
+      #     `plpgsql.control`, crash-looping the container on a fresh
+      #     data dir — exactly the clean-cluster path CI takes
+      #     (`compose/pg-data` is gitignored, so CI always initdb's
+      #     from scratch). Per-file mounts drop pgRDF in beside the
+      #     stock extensions instead of hiding them.
       - ./extensions/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro,z
-      - ./extensions/share/extension:/usr/share/postgresql/17/extension:ro,z
+      - ./extensions/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro,z
+      - ./extensions/share/extension/pgrdf--0.4.5.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.5.sql:ro,z
       # Read-only ontology + regression fixtures, reachable from the
       # postgres process at /fixtures (see pgrdf.load_turtle path arg).
       - ../fixtures:/fixtures:ro,z
