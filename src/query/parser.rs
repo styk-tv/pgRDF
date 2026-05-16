@@ -989,23 +989,52 @@ mod tests {
         assert_eq!(v["bgp_pattern_count"], 2);
     }
 
-    /// Transitive / quantified property paths (`:a*`, `:a+`, `:a?`,
-    /// inverse, etc.) are still unsupported. Note: simple sequence
-    /// paths (`<a>/<b>`) are desugared by spargebra into a BGP
-    /// chain with fresh blank nodes, so they don't surface as Path.
+    /// Property-path executability tracks the Phase E rollout. E1
+    /// (`^`/bare), E2 (`+`), and E3 (`*`/`?`, incl. their `^`
+    /// compositions) all lower into the `bgp` shape and are NOT
+    /// flagged — `sparql_parse` analysis mirrors execution. Only the
+    /// genuinely-deferred forms (alternation `|` — group E4 gated;
+    /// negated sets — out of scope; a recursive op with a nested-
+    /// recursive inner — E4) still surface in `unsupported_algebra`.
+    /// Note: simple sequence paths (`<a>/<b>`) are desugared by
+    /// spargebra into a BGP chain, so they never surface as Path.
     #[pg_test]
     fn sparql_parse_flags_unsupported_path() {
-        let q = "SELECT ?s ?o WHERE { ?s <http://x/a>* ?o }";
-        let j: pgrx::JsonB = Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q.into()])
-            .unwrap()
-            .unwrap();
-        let v = &j.0;
-        let unsupported = v["unsupported_algebra"].as_array().unwrap();
+        // E3-executable: `*` lowers to the bgp shape — NOT flagged.
+        let q_star = "SELECT ?s ?o WHERE { ?s <http://x/a>* ?o }";
+        let j: pgrx::JsonB =
+            Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q_star.into()])
+                .unwrap()
+                .unwrap();
+        let star_unsupported = j.0["unsupported_algebra"].as_array().unwrap();
         assert!(
-            unsupported
+            star_unsupported.is_empty(),
+            "`*` is executable from E3 and must NOT be flagged, got {star_unsupported:?}"
+        );
+        // `?` likewise (E3).
+        let q_opt = "SELECT ?s ?o WHERE { ?s <http://x/a>? ?o }";
+        let j2: pgrx::JsonB =
+            Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q_opt.into()])
+                .unwrap()
+                .unwrap();
+        let opt_unsupported = j2.0["unsupported_algebra"].as_array().unwrap();
+        assert!(
+            opt_unsupported.is_empty(),
+            "`?` is executable from E3 and must NOT be flagged, got {opt_unsupported:?}"
+        );
+        // Alternation `(a|b)` is the still-deferred E4 gated stretch —
+        // it MUST still be flagged in unsupported_algebra.
+        let q_alt = "SELECT ?s ?o WHERE { ?s (<http://x/a>|<http://x/b>) ?o }";
+        let j3: pgrx::JsonB =
+            Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q_alt.into()])
+                .unwrap()
+                .unwrap();
+        let alt_unsupported = j3.0["unsupported_algebra"].as_array().unwrap();
+        assert!(
+            alt_unsupported
                 .iter()
                 .any(|x| x.as_str().is_some_and(|s| s.contains("Path"))),
-            "expected Path to be flagged, got {unsupported:?}"
+            "alternation `|` (E4) must still be flagged, got {alt_unsupported:?}"
         );
     }
 

@@ -58,16 +58,16 @@ SELECT (
   )->>'bgp_pattern_count'
 )::int AS bgp_count_minus;
 
--- 4e. Quantified property paths (e.g. <a>*) are still unsupported
--- (Phase E group E1 ships bare-predicate + `^` inverse paths, which
--- are NOT flagged; recursive `*`/`+`/`?` and `|` still surface in
--- `unsupported_algebra` until groups E2/E3/E4 — with a more specific
--- "recursive/alternation" tag). Note: simple sequence paths
--- (<a>/<b>) are desugared by spargebra into BGP chains and don't
--- appear as Path nodes.
+-- 4e. Property-path executability tracks the Phase E rollout: E1
+-- (bare/`^`), E2 (`+`), and E3 (`*`/`?`) are NOT flagged (they
+-- lower into the bgp shape). Alternation `|` is the still-deferred
+-- E4 gated stretch, so it still surfaces in `unsupported_algebra`
+-- with the "recursive/alternation" tag. Note: simple sequence
+-- paths (<a>/<b>) are desugared by spargebra into BGP chains and
+-- don't appear as Path nodes.
 SELECT (
   pgrdf.sparql_parse(
-    'SELECT ?s ?o WHERE { ?s <http://x/a>* ?o }'
+    'SELECT ?s ?o WHERE { ?s (<http://x/a>|<http://x/b>) ?o }'
   )->'unsupported_algebra'
 )::text AS unsupported_path;
 

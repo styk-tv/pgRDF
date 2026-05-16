@@ -42,15 +42,15 @@ guc-above-max-rejected: t
 
 t
 0
-zero-or-more-preview-panic: t
 t
-zero-or-one-preview-panic: t
+t
+t
 alternation-gated-panic: t
 negated-set-out-of-scope-panic: t
 t
-reverse-of-star-still-previews: t
+t
 0
 0
-1
+0
 
-10
+13

@@ -134,7 +134,7 @@ coverage:
 plus W3C-shape fixtures 24 / 25 / 26 under
 [`tests/w3c-sparql/`](../tests/w3c-sparql/).
 
-## Property paths (LLD v0.4 §7 — Phase E, groups E1 + E2 shipped)
+## Property paths (LLD v0.4 §7 — Phase E, groups E1 + E2 + E3 shipped)
 
 SPARQL property paths arrive in the spargebra algebra as
 `GraphPattern::Path { subject, path, object }`. The shared WHERE
@@ -143,35 +143,37 @@ the single chokepoint every query form routes through — SELECT, ASK,
 `pgrdf.construct`, and the UPDATE WHERE bodies all inherit path
 support at once (it is not special-cased per consumer).
 `query::path::scoped_triple_from_path` classifies the operator: the
-E1 non-recursive set lowers to an ordinary triple, and the E2 `+`
-set lowers to a recursive-CTE-derived FROM relation that exposes the
-same `subject_id` / `object_id` columns a quad alias does. Either
-way the result flows through the existing `pattern_clauses` /
-var-binder machinery — so paths compose for free with named-graph
-scoping, multi-pattern BGP joins, and OPTIONAL/UNION/MINUS.
+E1 non-recursive set lowers to an ordinary triple; the E2 `+` set
+and the E3 `*` / `?` sets lower to a derived FROM relation that
+exposes the same `subject_id` / `object_id` columns a quad alias
+does (`*` is the `+` recursive walk `UNION` the zero-length
+node-set; `?` is the direct edge `UNION` the same zero-length set,
+non-recursive). Either way the result flows through the existing
+`pattern_clauses` / var-binder machinery — so paths compose for free
+with named-graph scoping, multi-pattern BGP joins, and
+OPTIONAL/UNION/MINUS.
 
 | Operator | SPARQL | Semantics | Status |
 |---|---|---|---|
 | bare predicate | `?s p ?o` (as a `Path`) | direct triple | ✅ E1 — lowers to `?s p ?o` |
 | `^` inverse | `?s ^p ?o` | `?o p ?s` | ✅ E1 — subject/object swap, no recursion; `^(^p)` folds by parity |
 | `+` one-or-more | `?s p+ ?o` | transitive closure (non-reflexive) | ✅ E2 — `WITH RECURSIVE` CTE; cycle-safe `UNION` dedup; `^p+`/`(^p)+` inverse-composition; depth guard enforced |
-| `*` zero-or-more | `?s p* ?o` | reflexive transitive closure | 🚧 group E3 |
-| `?` zero-or-one | `?s p? ?o` | equal-or-linked | 🚧 group E3 |
+| `*` zero-or-more | `?s p* ?o` | reflexive transitive closure | ✅ E3 — the `+` cycle-safe recursive walk `UNION` the W3C §9.3 zero-length node-set; reuses E2's `CYCLE` termination + depth guard + truncation probe; `^(p*)`/`(^p)*` inverse-composition |
+| `?` zero-or-one | `?s p? ?o` | equal-or-linked | ✅ E3 — non-recursive: the direct edge `UNION` the SAME W3C §9.3 zero-length node-set; no depth guard; `^(p?)`/`(^p)?` inverse-composition |
 | `\|` alternation | `?s (a\|b) ?o` | per-predicate union | 🚧 group E4 (gated stretch) |
 | `!(...)` negated set | `?s !(p) ?o` | — | out of v0.4 scope (panics) |
 | sequence `p1/p2` | `?s p1/p2 ?o` | — | use a multi-pattern BGP (`{ ?s p1 ?m . ?m p2 ?o }`); E1 rejects an explicit `Sequence` path-expr with a pointer to the BGP form |
 
-The still-deferred operators **preview-panic** with a stable prefix
-(`pgrdf: property path operator '<op>' lands in Phase E group EN
-(slice NN)` — `*`/`?`→E3; `|` is the gated-stretch message for E4; a
-`+` whose inner box is itself recursive/alternation/sequence — e.g.
-`(p*)+` — panics with the nested-recursive E4 message). Substring-
-match the prefix; the slice-number tail is advisory and shifts with
-the cycle countdown. `sparql_parse` does NOT panic on these — it
-lowers the executable set (E1 ∪ `+`) into the `bgp` shape and flags
-only the still-deferred forms in `unsupported_algebra` (parse-time
-analysis, mirroring how Phase C reports not-yet-shipped UPDATE
-forms).
+The still-deferred operators **preview-panic** with a stable prefix:
+`|` is the gated-stretch message for E4; a recursive/optional op
+whose inner box is itself recursive/alternation/sequence — e.g.
+`(p*)+`, `(a|b)*`, `(p1/p2)?` — panics with the nested-recursive E4
+message; negated sets panic with the out-of-scope message.
+Substring-match the prefix; any slice-number tail is advisory.
+`sparql_parse` does NOT panic on these — it lowers the executable
+set (E1 ∪ `+` ∪ `*`/`?`) into the `bgp` shape and flags only the
+still-deferred forms in `unsupported_algebra` (parse-time analysis,
+mirroring how Phase C reports not-yet-shipped UPDATE forms).
 
 **`+` chain example.** Over a `subClassOf`-style chain
 `c1 → c2 → … → c11`:
@@ -192,6 +194,45 @@ of a transitive closure equals the transitive closure of the
 inverse). A `p+` pattern joins to ordinary triple
 patterns, GRAPH scoping, and `pgrdf.construct` exactly like a plain
 triple.
+
+**`*` / `?` and W3C §9.3 zero-length-path semantics (E3).** `*` is
+the **reflexive** transitive closure — the `+` walk **plus** the
+zero-length ("identity") pairs; `?` is the single direct edge plus
+the same identity pairs (no recursion). Over the same chain:
+
+```sparql
+PREFIX ex: <http://example.org/>
+SELECT ?x WHERE { ?x ex:sub* ex:c11 }   -- → c1 … c10 AND c11 itself (11 — reflexive)
+SELECT ?o WHERE { ex:c1 ex:sub? ?o }    -- → c1 (identity) AND c2 (direct) only
+```
+
+The identity ("zero-length") pair-set the LLD §7.2 `SELECT ?s ?s`
+sketch alludes to is **refined to the precise W3C SPARQL 1.1 §9.3
+rules** (exactly as E2 refined §7.2's bare-`UNION` to the `CYCLE`
+clause). Which `(n,n)` pairs an endpoint contributes depends on
+whether that endpoint is **bound** (an IRI) or **unbound** (a var):
+
+| Pattern | Zero-length contribution |
+|---|---|
+| `<x> p* ?o` (subject bound) | `{(x,x)}` **unconditionally** — even if `<x>` is in no graph — plus `{(x,o) : x p+ o}` |
+| `?s p* <y>` (object bound) | symmetric: `{(y,y)}` unconditionally plus `{(s,y) : s p+ y}` |
+| `<x> p* <y>` (both bound) | true iff `x == y` **or** `x p+ y` |
+| `?s p* ?o` (both var) | `{(n,n)}` for every node `n` of the active scope (subject∪object position) plus `{(s,o) : s p+ o}` |
+| `?s p? ?o` | same identity set, but the non-identity part is the single direct `p` edge (no recursion) |
+
+A **bound** endpoint's self-pair holds even when the IRI is not a
+term in the data — pgRDF registers the queried IRI as an RDF term
+(a term reference; **no quad is added**, the graph data is
+unchanged) so the opposite projected variable can resolve it
+(`<lone> p* ?o` → `?o = <lone>`, 1 solution; `+` stays pure-lookup
+since it has no zero-length set). An **unbound** endpoint's
+node-set is the DISTINCT subject∪object of the active scope; under
+`GRAPH <iri>` / `GRAPH ?g` it is **scoped to that graph's nodes**
+(and is predicate-agnostic — the named graph's full term set, a
+node only in another graph is NOT in the scoped identity set). `*`
+inherits E2's cycle-safety and depth guard for its `+` part (the
+zero-length part is a single non-recursive scan and cannot
+truncate); `?` is fully non-recursive (no depth guard).
 
 **`pgrdf.path_max_depth` GUC + depth guard.** Integer,
 `GucContext::Userset`, default **64**, range **1..1024**, registered
@@ -222,7 +263,8 @@ Implementation:
 CTE builder + truncation probe — the executor only calls into it),
 [`src/query/guc.rs`](../src/query/guc.rs); regression coverage:
 [`108-property-path-inverse.sql`](../tests/regression/sql/108-property-path-inverse.sql)
-+ [`109-property-path-plus.sql`](../tests/regression/sql/109-property-path-plus.sql).
++ [`109-property-path-plus.sql`](../tests/regression/sql/109-property-path-plus.sql)
++ [`110-property-path-star-opt.sql`](../tests/regression/sql/110-property-path-star-opt.sql).
 W3C-shape property-path fixtures are deferred to group E4 (mirrors
 how Phase D deferred its W3C consolidation).
 

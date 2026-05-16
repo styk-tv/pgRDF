@@ -1305,7 +1305,12 @@ fn collect_truncation_probes(ps: &ParsedSelect) -> Vec<(String, Vec<i64>)> {
     let mut out: Vec<(String, Vec<i64>)> = Vec::new();
     let mut take = |st: &ScopedTriple| {
         if let Some(rel) = &st.path {
-            out.push((rel.probe_sql.clone(), rel.probe_params.clone()));
+            // A `?` (zero-or-one) path is non-recursive and carries an
+            // empty probe — nothing can truncate, so skip it (an empty
+            // prepared statement would error at probe time).
+            if !rel.probe_sql.is_empty() {
+                out.push((rel.probe_sql.clone(), rel.probe_params.clone()));
+            }
         }
     };
     for st in &ps.bgp {
@@ -1826,66 +1831,141 @@ fn scoped_triple_from_path(
     scope: Option<GraphScope>,
 ) -> ScopedTriple {
     use crate::query::path::{
-        build_one_or_more_relation_sql, classify_path, PathGraphScope, PathPlan,
+        build_one_or_more_relation_sql, build_zero_or_more_relation_sql,
+        build_zero_or_one_relation_sql, classify_path, PathGraphScope, PathPlan,
     };
-    match classify_path(subject, path, object) {
-        PathPlan::Triple(tp) => ScopedTriple {
+    // The recursive/optional operators (`+`/`*`/`?`) share all the
+    // scaffolding: resolve the predicate, map the BGP graph scope to
+    // the relation's scope flavour, emit the predicate / Literal-graph
+    // placeholders at THIS point (so the PARAM_BUF ordinal matches
+    // where a normal triple's `pattern_clauses` would have pushed
+    // them — keeping the surrounding `$N` numbering consistent), and
+    // build the placeholder triple (subject/object drive var-binding
+    // + SELECT-*; predicate slot is unused for path rows). Only the
+    // relation builder called at the end differs per operator.
+    let plan = classify_path(subject, path, object);
+    if let PathPlan::Triple(tp) = plan {
+        return ScopedTriple {
             triple: *tp,
             scope,
             path: None,
-        },
-        PathPlan::OneOrMore { predicate, swapped } => {
-            // Resolve the single walked predicate to its dict id
-            // (sentinel -1 ⇒ zero rows = spec-correct "no solutions"
-            // when the IRI was never interned).
-            let pred_id = lookup_iri_id(predicate.as_str()).unwrap_or(-1);
-            // Map the BGP graph scope to the CTE's scope flavour.
-            // Literal id resolves at translate time; a Variable
-            // scope keeps the walk inside one named graph and
-            // surfaces `graph_id` for the `?g` JOIN the builder adds.
-            let (path_scope, graph_ph, probe_gid): (PathGraphScope, Option<String>, Option<i64>) =
-                match &scope {
-                    None => (PathGraphScope::AllGraphs, None, None),
-                    Some(GraphScope::Literal(gid)) => {
-                        (PathGraphScope::Literal(*gid), None, Some(*gid))
-                    }
-                    Some(GraphScope::Variable { .. }) => (PathGraphScope::Variable, None, None),
-                };
-            // Emit the predicate placeholder (and, for a Literal
-            // scope, the graph placeholder) at THIS point so the
-            // PARAM_BUF ordinal matches where a normal triple's
-            // `pattern_clauses` would have pushed them — keeping the
-            // surrounding SQL's `$N` numbering consistent.
-            let predicate_placeholder = id_placeholder(pred_id);
-            let graph_placeholder = match (&path_scope, &graph_ph) {
-                (PathGraphScope::Literal(gid), _) => Some(id_placeholder(*gid)),
-                _ => None,
-            };
-            let max_depth = crate::query::guc::path_max_depth();
-            let rel = build_one_or_more_relation_sql(
-                &predicate_placeholder,
-                graph_placeholder.as_deref(),
-                &path_scope,
-                swapped,
-                max_depth,
-                pred_id,
-                probe_gid,
-            );
-            // Placeholder triple: the subject/object terms drive
-            // var-binding + SELECT-*; the predicate slot is unused
-            // for path rows (build_from_and_where skips
-            // bind_predicate when `path.is_some()`).
-            let placeholder_triple = TriplePattern {
-                subject: subject.clone(),
-                predicate: NamedNodePattern::NamedNode(predicate),
-                object: object.clone(),
-            };
-            ScopedTriple {
-                triple: placeholder_triple,
-                scope,
-                path: Some(rel),
-            }
+        };
+    }
+    let (predicate, swapped) = match &plan {
+        PathPlan::OneOrMore { predicate, swapped }
+        | PathPlan::ZeroOrMore { predicate, swapped }
+        | PathPlan::ZeroOrOne { predicate, swapped } => (predicate.clone(), *swapped),
+        PathPlan::Triple(_) => unreachable!("Triple handled above"),
+    };
+    // Resolve the single walked predicate to its dict id (sentinel
+    // -1 ⇒ zero direct/transitive rows = spec-correct "no solutions"
+    // when the IRI was never interned; for `*`/`?` the reflexive set
+    // is still produced — W3C zero-length holds regardless).
+    let pred_id = lookup_iri_id(predicate.as_str()).unwrap_or(-1);
+    let (path_scope, graph_ph, probe_gid): (PathGraphScope, Option<String>, Option<i64>) =
+        match &scope {
+            None => (PathGraphScope::AllGraphs, None, None),
+            Some(GraphScope::Literal(gid)) => (PathGraphScope::Literal(*gid), None, Some(*gid)),
+            Some(GraphScope::Variable { .. }) => (PathGraphScope::Variable, None, None),
+        };
+    let predicate_placeholder = id_placeholder(pred_id);
+    let graph_placeholder = match (&path_scope, &graph_ph) {
+        (PathGraphScope::Literal(gid), _) => Some(id_placeholder(*gid)),
+        _ => None,
+    };
+    // W3C §9.3 bound-endpoint self-pair (`*`/`?` only): a bound (IRI)
+    // subject / object contributes an UNCONDITIONAL `(x,x)` zero-length
+    // pair — true even if `x` is not a node of the active graph. Emit
+    // the dict-id placeholder(s) so the relation can `UNION ALL` the
+    // constant self-pair; the executor's existing subject/object id
+    // binder then filters to exactly the right rows. (The `Variable`
+    // scope flows bound endpoints through the scoped node-set instead
+    // — see `zero_length_node_set_sql` — so `build_*` ignores these
+    // there.) For `+` (non-reflexive) there is no zero-length set, so
+    // no self-pair is emitted.
+    //
+    // Dictionary resolution of a bound endpoint for a REFLEXIVE
+    // operator interns (get-or-create) rather than pure-lookup. W3C
+    // §9.3 makes `<x> p* ?o` yield the solution `?o = <x>` even when
+    // `<x>` is not a term in the data — so the projected variable
+    // must reverse-resolve `<x>`'s id back to its lexical IRI, which
+    // requires a real dictionary row. A query-written IRI used as a
+    // path endpoint IS an RDF term reference (no quad is added — the
+    // graph data is unchanged), so registering it in the term
+    // dictionary is the semantically-correct, idempotent thing to do
+    // and keeps the binder's `subject_id = $id` filter and the
+    // injected self-pair on the SAME id. (`+` stays pure-lookup: a
+    // never-seen endpoint correctly has no edges, and `+` has no
+    // zero-length set, so `-1` → no rows is right there.) The
+    // `Variable` (`GRAPH ?g`) scope flows bound endpoints through the
+    // scoped per-graph node-set instead of a constant self-pair, so
+    // it needs no interning here.
+    let reflexive = matches!(
+        plan,
+        PathPlan::ZeroOrMore { .. } | PathPlan::ZeroOrOne { .. }
+    );
+    let resolve_endpoint = |iri: &str| -> i64 {
+        if reflexive {
+            // Term reference — register if absent (idempotent, no
+            // quad written). Real id ⇒ the opposite projected
+            // variable can reverse-resolve the zero-length self-pair.
+            intern_named_node(iri)
+        } else {
+            lookup_iri_id(iri).unwrap_or(-1)
         }
+    };
+    let bound_self_pairs: Vec<String> =
+        if reflexive && !matches!(path_scope, PathGraphScope::Variable) {
+            let mut v = Vec::new();
+            if let TermPattern::NamedNode(n) = subject {
+                v.push(id_placeholder(resolve_endpoint(n.as_str())));
+            }
+            if let TermPattern::NamedNode(n) = object {
+                v.push(id_placeholder(resolve_endpoint(n.as_str())));
+            }
+            v
+        } else {
+            Vec::new()
+        };
+    let max_depth = crate::query::guc::path_max_depth();
+    let rel = match plan {
+        PathPlan::OneOrMore { .. } => build_one_or_more_relation_sql(
+            &predicate_placeholder,
+            graph_placeholder.as_deref(),
+            &path_scope,
+            swapped,
+            max_depth,
+            pred_id,
+            probe_gid,
+        ),
+        PathPlan::ZeroOrMore { .. } => build_zero_or_more_relation_sql(
+            &predicate_placeholder,
+            graph_placeholder.as_deref(),
+            &path_scope,
+            swapped,
+            max_depth,
+            pred_id,
+            probe_gid,
+            &bound_self_pairs,
+        ),
+        PathPlan::ZeroOrOne { .. } => build_zero_or_one_relation_sql(
+            &predicate_placeholder,
+            graph_placeholder.as_deref(),
+            &path_scope,
+            swapped,
+            &bound_self_pairs,
+        ),
+        PathPlan::Triple(_) => unreachable!("Triple handled above"),
+    };
+    let placeholder_triple = TriplePattern {
+        subject: subject.clone(),
+        predicate: NamedNodePattern::NamedNode(predicate),
+        object: object.clone(),
+    };
+    ScopedTriple {
+        triple: placeholder_triple,
+        scope,
+        path: Some(rel),
     }
 }
 
@@ -9784,16 +9864,183 @@ mod tests {
         Spi::run("RESET pgrdf.path_max_depth").unwrap();
     }
 
-    /// `*` still preview-panics with the EXACT stable message
-    /// (pgrx-tests 0.16 needs the literal — slice number included; it
-    /// is the single source of truth in `crate::query::path`, locked
-    /// here verbatim per the E1 convention).
-    #[pg_test(error = "pgrdf: property path operator '*' lands in Phase E group E3 (slice 40)")]
-    fn property_path_zero_or_more_still_preview_panics() {
+    /// E3 invariant A in miniature — `*` is the reflexive-transitive
+    /// closure. Over a length-5 chain, `?x ex:sub* <c5>` resolves the
+    /// 4 transitive ancestors c1..c4 PLUS c5 itself (W3C §9.3: object
+    /// bound ⇒ the zero-length pair (c5,c5) holds unconditionally).
+    #[pg_test]
+    fn property_path_zero_or_more_chain_is_reflexive() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:c1 ex:sub ex:c2 . ex:c2 ex:sub ex:c3 .
+                 ex:c3 ex:sub ex:c4 . ex:c4 ex:sub ex:c5 .',
+                9210)",
+        )
+        .unwrap();
+        let to_c5: String = Spi::get_one(
+            "SELECT string_agg(j->>'x', ',' ORDER BY j->>'x') \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?x WHERE { ?x ex:sub* ex:c5 }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            to_c5,
+            "http://example.com/c1,http://example.com/c2,\
+             http://example.com/c3,http://example.com/c4,\
+             http://example.com/c5",
+            "`?x p* <c5>` = transitive ancestors c1..c4 ∪ the \
+             reflexive pair (c5,c5) — 5 solutions"
+        );
+    }
+
+    /// E3 invariant C — `*` both-var = identity ∪ p+ over the active
+    /// node-set. Tiny acyclic graph a→b→c (nodes {a,b,c}):
+    /// `?s ex:sub* ?o` = {(a,a),(b,b),(c,c)} ∪ {(a,b),(b,c),(a,c)} =
+    /// exactly 6 pairs. Lock the full ordered set.
+    #[pg_test]
+    fn property_path_zero_or_more_both_var_exact_set() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:sub ex:b . ex:b ex:sub ex:c .',
+                9211)",
+        )
+        .unwrap();
+        // Unscoped: within this rolled-back test txn only graph 9211
+        // carries quads, so the all-graphs node-set is exactly
+        // {a,b,c} — no synthetic-graph-IRI dependency needed.
+        let pairs: String = Spi::get_one(
+            "SELECT string_agg((j->>'s')||'|'||(j->>'o'), ',' \
+                       ORDER BY (j->>'s'),(j->>'o')) \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?o WHERE { ?s ex:sub* ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            pairs,
+            "http://example.com/a|http://example.com/a,\
+             http://example.com/a|http://example.com/b,\
+             http://example.com/a|http://example.com/c,\
+             http://example.com/b|http://example.com/b,\
+             http://example.com/b|http://example.com/c,\
+             http://example.com/c|http://example.com/c",
+            "`?s p* ?o` = identity {{(a,a),(b,b),(c,c)}} ∪ p+ \
+             {{(a,b),(b,c),(a,c)}} — exactly 6 pairs"
+        );
+    }
+
+    /// E3 invariant D — W3C §9.3: a BOUND endpoint's zero-length
+    /// self-pair holds UNCONDITIONALLY, even if the term is not a
+    /// node of any graph. `<lone>` is never seeded; `<lone> p* ?o`
+    /// must still yield exactly the one solution `?o = <lone>`, and
+    /// `ASK { <lone> p* <lone> }` must be true.
+    #[pg_test]
+    fn property_path_zero_or_more_bound_subject_isolated_identity() {
+        // Seed an unrelated edge so the store is non-empty but
+        // contains NO `lone` term anywhere.
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:x ex:sub ex:y .',
+                9212)",
+        )
+        .unwrap();
+        let o: String = Spi::get_one(
+            "SELECT string_agg(j->>'o', ',' ORDER BY j->>'o') \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?o WHERE { ex:lone ex:sub* ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            o, "http://example.com/lone",
+            "`<lone> p* ?o` = just the zero-length pair (lone,lone) \
+             even though lone is not a graph term"
+        );
+        let ask: String = Spi::get_one(
+            "SELECT j->>'_ask' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  ASK { ex:lone ex:sub* ex:lone }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ask, "true", "the bound-term zero-length path always holds");
+    }
+
+    /// E3 invariant E — `?` is direct ∪ identity (non-recursive).
+    /// Seed a→b: `<a> ex:sub? ?o` = {a (identity), b (direct)} = 2
+    /// solutions; the ASK matrix is true/true/false.
+    #[pg_test]
+    fn property_path_zero_or_one_direct_union_identity() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:sub ex:b .',
+                9213)",
+        )
+        .unwrap();
+        let o: String = Spi::get_one(
+            "SELECT string_agg(j->>'o', ',' ORDER BY j->>'o') \
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?o WHERE { ex:a ex:sub? ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            o, "http://example.com/a,http://example.com/b",
+            "`<a> p? ?o` = identity {{a}} ∪ direct {{b}}"
+        );
+        let ask_self: String = Spi::get_one(
+            "SELECT j->>'_ask' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  ASK { ex:a ex:sub? ex:a }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ask_self, "true", "`<a> p? <a>` — the identity pair");
+        let ask_direct: String = Spi::get_one(
+            "SELECT j->>'_ask' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  ASK { ex:a ex:sub? ex:b }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ask_direct, "true", "`<a> p? <b>` — the direct edge");
+        let ask_none: String = Spi::get_one(
+            "SELECT j->>'_ask' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  ASK { ex:a ex:sub? ex:c }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ask_none, "false",
+            "`<a> p? <c>` — neither identity nor a direct edge"
+        );
+    }
+
+    /// `|` (alternation) is the gated E4 stretch goal and still
+    /// preview-panics with the EXACT stable message (pgrx-tests 0.16
+    /// needs the literal; it is the single source of truth in
+    /// `crate::query::path::PANIC_ALTERNATION`, locked here verbatim
+    /// per the E1/E2 convention). E3 ships `*`/`?` so their old
+    /// preview-panic tests are gone — the `|` lock proves the
+    /// not-yet-shipped boundary is still enforced.
+    #[pg_test(
+        error = "pgrdf: property path alternation '|' is a gated stretch goal (Phase E group E4)"
+    )]
+    fn property_path_alternation_still_preview_panics() {
         Spi::run(
             "SELECT * FROM pgrdf.sparql(
                  'PREFIX ex: <http://example.com/> \
-                  SELECT ?s ?o WHERE { ?s ex:knows* ?o }')",
+                  SELECT ?s ?o WHERE { ?s (ex:knows|ex:likes) ?o }')",
         )
         .unwrap();
     }

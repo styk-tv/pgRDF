@@ -128,19 +128,18 @@ SELECT _check_gap(
   'sparql: query form not supported yet'
 );
 
--- ─── Gap 7: Property path with `*` (zero-or-more) ─────────────────
--- W3C §9.1 — Phase E group E1 ships bare-predicate + `^` inverse
--- paths (see 108-property-path-inverse.sql). The recursive
--- repetition operators (`*`, `+`, `?`) and alternation (`|`) are
--- NOT executable until groups E2/E3/E4; they panic with a STABLE
--- rollout-preview prefix so downstream tooling can preview the
--- schedule. `*` (zero-or-more) → group E3. We match on the stable
--- prefix substring only; the slice-number tail may shift.
+-- ─── Gap 7: Property path with `|` (alternation) ─────────────────
+-- W3C §9.1 — Phase E E1 (bare/`^`), E2 (`+`), and E3 (`*`/`?`) are
+-- all executable now (see 108/109/110-property-path-*.sql).
+-- Alternation `|` is the gated E4 stretch goal and is still NOT
+-- executable; it panics with a STABLE rollout-preview prefix so
+-- downstream tooling can preview the schedule. We match on the
+-- stable prefix substring only.
 SELECT _check_gap(
-  'gap-7 property path zero-or-more',
+  'gap-7 property path alternation',
   'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?o WHERE { ?s foaf:knows* ?o }',
-  'lands in Phase E group E3'
+   SELECT ?o WHERE { ?s (foaf:knows|foaf:member) ?o }',
+  'gated stretch goal (Phase E group E4)'
 );
 
 -- ─── Gap 8: aggregates over UNION ────────────────────────────────

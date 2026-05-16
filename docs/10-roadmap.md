@@ -1020,7 +1020,7 @@ shaper. Sibling UDF rather than overloading `pgrdf.sparql` — callers
 signal intent at the SQL boundary. See
 [LLD v0.4 §6](../specs/SPEC.pgRDF.LLD.v0.4.md#6-construct-deferred-from-v03-now-in-scope).
 
-### Track 5 — Property paths (Phase E countdown — groups E1 ✅ E2 ✅)
+### Track 5 — Property paths (Phase E countdown — groups E1 ✅ E2 ✅ E3 ✅)
 
 `*`, `+`, `?`, `^`, with alternation `p1|p2` as a stretch goal.
 Recursive operators translate to recursive Postgres CTEs with a
@@ -1067,7 +1067,29 @@ is grouped into four dispatches:
   a `*`-still-panics negative; `108`'s `+`-related asserts re-targeted
   to E2 reality. `*`/`?` (E3), `|` (E4), nested-recursive `+` (E4),
   and negated sets still preview-panic with stable prefixes.
-- 🚧 **Group E3 — `*` / `?`.** Reflexive / zero-or-one closures.
+- ✅ **Group E3 (slices 41 → 38) — `*` / `?` + full W3C SPARQL 1.1
+  §9.3 zero-length-path semantics.** `*` lowers to the E2 cycle-safe
+  recursive `+` walk `UNION` the zero-length node-set; `?` is
+  non-recursive — the single direct edge `UNION` the SAME zero-length
+  set (no depth guard). The LLD §7.2 `SELECT ?s ?s` reflexive sketch
+  is refined to the precise W3C §9.3 `ZeroLengthPath` rules (exactly
+  as E2 refined §7.2's bare-`UNION` to the `CYCLE` clause): a **bound**
+  endpoint's self-pair `(x,x)` holds unconditionally — the queried
+  IRI is registered as an RDF term (term reference, no quad added) so
+  the opposite projected variable resolves it; an **unbound**
+  endpoint's node-set is the DISTINCT subject∪object of the active
+  scope, scoped to the active `GRAPH` (predicate-agnostic). Inverse
+  composition (`^(p*)`/`(^p)*`/`^(p?)`/`(^p)?`), GRAPH `<iri>`/`?g`
+  scoping, BGP joins and `pgrdf.construct` all inherited.
+  `*`/`?` logic lives in `src/query/path.rs`
+  (`build_zero_or_more_relation_sql` / `build_zero_or_one_relation_sql`
+  + the shared `zero_length_node_set_sql`); `executor.rs` only wires.
+  New regression `110-property-path-star-opt.sql` (invariants A–K, all
+  hand-computed); the E2 `*`-still-panics pgrx negative is replaced by
+  reflexive-chain / both-var-exact-set / isolated-bound-identity /
+  `?`-direct-∪-identity `#[pg_test]`s + a `|`-still-panics negative
+  locking the exact `PANIC_ALTERNATION` literal. `|` (E4),
+  nested-recursive (E4) and negated sets still preview-panic.
 - 🚧 **Group E4 — closure-detect + gated `|` + W3C-shape
   consolidation + the v0.4.5 release.**
 

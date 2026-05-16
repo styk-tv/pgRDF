@@ -711,9 +711,10 @@ operators across **Phase E**, grouped into four dispatches:
 **E1** (plumbing + `^` inverse + `pgrdf.path_max_depth` GUC +
 `path_depth_truncations` stat scaffold) — **landed**; **E2** (`+`
 recursive CTE + depth-guard enforcement + the `src/query/path.rs`
-carve) — **landed**; **E3** (`*` / `?`); **E4** (closure-detect + the
-gated `|` stretch + W3C-shape consolidation + the v0.4.5 release).
-The section keeps the 🚧 until E4 ships the full set. 🚧
+carve) — **landed**; **E3** (`*` / `?` with full W3C SPARQL 1.1 §9.3
+zero-length-path semantics) — **landed**; **E4** (closure-detect +
+the gated `|` stretch + W3C-shape consolidation + the v0.4.5
+release). The section keeps the 🚧 until E4 ships the full set. 🚧
 
 ### 7.1 Surface
 
@@ -721,8 +722,8 @@ The section keeps the 🚧 until E4 ships the full set. 🚧
 |---|---|---|---|
 | `^` inverse | `?s ^ex:knows ?o` | Equivalent to `?o ex:knows ?s`. | **Landed (E1).** No recursion — a subject/object swap on the scan. Nested `^(^p)` folds by parity. |
 | `+` one-or-more | `?s ex:knows+ ?o` | Transitive closure (non-reflexive). | **Landed (E2).** `WITH RECURSIVE` CTE as a derived FROM relation; `UNION` (cycle-safe dedup); `^p+`/`(^p)+` inverse-composition; depth guard enforced (truncate at `pgrdf.path_max_depth`, never error). |
-| `*` zero-or-more | `?s ex:knows* ?o` | Reflexive transitive closure of `ex:knows`. | 🚧 group E3. |
-| `?` zero-or-one | `?s ex:knows? ?o` | Either equal or directly linked. | 🚧 group E3. |
+| `*` zero-or-more | `?s ex:knows* ?o` | Reflexive transitive closure of `ex:knows`. | **Landed (E3).** The E2 cycle-safe recursive `+` walk `UNION` the W3C §9.3 zero-length node-set; reuses E2's `CYCLE` termination + depth guard + truncation probe; `^(p*)`/`(^p)*` inverse-composition. |
+| `?` zero-or-one | `?s ex:knows? ?o` | Either equal or directly linked. | **Landed (E3).** Non-recursive: the single direct edge `UNION` the SAME W3C §9.3 zero-length node-set; no depth guard (no recursion). `^(p?)`/`(^p)?` inverse-composition. |
 | `\|` alternation | `?s (ex:a\|ex:b) ?o` | Stretch goal — included if the translator refactor is cheap; explicitly gated. | 🚧 group E4 (gated). |
 
 A bare predicate that spargebra wraps as a degenerate `Path`
@@ -763,14 +764,43 @@ SELECT ...
 ```
 
 Path-operator mapping:
-- `+`: the CTE as written.
-- `*`: union with `SELECT ?s ?s FROM _pgrdf_quads` (reflexive base case)
-  per spec.
-- `?`: union of direct match and identity.
+- `+`: the CTE as written. **E2 correction (landed):** the bare
+  `UNION` sketch is refined to Postgres's `UNION ALL` + `CYCLE src,
+  dst SET is_cycle USING path` clause — the working tuple must carry
+  `depth` for the guard, so bare `UNION` would let a cycle spin to
+  the depth cap (see `src/query/path.rs` for the full rationale).
+- `*`: the `+` CTE `UNION` the reflexive node-set. **E3 correction
+  (landed):** the `SELECT ?s ?s` sketch is a simplification; the
+  reflexive ("zero-length") node-set follows the precise W3C SPARQL
+  1.1 §9.3 *ZeroLengthPath* rules — exactly as E2 refined §7.2's
+  bare-`UNION` to the `CYCLE` clause. The pairs `(n,n)` an endpoint
+  matches depend on whether that endpoint is **bound** or **unbound**:
+  - **Bound endpoint** (`<x> p* ?o` / `?s p* <y>` / `<x> p* <y>`):
+    the bound term's self-pair `(x,x)` holds **unconditionally** —
+    even if `x` is not a node of the active graph at all. (The bound
+    IRI is registered as an RDF term — a term reference, no quad
+    added — so the opposite projected variable can reverse-resolve
+    it; `+` stays pure-lookup since it has no zero-length set.)
+  - **Unbound endpoint** (`?s p* ?o`): the zero-length pairs are
+    `(n,n)` for every node `n` that is a term of the **active graph
+    in subject OR object position** (the DISTINCT union of
+    `subject_id` and `object_id` over the active scope; W3C also
+    nominally includes predicate-only nodes, but pgRDF scopes the
+    set to subject∪object — a predicate-only IRI is never a useful
+    path endpoint and a bare-predicate node-set would make `?s p* ?o`
+    quadratic for no observable solutions; documented choice, W3C
+    §9.3). Under `GRAPH <iri>` / `GRAPH ?g` the node-set is **scoped
+    to that graph's nodes** (and is predicate-agnostic — the named
+    graph's full term set, not just `p`-touched nodes).
+- `?`: the single direct match `UNION` the SAME W3C §9.3 zero-length
+  node-set (`ZeroLengthPath` is shared between `*` and `?`); `?`
+  needs no recursion (direct ∪ identity) and no depth guard.
 - `^`: swap `subject_id` and `object_id` in the base case (and join
-  predicate), no recursion needed.
+  predicate), no recursion needed. Composes with `*`/`?` —
+  `^(p*)`/`(^p)*`/`^(p?)`/`(^p)?` fold the inverse parity into the
+  same `swapped` flag the closure builders already carry.
 - `|` (if shipped): the base case becomes a union of per-predicate
-  scans.
+  scans. 🚧 group E4 (gated).
 
 **Materialised-closure detection.** If the graph has been
 materialised under a profile (OWL-RL or RDFS — see

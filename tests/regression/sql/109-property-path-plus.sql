@@ -298,21 +298,22 @@ FROM pgrdf.construct(
    CONSTRUCT { ?x ex:ancestorOf ex:c11 } WHERE { ?x ex:sub+ ex:c11 }'
 ) AS c(j);
 
--- ─── Invariant J: `*` / `?` / `|` / nested-recursive panics ──────
--- Substring match on the STABLE prefix only (the slice-number tail
--- shifts as the countdown advances). Note `(a|b)+` / `(p*)+` reach
--- the *nested-recursive* E4 message (the `+` classifier sees a
--- non-predicate inner box) — distinct from a pure top-level `(a|b)`
--- which gets the gated-stretch E4 message.
-SELECT _check_error(
-  'zero-or-more-still-E3',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:sub* ?o }')$$,
-  $$lands in Phase E group E3$$
+-- ─── Invariant J: `*`/`?` graduated; `|`/nested/negated panic ────
+-- `*`/`?` GRADUATED in Phase E group E3 — they no longer preview-
+-- panic; they execute (full coverage lives in
+-- 110-property-path-star-opt.sql). Here we just confirm they run.
+-- `*` over the length-10 chain is reflexive so a positive count;
+-- `?` is direct ∪ identity so also positive. Then the still-
+-- deferred forms: `|` (E4 gated) and negated (out of scope) panic;
+-- `(p*)+` / `(a|b)+` reach the *nested-recursive* E4 message (the
+-- recursive classifier sees a non-predicate inner box) — distinct
+-- from a pure top-level `(a|b)` which gets the gated-stretch E4
+-- message. Substring match on the STABLE prefix only.
+SELECT (count(*) > 0) AS zero_or_more_executes FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:sub* ?o }'
 );
-SELECT _check_error(
-  'zero-or-one-still-E3',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:sub? ?o }')$$,
-  $$lands in Phase E group E3$$
+SELECT (count(*) > 0) AS zero_or_one_executes FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:sub? ?o }'
 );
 -- Pure top-level alternation `(a|b)` → the gated-stretch E4 message.
 SELECT _check_error(
@@ -338,10 +339,10 @@ SELECT _check_error(
   $$negated property sets are out of scope for v0.4$$
 );
 
--- ─── sparql_parse analysis: `+` is now EXECUTABLE (not flagged) ───
--- E2 makes `?s ex:sub+ ?o` executable, so it lowers into the bgp
--- shape and is NOT flagged `unsupported_algebra` (parse-time). `*`
--- (E3) is still flagged.
+-- ─── sparql_parse analysis: `+` and `*` EXECUTABLE (not flagged) ──
+-- E2 makes `?s ex:sub+ ?o` executable and E3 makes `?s ex:sub* ?o`
+-- executable, so both lower into the bgp shape and are NOT flagged
+-- `unsupported_algebra` (parse-time analysis mirrors execution).
 SELECT jsonb_array_length(
   pgrdf.sparql_parse(
     'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:sub+ ?o }'

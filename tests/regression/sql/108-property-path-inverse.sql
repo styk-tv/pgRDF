@@ -278,26 +278,23 @@ SELECT pgrdf.shmem_reset();
 SELECT (pgrdf.stats() ? 'path_depth_truncations') AS key_present;
 SELECT (pgrdf.stats()->>'path_depth_truncations')::bigint AS truncations;
 
--- ─── Invariant J: recursive / alternation / negated preview-panic ─
--- Substring match on the STABLE prefix only — the tail carries slice
--- numbers that shift as the countdown advances.
-SELECT _check_error(
-  'zero-or-more-preview-panic',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows* ?o }')$$,
-  $$lands in Phase E group E3$$
-);
--- `+` GRADUATED in Phase E group E2: `?s ex:knows+ ?o` no longer
--- preview-panics — it executes (full coverage lives in
--- 109-property-path-plus.sql). Here we just confirm it runs without
--- the E1 panic (returns the transitive closure of the seed `knows`
--- graph; at least the direct edges, so a positive row count).
+-- ─── Invariant J: recursive ops graduated; gated/negated panic ───
+-- `+` (E2) and `*`/`?` (E3) are all executable now; only `|` (E4
+-- gated) and negated sets (out of scope) still preview-panic.
+-- Substring match on the STABLE prefix only for the panic asserts.
 SELECT (count(*) > 0) AS one_or_more_executes FROM pgrdf.sparql(
   'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows+ ?o }'
 );
-SELECT _check_error(
-  'zero-or-one-preview-panic',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows? ?o }')$$,
-  $$lands in Phase E group E3$$
+-- `*` GRADUATED in Phase E group E3 — `?s ex:knows* ?o` no longer
+-- preview-panics; it executes (reflexive transitive closure; full
+-- coverage lives in 110-property-path-star-opt.sql). It binds at
+-- least the reflexive node-set so a positive row count.
+SELECT (count(*) > 0) AS zero_or_more_executes FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows* ?o }'
+);
+-- `?` GRADUATED in E3 too — direct ∪ identity, non-recursive.
+SELECT (count(*) > 0) AS zero_or_one_executes FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows? ?o }'
 );
 SELECT _check_error(
   'alternation-gated-panic',
@@ -310,25 +307,23 @@ SELECT _check_error(
   $$negated property sets are out of scope for v0.4$$
 );
 
--- `^(ex:knows+)` (= inverse of one-or-more) ALSO graduated in E2 —
--- the `^` wrapper composes with `+` (inverse of a transitive closure
--- = transitive closure of the inverse). It executes; full inverse-
--- of-plus coverage is invariant E in 109. `*` under `^` still
--- preview-panics (E3 — the reverse wrapper doesn't change ownership).
+-- `^(ex:knows+)` (inverse of one-or-more, E2) and `^(ex:knows*)`
+-- (inverse of zero-or-more, E3) both execute — the `^` wrapper
+-- composes with the recursive operators (inverse of a closure =
+-- closure of the inverse). Full coverage: 109 invariant E, 110
+-- invariant H.
 SELECT (count(*) >= 0) AS reverse_of_plus_executes FROM pgrdf.sparql(
   'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ^(ex:knows+) ?o }'
 );
-SELECT _check_error(
-  'reverse-of-star-still-previews',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ^(ex:knows*) ?o }')$$,
-  $$lands in Phase E group E3$$
+SELECT (count(*) >= 0) AS reverse_of_star_executes FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ^(ex:knows*) ?o }'
 );
 
--- ─── sparql_parse analysis: E1+E2 path NOT flagged unsupported ────
+-- ─── sparql_parse analysis: E1+E2+E3 path NOT flagged unsupported ─
 -- `?s ^ex:knows ?o` lowers to a BGP triple — parse reports it in the
 -- bgp shape and does NOT flag `unsupported_algebra`. `?s ex:knows+
--- ?o` is now executable too (E2) so it is ALSO not flagged. `*`
--- (E3) remains flagged (parse-time, no panic).
+-- ?o` (E2) and `?s ex:knows* ?o` (E3) are executable too, so they
+-- are ALSO not flagged (parse-time analysis mirrors execution).
 SELECT jsonb_array_length(
   pgrdf.sparql_parse(
     'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ^ex:knows ?o }'
