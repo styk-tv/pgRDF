@@ -1,0 +1,8 @@
+PREFIX ex:   <http://example.org/>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+# W3C SPARQL 1.1 §9 zero-or-one path: the bound subject either
+# equals the object (zero-length) OR has a single direct edge.
+# `ex:alice foaf:knows? ?x` = { alice (identity, W3C §9.3 bound
+# endpoint), bob, carol (the two direct foaf:knows edges) }.
+# NOT dave — that needs two hops (alice→bob→dave), `?` allows ≤1.
+SELECT ?x WHERE { ex:alice foaf:knows? ?x }

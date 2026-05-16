@@ -164,9 +164,13 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
 - ⏳ Type-aware ORDER BY (sort numeric literals numerically rather
       than as strings). LLD v0.4 §11.
 - ⏳ `VALUES (?x ?y) { … }`. LLD v0.4 §11.
-- ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`,
-      alternation). Simple sequence already works because spargebra
-      desugars `:a/:b` into a BGP chain. LLD v0.4 §7.
+- ✅ Property paths (`^`, `+`, `*`, `?`, `|` incl.
+      `(a|b)+`/`(a|b)*`/`(a|b)?`/`^(a|b)`) + materialised-closure
+      no-CTE fallback — shipped v0.4 Phase E (E1 → E4). Simple
+      sequence already works because spargebra desugars `:a/:b`
+      into a BGP chain; the §7.1 sequence-arm / sequence-inner
+      remainder stays gated, negated sets out of v0.4 scope. LLD
+      v0.4 §7.
 - ✅ `CONSTRUCT` — full surface shipped across Phase D countdown
       slices 59 → 51 (slice 50 = the v0.4.4 release cut remains).
       slice 59 landed (foundation, constant-only
@@ -1020,13 +1024,14 @@ shaper. Sibling UDF rather than overloading `pgrdf.sparql` — callers
 signal intent at the SQL boundary. See
 [LLD v0.4 §6](../specs/SPEC.pgRDF.LLD.v0.4.md#6-construct-deferred-from-v03-now-in-scope).
 
-### Track 5 — Property paths (Phase E countdown — groups E1 ✅ E2 ✅ E3 ✅)
+### Track 5 — Property paths (Phase E countdown — groups E1 ✅ E2 ✅ E3 ✅ E4 ✅, **CLOSED**)
 
-`*`, `+`, `?`, `^`, with alternation `p1|p2` as a stretch goal.
+`*`, `+`, `?`, `^`, plus the alternation `p1|p2` stretch (shipped).
 Recursive operators translate to recursive Postgres CTEs with a
-`pgrdf.path_max_depth` GUC; future work falls back to direct BGP
-match when the predicate's closure is already materialised. Phase E
-is grouped into four dispatches:
+`pgrdf.path_max_depth` GUC; the materialised-closure fast path
+falls back to a direct BGP match when the predicate's closure is
+already materialised (no recursive CTE emitted). Phase E was
+grouped into four dispatches, all landed:
 
 - ✅ **Group E1 (slices 49 → 46) — foundation + `^` inverse.**
   Property-path AST detection in the shared WHERE walker + the
@@ -1087,11 +1092,35 @@ is grouped into four dispatches:
   New regression `110-property-path-star-opt.sql` (invariants A–K, all
   hand-computed); the E2 `*`-still-panics pgrx negative is replaced by
   reflexive-chain / both-var-exact-set / isolated-bound-identity /
-  `?`-direct-∪-identity `#[pg_test]`s + a `|`-still-panics negative
-  locking the exact `PANIC_ALTERNATION` literal. `|` (E4),
-  nested-recursive (E4) and negated sets still preview-panic.
-- 🚧 **Group E4 — closure-detect + gated `|` + W3C-shape
-  consolidation + the v0.4.5 release.**
+  `?`-direct-∪-identity `#[pg_test]`s + a `|`-still-panics negative.
+  `|` (E4), nested-recursive (E4) and negated sets still preview-panic.
+- ✅ **Group E4 (slices 37 → 35) — `|` alternation +
+  materialised-closure no-CTE fallback + Phase E W3C-shape
+  consolidation + the v0.4.5 release.** The §7.1 alternation stretch
+  shipped in full: the predicate match was generalised from a
+  single `predicate_id = $P` to a predicate **set**
+  (`predicate_id IN (…)` — a 1-element set is identical, so plain
+  `+`/`*`/`?` are unchanged), a cheap uniform one-line change at
+  each builder. Top-level `a|b` (non-reflexive single step), the
+  n-ary `a|b|c`, the recursion compositions `(a|b)+`/`(a|b)*`/
+  `(a|b)?`, and the inverse `^(a|b)`/`(^a|^b)` all execute. The
+  §7.1-permitted gated remainder (an alternation arm that is itself
+  a sequence/recursive path; a recursive op whose inner box is a
+  sequence) stays preview-panicking with the stable nested-recursive
+  prefix — folding it composes a recursive CTE inside an alternation
+  arm (the balloon §7.1 explicitly permits gating). The
+  materialised-closure no-CTE fallback landed: for a `+`/`*` over a
+  single well-known transitive predicate (`rdfs:subClassOf` /
+  `rdfs:subPropertyOf` / `owl:sameAs`) with `is_inferred` rows
+  present, the translator emits a direct match (no `CTE Scan` in
+  the executed plan — §7.3 acceptance, EXPLAIN-scraped via the new
+  `pgrdf.sparql_sql` debug hook). The deferred-all-phase Phase E
+  W3C-shape consolidation landed: 6 fixtures `36-path-inverse` …
+  `41-path-materialised` (35 → 41). New regression
+  `111-property-path-materialised-closure.sql` (invariants A–F);
+  the 108/109/110/80/30 alternation-panic locks re-targeted to the
+  gated remainder; the parser path-flag pgrx test updated (`|` no
+  longer flagged, the sequence-arm form is). v0.4.5 release cut.
 
 See
 [LLD v0.4 §7](../specs/SPEC.pgRDF.LLD.v0.4.md#7-property-paths-deferred-from-v03-now-in-scope).
@@ -1242,3 +1271,4 @@ above; the v0.3 rows below remain frozen as the shipped baseline.)
 | **v0.3 cut** | **93** | **39 + 23 + 3 = 65** | **Total 158 tests across all five layers** (93 pgrx integration + 39 pg_regress + 23 W3C-shape SPARQL + 3 LUBM-shape). v0.3 LLD §5 phase status: Phase 1 ✅, Phase 2 ✅ (2.0/2.1/2.2 + extended SPARQL surface steps 1-12), Phase 3 🚧 (steps 1-2 ✅, step 3 phase A ✅, phase B → v0.4), Phase 4 ✅, Phase 5 🚧 stub (real impl → v0.4 per LLD v0.4 §9 — landed ✅ in commit `ac40bc2` post-v0.3.0), Phase 6 🚧 (step 1 ✅, step 2 starter + expansions + essentials ✅, step 3 ⏳). License attribution (Apache 2.0 / 2026), MSRV (1.91), ERRATA E-006 re-check (2026-05-14), ERRATA E-010 (cargo audit informational). Forward look: [`SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md) is canonical for v0.4 scope |
 | **v0.4.0 cut (current)** | **94** | **40 + 23 + 3 = 66** | **Total 160 tests across all five layers** (94 pgrx integration + 40 pg_regress + 23 W3C-shape SPARQL + 3 LUBM-shape). Key delta vs v0.3 cut: real SHACL Core validation lands — `pgrdf.validate(data, shapes)` returns a W3C `sh:ValidationReport`-shape JSONB via `shacl 0.3.1` (commit `ac40bc2`), replacing the v0.3.0 stub. Unblocked via `[patch.crates-io]` to the `styk-tv/reasonable@rdf12-passthrough` fork ([ERRATA.v0.4 E-011](../specs/ERRATA.v0.4.md); upstream PR [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50) pending — v0.4.1 drops the patch on merge). New regression `71-shacl-real.sql`, three new pgrx integration tests. v0.4 LLD §5 phase status: Phase 1 ✅, Phase 2 ✅, Phase 3 🚧 (phase B still → v0.4.x), Phase 4 ✅, Phase 5 ✅, Phase 6 🚧 (step 3 ⏳). Named-graph + SPARQL UPDATE + lifecycle UDFs + CONSTRUCT + property paths + heap_multi_insert phase B + W3C SPARQL 1.1 manifest runner all 🚧 — slated for subsequent v0.4.x point releases or a refreshed v0.5.0 cut |
 | **Phase A §3 named-graph shipped** | **118** | **49 + 26 + 3 = 78** | **Total 196 tests across all five layers** (118 pgrx integration + 49 pg_regress + 26 W3C-shape SPARQL + 3 LUBM-shape). Cumulative landings of Phase A countdown slices 120 → 110 against the v0.4.0 cut: `_pgrdf_graphs` system table + `pg_extension_config_dump` registration (slice 120), the five-UDF `add_graph` / `graph_id` / `graph_iri` surface (slices 119 → 115), SPARQL `GRAPH <iri>` literal and `GRAPH ?g` variable forms (slices 114 / 113), per-pattern GRAPH composition with OPTIONAL/UNION/MINUS (slice 112), three W3C-shape conformance fixtures for §13.3 (slice 111: `24-graph-named-iri` / `25-graph-var-projection` / `26-graph-var-groupby`), and the shell-driven `tests/regression/scripts/pg-dump-roundtrip.sh` (slice 110, wired into `just test-pg-dump-roundtrip` + `just test-conformance`). New pg_regress files: `72-77`, `78`, `79`, `87` (+9 vs v0.4.0). All four §3.4 LLD acceptance criteria verified end-to-end. v0.4 LLD §5 phase status: Phase 1 ✅, Phase 2 ✅, Phase 3 🚧 (phase B still → v0.4.x), Phase 4 ✅, Phase 5 ✅, **§3 named-graph ✅** (Track 1 closed), Phase 6 🚧 (step 3 ⏳). Phase A continues with the docs-sync + close-out slices 109 → 100 toward a v0.4.1 tag; SPARQL UPDATE + lifecycle UDFs + CONSTRUCT + property paths + heap_multi_insert phase B + W3C SPARQL 1.1 manifest runner carry forward |
+| **Phase E property paths shipped (v0.4.5 cut)** | **230** | **73 + 41 + 3 = 117** | **Total 347 tests across all five layers** (230 pgrx integration + 73 pg_regress + 41 W3C-shape SPARQL + 3 LUBM-shape). Phase E countdown 49 → 35 closed against the v0.4.4 cut: E1 `^` inverse + `pgrdf.path_max_depth` GUC (slices 49 → 46), E2 `+` recursive CTE + depth guard + the `src/query/path.rs` carve (slices 45 → 42), E3 `*`/`?` with full W3C SPARQL 1.1 §9.3 zero-length semantics (slices 41 → 38), **E4 `\|` alternation (incl. `(a\|b)+`/`(a\|b)*`/`(a\|b)?`/`^(a\|b)`) + materialised-closure no-CTE fallback + Phase E W3C-shape consolidation (slices 37 → 35)**. New pg_regress `108`–`111` (+4 vs v0.4.4's 69; net 73 after intervening UPDATE/CONSTRUCT slices); new W3C-shape fixtures `36-path-inverse` … `41-path-materialised` (35 → 41); new `pgrdf.sparql_sql` debug hook (the §7.3 EXPLAIN-scrape acceptance). The §7.1-permitted gated remainder (alternation arm = sequence/recursive; recursive op inner = sequence) stays preview-panicking by spec allowance; negated property sets out of v0.4 scope. v0.4 LLD §5 phase status: Phase 1 ✅, Phase 2 ✅, Phase 3 🚧 (heap_multi_insert phase B still → v0.4.x), Phase 4 ✅, Phase 5 ✅, **§7 property paths ✅** (Track 5 closed), Phase 6 🚧 (step 3 ⏳). Phase F next |

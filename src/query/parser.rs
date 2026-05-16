@@ -27,13 +27,16 @@
 //!   * OPTIONAL / UNION / MINUS / FILTER / aggregates / BIND — the
 //!     parser walks through them; the executor supports them too,
 //!     so they are NOT flagged in `unsupported_algebra`.
-//!   * Property paths (Phase E group E1, SPEC.pgRDF.LLD.v0.4 §7) —
-//!     the parser lowers the E1-supported set (bare predicate, `^`
-//!     inverse, nested `^(^…)`) into `bgp` triples and does NOT flag
-//!     them. Recursive operators (`*`/`+`/`?`), alternation (`|`)
-//!     and negated property sets are still flagged under
-//!     `unsupported_algebra` (they land in groups E2/E3/E4); their
-//!     execution panics with a stable rollout-preview prefix.
+//!   * Property paths (Phase E groups E1-E4, SPEC.pgRDF.LLD.v0.4
+//!     §7) — the parser lowers the full shipped set (bare predicate,
+//!     `^` inverse, nested `^(^…)`, `+`, `*`, `?`, and `|` incl.
+//!     `(a|b)+`/`(a|b)*`/`(a|b)?` and the inverse `^(a|b)`) into
+//!     `bgp` triples and does NOT flag them. Only the §7.1-permitted
+//!     gated remainder (an alternation arm that is itself a
+//!     sequence/recursive path; a recursive op whose inner box is a
+//!     sequence) and negated property sets are still flagged under
+//!     `unsupported_algebra`; their execution panics with a stable
+//!     rollout-preview prefix.
 //!   * GRAPH (named-graph clause) — supported (v0.4 §3); not flagged.
 //!     Inline VALUES, SERVICE — still flagged under
 //!     `unsupported_algebra` (VALUES in §4-deferred backlog).
@@ -427,14 +430,17 @@ fn walk(
             path,
             object,
         } => {
-            // Phase E groups E1 + E2 (LLD v0.4 §7) — property paths.
-            // The executable surface — E1 lower-to-triple (bare
-            // predicate, `^p`, nested `^(^…)`) PLUS E2 `+` (`p+`,
-            // `^p+`, `(^p)+`) — surfaces its subject/object variables
-            // and a `bgp`-array entry just like an ordinary triple
-            // (the executor handles execution). The still-deferred
-            // forms (`*`/`?` → E3, `|` → E4, negated set / sequence /
-            // nested-recursive `+`) are flagged in
+            // Phase E groups E1+E2+E3+E4 (LLD v0.4 §7) — property
+            // paths. The executable surface — E1 lower-to-triple
+            // (bare predicate, `^p`, nested `^(^…)`), E2 `+`, E3
+            // `*`/`?`, and E4 `|` (incl. `(a|b)+`/`(a|b)*`/`(a|b)?`
+            // and the inverse `^(a|b)`) — surfaces its subject/object
+            // variables and a `bgp`-array entry just like an ordinary
+            // triple (the executor handles execution). Only the
+            // §7.1-permitted gated remainder (an alternation arm that
+            // is itself a sequence/recursive path, a recursive op
+            // whose inner box is a sequence) and the
+            // out-of-v0.4-scope negated property set are flagged in
             // `unsupported_algebra` here (parse-time, no panic),
             // mirroring how Phase C reports not-yet-shipped UPDATE
             // forms. Execution of those still panics with a stable
@@ -620,12 +626,14 @@ fn count_bgp_triples(p: &GraphPattern) -> usize {
         | GraphPattern::Slice { inner, .. }
         | GraphPattern::Group { inner, .. }
         | GraphPattern::Service { inner, .. } => count_bgp_triples(inner),
-        // Phase E groups E1 + E2: an executable property path (E1
-        // lower-to-triple OR E2 `+`) contributes exactly one BGP
+        // Phase E groups E1-E4: an executable property path (E1
+        // lower-to-triple, E2 `+`, E3 `*`/`?`, or E4 `|` incl. its
+        // recursion compositions) contributes exactly one BGP
         // relation; count it as 1 so CONSTRUCT-side
-        // `where_shape.triple_count` is accurate. Still-deferred
-        // recursive/alternation forms contribute 0 (they never reach
-        // execution). `Values` carries no triples.
+        // `where_shape.triple_count` is accurate. The §7.1-gated
+        // remainder (sequence-arm alternation / sequence-inner
+        // recursive) contributes 0 (it never reaches execution).
+        // `Values` carries no triples.
         GraphPattern::Path { path, .. } => usize::from(crate::query::path::is_executable(path)),
         GraphPattern::Values { .. } => 0,
         _ => 0,
@@ -990,14 +998,18 @@ mod tests {
     }
 
     /// Property-path executability tracks the Phase E rollout. E1
-    /// (`^`/bare), E2 (`+`), and E3 (`*`/`?`, incl. their `^`
-    /// compositions) all lower into the `bgp` shape and are NOT
-    /// flagged — `sparql_parse` analysis mirrors execution. Only the
-    /// genuinely-deferred forms (alternation `|` — group E4 gated;
-    /// negated sets — out of scope; a recursive op with a nested-
-    /// recursive inner — E4) still surface in `unsupported_algebra`.
-    /// Note: simple sequence paths (`<a>/<b>`) are desugared by
-    /// spargebra into a BGP chain, so they never surface as Path.
+    /// (`^`/bare), E2 (`+`), E3 (`*`/`?`, incl. their `^`
+    /// compositions), and E4 (`|`, incl. `(a|b)+`/`(a|b)*`/`(a|b)?`
+    /// and the inverse `^(a|b)`) all lower into the `bgp` shape and
+    /// are NOT flagged — `sparql_parse` analysis mirrors execution.
+    /// Only the §7.1-permitted gated remainder (an alternation arm
+    /// that is itself a sequence/recursive path; a recursive op with
+    /// a sequence inner box) and the out-of-v0.4-scope negated set
+    /// still surface in `unsupported_algebra`. Note: a simple
+    /// top-level sequence path (`<a>/<b>`) is desugared by spargebra
+    /// into a BGP chain, so it never surfaces as a Path — but a
+    /// sequence INSIDE an alternation arm (`<a>/<b>|<c>`) stays a
+    /// Path the analysis must flag.
     #[pg_test]
     fn sparql_parse_flags_unsupported_path() {
         // E3-executable: `*` lowers to the bgp shape — NOT flagged.
@@ -1022,8 +1034,8 @@ mod tests {
             opt_unsupported.is_empty(),
             "`?` is executable from E3 and must NOT be flagged, got {opt_unsupported:?}"
         );
-        // Alternation `(a|b)` is the still-deferred E4 gated stretch —
-        // it MUST still be flagged in unsupported_algebra.
+        // E4-executable: top-level `(a|b)` lowers to the bgp shape —
+        // NOT flagged (it ships in E4).
         let q_alt = "SELECT ?s ?o WHERE { ?s (<http://x/a>|<http://x/b>) ?o }";
         let j3: pgrx::JsonB =
             Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q_alt.into()])
@@ -1031,10 +1043,24 @@ mod tests {
                 .unwrap();
         let alt_unsupported = j3.0["unsupported_algebra"].as_array().unwrap();
         assert!(
-            alt_unsupported
+            alt_unsupported.is_empty(),
+            "`a|b` is executable from E4 and must NOT be flagged, got {alt_unsupported:?}"
+        );
+        // The §7.1-permitted gated remainder — an alternation arm
+        // that is itself a sequence (`<a>/<b> | <c>`) — MUST still
+        // be flagged (folding it composes a recursive CTE inside an
+        // alternation arm, the balloon §7.1 permits gating).
+        let q_gated = "SELECT ?s ?o WHERE { ?s (<http://x/a>/<http://x/b>|<http://x/c>) ?o }";
+        let j4: pgrx::JsonB =
+            Spi::get_one_with_args("SELECT pgrdf.sparql_parse($1)", &[q_gated.into()])
+                .unwrap()
+                .unwrap();
+        let gated_unsupported = j4.0["unsupported_algebra"].as_array().unwrap();
+        assert!(
+            gated_unsupported
                 .iter()
                 .any(|x| x.as_str().is_some_and(|s| s.contains("Path"))),
-            "alternation `|` (E4) must still be flagged, got {alt_unsupported:?}"
+            "the §7.1 gated remainder (sequence-arm alternation) must still be flagged, got {gated_unsupported:?}"
         );
     }
 

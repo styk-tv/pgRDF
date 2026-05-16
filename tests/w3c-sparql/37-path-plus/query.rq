@@ -1,0 +1,6 @@
+PREFIX ex: <http://example.org/>
+# W3C SPARQL 1.1 §9 one-or-more path: transitive (non-reflexive)
+# closure. `?x ex:partOf+ ex:Company` = everything that is
+# (transitively) part of the Company: Bolt, Engine, Car.
+# NON-reflexive: Company is NOT part of itself.
+SELECT ?x WHERE { ?x ex:partOf+ ex:Company }

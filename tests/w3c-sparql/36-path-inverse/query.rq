@@ -1,0 +1,7 @@
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+PREFIX ex:   <http://example.org/>
+# W3C SPARQL 1.1 §9 inverse path: `?x ^p ?y` ≡ `?y p ?x`.
+# `ex:bob ^foaf:knows ?who` ≡ `?who foaf:knows ex:bob` — who knows
+# Bob? Alice (alice knows bob) and Dave (dave knows bob). NOT carol
+# (alice knows carol, but carol does not know bob).
+SELECT ?who WHERE { ex:bob ^foaf:knows ?who }

@@ -72,7 +72,8 @@ SELECT * FROM pgrdf.sparql(
 | 2× ingest target (true COPY BINARY / heap_multi_insert) | ⏳ v0.4 |
 | Full W3C SPARQL 1.1 TTL-manifest runner against `w3c/rdf-tests` | ⏳ v0.4 |
 | LUBM-10 / LUBM-100 cross-engine benchmarks (Jena TDB, Apache AGE) | ⏳ v0.4 |
-| SPARQL surface — VALUES, property paths beyond simple seq, multi-triple OPTIONAL, DESCRIBE, aggregates over UNION, BIND-in-FILTER | ⏳ v0.4 |
+| SPARQL surface — property paths (`^`/`+`/`*`/`?`/`\|`) | ✅ v0.4.5 |
+| SPARQL surface — VALUES, multi-triple OPTIONAL, DESCRIBE, aggregates over UNION, BIND-in-FILTER | ⏳ v0.4 |
 
 For the long-form plan see
 [`docs/10-roadmap.md`](../docs/10-roadmap.md).

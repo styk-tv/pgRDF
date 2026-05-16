@@ -1,0 +1,8 @@
+PREFIX ex: <http://example.org/>
+# W3C SPARQL 1.1 §9 alternative path (Phase E group E4): the step
+# matches EITHER predicate. `?c (ex:parent|ex:guardian) ?caregiver`
+# = the union of the per-predicate scans `?c ex:parent ?caregiver`
+# (child1→mother, child3→father) and `?c ex:guardian ?caregiver`
+# (child2→uncle). The ex:owner edge is NOT in the alternation set
+# so ex:pet does not appear. Non-reflexive (a single step).
+SELECT ?c ?caregiver WHERE { ?c (ex:parent|ex:guardian) ?caregiver }

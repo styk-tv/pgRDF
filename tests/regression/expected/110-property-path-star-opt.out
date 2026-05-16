@@ -86,12 +86,15 @@ http://example.org/c3|three
 http://example.org/c7|seven
 11
 t
-alternation-still-E4-gated: t
+3
+t
 nested-star-plus-E4: t
-nested-alternation-star-E4: t
+sequence-inner-star-gated: t
+alternation-sequence-arm-gated: t
 negated-set-still-out-of-scope: t
+0
 0
 0
 1
 
-24
+27

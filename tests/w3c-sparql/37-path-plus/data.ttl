@@ -1,0 +1,6 @@
+@prefix ex: <http://example.org/> .
+
+# A part-of chain: Bolt ⊏ Engine ⊏ Car ⊏ Company.
+ex:Bolt   ex:partOf ex:Engine .
+ex:Engine ex:partOf ex:Car .
+ex:Car    ex:partOf ex:Company .

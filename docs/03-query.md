@@ -134,7 +134,7 @@ coverage:
 plus W3C-shape fixtures 24 / 25 / 26 under
 [`tests/w3c-sparql/`](../tests/w3c-sparql/).
 
-## Property paths (LLD v0.4 §7 — Phase E, groups E1 + E2 + E3 shipped)
+## Property paths (LLD v0.4 §7 — Phase E, fully shipped E1 → E4)
 
 SPARQL property paths arrive in the spargebra algebra as
 `GraphPattern::Path { subject, path, object }`. The shared WHERE
@@ -143,37 +143,46 @@ the single chokepoint every query form routes through — SELECT, ASK,
 `pgrdf.construct`, and the UPDATE WHERE bodies all inherit path
 support at once (it is not special-cased per consumer).
 `query::path::scoped_triple_from_path` classifies the operator: the
-E1 non-recursive set lowers to an ordinary triple; the E2 `+` set
-and the E3 `*` / `?` sets lower to a derived FROM relation that
-exposes the same `subject_id` / `object_id` columns a quad alias
-does (`*` is the `+` recursive walk `UNION` the zero-length
+E1 non-recursive set lowers to an ordinary triple; the `+` / `*` /
+`?` / `|` sets lower to a derived FROM relation that exposes the
+same `subject_id` / `object_id` columns a quad alias does (`+` is
+the recursive walk; `*` is that walk `UNION` the zero-length
 node-set; `?` is the direct edge `UNION` the same zero-length set,
-non-recursive). Either way the result flows through the existing
-`pattern_clauses` / var-binder machinery — so paths compose for free
-with named-graph scoping, multi-pattern BGP joins, and
+non-recursive; `|` is the non-reflexive single step over a
+predicate **set**, no recursion). Every recursive/optional/
+alternation builder centralises the predicate match as
+`predicate_id IN (…)` — a 1-element set is identical to `= $P`, so
+`|` (and its `(a|b)+`/`(a|b)*`/`(a|b)?` recursion compositions) is
+just a wider set, the LLD §7.2 "union of per-predicate scans" done
+as one scan. Either way the result flows through the existing
+`pattern_clauses` / var-binder machinery — so paths compose for
+free with named-graph scoping, multi-pattern BGP joins, and
 OPTIONAL/UNION/MINUS.
 
 | Operator | SPARQL | Semantics | Status |
 |---|---|---|---|
 | bare predicate | `?s p ?o` (as a `Path`) | direct triple | ✅ E1 — lowers to `?s p ?o` |
 | `^` inverse | `?s ^p ?o` | `?o p ?s` | ✅ E1 — subject/object swap, no recursion; `^(^p)` folds by parity |
-| `+` one-or-more | `?s p+ ?o` | transitive closure (non-reflexive) | ✅ E2 — `WITH RECURSIVE` CTE; cycle-safe `UNION` dedup; `^p+`/`(^p)+` inverse-composition; depth guard enforced |
+| `+` one-or-more | `?s p+ ?o` | transitive closure (non-reflexive) | ✅ E2 — `WITH RECURSIVE` CTE; cycle-safe `CYCLE`-clause dedup; `^p+`/`(^p)+` inverse-composition; depth guard enforced |
 | `*` zero-or-more | `?s p* ?o` | reflexive transitive closure | ✅ E3 — the `+` cycle-safe recursive walk `UNION` the W3C §9.3 zero-length node-set; reuses E2's `CYCLE` termination + depth guard + truncation probe; `^(p*)`/`(^p)*` inverse-composition |
 | `?` zero-or-one | `?s p? ?o` | equal-or-linked | ✅ E3 — non-recursive: the direct edge `UNION` the SAME W3C §9.3 zero-length node-set; no depth guard; `^(p?)`/`(^p)?` inverse-composition |
-| `\|` alternation | `?s (a\|b) ?o` | per-predicate union | 🚧 group E4 (gated stretch) |
+| `\|` alternation | `?s (a\|b) ?o` | per-predicate union (non-reflexive single step) | ✅ E4 — `predicate_id IN (…)`; n-ary `a\|b\|c`; the recursion compositions `(a\|b)+`/`(a\|b)*`/`(a\|b)?`; inverse `^(a\|b)`/`(^a\|^b)` |
 | `!(...)` negated set | `?s !(p) ?o` | — | out of v0.4 scope (panics) |
 | sequence `p1/p2` | `?s p1/p2 ?o` | — | use a multi-pattern BGP (`{ ?s p1 ?m . ?m p2 ?o }`); E1 rejects an explicit `Sequence` path-expr with a pointer to the BGP form |
 
-The still-deferred operators **preview-panic** with a stable prefix:
-`|` is the gated-stretch message for E4; a recursive/optional op
-whose inner box is itself recursive/alternation/sequence — e.g.
-`(p*)+`, `(a|b)*`, `(p1/p2)?` — panics with the nested-recursive E4
-message; negated sets panic with the out-of-scope message.
-Substring-match the prefix; any slice-number tail is advisory.
-`sparql_parse` does NOT panic on these — it lowers the executable
-set (E1 ∪ `+` ∪ `*`/`?`) into the `bgp` shape and flags only the
-still-deferred forms in `unsupported_algebra` (parse-time analysis,
-mirroring how Phase C reports not-yet-shipped UPDATE forms).
+The only remaining **preview-panic** is the §7.1-permitted **gated
+remainder**: an alternation arm that is itself a
+sequence/recursive/nested-recursive path (`(a/b|c)`, `(a+|b)`), or
+a recursive operator whose inner box is a sequence (`(p1/p2)+`).
+Folding these would compose a recursive CTE inside an alternation
+arm — the translator balloon LLD §7.1 explicitly permits gating.
+They panic with the stable nested-recursive prefix; negated sets
+panic with the out-of-scope message. Substring-match the prefix;
+any slice-number tail is advisory. `sparql_parse` does NOT panic on
+these — it lowers the full executable set (E1 ∪ `+` ∪ `*`/`?` ∪
+`|`) into the `bgp` shape and flags only the gated remainder in
+`unsupported_algebra` (parse-time analysis, mirroring how Phase C
+reports not-yet-shipped UPDATE forms).
 
 **`+` chain example.** Over a `subClassOf`-style chain
 `c1 → c2 → … → c11`:
@@ -258,15 +267,61 @@ path the guard actually cut bumps it); it may benignly over-count
 when the cut node was already reached by a shorter path (LLD v0.4
 §7.2 explicitly permits this).
 
+**`|` alternation (E4).** `?s (a|b) ?o` is the union of the
+per-predicate scans — equivalently a single scan over the predicate
+**set** (`predicate_id IN (a, b)`). It is a **non-reflexive single
+step** (not a closure — no recursion, no zero-length identity set):
+
+```sparql
+PREFIX ex: <http://example.org/>
+SELECT ?c ?who WHERE { ?c (ex:parent|ex:guardian) ?who }   -- parent ∪ guardian edges
+```
+
+The n-ary form `a|b|c` flattens to the full set; `^(a|b)` /
+`(^a|^b)` fold the inverse into the same swapped-edge flag; and the
+recursion compositions `(a|b)+` / `(a|b)*` / `(a|b)?` make the
+alternation the recursive step's predicate set (the depth guard,
+the `CYCLE` clause, the truncation probe, and the zero-length
+node-set are all predicate-set-agnostic, so they are reused
+verbatim). The only gated case is an alternation whose **arm** is
+itself a sequence/recursive path (`(a/b|c)`) — see the gated
+remainder above.
+
+**Materialised-closure no-CTE fallback (E4, LLD v0.4 §7.2 / §7.3).**
+When `pgrdf.materialize(graph_id)` has already entailed the
+transitive closure of a path's predicate, a recursive CTE is wasted
+work — every transitive pair is already a direct `is_inferred =
+TRUE` edge. For a `+`/`*` over a **single** predicate that is one of
+the well-known transitive predicates (`rdfs:subClassOf`,
+`rdfs:subPropertyOf`, `owl:sameAs`), the translator probes
+`EXISTS(… WHERE predicate_id = $P AND is_inferred AND <scope>)`; if
+a materialised row is present it emits a **direct match instead of
+the recursive CTE** — `+` becomes the non-reflexive single step,
+`*` becomes that step `UNION` the W3C §9.3 zero-length set (= the
+`?` relation; with the closure materialised, direct ∪ identity is
+the full `*` solution set). The executed plan therefore carries no
+`CTE Scan` (§7.3 acceptance, scraped via `EXPLAIN (FORMAT JSON)`).
+The result set is byte-identical to the non-materialised recursive
+walk — the optimisation is semantics-preserving. Detection is
+per-query, not cached; `?`/`^`/`|` are unaffected (no recursion to
+elide); a multi-predicate `(a|b)+` skips the fallback (the
+heuristic is single-well-known-predicate only). The
+`pgrdf.sparql_sql(q TEXT) → TEXT` debug hook returns the translated
+SQL (dict ids inlined) so a regression can EXPLAIN-scrape it.
+
 Implementation:
-[`src/query/path.rs`](../src/query/path.rs) (classifier + recursive-
-CTE builder + truncation probe — the executor only calls into it),
+[`src/query/path.rs`](../src/query/path.rs) (classifier +
+recursive-CTE builder + predicate-set generalisation + the
+alternation relation builder + truncation probe — the executor only
+calls into it), [`src/query/executor.rs`](../src/query/executor.rs)
+(`scoped_triple_from_path` wiring + the live-dictionary
+materialised-closure probe + `pgrdf.sparql_sql`),
 [`src/query/guc.rs`](../src/query/guc.rs); regression coverage:
 [`108-property-path-inverse.sql`](../tests/regression/sql/108-property-path-inverse.sql)
 + [`109-property-path-plus.sql`](../tests/regression/sql/109-property-path-plus.sql)
-+ [`110-property-path-star-opt.sql`](../tests/regression/sql/110-property-path-star-opt.sql).
-W3C-shape property-path fixtures are deferred to group E4 (mirrors
-how Phase D deferred its W3C consolidation).
++ [`110-property-path-star-opt.sql`](../tests/regression/sql/110-property-path-star-opt.sql)
++ [`111-property-path-materialised-closure.sql`](../tests/regression/sql/111-property-path-materialised-closure.sql);
+W3C-shape fixtures `36-path-inverse` … `41-path-materialised`.
 
 ## Prepared-plan cache (LLD §4.2, **shipped — Phase 3 step 2**)
 
@@ -670,7 +725,7 @@ Concrete shape:
       `pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates
       not supported (W3C 1.1 §16.2)`.
 - ⏳ `DESCRIBE` — different output shape; v0.4
-- ⏳ Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) — v0.4
+- ✅ Property paths (`^`, `+`, `*`, `?`, `\|` incl. `(a\|b)+`/`(a\|b)*`/`(a\|b)?`/`^(a\|b)`) + materialised-closure no-CTE fallback — shipped v0.4 Phase E (the §7.1 sequence-arm / sequence-inner remainder stays gated; negated sets out of v0.4 scope)
 - ⏳ `VALUES` inline data — needs derived-table refactor; v0.4
 - ⏳ Aggregates over UNION; multi-triple OPTIONAL; BIND-in-FILTER — v0.4
 - ❌ Federated `SERVICE` — out of scope for v0.x

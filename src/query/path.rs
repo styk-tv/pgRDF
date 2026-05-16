@@ -1,5 +1,5 @@
 //! SPARQL property-path translation — Phase E groups E1 + E2 + E3
-//! (LLD v0.4 §7).
+//! + E4 (LLD v0.4 §7).
 //!
 //! Property paths arrive in the spargebra algebra as
 //! `GraphPattern::Path { subject, path, object }`, where `path` is a
@@ -122,33 +122,74 @@
 //! wrappers, and `pgrdf.construct` (which routes its WHERE through
 //! the same `parse_select` walker).
 //!
-//! ## What E3 does NOT ship (deferred — stable preview panics)
+//! ## What E4 ships (LLD v0.4 §7.1 gated stretch / §7.2 / §7.3)
 //!
-//! Alternation (`|`) and the materialised-closure no-CTE
-//! optimisation are group E4 (the `|` arm is gated). A recursive
-//! path whose inner box is itself recursive / alternation /
-//! sequence (`(p*)+`, `(a|b)*`, `(p1/p2)?`) is exotic and lands with
-//! the nested-recursive consolidation in group E4. Negated property
-//! sets are out of v0.4 scope entirely. Each panics with a STABLE
-//! prefix so downstream tooling can preview the rollout schedule
-//! without depending on the (slice-number-bearing) tail — the exact
-//! same convention Phase C's per-form UPDATE panics use.
+//! * **Alternation** — `Alternative(a, b)` = `a|b`, and the n-ary
+//!   nests `a|b|c` (= `Alternative(a, Alternative(b, c))`). Per LLD
+//!   §7.2 the base case becomes "a union of per-predicate scans" —
+//!   in pgRDF that is exactly `predicate_id IN ($P1, $P2, …)`. The
+//!   §7.1-gated stretch ships in full because the refactor IS cheap:
+//!   every recursive/optional builder already centralised the single
+//!   `predicate_id = $P` clause, so generalising it to a predicate
+//!   *set* (`IN (…)`) is a uniform one-line change at each site, not
+//!   a translator balloon. Consequently the recursion-composed forms
+//!   ship too:
+//!   - **`(a|b)+` / `(a|b)*` / `(a|b)?`** — the alternation becomes
+//!     the recursive step's predicate SET: the CTE base arm and the
+//!     recursive arm both range over `{a,b}` (the depth guard, the
+//!     `CYCLE` clause, the truncation probe, and the zero-length
+//!     node-set are all predicate-set-agnostic, so they are reused
+//!     verbatim).
+//!   - **`^(a|b)` / `(^a|^b)`** — `^` composition is uniform (it is
+//!     the same `swapped` flag the closure builders already carry),
+//!     so the inverse of an alternation = the alternation of the
+//!     inverse over the swapped edge.
+//!
+//!   GATED (still preview-panics, per §7.1's explicit allowance): an
+//!   alternation whose arm is NOT a plain (optionally inverted)
+//!   predicate — e.g. `(a/b | c)` (sequence arm), `(a+ | b)`
+//!   (recursive arm), `(a | (b|c)*)` (nested-recursive arm). These
+//!   are exotic; folding them would mean composing a recursive CTE
+//!   inside an alternation arm, which IS the translator balloon §7.1
+//!   permits gating. They panic with the stable nested-recursive
+//!   prefix.
+//! * **Materialised-closure no-CTE fallback** — handled in
+//!   `executor.rs` (it needs the live dictionary + a probe query):
+//!   before emitting the recursive CTE for `+`/`*` over a predicate
+//!   that is one of the well-known transitive predicates
+//!   (`rdfs:subClassOf` / `rdfs:subPropertyOf` / `owl:sameAs`), if
+//!   `_pgrdf_quads` already carries `is_inferred = TRUE` rows for
+//!   that predicate in the active scope, the translator falls back
+//!   to a direct (non-recursive) BGP-style match — no `WITH
+//!   RECURSIVE`, no `CTE Scan` in the plan (§7.2 v0.4 heuristic /
+//!   §7.3 acceptance). `?`/`^` are unaffected (no recursion).
+//!
+//! ## What E4 does NOT ship (deferred — stable preview panics)
+//!
+//! A recursive path whose inner box is itself recursive / sequence,
+//! or an alternation whose arm is non-plain (`(p*)+`, `(p1/p2)?`,
+//! `(a/b|c)`, `(a+|b)`), is exotic and would require composing a
+//! recursive CTE inside another recursive/alternation context —
+//! deferred (LLD §7.1 explicitly permits gating the costly stretch).
+//! Negated property sets (`!(...)`) are out of v0.4 scope entirely.
+//! Each panics with a STABLE prefix so downstream tooling can
+//! preview the rollout schedule without depending on the
+//! (slice-number-bearing) tail — the exact same convention Phase C's
+//! per-form UPDATE panics use.
 
 use spargebra::algebra::PropertyPathExpression;
 use spargebra::term::{NamedNode, NamedNodePattern, TermPattern, TriplePattern};
 
-/// Stable panic prefix for a recursive path (`+`/`*`/`?`) whose
-/// inner box is NOT a plain (optionally inverted) predicate — e.g.
-/// `(p*)+`, `(a|b)*`, `(p1/p2)?`. The plain
-/// `p+`/`^p+`/`(^p)+` (E2) and `p*`/`p?` + inverse (E3) forms are
-/// executable; the nested-recursive case lands with the group E4
-/// consolidation.
+/// Stable panic prefix for a recursive/alternation path whose inner
+/// box / arm is NOT a plain (optionally inverted) predicate — e.g.
+/// `(p*)+`, `(p1/p2)?`, `(a/b|c)`, `(a+|b)`. The plain
+/// `p+`/`^p+`/`(^p)+` (E2), `p*`/`p?` + inverse (E3), and the
+/// alternation forms `a|b`, `(a|b)+`, `(a|b)*`, `(a|b)?`, `^(a|b)`
+/// over plain (optionally inverted) predicates (E4) are executable;
+/// the exotic nested-recursive / non-plain-arm case is the
+/// §7.1-permitted gated remainder.
 pub(crate) const PANIC_ONE_OR_MORE_NESTED: &str =
-    "pgrdf: nested recursive property path (e.g. `(p*)+`) lands in Phase E group E4";
-
-/// Stable panic for alternation `|` — a gated stretch goal (group E4).
-pub(crate) const PANIC_ALTERNATION: &str =
-    "pgrdf: property path alternation '|' is a gated stretch goal (Phase E group E4)";
+    "pgrdf: nested recursive property path (e.g. `(p*)+`, `(a/b|c)`) is a gated stretch goal (Phase E group E4)";
 
 /// Stable panic for negated property sets `!(...)` — out of v0.4 scope.
 pub(crate) const PANIC_NEGATED: &str = "pgrdf: negated property sets are out of scope for v0.4";
@@ -164,55 +205,167 @@ pub(crate) const PANIC_SEQUENCE: &str =
 
 /// How a [`PropertyPathExpression`] lowers for execution.
 ///
+/// The recursive/optional/alternation plans carry a `predicates`
+/// **set** (not a single predicate) so the `|` alternation (E4)
+/// composes uniformly: a plain `p+`/`p*`/`p?`/`a|b` is just a
+/// one-element / multi-element set, and the SQL builders emit
+/// `predicate_id IN (…)` (a 1-element `IN` is exactly the old
+/// `= $P`). `a|b` over plain (optionally inverted) predicates, and
+/// the recursion-composed `(a|b)+` / `(a|b)*` / `(a|b)?`, all reduce
+/// to "walk/match a predicate SET", which is the LLD §7.2
+/// "union of per-predicate scans" done in one scan.
+///
 /// * `Triple` — the E1 non-recursive set (bare predicate, `^p`,
 ///   nested `^(^…)`). Lowered to an ordinary [`TriplePattern`];
 ///   `executor.rs` pushes it like a BGP triple.
-/// * `OneOrMore { predicate, swapped }` — the E2 `+` set
-///   (`p+`, `^p+`, `(^p)+`). `predicate` is the resolved IRI of the
-///   single predicate walked; `swapped` is true when the closure is
-///   over the *inverse* edge (subject/object roles flipped — `^p+`
-///   ≡ `(^p)+`, the inverse of a transitive closure equals the
-///   transitive closure of the inverse). `executor.rs` builds the
-///   recursive CTE relation from this.
-/// * `ZeroOrMore { predicate, swapped }` — the E3 `*` set
-///   (`p*`, `^(p*)`, `(^p)*`). Same recursive `+` walk PLUS the
-///   W3C §9.3 zero-length node-set. `executor.rs` builds the relation
-///   from this (transitive CTE `UNION` the reflexive set).
-/// * `ZeroOrOne { predicate, swapped }` — the E3 `?` set
-///   (`p?`, `^(p?)`, `(^p)?`). NO recursion — the direct `p`
-///   (optionally inverted) edge `UNION` the same W3C §9.3 zero-length
-///   node-set.
+/// * `OneOrMore { predicates, swapped }` — the E2 `+` set
+///   (`p+`, `^p+`, `(^p)+`) plus the E4 `(a|b)+` / `^((a|b)+)` set.
+///   `predicates` are the resolved IRIs of the predicate set walked
+///   (one element for plain `p+`, ≥2 for `(a|b)+`); `swapped` is true
+///   when the closure is over the *inverse* edge (subject/object
+///   roles flipped — `^p+` ≡ `(^p)+`, the inverse of a transitive
+///   closure equals the transitive closure of the inverse).
+///   `executor.rs` builds the recursive CTE relation from this.
+/// * `ZeroOrMore { predicates, swapped }` — the E3 `*` set
+///   (`p*`, `^(p*)`, `(^p)*`) plus the E4 `(a|b)*` set. Same
+///   recursive `+` walk PLUS the W3C §9.3 zero-length node-set.
+/// * `ZeroOrOne { predicates, swapped }` — the E3 `?` set
+///   (`p?`, `^(p?)`, `(^p)?`) plus the E4 `(a|b)?` set. NO recursion
+///   — the direct (optionally inverted) edge over the predicate set
+///   `UNION` the same W3C §9.3 zero-length node-set.
+/// * `Alternation { predicates, swapped }` — the E4 top-level
+///   alternation `a|b` (and the n-ary nest `a|b|c`, and `^(a|b)` /
+///   `(^a|^b)`). NO recursion, NO zero-length set: it is exactly the
+///   non-reflexive single step over the predicate set —
+///   `?s (a|b) ?o` ≡ the union of `?s a ?o` and `?s b ?o`. Lowered
+///   to a direct-edge relation (`predicate_id IN (…)`), the same
+///   shape `?`'s direct arm uses, minus the identity union.
 pub(crate) enum PathPlan {
     Triple(Box<TriplePattern>),
-    OneOrMore { predicate: NamedNode, swapped: bool },
-    ZeroOrMore { predicate: NamedNode, swapped: bool },
-    ZeroOrOne { predicate: NamedNode, swapped: bool },
+    OneOrMore {
+        predicates: Vec<NamedNode>,
+        swapped: bool,
+    },
+    ZeroOrMore {
+        predicates: Vec<NamedNode>,
+        swapped: bool,
+    },
+    ZeroOrOne {
+        predicates: Vec<NamedNode>,
+        swapped: bool,
+    },
+    Alternation {
+        predicates: Vec<NamedNode>,
+        swapped: bool,
+    },
 }
 
-/// Fold the inner box of a recursive operator (`+`/`*`/`?`) down to
-/// its single (optionally inverted) predicate. `outer_swapped` is the
-/// parity accumulated from any `Reverse` wrappers ABOVE the operator
-/// (`^(p+)`); inner `Reverse`s (`(^p)+`) flip it further. The inverse
-/// of a recursive/optional closure equals the same closure over the
-/// inverse edge, so both fold to one `swapped` flag — identical for
-/// `+`, `*`, and `?`. A nested-recursive / alternation / sequence
-/// inner (`(p*)+`, `(a|b)*`, `(p1/p2)?`) is exotic and lands with the
-/// E4 consolidation; it panics with the stable preview prefix.
-fn fold_inner_predicate(inner: &PropertyPathExpression, outer_swapped: bool) -> (NamedNode, bool) {
-    let mut swapped = outer_swapped;
-    let mut ic = inner;
+/// Fold a (possibly inverted) plain predicate, accumulating any
+/// `Reverse` parity. Returns `None` if the expression is NOT a plain
+/// (optionally inverted) `NamedNode` — the caller decides whether
+/// that is a gate-panic or a different branch.
+fn fold_plain_predicate(
+    expr: &PropertyPathExpression,
+    start_swapped: bool,
+) -> Option<(NamedNode, bool)> {
+    let mut swapped = start_swapped;
+    let mut ic = expr;
     loop {
         match ic {
             PropertyPathExpression::Reverse(b) => {
                 swapped = !swapped;
                 ic = b;
             }
-            PropertyPathExpression::NamedNode(p) => return (p.clone(), swapped),
-            // `(p*)+`, `(a|b)*`, `(p1/p2)?` — nested recursive /
-            // alternation / sequence inner. Exotic; group E4.
-            _ => panic!("{PANIC_ONE_OR_MORE_NESTED}"),
+            PropertyPathExpression::NamedNode(p) => return Some((p.clone(), swapped)),
+            _ => return None,
         }
     }
+}
+
+/// Flatten an `Alternative(a, b)` tree (the n-ary nest `a|b|c` =
+/// `Alternative(a, Alternative(b, c))`) into a flat predicate SET,
+/// each arm folded through any `Reverse` parity. ALL arms must share
+/// the SAME `swapped` direction: `(a|^b)` would need a per-arm
+/// direction (a 2-direction relation), which is the §7.1-permitted
+/// gated remainder — return `None` so the caller emits the stable
+/// gate panic. The common forms `(a|b)`, `^(a|b)` (= `Reverse` above,
+/// so `start_swapped = true` uniformly), and `(^a|^b)` (both arms
+/// inverted, uniform) all fold cleanly. Returns `None` if any arm is
+/// NOT a plain (optionally inverted) predicate, or the arms disagree
+/// on direction.
+fn flatten_alternation(
+    expr: &PropertyPathExpression,
+    start_swapped: bool,
+) -> Option<(Vec<NamedNode>, bool)> {
+    let mut preds: Vec<NamedNode> = Vec::new();
+    let mut dir: Option<bool> = None;
+    // Recursive flatten over the (possibly nested) Alternative tree.
+    fn walk(
+        e: &PropertyPathExpression,
+        start_swapped: bool,
+        preds: &mut Vec<NamedNode>,
+        dir: &mut Option<bool>,
+    ) -> bool {
+        match e {
+            PropertyPathExpression::Alternative(l, r) => {
+                walk(l, start_swapped, preds, dir) && walk(r, start_swapped, preds, dir)
+            }
+            // A plain (optionally inverted) predicate arm.
+            other => match fold_plain_predicate(other, start_swapped) {
+                Some((p, sw)) => {
+                    match dir {
+                        None => *dir = Some(sw),
+                        Some(d) if *d == sw => {}
+                        // Mixed-direction arms (`a|^b`) — gated.
+                        Some(_) => return false,
+                    }
+                    preds.push(p);
+                    true
+                }
+                // A sequence / recursive / nested arm (`a/b|c`,
+                // `a+|b`) — the §7.1-permitted gated remainder.
+                None => false,
+            },
+        }
+    }
+    if walk(expr, start_swapped, &mut preds, &mut dir) && !preds.is_empty() {
+        Some((preds, dir.unwrap_or(start_swapped)))
+    } else {
+        None
+    }
+}
+
+/// Fold the inner box of a recursive operator (`+`/`*`/`?`) down to
+/// its predicate SET. `outer_swapped` is the parity accumulated from
+/// any `Reverse` wrappers ABOVE the operator (`^(p+)`); inner
+/// `Reverse`s (`(^p)+`) flip it further. The inverse of a
+/// recursive/optional closure equals the same closure over the
+/// inverse edge, so both fold to one `swapped` flag — identical for
+/// `+`, `*`, and `?`. E4: the inner box MAY be an `Alternative` of
+/// plain (optionally inverted) predicates (`(a|b)+` / `(a|b)*` /
+/// `(a|b)?`) — flattened to the predicate set, the recursive arm
+/// then ranges over `predicate_id IN (…)`. A nested-recursive /
+/// sequence inner, or a mixed-direction / non-plain alternation arm
+/// (`(p*)+`, `(p1/p2)?`, `(a/b|c)`), is the §7.1-permitted gated
+/// remainder; it panics with the stable preview prefix.
+fn fold_inner_predicates(
+    inner: &PropertyPathExpression,
+    outer_swapped: bool,
+) -> (Vec<NamedNode>, bool) {
+    // Single plain (optionally inverted) predicate — the E2/E3 form.
+    if let Some((p, sw)) = fold_plain_predicate(inner, outer_swapped) {
+        return (vec![p], sw);
+    }
+    // E4 — `(a|b)+` / `(a|b)*` / `(a|b)?`: the inner box is an
+    // alternation of plain (optionally inverted) predicates.
+    if matches!(inner, PropertyPathExpression::Alternative(_, _)) {
+        if let Some((preds, sw)) = flatten_alternation(inner, outer_swapped) {
+            return (preds, sw);
+        }
+    }
+    // `(p*)+`, `(p1/p2)?`, `(a/b|c)+`, `(a+|b)*` — nested recursive
+    // / sequence / non-plain-arm. Exotic; the gated E4 remainder.
+    panic!("{PANIC_ONE_OR_MORE_NESTED}");
 }
 
 /// Classify a property-path pattern into its execution plan, or panic
@@ -255,26 +408,48 @@ pub(crate) fn classify_path(
                 }));
             }
             PropertyPathExpression::OneOrMore(inner) => {
-                // E2 — `+`. The inner box must (for E2) be a plain
-                // predicate or an inverted predicate; fold any inner
-                // `Reverse` parity into the same `swapped` flag.
-                let (predicate, swapped) = fold_inner_predicate(inner, swapped);
-                return PathPlan::OneOrMore { predicate, swapped };
+                // E2 `p+` / E4 `(a|b)+`. The inner box folds to a
+                // predicate SET (1 elem = plain `+`, ≥2 = alternation
+                // step); inner `Reverse` parity folds into `swapped`.
+                let (predicates, swapped) = fold_inner_predicates(inner, swapped);
+                return PathPlan::OneOrMore {
+                    predicates,
+                    swapped,
+                };
             }
             PropertyPathExpression::ZeroOrMore(inner) => {
-                // E3 — `*`. Same inner-box discipline as `+` (plain or
-                // inverted predicate; nested-recursive inner → E4
-                // panic). Reflexive set added by the relation builder.
-                let (predicate, swapped) = fold_inner_predicate(inner, swapped);
-                return PathPlan::ZeroOrMore { predicate, swapped };
+                // E3 `p*` / E4 `(a|b)*`. Same inner-box discipline as
+                // `+`; reflexive set added by the relation builder.
+                let (predicates, swapped) = fold_inner_predicates(inner, swapped);
+                return PathPlan::ZeroOrMore {
+                    predicates,
+                    swapped,
+                };
             }
             PropertyPathExpression::ZeroOrOne(inner) => {
-                // E3 — `?`. Same inner-box discipline; non-recursive
-                // (direct edge ∪ identity), no depth guard needed.
-                let (predicate, swapped) = fold_inner_predicate(inner, swapped);
-                return PathPlan::ZeroOrOne { predicate, swapped };
+                // E3 `p?` / E4 `(a|b)?`. Same inner-box discipline;
+                // non-recursive (direct edge ∪ identity).
+                let (predicates, swapped) = fold_inner_predicates(inner, swapped);
+                return PathPlan::ZeroOrOne {
+                    predicates,
+                    swapped,
+                };
             }
-            PropertyPathExpression::Alternative(_, _) => panic!("{PANIC_ALTERNATION}"),
+            PropertyPathExpression::Alternative(_, _) => {
+                // E4 — top-level `a|b` (n-ary `a|b|c`, `^(a|b)`,
+                // `(^a|^b)`). Flatten to the predicate set; a
+                // sequence / recursive / mixed-direction arm is the
+                // §7.1-permitted gated remainder (stable panic).
+                match flatten_alternation(cur, swapped) {
+                    Some((predicates, swapped)) => {
+                        return PathPlan::Alternation {
+                            predicates,
+                            swapped,
+                        }
+                    }
+                    None => panic!("{PANIC_ONE_OR_MORE_NESTED}"),
+                }
+            }
             PropertyPathExpression::NegatedPropertySet(_) => panic!("{PANIC_NEGATED}"),
             PropertyPathExpression::Sequence(_, _) => panic!("{PANIC_SEQUENCE}"),
         }
@@ -285,11 +460,16 @@ pub(crate) fn classify_path(
 /// currently-shipped operator set (E1 lower-to-triple ∪ E2 `+` ∪
 /// E3 `*` / `?`)?
 ///
-/// `true`  → bare predicate, `^p`, nested `^(^…)`, OR
+/// `true`  → bare predicate, `^p`, nested `^(^…)`,
 ///           `p+`/`p*`/`p?` (and their `^…` inverse compositions)
-///           over an optionally-inverted single predicate.
-/// `false` → `|` (E4), negated set, sequence, or a `+`/`*`/`?` with
-///           a nested-recursive inner (E4).
+///           over an optionally-inverted single predicate, OR the
+///           E4 alternation forms `a|b` / `(a|b)+` / `(a|b)*` /
+///           `(a|b)?` / `^(a|b)` over plain (optionally inverted,
+///           uniform-direction) predicates.
+/// `false` → negated set, sequence, a `+`/`*`/`?` with a
+///           nested-recursive / non-plain-arm inner, or a
+///           mixed-direction / non-plain alternation arm
+///           (the §7.1-permitted gated E4 remainder).
 ///
 /// Used by `parser.rs` so `sparql_parse` does NOT flag the now-
 /// executable forms in `unsupported_algebra` (parse-time, no panic);
@@ -297,17 +477,17 @@ pub(crate) fn classify_path(
 /// deferred form panics with the stable rollout-preview prefix.
 pub(crate) fn is_executable(path: &PropertyPathExpression) -> bool {
     // True iff `inner` folds (through any `Reverse` wrappers) to a
-    // single plain predicate — the shared executability rule for the
+    // single plain predicate OR an alternation of plain (uniform-
+    // direction) predicates — the shared executability rule for the
     // recursive/optional operators (`+`/`*`/`?`).
-    fn inner_is_plain_predicate(inner: &PropertyPathExpression) -> bool {
-        let mut ic = inner;
-        loop {
-            match ic {
-                PropertyPathExpression::Reverse(b) => ic = b,
-                PropertyPathExpression::NamedNode(_) => return true,
-                _ => return false,
-            }
+    fn inner_is_plain_or_alternation(inner: &PropertyPathExpression) -> bool {
+        if fold_plain_predicate(inner, false).is_some() {
+            return true;
         }
+        if matches!(inner, PropertyPathExpression::Alternative(_, _)) {
+            return flatten_alternation(inner, false).is_some();
+        }
+        false
     }
     let mut cur = path;
     loop {
@@ -316,7 +496,16 @@ pub(crate) fn is_executable(path: &PropertyPathExpression) -> bool {
             PropertyPathExpression::NamedNode(_) => return true,
             PropertyPathExpression::OneOrMore(inner)
             | PropertyPathExpression::ZeroOrMore(inner)
-            | PropertyPathExpression::ZeroOrOne(inner) => return inner_is_plain_predicate(inner),
+            | PropertyPathExpression::ZeroOrOne(inner) => {
+                return inner_is_plain_or_alternation(inner)
+            }
+            // E4 — top-level `a|b` (and `^(a|b)` since we tunnelled
+            // through `Reverse` above): executable iff every arm is
+            // a plain (optionally inverted, uniform-direction)
+            // predicate.
+            PropertyPathExpression::Alternative(_, _) => {
+                return flatten_alternation(cur, false).is_some()
+            }
             _ => return false,
         }
     }
@@ -344,10 +533,15 @@ pub(crate) fn analysis_triple(
     if !is_executable(path) {
         return None;
     }
-    // The recursive/optional operators all bind subject/object like a
-    // single (possibly inverted) predicate triple — only the swap
-    // direction matters for var collection.
-    let plan_triple = |predicate: NamedNode, swapped: bool| {
+    // The recursive/optional/alternation operators all bind
+    // subject/object like a single (possibly inverted) predicate
+    // triple — only the swap direction matters for var collection.
+    // The predicate slot is a `NamedNode` (these operators walk a
+    // fixed predicate SET, never a variable) so `collect_vars` sees
+    // ONLY the subject/object variables — correct regardless of how
+    // many predicates the set carries; we use the first as a
+    // harmless placeholder (never emitted for a path row).
+    let plan_triple = |predicates: Vec<NamedNode>, swapped: bool| {
         let (s, o) = if swapped {
             (object.clone(), subject.clone())
         } else {
@@ -355,15 +549,33 @@ pub(crate) fn analysis_triple(
         };
         TriplePattern {
             subject: s,
-            predicate: NamedNodePattern::NamedNode(predicate),
+            predicate: NamedNodePattern::NamedNode(
+                predicates
+                    .into_iter()
+                    .next()
+                    .expect("non-empty predicate set"),
+            ),
             object: o,
         }
     };
     match classify_path(subject, path, object) {
         PathPlan::Triple(tp) => Some(*tp),
-        PathPlan::OneOrMore { predicate, swapped }
-        | PathPlan::ZeroOrMore { predicate, swapped }
-        | PathPlan::ZeroOrOne { predicate, swapped } => Some(plan_triple(predicate, swapped)),
+        PathPlan::OneOrMore {
+            predicates,
+            swapped,
+        }
+        | PathPlan::ZeroOrMore {
+            predicates,
+            swapped,
+        }
+        | PathPlan::ZeroOrOne {
+            predicates,
+            swapped,
+        }
+        | PathPlan::Alternation {
+            predicates,
+            swapped,
+        } => Some(plan_triple(predicates, swapped)),
     }
 }
 
@@ -415,10 +627,16 @@ pub(crate) enum PathGraphScope {
 }
 
 /// Build the recursive-CTE-derived relation for a `+` path (LLD v0.4
-/// §7.2). `predicate_placeholder` is the `$N` placeholder for the
-/// resolved predicate dict id (the caller appended it to the param
-/// buffer at the correct ordinal); `graph_placeholder` is the
-/// optional `$M` for the `Literal` scope's resolved graph id.
+/// §7.2), also serving the E4 `(a|b)+` alternation step. `pred_match`
+/// is the predicate-match SQL fragment using the OUTER `$N`
+/// placeholders the caller appended to the param buffer — exactly
+/// `predicate_id = $N` for a plain `p+` (one-element set) or
+/// `predicate_id IN ($N1, $N2, …)` for `(a|b)+` (the LLD §7.2
+/// "union of per-predicate scans" done as a single scan over a
+/// predicate set). `probe_pred_match` is the SAME match but written
+/// with the probe-local `$1[, $2, …]` placeholders; `probe_params`
+/// are the dict ids the probe binds in that order. `graph_placeholder`
+/// is the optional `$M` for the `Literal` scope's resolved graph id.
 /// `max_depth` is `query::guc::path_max_depth()` (read once at
 /// translate time — the depth guard is a hard cap baked into the
 /// recursive arm's `WHERE`).
@@ -429,27 +647,39 @@ pub(crate) enum PathGraphScope {
 ///
 /// ```text
 /// SELECT subject_id, object_id [, graph_id], 1 FROM _pgrdf_quads
-///   WHERE predicate_id = $P [graph predicate]
+///   WHERE <pred_match> [graph predicate]
 /// UNION
 /// SELECT w.src, q.object_id [, w.gid], w.depth + 1
 ///   FROM walk w JOIN _pgrdf_quads q ON q.subject_id = w.dst
-///   WHERE q.predicate_id = $P AND w.depth < $MAX [AND same-graph]
+///   WHERE q.<pred_match> AND w.depth < $MAX [AND same-graph]
 /// ```
 ///
-/// `swapped` (the `^p+` / `(^p)+` case) flips the edge direction:
-/// the base arm reads `object_id, subject_id` and the recursive arm
-/// joins `q.object_id = w.dst` projecting `q.subject_id`. `UNION`
-/// (not `UNION ALL`) makes cycles terminate (a revisited (src,dst)
-/// pair is deduped); `w.depth < $MAX` is the hard depth cap.
+/// `swapped` (the `^p+` / `(^p)+` / `^((a|b)+)` case) flips the edge
+/// direction: the base arm reads `object_id, subject_id` and the
+/// recursive arm joins `q.object_id = w.dst` projecting
+/// `q.subject_id`. `UNION` (not `UNION ALL`) makes cycles terminate
+/// (a revisited (src,dst) pair is deduped); `w.depth < $MAX` is the
+/// hard depth cap. The predicate-set generalisation is transparent to
+/// the cycle clause, the depth guard, and the truncation probe — they
+/// are all predicate-match-agnostic.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_one_or_more_relation_sql(
-    predicate_placeholder: &str,
+    pred_ids_sql: &str,
+    probe_pred_ids_sql: &str,
+    probe_params: Vec<i64>,
     graph_placeholder: Option<&str>,
     scope: &PathGraphScope,
     swapped: bool,
     max_depth: i32,
-    probe_predicate_id: i64,
     probe_graph_id: Option<i64>,
 ) -> PathRelation {
+    // Predicate match. `IN (…)` over the resolved dict-id placeholder
+    // list — a single-element `IN ($1)` is identical (semantically
+    // and to the planner) to `= $1`, so plain `p+` is unchanged and
+    // `(a|b)+` just widens the set (LLD §7.2 "union of per-predicate
+    // scans" as one scan over the predicate set).
+    let base_pred = format!("predicate_id IN ({pred_ids_sql})");
+    let rec_pred = format!("q.predicate_id IN ({pred_ids_sql})");
     // Edge endpoints depend on direction. Forward `p+`: walk
     // subject → object. Inverse `^p+`: walk object → subject.
     let (base_src, base_dst, rec_join_col, rec_proj_col) = if swapped {
@@ -529,12 +759,12 @@ pub(crate) fn build_one_or_more_relation_sql(
         "(WITH RECURSIVE {walk_cols} AS (\
            SELECT {base_src}, {base_dst}{base_gid}, 1 \
              FROM pgrdf._pgrdf_quads \
-            WHERE predicate_id = {predicate_placeholder}{base_graph_pred} \
+            WHERE {base_pred}{base_graph_pred} \
          UNION ALL \
            SELECT w.src, q.{rec_proj_col}{rec_gid}, w.depth + 1 \
              FROM walk w \
              JOIN pgrdf._pgrdf_quads q ON q.{rec_join_col} = w.dst \
-            WHERE q.predicate_id = {predicate_placeholder} \
+            WHERE {rec_pred} \
               AND w.depth < {max_depth}{rec_graph_pred}\
          ) CYCLE src, dst SET is_cycle USING path \
          SELECT DISTINCT {final_cols} FROM walk WHERE NOT is_cycle)"
@@ -578,24 +808,32 @@ pub(crate) fn build_one_or_more_relation_sql(
         };
     let p_base_gid = if carries_gid { ", graph_id" } else { "" };
     let p_rec_gid = if carries_gid { ", w.gid" } else { "" };
+    // Probe predicate match — same `IN (…)` set as the relation, but
+    // written with the probe-local `$1[, $2, …]` placeholders the
+    // caller bound in `probe_params` order. Plain `p+` is `IN ($1)`
+    // (identical to the old `= $1`); `(a|b)+` widens to `IN ($1,$2)`.
+    let probe_base_pred = format!("predicate_id IN ({probe_pred_ids_sql})");
+    let probe_rec_pred = format!("q.predicate_id IN ({probe_pred_ids_sql})");
+    let probe_cont_pred = format!("c.predicate_id IN ({probe_pred_ids_sql})");
     // The probe mirrors the relation's `UNION ALL` + `CYCLE` walk
     // (same cycle-safety), then asks: is there a NON-cycle row at
-    // exactly the depth cap whose `dst` still has an outgoing `$P`
-    // edge? A cycle terminates before the cap (CYCLE clause), so it
-    // never produces a `depth == MAX` row → a fully-resolved cyclic
-    // query correctly reports NO truncation. Only a genuinely long
-    // ACYCLIC path that the cap actually severed fires the probe.
+    // exactly the depth cap whose `dst` still has an outgoing edge
+    // in the predicate set? A cycle terminates before the cap (CYCLE
+    // clause), so it never produces a `depth == MAX` row → a
+    // fully-resolved cyclic query correctly reports NO truncation.
+    // Only a genuinely long ACYCLIC path that the cap actually
+    // severed fires the probe.
     let probe_sql = format!(
         "SELECT CASE WHEN EXISTS (\
            WITH RECURSIVE {probe_walk_cols} AS (\
              SELECT {base_src}, {base_dst}{p_base_gid}, 1 \
                FROM pgrdf._pgrdf_quads \
-              WHERE predicate_id = $1{probe_base_graph} \
+              WHERE {probe_base_pred}{probe_base_graph} \
            UNION ALL \
              SELECT w.src, q.{rec_proj_col}{p_rec_gid}, w.depth + 1 \
                FROM pwalk w \
                JOIN pgrdf._pgrdf_quads q ON q.{rec_join_col} = w.dst \
-              WHERE q.predicate_id = $1 \
+              WHERE {probe_rec_pred} \
                 AND w.depth < {max_depth}{probe_rec_graph}\
            ) CYCLE src, dst SET is_cycle USING path \
            SELECT 1 FROM pwalk w \
@@ -604,21 +842,20 @@ pub(crate) fn build_one_or_more_relation_sql(
               AND EXISTS (\
                 SELECT 1 FROM pgrdf._pgrdf_quads c \
                  WHERE c.{rec_join_col} = w.dst \
-                   AND c.predicate_id = $1{probe_cont_graph}\
+                   AND {probe_cont_pred}{probe_cont_graph}\
               )\
          ) THEN 1::bigint ELSE 0::bigint END"
     );
-    // The probe binds ONLY the predicate dict id as `$1`. The
-    // Literal scope's resolved graph id is a translate-time integer
-    // constant (not user input) and is inlined directly into
+    // The probe binds ONLY the predicate dict id(s) as `$1[, $2…]`.
+    // The Literal scope's resolved graph id is a translate-time
+    // integer constant (not user input) and is inlined directly into
     // `probe_base_graph` / `probe_rec_graph` / `probe_cont_graph`
     // above — keeping it out of the param vec keeps the probe's
-    // single-`$1` shape uniform across all three scope flavours.
+    // placeholder numbering aligned with `probe_params`.
     // `probe_graph_id` is accepted for call-site symmetry with the
     // main relation builder; it is intentionally not threaded into
     // the param vec (see the inlining above).
     let _ = probe_graph_id;
-    let probe_params = vec![probe_predicate_id];
 
     PathRelation {
         from_fragment,
@@ -716,26 +953,31 @@ fn zero_length_node_set_sql(scope: &PathGraphScope, bound_self_pairs: &[String])
 ///
 /// `bound_self_pairs` carries the resolved dict id placeholders for
 /// any *bound* (IRI) endpoint — see [`zero_length_node_set_sql`].
+/// `pred_ids_sql` / `probe_pred_ids_sql` / `probe_params` are the
+/// predicate-set fragments (E4 `(a|b)*` widens the set; plain `p*`
+/// is a 1-element set) — see [`build_one_or_more_relation_sql`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_zero_or_more_relation_sql(
-    predicate_placeholder: &str,
+    pred_ids_sql: &str,
+    probe_pred_ids_sql: &str,
+    probe_params: Vec<i64>,
     graph_placeholder: Option<&str>,
     scope: &PathGraphScope,
     swapped: bool,
     max_depth: i32,
-    probe_predicate_id: i64,
     probe_graph_id: Option<i64>,
     bound_self_pairs: &[String],
 ) -> PathRelation {
     // The transitive part is exactly the `+` relation. Reuse it so
     // there is ONE recursive-CTE + cycle-safety + probe implementation.
     let plus = build_one_or_more_relation_sql(
-        predicate_placeholder,
+        pred_ids_sql,
+        probe_pred_ids_sql,
+        probe_params,
         graph_placeholder,
         scope,
         swapped,
         max_depth,
-        probe_predicate_id,
         probe_graph_id,
     );
     // `+`'s `from_fragment` is a fully parenthesised derived table.
@@ -772,7 +1014,7 @@ pub(crate) fn build_zero_or_more_relation_sql(
 /// `swapped` (the `^(p?)` / `(^p)?` case) flips the direct edge's
 /// endpoints — symmetric with `+`/`*`.
 pub(crate) fn build_zero_or_one_relation_sql(
-    predicate_placeholder: &str,
+    pred_ids_sql: &str,
     graph_placeholder: Option<&str>,
     scope: &PathGraphScope,
     swapped: bool,
@@ -807,11 +1049,13 @@ pub(crate) fn build_zero_or_one_relation_sql(
     // with the node-set lines up; the outer `SELECT DISTINCT` dedups
     // the case where the direct edge is also a self-pair (impossible
     // for distinct subject/object but harmless) and matches the `+`
-    // relation's distinct projection contract.
+    // relation's distinct projection contract. `predicate_id IN (…)`
+    // generalises plain `p?` (1-elem, identical to `= $1`) to the E4
+    // `(a|b)?` predicate set.
     let direct = format!(
         "SELECT {dir_src} AS src, {dir_dst} AS dst{direct_gid} \
            FROM pgrdf._pgrdf_quads \
-          WHERE predicate_id = {predicate_placeholder}{direct_graph_pred}"
+          WHERE predicate_id IN ({pred_ids_sql}){direct_graph_pred}"
     );
     let from_fragment = format!("({direct} UNION {zero})");
     PathRelation {
@@ -819,6 +1063,60 @@ pub(crate) fn build_zero_or_one_relation_sql(
         columns,
         // `?` is non-recursive — nothing can truncate. An empty
         // probe means `collect_truncation_probes` skips it.
+        probe_sql: String::new(),
+        probe_params: Vec::new(),
+    }
+}
+
+/// Build the relation for a TOP-LEVEL alternation `a|b` (n-ary
+/// `a|b|c`, plus `^(a|b)` / `(^a|^b)` via `swapped`) — LLD v0.4
+/// §7.1 (the gated stretch, shipped in E4) / §7.2. This is the
+/// **non-reflexive single step** over the predicate SET:
+/// `?s (a|b) ?o` ≡ the union of `?s a ?o` and `?s b ?o`. NO
+/// recursion (it is not a closure operator), NO zero-length set
+/// (alternation is not reflexive — only `*`/`?` add the W3C §9.3
+/// identity pairs). It is exactly `?`'s direct arm WITHOUT the
+/// identity `UNION` — one scan, `predicate_id IN (…)`, the LLD §7.2
+/// "union of per-predicate scans". `swapped` flips the edge for
+/// `^(a|b)` (uniform — every arm shares the direction, enforced by
+/// [`flatten_alternation`]).
+pub(crate) fn build_alternation_relation_sql(
+    pred_ids_sql: &str,
+    graph_placeholder: Option<&str>,
+    scope: &PathGraphScope,
+    swapped: bool,
+) -> PathRelation {
+    let (dir_src, dir_dst) = if swapped {
+        ("object_id", "subject_id")
+    } else {
+        ("subject_id", "object_id")
+    };
+    let (graph_pred, carries_gid, columns): (String, bool, &'static str) = match scope {
+        PathGraphScope::AllGraphs => (String::new(), false, "(subject_id, object_id)"),
+        PathGraphScope::Literal(_) => {
+            let g = graph_placeholder.expect("Literal scope needs a graph placeholder");
+            (
+                format!(" AND graph_id = {g}"),
+                false,
+                "(subject_id, object_id)",
+            )
+        }
+        PathGraphScope::Variable => (
+            " AND graph_id <> 0".to_string(),
+            true,
+            "(subject_id, object_id, graph_id)",
+        ),
+    };
+    let gid = if carries_gid { ", graph_id AS gid" } else { "" };
+    let from_fragment = format!(
+        "(SELECT DISTINCT {dir_src} AS src, {dir_dst} AS dst{gid} \
+            FROM pgrdf._pgrdf_quads \
+           WHERE predicate_id IN ({pred_ids_sql}){graph_pred})"
+    );
+    PathRelation {
+        from_fragment,
+        columns,
+        // Non-recursive single step — nothing can truncate.
         probe_sql: String::new(),
         probe_params: Vec::new(),
     }
@@ -843,7 +1141,8 @@ mod tests {
             PathPlan::Triple(tp) => *tp,
             PathPlan::OneOrMore { .. }
             | PathPlan::ZeroOrMore { .. }
-            | PathPlan::ZeroOrOne { .. } => panic!("expected a lower-to-triple plan"),
+            | PathPlan::ZeroOrOne { .. }
+            | PathPlan::Alternation { .. } => panic!("expected a lower-to-triple plan"),
         }
     }
 
@@ -887,8 +1186,12 @@ mod tests {
             iri("http://example.org/p"),
         )));
         match classify_path(&var("s"), &p, &var("o")) {
-            PathPlan::OneOrMore { predicate, swapped } => {
-                assert_eq!(predicate.as_str(), "http://example.org/p");
+            PathPlan::OneOrMore {
+                predicates,
+                swapped,
+            } => {
+                assert_eq!(predicates.len(), 1);
+                assert_eq!(predicates[0].as_str(), "http://example.org/p");
                 assert!(!swapped, "plain `p+` is not swapped");
             }
             _ => panic!("`p+` must classify as OneOrMore"),
@@ -931,8 +1234,12 @@ mod tests {
             iri("http://example.org/p"),
         )));
         match classify_path(&var("s"), &p, &var("o")) {
-            PathPlan::ZeroOrMore { predicate, swapped } => {
-                assert_eq!(predicate.as_str(), "http://example.org/p");
+            PathPlan::ZeroOrMore {
+                predicates,
+                swapped,
+            } => {
+                assert_eq!(predicates.len(), 1);
+                assert_eq!(predicates[0].as_str(), "http://example.org/p");
                 assert!(!swapped, "plain `p*` is not swapped");
             }
             _ => panic!("`p*` must classify as ZeroOrMore"),
@@ -960,8 +1267,12 @@ mod tests {
             iri("http://example.org/p"),
         )));
         match classify_path(&var("s"), &p, &var("o")) {
-            PathPlan::ZeroOrOne { predicate, swapped } => {
-                assert_eq!(predicate.as_str(), "http://example.org/p");
+            PathPlan::ZeroOrOne {
+                predicates,
+                swapped,
+            } => {
+                assert_eq!(predicates.len(), 1);
+                assert_eq!(predicates[0].as_str(), "http://example.org/p");
                 assert!(!swapped, "plain `p?` is not swapped");
             }
             _ => panic!("`p?` must classify as ZeroOrOne"),
@@ -980,8 +1291,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "gated stretch goal")]
-    fn alternation_preview_panics() {
+    fn alternation_ships_as_predicate_set() {
+        // E4 — top-level `a|b` over plain predicates is executable
+        // (LLD §7.1 gated stretch, shipped). Classifies as the
+        // non-reflexive `Alternation` plan with BOTH predicates.
         let p = PropertyPathExpression::Alternative(
             Box::new(PropertyPathExpression::NamedNode(iri(
                 "http://example.org/a",
@@ -990,6 +1303,134 @@ mod tests {
                 "http://example.org/b",
             ))),
         );
+        match classify_path(&var("s"), &p, &var("o")) {
+            PathPlan::Alternation {
+                predicates,
+                swapped,
+            } => {
+                assert_eq!(predicates.len(), 2);
+                assert_eq!(predicates[0].as_str(), "http://example.org/a");
+                assert_eq!(predicates[1].as_str(), "http://example.org/b");
+                assert!(!swapped, "plain `a|b` is forward");
+            }
+            _ => panic!("`a|b` must classify as Alternation"),
+        }
+        assert!(is_executable(&p), "`a|b` ships in E4");
+    }
+
+    #[test]
+    fn nary_alternation_flattens_to_full_set() {
+        // `a|b|c` = Alternative(a, Alternative(b, c)) — the n-ary
+        // nest flattens to a 3-element predicate set.
+        let p = PropertyPathExpression::Alternative(
+            Box::new(PropertyPathExpression::NamedNode(iri(
+                "http://example.org/a",
+            ))),
+            Box::new(PropertyPathExpression::Alternative(
+                Box::new(PropertyPathExpression::NamedNode(iri(
+                    "http://example.org/b",
+                ))),
+                Box::new(PropertyPathExpression::NamedNode(iri(
+                    "http://example.org/c",
+                ))),
+            )),
+        );
+        match classify_path(&var("s"), &p, &var("o")) {
+            PathPlan::Alternation { predicates, .. } => {
+                let got: Vec<&str> = predicates.iter().map(|n| n.as_str()).collect();
+                assert_eq!(
+                    got,
+                    vec![
+                        "http://example.org/a",
+                        "http://example.org/b",
+                        "http://example.org/c"
+                    ]
+                );
+            }
+            _ => panic!("`a|b|c` must classify as Alternation"),
+        }
+    }
+
+    #[test]
+    fn inverse_alternation_folds_to_swapped() {
+        // `^(a|b)` = Reverse(Alternative(a,b)) — inverse of an
+        // alternation = alternation of the inverse over the swapped
+        // edge (uniform direction, ships).
+        let p = PropertyPathExpression::Reverse(Box::new(PropertyPathExpression::Alternative(
+            Box::new(PropertyPathExpression::NamedNode(iri(
+                "http://example.org/a",
+            ))),
+            Box::new(PropertyPathExpression::NamedNode(iri(
+                "http://example.org/b",
+            ))),
+        )));
+        match classify_path(&var("s"), &p, &var("o")) {
+            PathPlan::Alternation {
+                predicates,
+                swapped,
+            } => {
+                assert_eq!(predicates.len(), 2);
+                assert!(swapped, "`^(a|b)` walks the inverse edge");
+            }
+            _ => panic!("`^(a|b)` must classify as Alternation"),
+        }
+        assert!(is_executable(&p));
+    }
+
+    #[test]
+    fn alternation_recursion_composition_classifies() {
+        // `(a|b)+` = OneOrMore(Alternative(a,b)) — the alternation
+        // becomes the recursive step's predicate SET. Ships in E4.
+        let plus =
+            PropertyPathExpression::OneOrMore(Box::new(PropertyPathExpression::Alternative(
+                Box::new(PropertyPathExpression::NamedNode(iri(
+                    "http://example.org/a",
+                ))),
+                Box::new(PropertyPathExpression::NamedNode(iri(
+                    "http://example.org/b",
+                ))),
+            )));
+        match classify_path(&var("s"), &plus, &var("o")) {
+            PathPlan::OneOrMore { predicates, .. } => assert_eq!(predicates.len(), 2),
+            _ => panic!("`(a|b)+` must classify as OneOrMore over the set"),
+        }
+        assert!(is_executable(&plus), "`(a|b)+` ships in E4");
+        // `(a|b)*` and `(a|b)?` likewise.
+        let star =
+            PropertyPathExpression::ZeroOrMore(Box::new(PropertyPathExpression::Alternative(
+                Box::new(PropertyPathExpression::NamedNode(iri(
+                    "http://example.org/a",
+                ))),
+                Box::new(PropertyPathExpression::NamedNode(iri(
+                    "http://example.org/b",
+                ))),
+            )));
+        assert!(matches!(
+            classify_path(&var("s"), &star, &var("o")),
+            PathPlan::ZeroOrMore { .. }
+        ));
+        assert!(is_executable(&star), "`(a|b)*` ships in E4");
+    }
+
+    #[test]
+    #[should_panic(expected = "gated stretch goal")]
+    fn alternation_with_sequence_arm_is_gated() {
+        // `(a/b | c)` = Alternative(Sequence(a,b), c) — an arm that
+        // is itself a sequence. The §7.1-permitted gated remainder.
+        let p = PropertyPathExpression::Alternative(
+            Box::new(PropertyPathExpression::Sequence(
+                Box::new(PropertyPathExpression::NamedNode(iri(
+                    "http://example.org/a",
+                ))),
+                Box::new(PropertyPathExpression::NamedNode(iri(
+                    "http://example.org/b",
+                ))),
+            )),
+            Box::new(PropertyPathExpression::NamedNode(iri(
+                "http://example.org/c",
+            ))),
+        );
+        assert!(!is_executable(&p));
         let _ = classify_path(&var("s"), &p, &var("o"));
     }
 
@@ -1030,10 +1471,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "nested recursive property path")]
     fn nested_recursive_star_panics() {
-        // `(a|b)*` = ZeroOrMore(Alternative(...)) — a `*` whose inner
-        // box is not a plain (optionally inverted) predicate. Exotic;
-        // lands with the E4 consolidation.
-        let p = PropertyPathExpression::ZeroOrMore(Box::new(PropertyPathExpression::Alternative(
+        // `(a/b)*` = ZeroOrMore(Sequence(...)) — a `*` whose inner
+        // box is a SEQUENCE, not a plain (optionally inverted)
+        // predicate nor a plain-arm alternation. The §7.1-permitted
+        // gated remainder. (`(a|b)*` now SHIPS in E4 — see
+        // `alternation_recursion_composition_classifies`.)
+        let p = PropertyPathExpression::ZeroOrMore(Box::new(PropertyPathExpression::Sequence(
             Box::new(PropertyPathExpression::NamedNode(iri(
                 "http://example.org/a",
             ))),
@@ -1052,11 +1495,12 @@ mod tests {
         // (subject∪object of the active scope).
         let r = build_zero_or_more_relation_sql(
             "$1",
+            "$1",
+            vec![42],
             None,
             &PathGraphScope::AllGraphs,
             false,
             64,
-            42,
             None,
             &[],
         );
@@ -1094,11 +1538,12 @@ mod tests {
         // node — injected as a constant `SELECT $7,$7`.
         let r = build_zero_or_more_relation_sql(
             "$1",
+            "$1",
+            vec![42],
             None,
             &PathGraphScope::AllGraphs,
             false,
             64,
-            42,
             None,
             &["$7".to_string()],
         );
@@ -1116,11 +1561,12 @@ mod tests {
         // scoped node-set, so NO constant self-pair even if provided.
         let r = build_zero_or_more_relation_sql(
             "$2",
+            "$1",
+            vec![9],
             None,
             &PathGraphScope::Variable,
             false,
             32,
-            9,
             None,
             &["$9".to_string()],
         );
@@ -1152,8 +1598,8 @@ mod tests {
             "direct forward `p` edge"
         );
         assert!(
-            r.from_fragment.contains("WHERE predicate_id = $1"),
-            "direct arm filters the predicate"
+            r.from_fragment.contains("WHERE predicate_id IN ($1)"),
+            "direct arm filters the predicate set (1-elem = old `= $1`)"
         );
         assert!(
             r.from_fragment
@@ -1176,22 +1622,76 @@ mod tests {
     }
 
     #[test]
+    fn opt_predicate_set_widens_to_in_list() {
+        // `(a|b)?` — the direct arm widens to `IN ($1, $2)` (the E4
+        // alternation-recursion composition path).
+        let r =
+            build_zero_or_one_relation_sql("$1, $2", None, &PathGraphScope::AllGraphs, false, &[]);
+        assert!(
+            r.from_fragment.contains("WHERE predicate_id IN ($1, $2)"),
+            "`(a|b)?` direct arm scans the predicate set"
+        );
+    }
+
+    #[test]
+    fn alternation_relation_is_nonreflexive_single_step() {
+        // Top-level `a|b` unscoped: a single non-reflexive step over
+        // the predicate set — NO recursion, NO zero-length identity.
+        let r = build_alternation_relation_sql("$1, $2", None, &PathGraphScope::AllGraphs, false);
+        assert!(
+            r.from_fragment
+                .contains("SELECT DISTINCT subject_id AS src, object_id AS dst"),
+            "forward single step"
+        );
+        assert!(
+            r.from_fragment.contains("WHERE predicate_id IN ($1, $2)"),
+            "union of per-predicate scans as one IN-list scan"
+        );
+        assert!(
+            !r.from_fragment.contains("WITH RECURSIVE"),
+            "`|` is not a closure — no recursion"
+        );
+        assert!(
+            !r.from_fragment.contains("subject_id AS dst"),
+            "`|` is non-reflexive — no identity pairs"
+        );
+        assert!(r.probe_sql.is_empty(), "non-recursive — empty probe");
+        assert_eq!(r.columns, "(subject_id, object_id)");
+
+        // Inverse `^(a|b)`: swapped endpoints.
+        let ri = build_alternation_relation_sql("$1, $2", None, &PathGraphScope::AllGraphs, true);
+        assert!(ri
+            .from_fragment
+            .contains("SELECT DISTINCT object_id AS src, subject_id AS dst"));
+
+        // `GRAPH ?g`: per-graph, carries gid.
+        let rv = build_alternation_relation_sql("$3", None, &PathGraphScope::Variable, false);
+        assert_eq!(rv.columns, "(subject_id, object_id, graph_id)");
+        assert!(rv.from_fragment.contains("graph_id <> 0"));
+    }
+
+    #[test]
     fn relation_sql_shapes_forward_and_inverse() {
         // Forward `p+`, unscoped: walk subject→object, no graph pred,
         // 2-column relation, UNION (cycle-safe), depth cap present.
         let r = build_one_or_more_relation_sql(
             "$1",
+            "$1",
+            vec![42],
             None,
             &PathGraphScope::AllGraphs,
             false,
             64,
-            42,
             None,
         );
         assert!(r
             .from_fragment
             .contains("WITH RECURSIVE walk(src, dst, depth)"));
         assert!(r.from_fragment.contains("SELECT subject_id, object_id"));
+        assert!(
+            r.from_fragment.contains("WHERE predicate_id IN ($1)"),
+            "1-elem predicate set = old `= $1`"
+        );
         // Cycle-safe termination via Postgres `CYCLE` (UNION ALL is
         // required by the CYCLE clause; the final WHERE NOT is_cycle
         // drops the cycle-closing marker).
@@ -1216,11 +1716,12 @@ mod tests {
         // Inverse `^p+`: base arm reads object_id, subject_id.
         let ri = build_one_or_more_relation_sql(
             "$1",
+            "$1",
+            vec![7],
             None,
             &PathGraphScope::AllGraphs,
             true,
             64,
-            7,
             None,
         );
         assert!(ri.from_fragment.contains("SELECT object_id, subject_id"));
@@ -1229,15 +1730,45 @@ mod tests {
         // GRAPH ?g (Variable) carries gid + same-graph recursive hop.
         let rv = build_one_or_more_relation_sql(
             "$2",
+            "$1",
+            vec![9],
             None,
             &PathGraphScope::Variable,
             false,
             32,
-            9,
             None,
         );
         assert_eq!(rv.columns, "(subject_id, object_id, graph_id)");
         assert!(rv.from_fragment.contains("q.graph_id = w.gid"));
         assert!(rv.from_fragment.contains("graph_id <> 0"));
+    }
+
+    #[test]
+    fn plus_predicate_set_widens_relation_and_probe() {
+        // `(a|b)+` — both the recursive CTE and the truncation probe
+        // range over the predicate SET (`IN (...)`), not a single id.
+        let r = build_one_or_more_relation_sql(
+            "$1, $2",
+            "$1, $2",
+            vec![10, 20],
+            None,
+            &PathGraphScope::AllGraphs,
+            false,
+            64,
+            None,
+        );
+        assert!(
+            r.from_fragment.contains("WHERE predicate_id IN ($1, $2)"),
+            "base arm scans the predicate set"
+        );
+        assert!(
+            r.from_fragment.contains("q.predicate_id IN ($1, $2)"),
+            "recursive arm scans the predicate set"
+        );
+        assert_eq!(r.probe_params, vec![10, 20]);
+        assert!(
+            r.probe_sql.contains("predicate_id IN ($1, $2)"),
+            "probe binds the full predicate set"
+        );
     }
 }

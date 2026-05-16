@@ -296,10 +296,18 @@ SELECT (count(*) > 0) AS zero_or_more_executes FROM pgrdf.sparql(
 SELECT (count(*) > 0) AS zero_or_one_executes FROM pgrdf.sparql(
   'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:knows? ?o }'
 );
+-- E4: `(ex:knows|ex:likes)` EXECUTES — the seed has 4 `ex:knows`
+-- edges and zero `ex:likes`, so the alternation (union of the two
+-- per-predicate scans) yields exactly 4 solutions.
+SELECT count(*)::bigint AS alternation_executes_count FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:knows|ex:likes) ?o }'
+);
+-- The §7.1-permitted gated remainder still preview-panics: an
+-- alternation arm that is itself a sequence (`ex:knows/ex:knows`).
 SELECT _check_error(
-  'alternation-gated-panic',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:knows|ex:likes) ?o }')$$,
-  $$gated stretch goal (Phase E group E4)$$
+  'alternation-sequence-arm-gated',
+  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:knows/ex:knows|ex:likes) ?o }')$$,
+  $$nested recursive property path$$
 );
 SELECT _check_error(
   'negated-set-out-of-scope-panic',

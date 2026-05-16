@@ -211,6 +211,37 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     }
 }
 
+/// Debug surface: return the translated SQL string a SELECT/ASK
+/// query lowers to, with the resolved dict-id `$N` placeholders
+/// inlined as bare integer literals. The inlined values are
+/// translate-time integers (resolved dictionary ids, never
+/// user-supplied strings), so the result is a self-contained,
+/// safely-`EXPLAIN`-able query. This exists for the LLD v0.4 §7.3
+/// acceptance criterion: a regression wraps the returned SQL in
+/// `EXPLAIN (FORMAT JSON)` and scrapes for the **absence** of
+/// `CTE Scan` to prove the materialised-closure no-CTE fallback
+/// elided the recursive CTE. Not part of the user-facing query
+/// surface — a translator-introspection hook only.
+///
+/// SQL: `pgrdf.sparql_sql(q TEXT) → TEXT`.
+#[pg_extern]
+fn sparql_sql(query: &str) -> String {
+    let parser = SparqlParser::new();
+    let parsed = parser
+        .parse_query(query)
+        .unwrap_or_else(|e| panic!("sparql: parse error: {e}"));
+    let plan = translate(&parsed);
+    // Inline `$N` → the resolved dict id. Replace the
+    // highest-numbered placeholders first so `$1` does not
+    // prefix-match `$11` (e.g. a 12+-param query).
+    let mut sql = plan.sql;
+    for (i, id) in plan.params.iter().enumerate().rev() {
+        let ph = format!("${}", i + 1);
+        sql = sql.replace(&ph, &id.to_string());
+    }
+    sql
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Phase D slice 59 — CONSTRUCT foundation
 //
@@ -1831,18 +1862,19 @@ fn scoped_triple_from_path(
     scope: Option<GraphScope>,
 ) -> ScopedTriple {
     use crate::query::path::{
-        build_one_or_more_relation_sql, build_zero_or_more_relation_sql,
-        build_zero_or_one_relation_sql, classify_path, PathGraphScope, PathPlan,
+        build_alternation_relation_sql, build_one_or_more_relation_sql,
+        build_zero_or_more_relation_sql, build_zero_or_one_relation_sql, classify_path,
+        PathGraphScope, PathPlan,
     };
-    // The recursive/optional operators (`+`/`*`/`?`) share all the
-    // scaffolding: resolve the predicate, map the BGP graph scope to
-    // the relation's scope flavour, emit the predicate / Literal-graph
-    // placeholders at THIS point (so the PARAM_BUF ordinal matches
-    // where a normal triple's `pattern_clauses` would have pushed
-    // them — keeping the surrounding `$N` numbering consistent), and
-    // build the placeholder triple (subject/object drive var-binding
-    // + SELECT-*; predicate slot is unused for path rows). Only the
-    // relation builder called at the end differs per operator.
+    // The recursive/optional/alternation operators share all the
+    // scaffolding: resolve the predicate SET, map the BGP graph scope
+    // to the relation's scope flavour, emit the predicate / Literal-
+    // graph placeholders at THIS point (so the PARAM_BUF ordinal
+    // matches where a normal triple's `pattern_clauses` would have
+    // pushed them — keeping the surrounding `$N` numbering
+    // consistent), and build the placeholder triple (subject/object
+    // drive var-binding + SELECT-*; predicate slot is unused for path
+    // rows). Only the relation builder called at the end differs.
     let plan = classify_path(subject, path, object);
     if let PathPlan::Triple(tp) = plan {
         return ScopedTriple {
@@ -1851,24 +1883,51 @@ fn scoped_triple_from_path(
             path: None,
         };
     }
-    let (predicate, swapped) = match &plan {
-        PathPlan::OneOrMore { predicate, swapped }
-        | PathPlan::ZeroOrMore { predicate, swapped }
-        | PathPlan::ZeroOrOne { predicate, swapped } => (predicate.clone(), *swapped),
+    let (predicates, swapped) = match &plan {
+        PathPlan::OneOrMore {
+            predicates,
+            swapped,
+        }
+        | PathPlan::ZeroOrMore {
+            predicates,
+            swapped,
+        }
+        | PathPlan::ZeroOrOne {
+            predicates,
+            swapped,
+        }
+        | PathPlan::Alternation {
+            predicates,
+            swapped,
+        } => (predicates.clone(), *swapped),
         PathPlan::Triple(_) => unreachable!("Triple handled above"),
     };
-    // Resolve the single walked predicate to its dict id (sentinel
-    // -1 ⇒ zero direct/transitive rows = spec-correct "no solutions"
-    // when the IRI was never interned; for `*`/`?` the reflexive set
-    // is still produced — W3C zero-length holds regardless).
-    let pred_id = lookup_iri_id(predicate.as_str()).unwrap_or(-1);
+    // Resolve every walked predicate to its dict id (sentinel -1 ⇒
+    // that predicate contributes zero direct/transitive rows =
+    // spec-correct "no solutions" when the IRI was never interned;
+    // for `*`/`?` the reflexive set is still produced — W3C
+    // zero-length holds regardless of whether the predicate exists).
+    let pred_ids: Vec<i64> = predicates
+        .iter()
+        .map(|p| lookup_iri_id(p.as_str()).unwrap_or(-1))
+        .collect();
     let (path_scope, graph_ph, probe_gid): (PathGraphScope, Option<String>, Option<i64>) =
         match &scope {
             None => (PathGraphScope::AllGraphs, None, None),
             Some(GraphScope::Literal(gid)) => (PathGraphScope::Literal(*gid), None, Some(*gid)),
             Some(GraphScope::Variable { .. }) => (PathGraphScope::Variable, None, None),
         };
-    let predicate_placeholder = id_placeholder(pred_id);
+    // The predicate-set placeholder list for the relation SQL — each
+    // resolved id appended to PARAM_BUF in order, joined as
+    // `$N1, $N2, …` (a 1-element list is just `$N`, identical to the
+    // old single-predicate `= $N`). This keeps the surrounding `$N`
+    // numbering aligned with where ordinary-triple `pattern_clauses`
+    // would have pushed the predicate id.
+    let pred_ids_sql = pred_ids
+        .iter()
+        .map(|id| id_placeholder(*id))
+        .collect::<Vec<_>>()
+        .join(", ");
     let graph_placeholder = match (&path_scope, &graph_ph) {
         (PathGraphScope::Literal(gid), _) => Some(id_placeholder(*gid)),
         _ => None,
@@ -1900,6 +1959,10 @@ fn scoped_triple_from_path(
     // `Variable` (`GRAPH ?g`) scope flows bound endpoints through the
     // scoped per-graph node-set instead of a constant self-pair, so
     // it needs no interning here.
+    // `*`/`?` are reflexive (they carry the W3C §9.3 zero-length
+    // set); `+` and top-level `|` are NON-reflexive (no identity
+    // pairs). Only the reflexive operators intern a bound endpoint
+    // and emit a constant self-pair.
     let reflexive = matches!(
         plan,
         PathPlan::ZeroOrMore { .. } | PathPlan::ZeroOrOne { .. }
@@ -1927,39 +1990,116 @@ fn scoped_triple_from_path(
         } else {
             Vec::new()
         };
+    // Probe predicate-set placeholders — the probe binds its OWN
+    // `$1[, $2, …]` (independent of PARAM_BUF), and `probe_params`
+    // carries the same dict ids in that order. The Literal scope's
+    // graph id stays a translate-time constant inlined inside
+    // path.rs (see the truncation-probe doc), so the probe binds
+    // ONLY the predicate ids.
+    let probe_pred_ids_sql = (1..=pred_ids.len())
+        .map(|n| format!("${n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let probe_params: Vec<i64> = pred_ids.clone();
     let max_depth = crate::query::guc::path_max_depth();
-    let rel = match plan {
+
+    // ── Materialised-closure no-CTE fallback (LLD v0.4 §7.2 / §7.3) ─
+    //
+    // If the graph has been materialised under a profile that
+    // already entails the closure of this path's predicate, a
+    // recursive CTE is wasted work — every transitive pair is
+    // already a direct (is_inferred = TRUE) edge. The v0.4 heuristic
+    // (LLD §7.2): for `+`/`*` over a SINGLE predicate that is one of
+    // the well-known transitive predicates (rdfs:subClassOf,
+    // rdfs:subPropertyOf, owl:sameAs), if `_pgrdf_quads` carries any
+    // `is_inferred = TRUE` row for that predicate in the active
+    // scope, emit a DIRECT match instead of the CTE — no
+    // `WITH RECURSIVE`, so the executed plan has no `CTE Scan`
+    // (§7.3 acceptance). Per-query detection, not cached.
+    //
+    //  * `+` direct  → the non-reflexive single step over the
+    //                  predicate (`build_alternation_relation_sql`
+    //                  is exactly that: `predicate_id IN (…)`, no
+    //                  recursion, no identity).
+    //  * `*` direct  → that step ∪ the W3C §9.3 zero-length set —
+    //                  i.e. precisely `?`'s relation
+    //                  (`build_zero_or_one_relation_sql`): with the
+    //                  closure materialised, every transitive pair
+    //                  IS a direct edge, so `direct ∪ identity` is
+    //                  the full `*` solution set.
+    //
+    // `?`/`^`/`|` are unaffected (no recursion to elide). Multi-
+    // predicate `(a|b)+`/`(a|b)*` skip the fallback (the heuristic
+    // is single-well-known-predicate only — a mixed set is not a
+    // recognised materialised closure).
+    let closure_materialised = pred_ids.len() == 1
+        && matches!(
+            plan,
+            PathPlan::OneOrMore { .. } | PathPlan::ZeroOrMore { .. }
+        )
+        && is_well_known_transitive(predicates[0].as_str())
+        && inferred_closure_present(pred_ids[0], &scope);
+
+    let rel = match &plan {
+        _ if closure_materialised => {
+            // No recursion emitted. `+` → direct step only; `*` →
+            // direct step ∪ zero-length set (= the `?` relation).
+            match plan {
+                PathPlan::OneOrMore { .. } => build_alternation_relation_sql(
+                    &pred_ids_sql,
+                    graph_placeholder.as_deref(),
+                    &path_scope,
+                    swapped,
+                ),
+                PathPlan::ZeroOrMore { .. } => build_zero_or_one_relation_sql(
+                    &pred_ids_sql,
+                    graph_placeholder.as_deref(),
+                    &path_scope,
+                    swapped,
+                    &bound_self_pairs,
+                ),
+                _ => unreachable!("closure_materialised gates `+`/`*` only"),
+            }
+        }
         PathPlan::OneOrMore { .. } => build_one_or_more_relation_sql(
-            &predicate_placeholder,
+            &pred_ids_sql,
+            &probe_pred_ids_sql,
+            probe_params,
             graph_placeholder.as_deref(),
             &path_scope,
             swapped,
             max_depth,
-            pred_id,
             probe_gid,
         ),
         PathPlan::ZeroOrMore { .. } => build_zero_or_more_relation_sql(
-            &predicate_placeholder,
+            &pred_ids_sql,
+            &probe_pred_ids_sql,
+            probe_params,
             graph_placeholder.as_deref(),
             &path_scope,
             swapped,
             max_depth,
-            pred_id,
             probe_gid,
             &bound_self_pairs,
         ),
         PathPlan::ZeroOrOne { .. } => build_zero_or_one_relation_sql(
-            &predicate_placeholder,
+            &pred_ids_sql,
             graph_placeholder.as_deref(),
             &path_scope,
             swapped,
             &bound_self_pairs,
+        ),
+        PathPlan::Alternation { .. } => build_alternation_relation_sql(
+            &pred_ids_sql,
+            graph_placeholder.as_deref(),
+            &path_scope,
+            swapped,
         ),
         PathPlan::Triple(_) => unreachable!("Triple handled above"),
     };
     let placeholder_triple = TriplePattern {
         subject: subject.clone(),
-        predicate: NamedNodePattern::NamedNode(predicate),
+        predicate: NamedNodePattern::NamedNode(predicates[0].clone()),
         object: object.clone(),
     };
     ScopedTriple {
@@ -3874,6 +4014,58 @@ fn bind_var(
 fn quote_identifier(name: &str) -> String {
     let escaped = name.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Materialised-closure detection (LLD v0.4 §7.2 / §7.3)
+// ─────────────────────────────────────────────────────────────────────
+
+/// The three well-known transitive predicates the v0.4 closure
+/// heuristic recognises (LLD v0.4 §7.2). If a `+`/`*` walks one of
+/// these AND the graph already carries `is_inferred = TRUE` rows for
+/// it (i.e. `pgrdf.materialize` entailed the closure), the recursive
+/// CTE is wasted work — the translator falls back to a direct match.
+fn is_well_known_transitive(iri: &str) -> bool {
+    matches!(
+        iri,
+        "http://www.w3.org/2000/01/rdf-schema#subClassOf"
+            | "http://www.w3.org/2000/01/rdf-schema#subPropertyOf"
+            | "http://www.w3.org/2002/07/owl#sameAs"
+    )
+}
+
+/// Per-query probe (LLD v0.4 §7.2 — "per-query detection, not
+/// cached"): does `_pgrdf_quads` carry any `is_inferred = TRUE` row
+/// for `pred_id` in the active scope? `pgrdf.materialize(graph_id)`
+/// writes the entailed transitive closure as `is_inferred = TRUE`
+/// rows (see `src/inference/reasonable.rs`), so a positive answer
+/// means the closure is materialised and a direct BGP match is
+/// equivalent to (and cheaper than) the recursive walk. Scope-exact:
+/// unscoped probes all partitions; `GRAPH <iri>` one graph;
+/// `GRAPH ?g` any named graph (graph_id <> 0). A sentinel
+/// `pred_id = -1` (predicate never interned) short-circuits to
+/// false — there can be no inferred rows for a non-existent
+/// predicate, so the CTE path (which correctly yields no solutions)
+/// stays.
+fn inferred_closure_present(pred_id: i64, scope: &Option<GraphScope>) -> bool {
+    if pred_id < 0 {
+        return false;
+    }
+    let scope_pred: String = match scope {
+        None => String::new(),
+        Some(GraphScope::Literal(gid)) => format!(" AND graph_id = {gid}"),
+        Some(GraphScope::Variable { .. }) => " AND graph_id <> 0".to_string(),
+    };
+    Spi::get_one_with_args::<bool>(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM pgrdf._pgrdf_quads \
+              WHERE predicate_id = $1 AND is_inferred{scope_pred})"
+        ),
+        &[pred_id.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -10026,21 +10218,54 @@ mod tests {
         );
     }
 
-    /// `|` (alternation) is the gated E4 stretch goal and still
-    /// preview-panics with the EXACT stable message (pgrx-tests 0.16
-    /// needs the literal; it is the single source of truth in
-    /// `crate::query::path::PANIC_ALTERNATION`, locked here verbatim
-    /// per the E1/E2 convention). E3 ships `*`/`?` so their old
-    /// preview-panic tests are gone — the `|` lock proves the
-    /// not-yet-shipped boundary is still enforced.
+    /// E4 ships top-level alternation `a|b` over plain (optionally
+    /// inverted) predicates: `?s (ex:knows|ex:likes) ?o` ≡ the union
+    /// of the two single-predicate scans. Seeded a→b via `ex:knows`
+    /// and c→d via `ex:likes`: the alternation must return BOTH
+    /// pairs (and exactly those — it is non-reflexive).
+    #[pg_test]
+    fn property_path_alternation_executes() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://example.com/> . \
+             ex:a ex:knows ex:b . ex:c ex:likes ex:d .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?o WHERE { ?s (ex:knows|ex:likes) ?o }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 2, "`a|b` = union of per-predicate scans (2 pairs)");
+        let pair: String = Spi::get_one(
+            "SELECT j->>'s' || '->' || (j->>'o') FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?s ?o WHERE { ?s (ex:knows|ex:likes) ?o } ORDER BY ?s') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            pair, "http://example.com/a->http://example.com/b",
+            "first ordered solution is the ex:knows arm"
+        );
+    }
+
+    /// The §7.1-permitted gated remainder still preview-panics with
+    /// the EXACT stable message (pgrx-tests 0.16 needs the literal;
+    /// single source of truth in
+    /// `crate::query::path::PANIC_ONE_OR_MORE_NESTED`, locked here
+    /// verbatim per the E1/E2/E3 convention). An alternation arm that
+    /// is itself a sequence (`a/b | c`) is the exotic case E4
+    /// explicitly gates (LLD §7.1).
     #[pg_test(
-        error = "pgrdf: property path alternation '|' is a gated stretch goal (Phase E group E4)"
+        error = "pgrdf: nested recursive property path (e.g. `(p*)+`, `(a/b|c)`) is a gated stretch goal (Phase E group E4)"
     )]
-    fn property_path_alternation_still_preview_panics() {
+    fn property_path_gated_remainder_still_preview_panics() {
         Spi::run(
             "SELECT * FROM pgrdf.sparql(
                  'PREFIX ex: <http://example.com/> \
-                  SELECT ?s ?o WHERE { ?s (ex:knows|ex:likes) ?o }')",
+                  SELECT ?s ?o WHERE { ?s (ex:knows/ex:knows|ex:likes) ?o }')",
         )
         .unwrap();
     }

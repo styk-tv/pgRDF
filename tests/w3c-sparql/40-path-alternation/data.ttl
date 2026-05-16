@@ -1,0 +1,7 @@
+@prefix ex: <http://example.org/> .
+
+# Two distinct caregiver relations.
+ex:child1 ex:parent   ex:mother .
+ex:child2 ex:guardian ex:uncle .
+ex:child3 ex:parent   ex:father .
+ex:pet    ex:owner    ex:child1 .

@@ -1,0 +1,7 @@
+PREFIX ex:   <http://example.org/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+# W3C SPARQL 1.1 §9 zero-or-more path: REFLEXIVE transitive closure.
+# `?c rdfs:subClassOf* ex:Animal` = every subclass of Animal PLUS
+# Animal itself (W3C §9.3: the object is bound, so the zero-length
+# pair (Animal,Animal) holds unconditionally). = Dog, Mammal, Animal.
+SELECT ?c WHERE { ?c rdfs:subClassOf* ex:Animal }

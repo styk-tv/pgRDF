@@ -1,0 +1,12 @@
+PREFIX ex:   <http://example.org/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+# `?c rdfs:subClassOf* ex:Animal` over a MATERIALISED graph. The
+# translator takes the no-CTE direct-match fast path (is_inferred
+# rows for the well-known transitive rdfs:subClassOf are present),
+# but the SOLUTION SET is identical to the non-materialised
+# recursive-CTE walk: every transitive subclass of Animal
+# (Sparrow, Bird, Vertebrate) PLUS Animal itself (W3C §9.3 bound
+# endpoint reflexive). The materialised closure makes every
+# transitive pair a direct edge, so direct ∪ identity = the full
+# `*` solution set — semantics preserved.
+SELECT ?c WHERE { ?c rdfs:subClassOf* ex:Animal }

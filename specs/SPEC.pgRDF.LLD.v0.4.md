@@ -91,8 +91,13 @@ already enumerated in [`v0.3 §3`](SPEC.pgRDF.LLD.v0.3.md) as
    returning `{subject, predicate, object}`-shaped rows. ✅ shipped
    across Phase D countdown slices 59 → 52 (templates, GRAPH-scoped
    WHERE, shorthand, round-trip ingest, `sparql_parse` enrichment).
-5. **Property paths** (§7) — `*`, `+`, `?`, `^`, with alternation
-   `p1|p2` as a stretch. Materialised-closure-aware translation. 🚧
+5. **Property paths** (§7) — `*`, `+`, `?`, `^`, plus the `p1|p2`
+   alternation stretch (and its `(a|b)+`/`(a|b)*`/`(a|b)?`/`^(a|b)`
+   compositions), with materialised-closure-aware translation. ✅
+   shipped across Phase E countdown slices 49 → 35 (E1 `^` + GUC,
+   E2 `+` recursive CTE + depth guard, E3 `*`/`?` W3C §9.3, E4 `|`
+   + materialised-closure no-CTE fallback). The §7.1-permitted
+   non-plain-arm / sequence-inner remainder stays gated.
 6. **SHACL real validation** (§9) — `pgrdf.validate(data, shapes)`
    ships the real W3C-shaped report; the v0.3 stub is gone. ✅
    shipped on `main` in commit
@@ -117,8 +122,9 @@ Capability matrix for the v0.4 target:
 | Lifecycle algebra (`DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / ALL / NAMED`) | not yet | §4.4 | ✅ slice 78 |
 | `pgrdf.drop_graph / clear_graph / copy_graph / move_graph` | not yet | §5 | ✅ all four shipped (slices 99 / 98 / 97 / 96) |
 | `CONSTRUCT` | ⏳ deferred | §6 | ✅ slice 52 (variables + constants + blank-node templates + N-triple templates (with cross-triple bnode label joining) + GRAPH-scoped WHERE (literal-IRI and variable form, W3C §13.3 named-graph-only) + WHERE shorthand (W3C SPARQL 1.1 §16.2.4, pure BGP only, no blank nodes) + **round-trip ingest via `pgrdf.put_construct_row` / `pgrdf.put_construct_rows`** (slice 53; preserves typed literals, language tags, and within-solution bnode joining; idempotent re-ingest) + **`sparql_parse` CONSTRUCT enrichment** (slice 52; `form: "CONSTRUCT"` with `template` (triple count, has_variables, has_blank_nodes, has_constants_only, variables) and `where_shape` (kind, triple_count, named_graphs_used, variables) blocks; `shorthand` flag; `unsupported_algebra` lists Distinct/OrderBy/Group/Aggregate wrappings that panic at execute time per §6.2)) |
-| Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | 🚧 |
-| Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | 🚧 |
+| Property paths `*`, `+`, `?`, `^` | ⏳ deferred | §7 | ✅ E1 `^` (slices 49-46) / E2 `+` (slices 45-42) / E3 `*`,`?` (slices 41-38) — full W3C §9.3 zero-length semantics, depth-guard GUC, cycle-safe CTE |
+| Property-path alternation `p1\|p2` | not yet | 🎯 stretch §7.1 | ✅ E4 (slices 37-35) — `a\|b`, n-ary `a\|b\|c`, `(a\|b)+`/`(a\|b)*`/`(a\|b)?`, `^(a\|b)`; sequence/recursive-arm remainder gated per §7.1 |
+| Materialised-closure no-CTE fallback | not yet | §7.2 / §7.3 | ✅ E4 (slices 37-35) — `+`/`*` over `rdfs:subClassOf` / `rdfs:subPropertyOf` / `owl:sameAs` with `is_inferred` rows present → direct match, no `CTE Scan` |
 | Multi-triple `OPTIONAL { BGP }` | ⏳ deferred | §11 | 🚧 |
 | `VALUES` inline tables | ⏳ deferred | §11 | 🚧 |
 | `BIND` output in later FILTER / BGP | ⏳ deferred | §11 | 🚧 |
@@ -712,9 +718,17 @@ operators across **Phase E**, grouped into four dispatches:
 `path_depth_truncations` stat scaffold) — **landed**; **E2** (`+`
 recursive CTE + depth-guard enforcement + the `src/query/path.rs`
 carve) — **landed**; **E3** (`*` / `?` with full W3C SPARQL 1.1 §9.3
-zero-length-path semantics) — **landed**; **E4** (closure-detect +
-the gated `|` stretch + W3C-shape consolidation + the v0.4.5
-release). The section keeps the 🚧 until E4 ships the full set. 🚧
+zero-length-path semantics) — **landed**; **E4** (the `|`
+alternation stretch + materialised-closure no-CTE detection + the
+Phase E W3C-shape consolidation + the v0.4.5 release) —
+**landed**. The full v0.4 property-path surface is shipped: `^`,
+`+`, `*`, `?`, and `|` (including its recursion compositions
+`(a|b)+` / `(a|b)*` / `(a|b)?` and the inverse `^(a|b)`) all
+execute; the materialised-closure fast path is wired; the only
+remaining preview-panics are the §7.1-permitted gated remainder (an
+alternation arm that is itself a sequence/recursive path, a
+recursive operator whose inner box is a sequence) and the
+out-of-v0.4-scope negated property set. ✅
 
 ### 7.1 Surface
 
@@ -724,15 +738,16 @@ release). The section keeps the 🚧 until E4 ships the full set. 🚧
 | `+` one-or-more | `?s ex:knows+ ?o` | Transitive closure (non-reflexive). | **Landed (E2).** `WITH RECURSIVE` CTE as a derived FROM relation; `UNION` (cycle-safe dedup); `^p+`/`(^p)+` inverse-composition; depth guard enforced (truncate at `pgrdf.path_max_depth`, never error). |
 | `*` zero-or-more | `?s ex:knows* ?o` | Reflexive transitive closure of `ex:knows`. | **Landed (E3).** The E2 cycle-safe recursive `+` walk `UNION` the W3C §9.3 zero-length node-set; reuses E2's `CYCLE` termination + depth guard + truncation probe; `^(p*)`/`(^p)*` inverse-composition. |
 | `?` zero-or-one | `?s ex:knows? ?o` | Either equal or directly linked. | **Landed (E3).** Non-recursive: the single direct edge `UNION` the SAME W3C §9.3 zero-length node-set; no depth guard (no recursion). `^(p?)`/`(^p)?` inverse-composition. |
-| `\|` alternation | `?s (ex:a\|ex:b) ?o` | Stretch goal — included if the translator refactor is cheap; explicitly gated. | 🚧 group E4 (gated). |
+| `\|` alternation | `?s (ex:a\|ex:b) ?o` | Solutions where the step matches `ex:a` OR `ex:b` (non-reflexive). | **Landed (E4).** §7.1 stretch shipped in full — the translator refactor was cheap: every recursive/optional builder already centralised the single `predicate_id = $P` clause, so generalising it to a predicate **set** (`predicate_id IN (…)` — the LLD §7.2 "union of per-predicate scans" as one scan) is a uniform one-line change at each site, not a balloon. Plain `a\|b`, the n-ary nest `a\|b\|c`, the recursion compositions `(a\|b)+` / `(a\|b)*` / `(a\|b)?`, and the inverse `^(a\|b)` / `(^a\|^b)` all execute. **Gated (still preview-panics, per §7.1's explicit allowance):** an alternation whose arm is itself a sequence / recursive / nested-recursive path (`(a/b\|c)`, `(a+\|b)`) — folding it would mean composing a recursive CTE inside an alternation arm, the translator balloon §7.1 permits gating. |
 
 A bare predicate that spargebra wraps as a degenerate `Path`
 (adjacent to an operator) is also handled by E1 — it lowers to an
-ordinary triple. The not-yet-landed operators preview-panic with a
-stable rollout-schedule prefix (`pgrdf: property path operator
-'<op>' lands in Phase E group EN (slice NN)`) so downstream tooling
-can route on partial-translatability without depending on the
-volatile slice-number tail. `^` composes with named-graph scoping
+ordinary triple. The remaining gated forms (the §7.1-permitted
+non-plain-arm alternation / sequence-inner recursive remainder) and
+the out-of-v0.4-scope negated property set preview-panic with a
+stable rollout-schedule prefix so downstream tooling can route on
+partial-translatability without depending on the volatile
+slice-number tail. `^` composes with named-graph scoping
 (`GRAPH <iri>` / `GRAPH ?g`), multi-pattern BGP joins,
 OPTIONAL/UNION/MINUS, and `pgrdf.construct` (all route through the
 shared `parse_select` walker, so path support is inherited, not
@@ -799,22 +814,55 @@ Path-operator mapping:
   predicate), no recursion needed. Composes with `*`/`?` —
   `^(p*)`/`(^p)*`/`^(p?)`/`(^p)?` fold the inverse parity into the
   same `swapped` flag the closure builders already carry.
-- `|` (if shipped): the base case becomes a union of per-predicate
-  scans. 🚧 group E4 (gated).
+- `|` (**landed, group E4**): the LLD §7.2 "union of per-predicate
+  scans" is realised as a single scan over a predicate **set** —
+  `predicate_id IN ($P1, $P2, …)`. The refactor was cheap because
+  every recursive/optional builder (`+`/`*`/`?`) already centralised
+  the single `predicate_id = $P` clause, so generalising it to the
+  `IN (…)` set is a uniform one-line change at each site (a
+  1-element set is byte-identical, semantically and to the planner,
+  to the old `= $P`). Consequently the recursion compositions ship
+  too: `(a|b)+` / `(a|b)*` / `(a|b)?` make the alternation the
+  recursive step's predicate set (the CTE base + recursive arms both
+  range over `IN (…)`; the depth guard, the `CYCLE` clause, the
+  truncation probe, and the zero-length node-set are all
+  predicate-match-agnostic, so they are reused verbatim). Top-level
+  `a|b` is a non-reflexive single step (no recursion, no
+  zero-length set — it is `?`'s direct arm minus the identity
+  union). `^(a|b)` / `(^a|^b)` fold the inverse into the same
+  `swapped` flag. The §7.1-permitted gated remainder (still
+  preview-panics) is an alternation arm that is itself a sequence /
+  recursive / nested-recursive path (`(a/b|c)`, `(a+|b)`), or a
+  recursive operator whose inner box is a sequence (`(p1/p2)+`) —
+  folding these means composing a recursive CTE inside an
+  alternation arm, the translator balloon §7.1 explicitly permits
+  gating.
 
-**Materialised-closure detection.** If the graph has been
-materialised under a profile (OWL-RL or RDFS — see
+**Materialised-closure detection (landed, group E4).** If the graph
+has been materialised under a profile (OWL-RL or RDFS — see
 [`v0.5-FUTURE §3`](SPEC.pgRDF.LLD.v0.5-FUTURE.md)) that already
 entails the closure of the path's predicate, the translator falls
 back to a direct BGP match against the materialised triples. No
 recursion is emitted.
 
-Heuristic for v0.4: if `_pgrdf_quads` carries `is_inferred = TRUE`
-rows whose `predicate_id` corresponds to one of the well-known
+Heuristic for v0.4 (**implemented in `executor.rs`**): for a
+`+`/`*` over a SINGLE predicate that is one of the well-known
 transitive predicates (`rdfs:subClassOf`, `rdfs:subPropertyOf`,
-`owl:sameAs`), the translator prefers a direct match over the CTE.
-The detection is per-query, not cached; a future refinement would
-record materialised-closure metadata on `_pgrdf_graphs`.
+`owl:sameAs`), the translator probes
+`EXISTS(SELECT 1 FROM _pgrdf_quads WHERE predicate_id = $P AND
+is_inferred AND <scope>)`; if a materialised (`is_inferred = TRUE`)
+row is present it emits a direct match instead of the recursive
+CTE — `+` becomes the non-reflexive single step, `*` becomes that
+step `UNION` the W3C §9.3 zero-length set (i.e. exactly the `?`
+relation: with the closure materialised every transitive pair IS a
+direct edge, so `direct ∪ identity` is the full `*` solution set).
+The executed plan therefore carries **no `CTE Scan`** (§7.3
+acceptance). `?`/`^`/`|` are unaffected (no recursion to elide);
+multi-predicate `(a|b)+`/`(a|b)*` skip the fallback (the heuristic
+is single-well-known-predicate only). The detection is per-query,
+not cached; a future refinement would record materialised-closure
+metadata on `_pgrdf_graphs`. `pgrdf.materialize(graph_id)` (v0.3 UDF,
+unchanged) is what writes the `is_inferred = TRUE` closure rows.
 
 **Depth-guard.** `$MAX_DEPTH` defaults to 64. Configurable via the
 GUC `pgrdf.path_max_depth` (`GucContext::Userset`, integer, range
@@ -857,11 +905,17 @@ may benignly **over-count** in the §7.2-permitted case where the
 continuation node was already reached via a shorter path (the spec
 allows slight over-counting; claiming-complete-when-truncated is the
 only unacceptable error). The closure-detect no-CTE optimisation
-above is still 🚧 (group E4); E2 always emits the CTE. The
-`src/query/path.rs` carve (E1 created the module; E2 keeps ALL
-property-path SQL generation — classifier, recursive-CTE builder,
-truncation probe, preview-panics — inside it; `executor.rs` only
-calls into `path::…`) is the structural half of E2.
+above landed in group E4 (the detection probe + the direct-match
+fallback live in `executor.rs`; when the closure is NOT
+materialised, the recursive CTE described here is still what runs —
+E4 only elides it when an `is_inferred` row proves the closure is
+already present). The `src/query/path.rs` carve (E1 created the
+module; E2 keeps ALL property-path SQL generation — classifier,
+recursive-CTE builder, truncation probe, preview-panics — inside
+it; E4 added the predicate-set generalisation + the alternation
+relation builder there too; `executor.rs` only calls into `path::…`
+and owns the live-dictionary materialised-closure probe) is the
+structural half of E2.
 
 ### 7.3 Acceptance criteria (v0.4 gate)
 

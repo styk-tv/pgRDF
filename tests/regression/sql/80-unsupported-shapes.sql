@@ -128,18 +128,22 @@ SELECT _check_gap(
   'sparql: query form not supported yet'
 );
 
--- ─── Gap 7: Property path with `|` (alternation) ─────────────────
--- W3C §9.1 — Phase E E1 (bare/`^`), E2 (`+`), and E3 (`*`/`?`) are
--- all executable now (see 108/109/110-property-path-*.sql).
--- Alternation `|` is the gated E4 stretch goal and is still NOT
--- executable; it panics with a STABLE rollout-preview prefix so
--- downstream tooling can preview the schedule. We match on the
--- stable prefix substring only.
+-- ─── Gap 7: Property path — the §7.1-gated remainder ─────────────
+-- W3C §9.1 — Phase E E1 (bare/`^`), E2 (`+`), E3 (`*`/`?`) AND E4
+-- (`|`, incl. `(a|b)+`/`(a|b)*`/`(a|b)?`/`^(a|b)`) are all
+-- executable now (see 108/109/110-property-path-*.sql). The ONLY
+-- still-NOT-executable property-path form is the §7.1-permitted
+-- gated remainder: an alternation arm that is itself a sequence
+-- (`foaf:knows/foaf:knows | foaf:member`) — folding it would mean
+-- composing a recursive CTE inside an alternation arm (the
+-- translator balloon §7.1 explicitly permits gating). It panics
+-- with a STABLE rollout-preview prefix; we match on the stable
+-- substring only.
 SELECT _check_gap(
   'gap-7 property path alternation',
   'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?o WHERE { ?s (foaf:knows|foaf:member) ?o }',
-  'gated stretch goal (Phase E group E4)'
+   SELECT ?o WHERE { ?s (foaf:knows/foaf:knows|foaf:member) ?o }',
+  'nested recursive property path'
 );
 
 -- ─── Gap 8: aggregates over UNION ────────────────────────────────

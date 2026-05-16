@@ -303,34 +303,58 @@ FROM pgrdf.construct(
 -- panic; they execute (full coverage lives in
 -- 110-property-path-star-opt.sql). Here we just confirm they run.
 -- `*` over the length-10 chain is reflexive so a positive count;
--- `?` is direct ∪ identity so also positive. Then the still-
--- deferred forms: `|` (E4 gated) and negated (out of scope) panic;
--- `(p*)+` / `(a|b)+` reach the *nested-recursive* E4 message (the
--- recursive classifier sees a non-predicate inner box) — distinct
--- from a pure top-level `(a|b)` which gets the gated-stretch E4
--- message. Substring match on the STABLE prefix only.
+-- `?` is direct ∪ identity so also positive. E4 ships `|`: a
+-- pure top-level `(a|b)` AND its `(a|b)+` recursion-composition
+-- both EXECUTE now. The still-gated §7.1 remainder is an
+-- alternation arm that is itself a sequence (`(a/b|c)`) and a
+-- recursive op whose inner box is a sequence (`(p1/p2)+`) — these
+-- reach the stable nested-recursive E4 message. Negated sets stay
+-- out of v0.4 scope. Substring match on the STABLE prefix only.
 SELECT (count(*) > 0) AS zero_or_more_executes FROM pgrdf.sparql(
   'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:sub* ?o }'
 );
 SELECT (count(*) > 0) AS zero_or_one_executes FROM pgrdf.sparql(
   'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:sub? ?o }'
 );
--- Pure top-level alternation `(a|b)` → the gated-stretch E4 message.
-SELECT _check_error(
-  'alternation-still-E4-gated',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub|ex:rel) ?o }')$$,
-  $$gated stretch goal (Phase E group E4)$$
+-- E4: top-level `(ex:rel|ex:sub)` EXECUTES (non-reflexive union of
+-- the two per-predicate scans). Scoped to `GRAPH <cyc>` (the
+-- 3-cycle a→b→c→a over `ex:rel`; no `ex:sub` there) so the count
+-- is the 3 direct `ex:rel` edges exactly — the alternation is the
+-- union of `?s ex:rel ?o` (3) and `?s ex:sub ?o` (0 in this scope).
+SELECT count(*)::bigint AS alternation_executes_count FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?s ?o WHERE { GRAPH <http://example.org/cyc> { ?s (ex:rel|ex:sub) ?o } }'
 );
--- A `+` whose inner box is itself recursive/alternation/sequence —
--- `(p*)+`, `(a|b)+`, `(p1/p2)+` — is the nested-recursive E4 case.
+-- E4: `(ex:rel|ex:sub)+` EXECUTES under `GRAPH <cyc>` — the
+-- alternation becomes the recursive step's predicate set. Graph
+-- <cyc> is the 3-cycle a→b→c→a over `ex:rel` only; the cycle-safe
+-- transitive closure of a 3-cycle reaches every node from every
+-- node = 9 ordered pairs (each of a,b,c reaches a,b,c — incl.
+-- itself via one lap; `+` is non-reflexive but the cycle makes
+-- (x,x) a genuine length-3 path). Same result `ex:rel+` alone
+-- gives here (the `ex:sub` arm contributes nothing in this scope).
+SELECT count(*)::bigint AS alternation_plus_executes_count FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?s ?o WHERE { GRAPH <http://example.org/cyc> { ?s (ex:rel|ex:sub)+ ?o } }'
+);
+-- §7.1-permitted gated remainder: a `+` whose inner box is a
+-- SEQUENCE (`(p1/p2)+`), and an alternation whose arm is itself a
+-- sequence (`(a/b|c)`) — both reach the stable nested-recursive
+-- E4 message (composing a recursive CTE inside an alternation arm
+-- is the translator balloon §7.1 permits gating).
 SELECT _check_error(
   'nested-star-plus-E4',
   $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub*)+ ?o }')$$,
   $$nested recursive property path$$
 );
 SELECT _check_error(
-  'nested-alternation-plus-E4',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub|ex:rel)+ ?o }')$$,
+  'sequence-inner-plus-gated',
+  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub/ex:sub)+ ?o }')$$,
+  $$nested recursive property path$$
+);
+SELECT _check_error(
+  'alternation-sequence-arm-gated',
+  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub/ex:sub|ex:rel) ?o }')$$,
   $$nested recursive property path$$
 );
 SELECT _check_error(

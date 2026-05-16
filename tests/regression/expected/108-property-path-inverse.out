@@ -45,7 +45,8 @@ t
 t
 t
 t
-alternation-gated-panic: t
+6
+alternation-sequence-arm-gated: t
 negated-set-out-of-scope-panic: t
 t
 t
@@ -53,4 +54,4 @@ t
 0
 0
 
-13
+14

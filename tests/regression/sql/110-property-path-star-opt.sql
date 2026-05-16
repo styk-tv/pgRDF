@@ -399,25 +399,51 @@ FROM pgrdf.construct(
    CONSTRUCT { ?x ex:reaches ex:c11 } WHERE { ?x ex:sub* ex:c11 }'
 ) AS c(j);
 
--- ─── Invariant K: `|` / nested-recursive / negated still panic ───
--- Substring match on the STABLE prefix only (slice tail shifts).
--- Pure top-level `(a|b)` → the gated-stretch E4 message.
-SELECT _check_error(
-  'alternation-still-E4-gated',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub|ex:rel) ?o }')$$,
-  $$gated stretch goal (Phase E group E4)$$
+-- ─── Invariant K: `|` ships in E4; gated remainder still panics ──
+-- E4 ships `|` (top-level AND `(a|b)*` recursion-composition).
+-- Scoped to `GRAPH <cyc>` (3-cycle a→b→c→a over `ex:rel`; no
+-- `ex:sub` there) for a cleanly hand-computable result.
+--
+-- K1: top-level `(ex:rel|ex:sub)` = non-reflexive union of the two
+-- per-predicate scans = the 3 direct `ex:rel` edges (the `ex:sub`
+-- arm is empty in <cyc>).
+SELECT count(*)::bigint AS alternation_step_count FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.org/>
+   SELECT ?s ?o WHERE { GRAPH <http://example.org/cyc> { ?s (ex:rel|ex:sub) ?o } }'
 );
--- `(p*)+`, `(a|b)*`, `(p1/p2)?` — a recursive/optional op whose
--- inner box is not a plain (optionally inverted) predicate ⇒ the
--- nested-recursive E4 message.
+-- K2: `(ex:rel|ex:sub)*` EXECUTES — the alternation becomes the
+-- recursive step's predicate set, UNION the W3C §9.3 zero-length
+-- set. Over the 3-cycle the cycle-safe transitive closure reaches
+-- every node from every node = 9 ordered pairs; the zero-length
+-- identity pairs {(a,a),(b,b),(c,c)} are already among those 9
+-- (the cycle makes (x,x) a real length-3 path), so `*` = 9. This
+-- is identical to plain `ex:rel*` here (the `ex:sub` arm is
+-- empty) — assert EQUIVALENCE so the value is anchored to an
+-- already-locked invariant rather than a fresh magic number.
+SELECT (
+  (SELECT count(*) FROM pgrdf.sparql(
+     'PREFIX ex: <http://example.org/>
+      SELECT ?s ?o WHERE { GRAPH <http://example.org/cyc> { ?s (ex:rel|ex:sub)* ?o } }'))
+  = (SELECT count(*) FROM pgrdf.sparql(
+     'PREFIX ex: <http://example.org/>
+      SELECT ?s ?o WHERE { GRAPH <http://example.org/cyc> { ?s ex:rel* ?o } }'))
+) AS alternation_star_equiv_plain_star;
+-- The §7.1-permitted gated remainder still preview-panics: a
+-- recursive op whose inner box is a SEQUENCE (`(p1/p2)+`), and an
+-- alternation arm that is itself a sequence (`(a/b|c)`).
 SELECT _check_error(
   'nested-star-plus-E4',
   $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub*)+ ?o }')$$,
   $$nested recursive property path$$
 );
 SELECT _check_error(
-  'nested-alternation-star-E4',
-  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub|ex:rel)* ?o }')$$,
+  'sequence-inner-star-gated',
+  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub/ex:sub)* ?o }')$$,
+  $$nested recursive property path$$
+);
+SELECT _check_error(
+  'alternation-sequence-arm-gated',
+  $$SELECT * FROM pgrdf.sparql('PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub/ex:sub|ex:rel)* ?o }')$$,
   $$nested recursive property path$$
 );
 SELECT _check_error(
@@ -426,10 +452,12 @@ SELECT _check_error(
   $$negated property sets are out of scope for v0.4$$
 );
 
--- ─── sparql_parse analysis: `*` and `?` are now EXECUTABLE ───────
--- E3 makes `?s ex:sub* ?o` / `?s ex:sub? ?o` executable, so they
--- lower into the bgp shape and are NOT flagged unsupported_algebra
--- (parse-time). A pure top-level `(a|b)` (E4) is still flagged.
+-- ─── sparql_parse analysis: `*`/`?`/`|` are EXECUTABLE ───────────
+-- E3 makes `?s ex:sub* ?o` / `?s ex:sub? ?o` executable and E4
+-- makes top-level `(a|b)` executable, so all lower into the bgp
+-- shape and are NOT flagged unsupported_algebra (parse-time mirrors
+-- execution). Only the §7.1-gated sequence-arm alternation stays
+-- flagged.
 SELECT jsonb_array_length(
   pgrdf.sparql_parse(
     'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s ex:sub* ?o }'
@@ -445,6 +473,11 @@ SELECT jsonb_array_length(
     'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub|ex:rel) ?o }'
   )->'unsupported_algebra'
 ) AS alt_unsupported_count;
+SELECT jsonb_array_length(
+  pgrdf.sparql_parse(
+    'PREFIX ex: <http://example.org/> SELECT ?s ?o WHERE { ?s (ex:sub/ex:sub|ex:rel) ?o }'
+  )->'unsupported_algebra'
+) AS gated_alt_unsupported_count;
 
 DROP FUNCTION _check_error(TEXT, TEXT, TEXT);
 

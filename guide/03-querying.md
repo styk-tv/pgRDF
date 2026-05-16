@@ -47,7 +47,7 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | Lifecycle algebra — `DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / NAMED / ALL` targets, `SILENT` flag | ✅ v0.4.3 |
 | `CONSTRUCT { template } WHERE { … }` (constant / variable / blank-node / multi-triple templates, GRAPH-scoped WHERE, `CONSTRUCT WHERE { … }` shorthand, round-trip ingest) via `pgrdf.construct(q)` | ✅ v0.4 |
 | `DESCRIBE` | ⏳ v0.4 |
-| Property paths beyond simple sequence (`*`, `+`, `?`, `^`, `\|`) | ⏳ v0.4 |
+| Property paths — `^` inverse, `+` / `*` / `?`, `\|` alternation (incl. `(a\|b)+`/`(a\|b)*`/`(a\|b)?`/`^(a\|b)`), materialised-closure fast path | ✅ v0.4.5 |
 | `VALUES (?x) { … }` inline data | ⏳ v0.4 |
 | Aggregates over `UNION` | ⏳ v0.4 |
 | BIND output referenced in later FILTER / BGP | ⏳ v0.4 |
@@ -713,6 +713,62 @@ SELECT * FROM pgrdf.sparql(
    }'
 );
 ```
+
+### Traversing graphs with property paths
+
+A property path lets one triple pattern match a *route* through the
+graph rather than a single edge. pgRDF ships the full v0.4 surface:
+
+| Path | Means | Example |
+|---|---|---|
+| `^p` | the edge, reversed (`?x ^p ?y` ≡ `?y p ?x`) | `?who ^foaf:knows ex:bob` — who points an `ex:bob`? no: who does Bob `knows`? Use `ex:bob ^foaf:knows ?who` for "who knows Bob". |
+| `p+` | one-or-more hops (transitive, **not** reflexive) | `?sub rdfs:subClassOf+ ex:Animal` |
+| `p*` | zero-or-more hops (transitive **and** reflexive) | `?sub rdfs:subClassOf* ex:Animal` (includes `ex:Animal` itself) |
+| `p?` | zero or one hop | `ex:x foaf:knows? ?y` (= `ex:x`, or anyone `ex:x` directly knows) |
+| `a\|b` | either predicate (a single step) | `?c (ex:parent\|ex:guardian) ?who` |
+
+These compose: `(ex:a\|ex:b)+` transitively closes over *either*
+predicate, `^(ex:p+)` is the inverse of a transitive closure, and a
+path joins to ordinary triples / `GRAPH` scopes / `OPTIONAL` exactly
+like a plain pattern.
+
+**Worked example — a subclass hierarchy.** Seed a chain:
+
+```sql
+SELECT pgrdf.add_graph(7000);
+SELECT pgrdf.parse_turtle('
+@prefix ex:   <http://example.org/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+ex:Sparrow rdfs:subClassOf ex:Bird .
+ex:Bird    rdfs:subClassOf ex:Vertebrate .
+ex:Vertebrate rdfs:subClassOf ex:Animal .
+', 7000);
+```
+
+Every (transitive) subclass of `ex:Animal`, and `ex:Animal` itself:
+
+```sql
+SELECT sparql FROM pgrdf.sparql(
+  'PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+   PREFIX ex:   <http://example.org/>
+   SELECT ?c WHERE { ?c rdfs:subClassOf* ex:Animal }');
+-- → ex:Sparrow, ex:Bird, ex:Vertebrate, ex:Animal  (4 — `*` is reflexive)
+```
+
+Use `+` instead of `*` to exclude `ex:Animal` itself (the strict
+subclasses only). A guard GUC `pgrdf.path_max_depth` (default 64,
+range 1–1024) bounds recursive walks — a traversal past the cap is
+**truncated, not errored**, and `pgrdf.stats()->>'path_depth_truncations'`
+counts it.
+
+**The materialise optimisation.** If you have already run
+`pgrdf.materialize(7000)` (the OWL-RL reasoner — see
+[04-inference](04-inference.md)), the transitive `subClassOf` closure
+is stored as direct edges. pgRDF *detects* this: a `subClassOf+` /
+`subClassOf*` (or `subPropertyOf` / `owl:sameAs`) query over a
+materialised graph skips the recursive walk entirely and does a
+plain direct match — same answers, no recursion. It is automatic and
+per-query; you do not change the query.
 
 ### Aggregates and GROUP BY
 

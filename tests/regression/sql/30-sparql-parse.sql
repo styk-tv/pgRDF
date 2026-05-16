@@ -59,15 +59,20 @@ SELECT (
 )::int AS bgp_count_minus;
 
 -- 4e. Property-path executability tracks the Phase E rollout: E1
--- (bare/`^`), E2 (`+`), and E3 (`*`/`?`) are NOT flagged (they
--- lower into the bgp shape). Alternation `|` is the still-deferred
--- E4 gated stretch, so it still surfaces in `unsupported_algebra`
--- with the "recursive/alternation" tag. Note: simple sequence
--- paths (<a>/<b>) are desugared by spargebra into BGP chains and
--- don't appear as Path nodes.
+-- (bare/`^`), E2 (`+`), E3 (`*`/`?`) AND E4 (`|`, incl.
+-- `(a|b)+`/`(a|b)*`/`(a|b)?`/`^(a|b)`) are NOT flagged (they all
+-- lower into the bgp shape). The ONLY still-flagged property-path
+-- form is the §7.1-permitted gated remainder: an alternation arm
+-- that is itself a SEQUENCE (`<a>/<b> | <c>`) — folding it composes
+-- a recursive CTE inside an alternation arm (the translator balloon
+-- §7.1 explicitly permits gating). It still surfaces in
+-- `unsupported_algebra` with the "recursive/alternation" tag.
+-- (A top-level simple sequence `<a>/<b>` is desugared by spargebra
+-- into a BGP chain and never appears as a Path node — but a
+-- sequence INSIDE an alternation arm stays a Path.)
 SELECT (
   pgrdf.sparql_parse(
-    'SELECT ?s ?o WHERE { ?s (<http://x/a>|<http://x/b>) ?o }'
+    'SELECT ?s ?o WHERE { ?s (<http://x/a>/<http://x/b>|<http://x/c>) ?o }'
   )->'unsupported_algebra'
 )::text AS unsupported_path;
 
