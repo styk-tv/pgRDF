@@ -6,6 +6,10 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Reasoning-profile selector + IRI lifecycle overloads — Phase G group G1 (slices 21-18). `pgrdf.materialize(graph_id, profile TEXT DEFAULT 'owl-rl')` adds `'rdfs'` (RDFS rule subset) alongside `'owl-rl'`; JSONB gains a `profile` field; unknown profiles error (`materialize: unknown profile`, no silent fallback). The bare `pgrdf.materialize(g)` form is unchanged. IRI-keyed overloads `pgrdf.{drop,clear,copy,move}_graph(iri TEXT, …)` resolve via `_pgrdf_graphs` and dispatch to the v0.4 §5 partition-DDL path (error `<fn>: unknown iri` on an unbound IRI, distinct from the BIGINT no-op). Closes v0.5-FUTURE §3 (last ONTOSYS P1 gap) + §7.
+
 ## [0.4.6] — 2026-05-16
 
 ### Added

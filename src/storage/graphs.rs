@@ -664,6 +664,135 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
     count
 }
 
+// ─── v0.5-FUTURE §7 — IRI-keyed overloads for the lifecycle UDFs ──
+//
+// v0.4 §5 ships the four lifecycle UDFs with `BIGINT graph_id`
+// signatures only; callers route IRI input through
+// `pgrdf.graph_id(iri)` explicitly. §7 adds IRI-keyed overloads for
+// ergonomics. **Semantics are identical to the BIGINT overloads** —
+// each IRI overload resolves `iri → graph_id` via `_pgrdf_graphs.iri`
+// and then dispatches to the SAME Rust UDF (the partition-DDL
+// implementation is single-sourced; the IRI overload is pure
+// ergonomics, NO logic duplication). pgrx surfaces both the BIGINT
+// and TEXT functions under one SQL name via `#[pg_extern(name =
+// "...")]`, and Postgres dispatches on the argument types — the same
+// pattern `add_graph` uses for its BIGINT / TEXT overloads (slices
+// 117/118).
+//
+// The one INTENTIONAL behavioural difference vs the BIGINT overloads
+// (per §7.1 acceptance #2): an unbound IRI is an **error** with the
+// stable prefix `<fn>: unknown iri`, NOT the BIGINT overloads'
+// no-op-on-absent-id semantics. A BIGINT id is a raw partition
+// selector (absent ⇒ nothing to do, return 0); an IRI is a *name*
+// the caller asserts is bound, so a miss is a programming error.
+
+/// Resolve a graph IRI to its `graph_id` via `_pgrdf_graphs`, or
+/// panic with the stable `<fn>: unknown iri` prefix if unbound.
+/// Shared by all four IRI overloads so the lookup + error shape is
+/// single-sourced. The inner scalar-subquery wrapper keeps SPI on
+/// the exactly-one-row path (NULL when unbound) — same idiom as
+/// `graph_id` / `add_graph_iri`.
+fn resolve_iri_or_panic(fn_name: &str, iri: &str) -> i64 {
+    let id: Option<i64> = Spi::get_one_with_args(
+        "SELECT (SELECT graph_id FROM pgrdf._pgrdf_graphs WHERE iri = $1 LIMIT 1)",
+        &[iri.into()],
+    )
+    .unwrap_or_else(|e| panic!("{fn_name}: iri resolution failed: {e}"));
+    match id {
+        Some(g) => g,
+        None => panic!("{fn_name}: unknown iri {iri:?}"),
+    }
+}
+
+/// IRI-keyed overload of `pgrdf.drop_graph`. Resolves `iri` to its
+/// `graph_id` and dispatches to the BIGINT `drop_graph` UDF — same
+/// partition-DDL path, same return value (pre-drop triple count).
+///
+/// Errors with the stable prefix `drop_graph: unknown iri` if the
+/// IRI is not bound (distinct from the BIGINT overload's
+/// no-op-returns-0 on an absent id, per §7.1 #2).
+///
+/// SQL surface: `pgrdf.drop_graph(iri TEXT, cascade BOOLEAN DEFAULT
+/// TRUE) → BIGINT`. Per v0.5-FUTURE §7.
+#[pg_extern(name = "drop_graph")]
+fn drop_graph_iri(iri: &str, cascade: default!(bool, "true")) -> i64 {
+    let id = resolve_iri_or_panic("drop_graph", iri);
+    // Re-enter through the SQL surface so the partition-DDL idiom
+    // stays single-sourced in `drop_graph(id BIGINT, …)` above —
+    // identical to the `add_graph_iri → add_graph(bigint)` pattern.
+    Spi::get_one_with_args(
+        "SELECT pgrdf.drop_graph($1::bigint, $2)",
+        &[id.into(), cascade.into()],
+    )
+    .unwrap_or_else(|e| panic!("drop_graph: dispatch to bigint overload failed: {e}"))
+    .unwrap_or(0)
+}
+
+/// IRI-keyed overload of `pgrdf.clear_graph`. Resolves `iri` and
+/// dispatches to the BIGINT `clear_graph` UDF (same partition-DDL
+/// path, returns the pre-clear triple count, keeps the IRI binding).
+///
+/// Errors with `clear_graph: unknown iri` on an unbound IRI.
+///
+/// SQL surface: `pgrdf.clear_graph(iri TEXT) → BIGINT`. Per
+/// v0.5-FUTURE §7.
+#[pg_extern(name = "clear_graph")]
+fn clear_graph_iri(iri: &str) -> i64 {
+    let id = resolve_iri_or_panic("clear_graph", iri);
+    Spi::get_one_with_args("SELECT pgrdf.clear_graph($1::bigint)", &[id.into()])
+        .unwrap_or_else(|e| panic!("clear_graph: dispatch to bigint overload failed: {e}"))
+        .unwrap_or(0)
+}
+
+/// IRI-keyed overload of `pgrdf.copy_graph`. Resolves BOTH IRIs and
+/// dispatches to the BIGINT `copy_graph` UDF. `dst_iri` need not
+/// pre-exist as a partition (the BIGINT `copy_graph` auto-creates the
+/// dst partition via `add_graph` — mirrored exactly here), but it
+/// MUST be a *bound* IRI in `_pgrdf_graphs`: an IRI overload's whole
+/// contract is name → id resolution, so an unbound dst IRI is the
+/// `copy_graph: unknown iri` error (the caller binds it first with
+/// `pgrdf.add_graph(iri)`, exactly as the v0.4 §4 UPDATE-GRAPH path
+/// auto-binds before copy).
+///
+/// Errors with `copy_graph: unknown iri` if EITHER IRI is unbound.
+///
+/// SQL surface: `pgrdf.copy_graph(src_iri TEXT, dst_iri TEXT) →
+/// BIGINT`. Per v0.5-FUTURE §7.
+#[pg_extern(name = "copy_graph")]
+fn copy_graph_iri(src_iri: &str, dst_iri: &str) -> i64 {
+    let src = resolve_iri_or_panic("copy_graph", src_iri);
+    let dst = resolve_iri_or_panic("copy_graph", dst_iri);
+    Spi::get_one_with_args(
+        "SELECT pgrdf.copy_graph($1::bigint, $2::bigint)",
+        &[src.into(), dst.into()],
+    )
+    .unwrap_or_else(|e| panic!("copy_graph: dispatch to bigint overload failed: {e}"))
+    .unwrap_or(0)
+}
+
+/// IRI-keyed overload of `pgrdf.move_graph`. Resolves BOTH IRIs and
+/// dispatches to the BIGINT `move_graph` UDF (which is itself
+/// `copy_graph(src,dst)` + `drop_graph(src, cascade => true)` per
+/// v0.4 §5). After the move the BIGINT path's `_pgrdf_graphs`
+/// invalidation leaves `src` unbound and `dst` bound — semantics
+/// identical to the BIGINT overload.
+///
+/// Errors with `move_graph: unknown iri` if EITHER IRI is unbound.
+///
+/// SQL surface: `pgrdf.move_graph(src_iri TEXT, dst_iri TEXT) →
+/// BIGINT`. Per v0.5-FUTURE §7.
+#[pg_extern(name = "move_graph")]
+fn move_graph_iri(src_iri: &str, dst_iri: &str) -> i64 {
+    let src = resolve_iri_or_panic("move_graph", src_iri);
+    let dst = resolve_iri_or_panic("move_graph", dst_iri);
+    Spi::get_one_with_args(
+        "SELECT pgrdf.move_graph($1::bigint, $2::bigint)",
+        &[src.into(), dst.into()],
+    )
+    .unwrap_or_else(|e| panic!("move_graph: dispatch to bigint overload failed: {e}"))
+    .unwrap_or(0)
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
@@ -1445,5 +1574,139 @@ mod tests {
         )
         .expect("seed quads failed");
         Spi::run("SELECT pgrdf.move_graph(9607::bigint, 9608::bigint)").unwrap();
+    }
+
+    // ── v0.5-FUTURE §7 — IRI-keyed lifecycle overloads ───────────
+
+    /// §7.1 #1 — `drop_graph(iri)` removes the graph bound to that
+    /// IRI; equivalent to `drop_graph(graph_id(iri))`. Seed a named
+    /// graph, drop by IRI, assert the partition AND binding are gone.
+    #[pg_test]
+    fn drop_graph_iri_equivalent_to_bigint() {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('http://example.org/g7-drop')")
+            .unwrap()
+            .unwrap();
+        Spi::run_with_args(
+            "INSERT INTO pgrdf._pgrdf_quads \
+             (subject_id, predicate_id, object_id, graph_id) \
+             VALUES (1,1,1,$1),(2,2,2,$1)",
+            &[g.into()],
+        )
+        .unwrap();
+
+        // Resolution agrees with graph_id(iri).
+        let resolved: i64 = Spi::get_one("SELECT pgrdf.graph_id('http://example.org/g7-drop')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved, g);
+
+        let dropped: i64 = Spi::get_one("SELECT pgrdf.drop_graph('http://example.org/g7-drop')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(dropped, 2, "IRI drop returns pre-drop triple count");
+
+        let part_name = format!("_pgrdf_quads_g{g}");
+        let exists: bool = Spi::get_one_with_args(
+            "SELECT EXISTS(SELECT 1 FROM pg_class \
+             WHERE relnamespace = 'pgrdf'::regnamespace AND relname = $1)",
+            &[part_name.as_str().into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!exists, "partition must be gone after IRI drop");
+        let bound: Option<i64> =
+            Spi::get_one("SELECT pgrdf.graph_id('http://example.org/g7-drop')").unwrap();
+        assert!(bound.is_none(), "binding must be gone after IRI drop");
+    }
+
+    /// §7 — `clear_graph(iri)` empties the partition but KEEPS the
+    /// IRI binding (mirrors the BIGINT clear_graph semantics).
+    #[pg_test]
+    fn clear_graph_iri_keeps_binding() {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('http://example.org/g7-clear')")
+            .unwrap()
+            .unwrap();
+        Spi::run_with_args(
+            "INSERT INTO pgrdf._pgrdf_quads \
+             (subject_id, predicate_id, object_id, graph_id) \
+             VALUES (1,1,1,$1),(2,2,2,$1),(3,3,3,$1)",
+            &[g.into()],
+        )
+        .unwrap();
+        let cleared: i64 = Spi::get_one("SELECT pgrdf.clear_graph('http://example.org/g7-clear')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared, 3);
+        let remaining: i64 = Spi::get_one_with_args(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
+            &[g.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(remaining, 0, "clear empties the partition");
+        let still_bound: i64 = Spi::get_one("SELECT pgrdf.graph_id('http://example.org/g7-clear')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_bound, g, "clear_graph(iri) keeps the binding");
+    }
+
+    /// §7 — `copy_graph(src_iri, dst_iri)` mirrors the BIGINT
+    /// copy semantics (rows duplicated into dst, src intact).
+    #[pg_test]
+    fn copy_graph_iri_mirrors_bigint() {
+        let s: i64 = Spi::get_one("SELECT pgrdf.add_graph('http://example.org/g7-src')")
+            .unwrap()
+            .unwrap();
+        let d: i64 = Spi::get_one("SELECT pgrdf.add_graph('http://example.org/g7-dst')")
+            .unwrap()
+            .unwrap();
+        Spi::run_with_args(
+            "INSERT INTO pgrdf._pgrdf_quads \
+             (subject_id, predicate_id, object_id, graph_id) \
+             VALUES (1,1,1,$1),(2,2,2,$1)",
+            &[s.into()],
+        )
+        .unwrap();
+        let copied: i64 = Spi::get_one(
+            "SELECT pgrdf.copy_graph('http://example.org/g7-src', \
+                                     'http://example.org/g7-dst')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(copied, 2);
+        let src_n: i64 = Spi::get_one_with_args(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
+            &[s.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let dst_n: i64 = Spi::get_one_with_args(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
+            &[d.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(src_n, 2, "copy leaves src intact");
+        assert_eq!(dst_n, 2, "copy duplicates rows into dst");
+    }
+
+    /// §7.1 #2 — `drop_graph(iri)` on an UNBOUND IRI errors with the
+    /// EXACT `drop_graph: unknown iri` prefix (distinct from the
+    /// BIGINT overload's no-op-returns-0).
+    #[pg_test(error = "drop_graph: unknown iri \"http://example.org/nope\"")]
+    fn drop_graph_iri_unknown_errors() {
+        let _ = Spi::get_one::<i64>("SELECT pgrdf.drop_graph('http://example.org/nope')");
+    }
+
+    /// §7.1 #2 — `move_graph(src_iri, dst_iri)` with an unbound src
+    /// IRI errors `move_graph: unknown iri` (analogous prefix locked
+    /// for the move overload).
+    #[pg_test(error = "move_graph: unknown iri \"http://example.org/missing-src\"")]
+    fn move_graph_iri_unknown_errors() {
+        Spi::run("SELECT pgrdf.add_graph('http://example.org/g7-mv-dst')").unwrap();
+        let _ = Spi::get_one::<i64>(
+            "SELECT pgrdf.move_graph('http://example.org/missing-src', \
+                                     'http://example.org/g7-mv-dst')",
+        );
     }
 }

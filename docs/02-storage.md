@@ -600,6 +600,57 @@ shared dictionary, SPARQL `GRAPH <iri>` projection survival post-copy,
 and the drop-then-rebind loop. Per-UDF files (88/89/90/91) lock each
 UDF's invariants in isolation; slice 95 pins their interactions.
 
+### IRI-keyed overloads (✅ Phase G group G1, v0.5-FUTURE §7)
+
+Each lifecycle UDF gains an IRI-keyed overload so callers don't have
+to wrap every IRI in `pgrdf.graph_id(iri)`:
+
+```sql
+pgrdf.drop_graph(iri TEXT, cascade BOOLEAN DEFAULT TRUE) → BIGINT
+pgrdf.clear_graph(iri TEXT)                              → BIGINT
+pgrdf.copy_graph(src_iri TEXT, dst_iri TEXT)             → BIGINT
+pgrdf.move_graph(src_iri TEXT, dst_iri TEXT)             → BIGINT
+```
+
+Semantics are **identical** to the BIGINT overloads — the IRI
+overload resolves `iri → graph_id` via `_pgrdf_graphs.iri` and
+dispatches to the *same* BIGINT UDF (the partition-DDL logic is
+single-sourced; pgrx surfaces both signatures under one SQL name and
+Postgres dispatches on argument type, the same pattern `add_graph`
+uses).
+
+The **one intentional difference** vs the BIGINT overloads (§7.1):
+an unbound IRI is an **error** with the stable prefix
+`<fn>: unknown iri`, *not* the BIGINT overloads' no-op-returns-0 on
+an absent id. A BIGINT id is a raw partition selector (absent ⇒
+nothing to do); an IRI is a *name* the caller asserts is bound, so a
+miss is a programming error.
+
+```sql
+-- Equivalent to pgrdf.drop_graph(pgrdf.graph_id('http://ex.org/g1')):
+SELECT pgrdf.drop_graph('http://ex.org/g1');     -- → pre-drop row count
+
+SELECT pgrdf.clear_graph('http://ex.org/g1');    -- empties, keeps binding
+SELECT pgrdf.copy_graph('http://ex.org/a',
+                         'http://ex.org/b');      -- → src row count
+SELECT pgrdf.move_graph('http://ex.org/a',
+                         'http://ex.org/b');      -- src unbound after
+
+-- Unbound IRI → error (distinct from the BIGINT no-op):
+SELECT pgrdf.drop_graph('http://ex.org/nope');   -- ERROR: drop_graph: unknown iri "http://ex.org/nope"
+SELECT pgrdf.drop_graph(99999::bigint);          -- → 0 (BIGINT no-op, unchanged)
+```
+
+Regression coverage:
+[`tests/regression/sql/118-lifecycle-iri-overloads.sql`](../tests/regression/sql/118-lifecycle-iri-overloads.sql)
+locks IRI≡BIGINT equivalence, binding preservation, copy/move
+mirror semantics, all four unknown-iri errors, the BIGINT no-op
+contrast, and composition with the v0.4 §4 SPARQL UPDATE lifecycle
+algebra (drop-by-IRI then `CREATE GRAPH <same-iri>` rebinds).
+Pgrx integration tests in `src/storage/graphs.rs`.
+
+Spec: [LLD v0.5-FUTURE §7](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+
 ## 2.5 What's NOT in storage
 
 - **No vacuum tuning yet.** Standard autovacuum suffices for v0.2;

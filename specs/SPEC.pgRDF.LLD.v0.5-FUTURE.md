@@ -56,17 +56,23 @@ inside Postgres, with four engines:
 
 ## 2. Scope of v0.5
 
-| Section | Surface | Provenance |
-|---|---|---|
-| §3 | Reasoning profile selector on `pgrdf.materialize` | was v0.4-FUTURE §8 |
-| §4 | TriG / N-Quads ingest (`pgrdf.parse_trig`, `pgrdf.parse_nquads`) | was v0.4-FUTURE §10 |
-| §5 | SHACL-SPARQL constraint mode + validation-against-materialised-graph | was v0.4-FUTURE §9.5 |
-| §6 | W3C SHACL manifest runner wired to CI | was v0.4-FUTURE §9.5 / §13 |
-| §7 | IRI overloads for lifecycle UDFs (`drop_graph(iri)`, etc.) | was v0.4-FUTURE §5.1 forward note |
-| §8 | Aggregates-over-UNION refinements not landed in v0.4 §11 | was v0.4-FUTURE §11 |
-| §9 | v1.0 contents (forward look) | was v0.4-FUTURE §15 |
+| Section | Surface | Provenance | Status |
+|---|---|---|---|
+| §3 | Reasoning profile selector on `pgrdf.materialize` | was v0.4-FUTURE §8 | ✅ shipped — Phase G group G1 (slices 21-18) |
+| §4 | TriG / N-Quads ingest (`pgrdf.parse_trig`, `pgrdf.parse_nquads`) | was v0.4-FUTURE §10 | 🚧 Phase G group G2 |
+| §5 | SHACL-SPARQL constraint mode + validation-against-materialised-graph | was v0.4-FUTURE §9.5 | 🚧 Phase G group G3 |
+| §6 | W3C SHACL manifest runner wired to CI | was v0.4-FUTURE §9.5 / §13 | 🚧 Phase G group G3 |
+| §7 | IRI overloads for lifecycle UDFs (`drop_graph(iri)`, etc.) | was v0.4-FUTURE §5.1 forward note | ✅ shipped — Phase G group G1 (slices 21-18) |
+| §8 | Aggregates-over-UNION refinements not landed in v0.4 §11 | was v0.4-FUTURE §11 | 🚧 Phase G group G2 |
+| §9 | v1.0 contents (forward look) | was v0.4-FUTURE §15 | forward look |
 
-## 3. Reasoning profile selector
+## 3. Reasoning profile selector ✅ shipped (Phase G group G1)
+
+> **Status: ✅ shipped — Phase G group G1 (slices 21-18).** All
+> three §3.1 acceptance criteria met (strictly, not approximated).
+> See "§3 implementation route" below for the chosen route + the
+> precise `'rdfs'` semantics. Closes the last ONTOSYS P1 capability
+> gap.
 
 Reasoners selecting between RDFS and OWL 2 RL per workload class
 need a per-call profile selector on `pgrdf.materialize`. v0.4 keeps
@@ -91,15 +97,64 @@ pgrdf.materialize(graph_id BIGINT, profile TEXT DEFAULT 'owl-rl') → JSONB
   asserts the entailed-triple count is a **non-strict subset** of
   the OWL-RL count on the same input.
 
-### 3.1 Acceptance criteria (v0.5 gate)
+### 3.1 Acceptance criteria (v0.5 gate) — ✅ all met
 
-- `pgrdf.materialize(g, 'rdfs')` triple count ≤
+- ✅ `pgrdf.materialize(g, 'rdfs')` triple count ≤
   `pgrdf.materialize(g, 'owl-rl')` triple count on a fixed input.
-- The two profiles agree on the entailment of the RDFS axioms
-  (subClassOf transitivity, domain/range propagation, etc.).
-- An unknown profile string returns an error with prefix
+  *(Regression `117-materialize-rdfs.sql`: rdfs writes exactly 6,
+  owl-rl writes 15, on the shared 7-triple seed.)*
+- ✅ The two profiles agree on the entailment of the RDFS axioms
+  (subClassOf transitivity, domain/range propagation, etc.). *(All
+  6 hand-derived RDFS entailments present under BOTH profiles —
+  invariant B.)*
+- ✅ An unknown profile string returns an error with prefix
   `materialize: unknown profile`, not a silent fallback to
-  `'owl-rl'`.
+  `'owl-rl'`. *(Validated BEFORE any side effect — the
+  idempotency wipe — so an unknown profile can't perturb state.
+  The reserved future `'owl-rl-ext'` is treated as unknown.)*
+
+### 3.2 §3 implementation route (shipped — route 2, strict)
+
+**Route chosen: route 2 — a pgRDF-internal RDFS forward-chain pass**
+(`src/inference/reasonable.rs::rdfs_closure`). The patched
+`styk-tv/reasonable` fork (branch `rdf12-passthrough`) exposes only
+a single fused OWL-RL datalog fixpoint (`Reasoner::reason()` /
+`reason_full()`) with **no upstream RDFS-only rule selection**, so
+route 1 (direct upstream profile support, the spec's preferred
+option) is unavailable.
+
+Route 2 is implemented as a **strict, sound, complete RDFS rule
+engine** — *not* a lossy post-hoc filter of the OWL-RL output. It
+forward-chains the six application-visible RDFS entailment rules
+(W3C RDF 1.1 Semantics §9.2.1) to a fixed point:
+
+| Rule | Entailment |
+|---|---|
+| rdfs5  | `subPropertyOf` transitivity |
+| rdfs11 | `subClassOf` transitivity |
+| rdfs7  | `subPropertyOf` application: `p ⊑ q ∧ s p o ⇒ s q o` |
+| rdfs9  | `subClassOf` application: `c ⊑ d ∧ s a c ⇒ s a d` |
+| rdfs2  | `rdfs:domain`: `p rdfs:domain c ∧ s p o ⇒ s a c` |
+| rdfs3  | `rdfs:range`:  `p rdfs:range  c ∧ s p o ⇒ o a c` |
+
+The axiomatic reflexive-typing rules (rdfs1/4a/4b/6/8/10/12/13 —
+the universal `… rdf:type rdfs:Resource` / `rdfs:Class` /
+`rdf:Property` triples) are **deliberately not emitted**: they add
+only tautological triples that inflate the count, and `reasonable`
+(OWL-RL) does not emit the universal `rdfs:Resource` typing either —
+so emitting them on the `rdfs` side would *violate* §3.1 #1
+(non-strict subset). Restricting to the six productive rules keeps
+`rdfs` a **true subset** of `owl-rl` (RDFS rules ⊂ OWL 2 RL rules),
+which is exactly why §3.1 #1 and #2 hold *by construction*, not by
+coincidence.
+
+The JSONB stats object gains a `profile` field reflecting the
+requested profile (the default-arg call reports
+`"profile":"owl-rl"`). The reserved future `'owl-rl-ext'` is
+**not yet supported** — §3 names it as a future profile only; it
+returns the same `materialize: unknown profile` error until a later
+cycle wires it (documented choice; the spec's future-reservation
+does not require it to work yet).
 
 ## 4. TriG / N-Quads ingest
 
@@ -191,7 +246,14 @@ failure carries an entry in ERRATA.
 - `just test-shacl-manifest --sparql` exits with a known-failing
   set, documented in ERRATA.
 
-## 7. IRI overloads for lifecycle UDFs
+## 7. IRI overloads for lifecycle UDFs ✅ shipped (Phase G group G1)
+
+> **Status: ✅ shipped — Phase G group G1 (slices 21-18).** Both
+> §7.1 acceptance criteria met. The IRI overloads resolve
+> `iri → graph_id` via `_pgrdf_graphs.iri` and dispatch to the
+> EXISTING BIGINT UDFs (no partition-DDL logic duplicated — the
+> overload re-enters through the SQL surface, the same single-
+> sourcing pattern `add_graph_iri` uses).
 
 v0.4 §5 ships the four lifecycle UDFs with `BIGINT graph_id`
 signatures only. Callers route IRI input through
@@ -209,14 +271,25 @@ Semantics identical to the BIGINT overloads from v0.4 §5; the IRI
 overloads resolve via `_pgrdf_graphs.iri → graph_id` and dispatch
 to the same partition-DDL implementation.
 
-### 7.1 Acceptance criteria (v0.5 gate)
+### 7.1 Acceptance criteria (v0.5 gate) — ✅ all met
 
-- `pgrdf.drop_graph('http://example.org/g1')` removes the graph
+- ✅ `pgrdf.drop_graph('http://example.org/g1')` removes the graph
   bound to that IRI; equivalent to
   `pgrdf.drop_graph(pgrdf.graph_id('http://example.org/g1'))`.
-- IRI overloads error with prefix `drop_graph: unknown iri` if the
-  IRI is not bound — distinct from the BIGINT overloads' no-op
-  semantics on absent ids.
+  *(Regression `118-lifecycle-iri-overloads.sql` invariant G;
+  resolution agrees with `pgrdf.graph_id(iri)`.)*
+- ✅ IRI overloads error with prefix `drop_graph: unknown iri` if
+  the IRI is not bound — distinct from the BIGINT overloads' no-op
+  semantics on absent ids. *(All four overloads:
+  `drop_graph: unknown iri` / `clear_graph: unknown iri` /
+  `copy_graph: unknown iri` / `move_graph: unknown iri` —
+  invariant J; the BIGINT `drop_graph(99999)` → 0 no-op
+  re-asserted unchanged.)*
+
+The IRI overloads compose with the v0.4 §4 SPARQL UPDATE lifecycle
+algebra: dropping a graph via the IRI overload then issuing a
+`CREATE GRAPH <same-iri>` SPARQL UPDATE rebinds the IRI cleanly to
+a fresh partition (invariant K).
 
 ## 8. Aggregates over UNION — residual refinements
 

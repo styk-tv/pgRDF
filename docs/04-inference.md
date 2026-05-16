@@ -27,13 +27,46 @@ entailed-but-not-asserted triples back into the same partition with
 
 If a TBox needs EL (SNOMED-style) or QL, the slice would need a
 different reasoner (e.g. ELK or a custom DL engine). Tracked in
-[`docs/10-roadmap.md`](10-roadmap.md) v0.4+. A per-call **reasoning
-profile selector** (`'rdfs'` / `'owl-rl'` / future `'owl-rl-ext'`)
-is flagged for v0.5 in
-[`specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md) §3 —
-the v0.3 surface (`pgrdf.materialize(graph_id) → JSONB`) is
-preserved through v0.4; v0.5 adds an optional
-`profile TEXT DEFAULT 'owl-rl'` argument.
+[`docs/10-roadmap.md`](10-roadmap.md) v0.4+.
+
+## Reasoning-profile selector (✅ Phase G group G1)
+
+```sql
+pgrdf.materialize(graph_id BIGINT, profile TEXT DEFAULT 'owl-rl') → JSONB
+```
+
+The bare `pgrdf.materialize(g)` form is **unchanged** — it defaults
+`profile => 'owl-rl'` and is behaviourally identical to the v0.3 /
+v0.4 surface. v0.5 adds the profile selector
+([v0.5-FUTURE §3](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md)):
+
+| Profile | Behaviour |
+|---|---|
+| `'owl-rl'` (default) | Full OWL 2 RL forward-chain via `reasonable` (the existing path, unchanged). |
+| `'rdfs'` | The RDFS entailment-rule subset only — a strict, sound, complete RDFS forward-chain (rdfs2/3/5/7/9/11). A true subset of `'owl-rl'`. |
+| any other string | Errors `materialize: unknown profile …` — **no silent fallback**. The reserved future `'owl-rl-ext'` is treated as unknown until a later cycle wires it. |
+
+The JSONB stats object gains a `profile` field reflecting the
+requested profile. Why route 2 (a pgRDF-internal RDFS engine, not
+upstream profile support): the patched `reasonable` fork exposes
+only a fused OWL-RL fixpoint, so pgRDF computes the RDFS closure
+itself — restricted to the six productive RDFS rules so it stays a
+true subset of OWL-RL (the §3.1 subset + agreement criteria hold by
+construction). Full rationale in
+[v0.5-FUTURE §3.2](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md).
+
+```sql
+-- RDFS-only entailment (e.g. for an RDFS-scoped workload class):
+SELECT pgrdf.materialize(g, 'rdfs');
+-- → {"base_triples":7,"inferred_triples_written":6,"profile":"rdfs",…}
+
+-- Full OWL 2 RL (default — identical to pre-v0.5 pgrdf.materialize(g)):
+SELECT pgrdf.materialize(g, 'owl-rl');
+SELECT pgrdf.materialize(g);            -- same thing
+
+-- Unknown profile → error, not a fallback:
+SELECT pgrdf.materialize(g, 'bogus');   -- ERROR: materialize: unknown profile "bogus" …
+```
 
 ## Flow
 
@@ -63,6 +96,7 @@ preserved through v0.4; v0.5 adds an optional
   "base_triples":              123,
   "inferred_triples_written":  45,
   "previous_inferred_dropped": 42,
+  "profile":                   "owl-rl",
   "reasoner_errors":           [],
   "elapsed_ms":                17.4
 }
@@ -74,8 +108,11 @@ preserved through v0.4; v0.5 adds an optional
   not-asserted triples written this call.
 - `previous_inferred_dropped` — rows wiped before this run (= the
   previous run's `inferred_triples_written` if you call back-to-back).
+- `profile` — the requested reasoning profile (`'owl-rl'` for the
+  default-arg call, or `'rdfs'`). Phase G group G1.
 - `reasoner_errors` — any `reasonable::ReasoningError` instances
   emitted during the run. Currently surfaced as `Display` strings.
+  (The `'rdfs'` profile is pure pgRDF code — always `[]`.)
 - `elapsed_ms` — wall clock for the whole UDF.
 
 ## Idempotency
@@ -118,8 +155,10 @@ Fast under partition-pruning. The base graph is preserved. The next
 - Regressions:
   [`60-materialize-owl-rl.sql`](../tests/regression/sql/60-materialize-owl-rl.sql) (core OWL 2 RL entailments + idempotence + inverseOf),
   [`61-materialize-then-sparql.sql`](../tests/regression/sql/61-materialize-then-sparql.sql) (inferred triples flow through `pgrdf.sparql`),
-  [`62-materialize-empty.sql`](../tests/regression/sql/62-materialize-empty.sql) (zero-triple edge case).
+  [`62-materialize-empty.sql`](../tests/regression/sql/62-materialize-empty.sql) (zero-triple edge case),
+  [`117-materialize-rdfs.sql`](../tests/regression/sql/117-materialize-rdfs.sql) (the `'rdfs'` profile: subset of owl-rl + RDFS-axiom agreement + unknown-profile error + no-CTE compose — Phase G group G1).
 - ERRATA: [`E-002`](../specs/ERRATA.v0.2.md) — narrows the LLD §2
   reference from "Datalog reasoner" to "OWL 2 RL".
-- Forward-looking: [`specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md) §3 —
-  reasoning profile selector (v0.5).
+- Reasoning profile selector: shipped Phase G group G1 —
+  [`specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md) §3 / §3.2
+  (route + precise `'rdfs'` semantics).
