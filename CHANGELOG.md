@@ -6,6 +6,91 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-05-16
+
+**Marquee: full SPARQL 1.1 property paths.** Closes the LLD v0.4 §7
+property-path column across the four-group Phase E countdown
+(49 → 35). `^` inverse, `+` one-or-more, `*` zero-or-more, `?`
+zero-or-one, and `|` alternation all execute, composing with
+named-graph scoping, multi-pattern BGP joins, OPTIONAL/UNION/MINUS,
+and `pgrdf.construct` for free (the shared WHERE walker recognises
+`GraphPattern::Path` at the single chokepoint every query form
+routes through — path support is inherited, not special-cased).
+Recursive operators lower to a `WITH RECURSIVE` CTE as a derived
+FROM relation with Postgres's `CYCLE src, dst` clause for
+cycle-safe termination and a `pgrdf.path_max_depth` GUC (default
+64, range 1-1024) depth guard that truncates rather than errors
+(`pgrdf.stats().path_depth_truncations` accounts a genuine acyclic
+cap-hit). `*`/`?` carry the precise W3C SPARQL 1.1 §9.3
+zero-length-path semantics (a bound endpoint's self-pair holds
+unconditionally; an unbound endpoint's node-set is the active
+scope's subject∪object). The §7.1 `|` stretch shipped **in full**:
+the predicate match was generalised from a single `predicate_id =
+$P` to a predicate **set** (`predicate_id IN (…)` — a 1-element
+set is byte-identical, so `+`/`*`/`?` are unchanged), a cheap
+uniform one-line change at each builder rather than a translator
+balloon, so the recursion compositions `(a|b)+` / `(a|b)*` /
+`(a|b)?` and the inverse `^(a|b)` / `(^a|^b)` all ship too. The
+materialised-closure no-CTE fallback (§7.2 v0.4 heuristic / §7.3
+acceptance) elides the recursive CTE for a `+`/`*` over a single
+well-known transitive predicate (`rdfs:subClassOf` /
+`rdfs:subPropertyOf` / `owl:sameAs`) once `pgrdf.materialize` has
+entailed the closure — the executed plan carries no `CTE Scan` and
+the result set is byte-identical. The §7.1-permitted gated
+remainder (an alternation arm that is itself a sequence/recursive
+path; a recursive op whose inner box is a sequence) stays
+preview-panicking by spec allowance; negated property sets remain
+out of v0.4 scope. The deferred-all-phase Phase E W3C-shape
+consolidation landed (6 fixtures `36-path-inverse` …
+`41-path-materialised`, 35 → 41).
+
+Phase E slice attribution (countdown 49 → 35):
+
+  * **E1 (49 → 46)** — property-path AST detection + translator
+    dispatch; `^` inverse fully supported (`?s ^p ?o` ≡ `?o p ?s`;
+    nested `^(^p)` folds by parity; bare-predicate degenerate
+    `Path` lowers to a triple). New GUC `pgrdf.path_max_depth`;
+    new `pgrdf.stats()` field `path_depth_truncations` (scaffold —
+    enforcement lands E2). Recursive/alternation operators
+    preview-panic with stable rollout-schedule prefixes.
+  * **E2 (45 → 42)** — `+` one-or-more: the LLD v0.4 §7.2
+    `WITH RECURSIVE walk(src, dst, depth)` CTE as a derived FROM
+    relation, cycle-safe via Postgres's `CYCLE` clause (a bare
+    `UNION` can't dedup a cycle once the tuple carries the
+    depth-guard column), depth guard enforced (truncate, never
+    error). All property-path SQL generation carved into
+    `src/query/path.rs`.
+  * **E3 (41 → 38)** — `*` zero-or-more (the cycle-safe `+` walk
+    `UNION` the W3C §9.3 zero-length node-set) and `?` zero-or-one
+    (non-recursive: the single direct edge `UNION` the same
+    node-set). Full W3C SPARQL 1.1 §9.3 `ZeroLengthPath` rules;
+    inverse composition (`^(p*)` / `(^p)*` / `^(p?)` / `(^p)?`).
+  * **E4 (37 → 35)** — `|` alternation (top-level `a|b`, n-ary
+    `a|b|c`, `(a|b)+` / `(a|b)*` / `(a|b)?`, `^(a|b)` / `(^a|^b)`)
+    via the predicate-set generalisation; materialised-closure
+    no-CTE fallback + the `pgrdf.sparql_sql(q) → TEXT` debug hook
+    (the §7.3 EXPLAIN-scrape acceptance); Phase E W3C-shape
+    consolidation; the v0.4.5 release cut.
+
+Test bar:
+
+  pgrx integration  230  (was 222 at v0.4.4 / Phase E3)
+  pg_regress         73  (path coverage 108–111)
+  w3c-sparql         41  (was 35 — +6 property-path fixtures)
+  LUBM-shape          3  (unchanged)
+  Total: 347 green, plus the pg_dump round-trip gate.
+
+Version touches:
+  * Cargo.toml      0.4.4 → 0.4.5 (Cargo.lock pgrdf entry too)
+  * pgrdf.control   default_version = '0.4.5'
+  * compose/compose.yml  adds pgrdf--0.4.5.sql bind mount
+  * tests/regression/expected/00-smoke.out  0.4.4 → 0.4.5
+
+E-011 carried: `publish-crate.yml` stays disabled until upstream
+`gtfierro/reasonable#50` merges. The tag push fires `release.yml`
+only (8 platform tarballs PG14-17 × amd64/arm64 + SHA256SUMS); no
+crates.io publish this cut.
+
 ### Added
 
 - SPARQL property-path foundation — Phase E group E1 (slices 49-46). Property-path AST detection + translator dispatch; `^` inverse operator fully supported (`?s ^p ?o` ≡ `?o p ?s`, composes with GRAPH scoping / BGP joins / pgrdf.construct). New GUC `pgrdf.path_max_depth` (default 64, range 1-1024). New `pgrdf.stats()` field `path_depth_truncations` (depth-guard enforcement lands with the recursive operators in group E2). Recursive operators `*`/`+`/`?` and alternation `|` preview-panic with stable rollout-schedule prefixes.

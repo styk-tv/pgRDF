@@ -46,6 +46,7 @@ services:
       - ./extensions/share/extension/pgrdf--0.4.2.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.2.sql:ro,z
       - ./extensions/share/extension/pgrdf--0.4.3.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.3.sql:ro,z
       - ./extensions/share/extension/pgrdf--0.4.4.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.4.sql:ro,z
+      - ./extensions/share/extension/pgrdf--0.4.5.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.5.sql:ro,z
       # Read-only ontology + regression fixtures, reachable from the
       # postgres process at /fixtures (see pgrdf.load_turtle path arg).
       - ../fixtures:/fixtures:ro,z

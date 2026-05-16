@@ -4,11 +4,120 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is `v0.4.4`. Cargo.toml reads `version = "0.4.4"`
-(bumped from `0.4.3` during the v0.4.4 release pre-flight, Phase D
-countdown slice 50). See `CHANGELOG.md` for the running set of
+The current cut is `v0.4.5`. Cargo.toml reads `version = "0.4.5"`
+(bumped from `0.4.4` during the v0.4.5 release pre-flight, Phase E
+countdown slice 35). See `CHANGELOG.md` for the running set of
 `[Unreleased]` entries that move into the next `[N.M.P]` block at
 tag time.
+
+## v0.4.5 — 2026-05-16
+
+Phase E closes with a four-group countdown (49 → 35) shipping the
+full LLD v0.4 §7 property-path surface, plus the release cut
+(slice 35). `^` inverse, `+` one-or-more, `*` zero-or-more, `?`
+zero-or-one, and `|` alternation all execute end-to-end on the SQL
+engine and compose with named-graph scoping, BGP joins,
+OPTIONAL/UNION/MINUS, and `pgrdf.construct` for free (the shared
+WHERE walker recognises `GraphPattern::Path` at the single
+chokepoint every query form routes through).
+
+### Engine surface delta vs v0.4.4
+
+- **Storage / OWL 2 RL inference / SHACL / SPARQL UPDATE /
+  CONSTRUCT** — unchanged; no breaking changes to existing
+  surfaces. The only new UDF is `pgrdf.sparql_sql(q) → TEXT`, a
+  translator-introspection debug hook (returns the lowered SQL
+  with dict ids inlined) used by the §7.3 EXPLAIN-scrape
+  acceptance — not part of the user-facing query surface.
+- **SPARQL property-path track (LLD v0.4 §7)** — **shipped
+  end-to-end across the Phase E countdown 49 → 35**. Per group:
+    - **E1 (49 → 46)** — property-path AST detection + the shared
+      `query::path` dispatcher; `^` inverse (`?s ^p ?o` ≡
+      `?o p ?s`; nested `^(^p)` folds by parity; bare-predicate
+      degenerate `Path` lowers to a triple). New GUC
+      `pgrdf.path_max_depth` (Userset, default 64, range 1–1024);
+      `pgrdf.stats().path_depth_truncations` scaffold (a
+      cross-backend shmem counter, 0 in E1; depth enforcement +
+      the increment land with the recursive CTE in E2).
+    - **E2 (45 → 42)** — `+` one-or-more: the LLD §7.2
+      `WITH RECURSIVE walk(src, dst, depth)` CTE as a derived FROM
+      relation, cycle-safe via Postgres's `CYCLE src, dst` clause
+      (a bare `UNION` can't dedup a cycle once the tuple carries
+      the depth-guard column), depth guard enforced (truncate,
+      never error; a per-`+` post-execution probe accounts a
+      genuine acyclic cap-hit). All property-path SQL generation
+      carved into `src/query/path.rs`.
+    - **E3 (41 → 38)** — `*` zero-or-more (the cycle-safe `+` walk
+      `UNION` the W3C §9.3 zero-length node-set) and `?`
+      zero-or-one (non-recursive: the direct edge `UNION` the same
+      node-set). Full W3C SPARQL 1.1 §9.3 `ZeroLengthPath` rules
+      (bound endpoint's self-pair unconditional; unbound
+      endpoint's node-set = active scope's subject∪object);
+      inverse composition `^(p*)` / `(^p)*` / `^(p?)` / `(^p)?`.
+    - **E4 (37 → 35)** — `|` alternation: the §7.1 gated stretch
+      shipped in full via the predicate-set generalisation
+      (`predicate_id = $P` → `predicate_id IN (…)`, a uniform
+      one-line change at each builder; a 1-element set is
+      byte-identical, so `+`/`*`/`?` are unchanged). Top-level
+      `a|b`, n-ary `a|b|c`, the recursion compositions
+      `(a|b)+`/`(a|b)*`/`(a|b)?`, and the inverse
+      `^(a|b)`/`(^a|^b)` all execute. The materialised-closure
+      no-CTE fallback (§7.2 v0.4 heuristic / §7.3 acceptance)
+      elides the recursive CTE for a `+`/`*` over a single
+      well-known transitive predicate (`rdfs:subClassOf` /
+      `rdfs:subPropertyOf` / `owl:sameAs`) once
+      `pgrdf.materialize` has entailed the closure — no `CTE
+      Scan` in the executed plan, result byte-identical. The
+      §7.1-permitted gated remainder (an alternation arm that is
+      itself a sequence/recursive path; a recursive op whose
+      inner box is a sequence) stays preview-panicking by spec
+      allowance; negated property sets remain out of v0.4 scope.
+      Phase E W3C-shape consolidation: 6 new fixtures
+      `36-path-inverse` … `41-path-materialised` (35 → 41).
+
+### Version-bearing files touched (mirrors the v0.4.4 cut)
+
+- `Cargo.toml` `version` `0.4.4` → `0.4.5` (and the `Cargo.lock`
+  `pgrdf` entry via `cargo update -p pgrdf`).
+- `pgrdf.control` `default_version = '0.4.5'`.
+- `compose/compose.yml` — adds the `pgrdf--0.4.5.sql` bind mount
+  (mirrors how the v0.4.4 cut added `pgrdf--0.4.4.sql`).
+- `tests/regression/expected/00-smoke.out` — version literals
+  `0.4.4` → `0.4.5`.
+- `CHANGELOG.md` — the accreted `[Unreleased]` Phase E bullets
+  move into `## [0.4.5] — 2026-05-16` with a marquee; the empty
+  `[Unreleased]` header stays (mirrors the v0.4.4 cut shape).
+- `RELEASE_NOTES.md` — full rewrite for v0.4.5.
+
+### Test bar
+
+```
+pgrx integration  230  (was 222 at v0.4.4 / Phase E3)
+pg_regress         73  (property-path coverage 108–111)
+w3c-sparql         41  (was 35 — +6 property-path fixtures)
+LUBM-shape          3  (unchanged)
+Total: 347 green, plus the pg_dump round-trip gate.
+```
+
+### Ritual deviations vs v0.4.4 cut
+
+- README.md NOT touched (a parallel docs session owns an
+  uncommitted logo-header edit; out of release-cut scope —
+  mirrors the v0.4.4 cut's same deviation).
+- No `src/` fmt sweep needed (`cargo fmt --all -- --check` clean
+  this cut).
+- The roadmap / spec / guide / docs §7 coherence edits land in
+  the **feature** commit (Phase E close-out), not the release
+  commit — the v0.4.4 cut did not touch those files, so neither
+  does this release commit (the `git show df1e2f6 --stat` file
+  set is authoritative).
+
+### E-011 carried
+
+`publish-crate.yml` stays disabled until upstream
+`gtfierro/reasonable#50` merges. The v0.4.5 tag fires
+`release.yml` only (8 platform tarballs PG14-17 × amd64/arm64 +
+SHA256SUMS); no crates.io publish this cut.
 
 ## v0.4.4 — 2026-05-15
 

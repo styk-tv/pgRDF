@@ -1,265 +1,159 @@
-# pgRDF v0.4.4
+# pgRDF v0.4.5
 
-**SPARQL 1.1 CONSTRUCT surface complete.** The LLD v0.4 §6
-CONSTRUCT column closes: the full query form lands end-to-end on
-the SQL engine. Phase D closes in nine countdown slices (59 → 51)
-on top of v0.4.3's SPARQL UPDATE surface, plus the v0.4.4 release
-cut (slice 50).
+**Full SPARQL 1.1 property paths.** The LLD v0.4 §7 property-path
+column closes: `^` inverse, `+` one-or-more, `*` zero-or-more, `?`
+zero-or-one, and `|` alternation all execute end-to-end on the SQL
+engine. Phase E lands across a four-group countdown (49 → 35) on
+top of v0.4.4's CONSTRUCT surface, plus the v0.4.5 release cut.
 
-## Marquee — SPARQL CONSTRUCT (LLD v0.4 §6)
+## Marquee — SPARQL property paths (LLD v0.4 §7)
 
-`pgrdf.construct(q TEXT) → SETOF JSONB` is a sibling UDF to
-`pgrdf.sparql` — callers signal CONSTRUCT intent at the SQL
-boundary rather than overloading the SELECT/ASK/UPDATE entry
-point. It evaluates the WHERE pattern through the existing
-SELECT-side translator (`parse_select` → `build_bgp_sql` →
-`execute`), instantiates the template once per WHERE solution, and
-emits one JSONB row per template triple. Each row carries the
-structured term shape `{"type": "iri"|"literal"|"bnode", "value":
-…, "datatype"?: …, "language"?: …}` documented in LLD v0.4 §6.1.
+A property path lets one triple pattern match a *route* through
+the graph instead of a single edge. pgRDF recognises
+`GraphPattern::Path` at the single chokepoint every query form
+routes through — SELECT, ASK, `pgrdf.construct`, and the UPDATE
+WHERE bodies all inherit path support at once (it is not
+special-cased per consumer). Paths compose with named-graph
+scoping (`GRAPH <iri>` / `GRAPH ?g`), multi-pattern BGP joins, and
+OPTIONAL/UNION/MINUS for free.
 
-### Template surface
+### Operator surface
 
-- **Constant templates** (slice 59) — ground-triple templates per
-  W3C SPARQL 1.1 §16.2 emit one row per WHERE solution per
-  template triple. DISTINCT / ORDER BY / GROUP BY / aggregate
-  wrappings on CONSTRUCT are explicitly rejected at execute time
-  (out of scope per LLD §6.2).
-- **Variable substitution** (slice 58) — variables in subject,
-  predicate, and object positions resolve per solution (RDF
-  admits variable predicates in templates). Unbound template
-  variables panic with the stable `unbound template variable ?X`
-  message. Typed and language-tagged literals carry the full
-  structured shape; language-tagged literals carry both the
-  `language` field AND the implicit `rdf:langString` datatype IRI
-  per RDF 1.1 §3.3.
-- **Blank-node templates** (slice 57) — `_:label` in template
-  positions mints a fresh per-solution label per W3C SPARQL 1.1
-  §16.2; the same template label across positions in one solution
-  joins to the same fresh label. Per-call fresh labels carry the
-  solution index as a prefix (`b{solution}_{n}`) so the `value`
-  column alone distinguishes per-solution bnodes. Predicate-
-  position blank nodes are illegal RDF and reject at parse time.
-- **Multi-triple templates** (slice 56) — an N-triple template
-  emits N rows per solution; blank-node labels are SHARED across
-  all N triples within the same solution (and fresh per solution).
-  Empty templates `{ }` panic with `empty template`.
+| Operator | SPARQL | Semantics |
+|---|---|---|
+| `^` inverse | `?s ^p ?o` | `?o p ?s` — subject/object swap, no recursion; `^(^p)` folds by parity |
+| `+` one-or-more | `?s p+ ?o` | transitive closure (non-reflexive) — recursive CTE, cycle-safe, depth-guarded |
+| `*` zero-or-more | `?s p* ?o` | reflexive transitive closure — the `+` walk `UNION` the W3C §9.3 zero-length node-set |
+| `?` zero-or-one | `?s p? ?o` | equal-or-linked — non-recursive: the direct edge `UNION` the same zero-length node-set |
+| `\|` alternation | `?s (a\|b) ?o` | per-predicate union (non-reflexive single step); n-ary `a\|b\|c`; `(a\|b)+`/`(a\|b)*`/`(a\|b)?`; `^(a\|b)`/`(^a\|^b)` |
 
-### CONSTRUCT WHERE shorthand (slice 54)
+### Recursive-path engine
 
-`CONSTRUCT WHERE { pattern }` is equivalent to `CONSTRUCT {
-pattern } WHERE { pattern }` per W3C SPARQL 1.1 §16.2.4. The
-pattern must be a pure BGP (no OPTIONAL / UNION / MINUS / FILTER /
-GRAPH / BIND / VALUES) and must contain no blank nodes; both
-restrictions panic with explicit W3C-citing messages. Spargebra
-populates `template` from the BGP at parse so the shorthand reuses
-the multi-triple emission path.
+Recursive operators lower to a `WITH RECURSIVE walk(src, dst,
+depth)` CTE as a derived FROM relation (it exposes the same
+`subject_id` / `object_id` columns a quad alias does, so it joins
+through the unchanged BGP machinery). Cycle-safety uses Postgres's
+`CYCLE src, dst SET is_cycle USING path` clause (PG14+) — a bare
+`UNION` cannot dedup a cycle once the working tuple carries the
+`depth` column for the guard. The `pgrdf.path_max_depth` GUC
+(Userset, default 64, range 1–1024) caps the walk: a traversal
+past the cap is **truncated, not errored**, and
+`pgrdf.stats()->>'path_depth_truncations'` accounts a genuine
+acyclic cap-hit (a fully-resolved cyclic query correctly reports
+no truncation).
 
-### GRAPH-scoped WHERE (slice 55)
+### W3C §9.3 zero-length-path semantics
 
-`WHERE { GRAPH <iri> { … } }` (literal) and `WHERE { GRAPH ?g { …
-} }` (variable) compose with every template surface. Variable
-GRAPH binds `?g` to the source graph IRI per solution; default-
-graph quads are excluded per W3C SPARQL 1.1 §13.3 — the JOIN to
-`_pgrdf_graphs` now carries `g{S}.graph_id <> 0`, which also
-corrected a latent slice-79 / slice-87 SELECT-side bleed (variable
-GRAPH previously bound `?g` to `urn:pgrdf:graph:0` when default-
-graph quads coexisted with named-graph quads). Empty named graphs
-and missing graphs yield zero solutions.
+`*` and `?` carry the precise W3C SPARQL 1.1 §9.3 `ZeroLengthPath`
+rules (not the LLD §7.2 `SELECT ?s ?s` simplification). A **bound**
+endpoint's self-pair `(x,x)` holds unconditionally — even when the
+queried IRI is in no graph (pgRDF registers it as a term
+reference; **no quad is added**). An **unbound** endpoint's
+node-set is the DISTINCT subject∪object of the active scope,
+scoped to the active `GRAPH`.
 
-### Round-trip ingest (slice 53)
+### `|` alternation (the §7.1 stretch — shipped in full)
 
-`pgrdf.put_construct_row(row JSONB, graph_id BIGINT DEFAULT 0) →
-BIGINT` and `pgrdf.put_construct_rows(rows JSONB[], graph_id
-BIGINT DEFAULT 0) → BIGINT` re-ingest any construct rowset back
-into the hexastore, closing LLD v0.4 §6.3's round-trip acceptance
-criterion. Typed literals, language tags, plain strings (with the
-explicit `xsd:string` datatype the construct emitter writes), and
-within-solution blank-node joining are all preserved. The plural
-form is the recommended surface: a per-call `HashMap<String, i64>`
-of blank-node labels keeps repeated bnode references within one
-batch collapsed onto a single stored blank node. Re-ingestion is
-idempotent (`WHERE NOT EXISTS`, mirroring `executor::insert_quad`);
-a NULL array (from `array_agg` over an empty construct rowset) is
-a no-op, so the `(SELECT array_agg(j) FROM pgrdf.construct(…))`
-idiom works for empty-result queries too.
+LLD §7.1 marked alternation a gated stretch goal. The gate is
+lifted entirely: every recursive/optional builder already
+centralised the single `predicate_id = $P` clause, so generalising
+it to a predicate **set** (`predicate_id IN (…)` — the LLD §7.2
+"union of per-predicate scans" as one scan; a 1-element set is
+byte-identical, semantically and to the planner, to the old
+`= $P`) was a uniform one-line change at each site, not a
+translator balloon. Consequently the recursion compositions
+`(a|b)+` / `(a|b)*` / `(a|b)?` ship too (the alternation becomes
+the recursive step's predicate set; the depth guard, the CYCLE
+clause, the truncation probe, and the zero-length node-set are all
+predicate-match-agnostic and reused verbatim), as does the inverse
+`^(a|b)` / `(^a|^b)`.
 
-### Preview surface — `pgrdf.sparql_parse` (slice 52)
+The §7.1-permitted **gated remainder** (still preview-panics, by
+spec allowance — not a regression): an alternation arm that is
+itself a sequence/recursive path (`(a/b|c)`, `(a+|b)`), or a
+recursive operator whose inner box is a sequence (`(p1/p2)+`).
+Folding these would compose a recursive CTE inside an alternation
+arm — the genuine translator balloon §7.1 explicitly permits
+gating. Negated property sets (`!(...)`) remain out of v0.4 scope.
 
-`pgrdf.sparql_parse(q)` mirrors the executor's CONSTRUCT
-classification:
+### Materialised-closure no-CTE fallback (§7.2 / §7.3)
 
-```jsonc
-{
-  "form": "CONSTRUCT",
-  "shorthand": false,
-  "template": {
-    "triple_count":        2,
-    "has_variables":       true,
-    "has_blank_nodes":     true,
-    "has_constants_only":  false,
-    "variables":           ["s", "o"]
-  },
-  "where_shape": {
-    "kind":              "Bgp",
-    "triple_count":      1,
-    "named_graphs_used": [],
-    "variables":         ["s", "o"]
-  },
-  "unsupported_algebra": []
-}
-```
+When `pgrdf.materialize(graph_id)` has already entailed the
+transitive closure of a path's predicate, a recursive CTE is
+wasted work — every transitive pair is already a direct
+`is_inferred = TRUE` edge. For a `+`/`*` over a **single**
+well-known transitive predicate (`rdfs:subClassOf`,
+`rdfs:subPropertyOf`, `owl:sameAs`), the translator probes for a
+materialised row and, if present, emits a **direct match instead
+of the recursive CTE** — the executed plan carries no `CTE Scan`
+(§7.3 acceptance, EXPLAIN-scraped via the new `pgrdf.sparql_sql(q)
+→ TEXT` debug hook). The result set is byte-identical to the
+non-materialised recursive walk; the optimisation is
+semantics-preserving and per-query (not cached). `?`/`^`/`|` are
+unaffected (no recursion to elide); a multi-predicate `(a|b)+`
+skips the fallback (single-well-known-predicate heuristic).
 
-Callers preview translatability without executing.
-`unsupported_algebra` flags `Distinct` / `OrderBy` / `Group` /
-`Aggregate` wrappings — `pgrdf.construct` panics on these at
-execute time per LLD §6.2.
+## Phase E slice attribution (countdown 49 → 35)
 
-### Conformance (slice 51)
-
-Six new W3C-shape CONSTRUCT fixtures under `tests/w3c-sparql/30-35`
-lock the surface through the conformance harness: basic bnode +
-var + multi-triple §16.2.1, WHERE shorthand §16.2.4, constant-
-template multiplicity §16.2, variable-GRAPH §13.3, typed/lang-
-literal term shaping, and round-trip via `pgrdf.put_construct_rows`.
-The harness gained a surgical per-fixture `kind: construct`
-selector routing through `pgrdf.construct` instead of
-`pgrdf.sparql`. A docs / spec / guide coherence sweep landed
-alongside.
-
-### CI-perf hardening (alongside Phase D)
-
-The partition-DDL window in the SPARQL UPDATE / lifecycle paths now
-takes a statement-outermost transaction advisory lock, so the
-default parallel pgrx-test scheduler no longer flakes on
-concurrent partition DDL. Parallel test threads are restored — the
-test bar below is verified at default parallelism (no
-`--test-threads=1`).
-
-### Error-prefix contract (stable for downstream tooling)
-
-CONSTRUCT-specific surfaces surface validation failures with
-form-prefixed panic messages:
-
-```
-unbound template variable ?<name>
-empty template
-pgrdf.construct: parse error: <…>           (covers malformed CONSTRUCT, predicate-position bnodes)
-pgrdf.put_construct_row: <…>                (negative graph_id, literal in subject/predicate position)
-```
-
-DISTINCT / ORDER BY / GROUP BY / aggregate on CONSTRUCT, and the
-shorthand-form BGP / blank-node restrictions, panic with explicit
-W3C-citing messages.
+- **E1 (49 → 46)** — property-path AST detection + translator
+  dispatch; `^` inverse fully supported. New GUC
+  `pgrdf.path_max_depth`; `pgrdf.stats().path_depth_truncations`
+  scaffold (enforcement lands E2).
+- **E2 (45 → 42)** — `+` one-or-more recursive CTE, cycle-safe via
+  the `CYCLE` clause, depth guard enforced. All property-path SQL
+  generation carved into `src/query/path.rs`.
+- **E3 (41 → 38)** — `*` / `?` with full W3C §9.3 zero-length
+  semantics; inverse composition (`^(p*)` etc.).
+- **E4 (37 → 35)** — `|` alternation (incl. the recursion
+  compositions and inverse) via the predicate-set generalisation;
+  materialised-closure no-CTE fallback + the `pgrdf.sparql_sql`
+  debug hook; Phase E W3C-shape consolidation; the v0.4.5 cut.
 
 ## Test bar
 
-301 automated tests across four layers plus the pg_dump
-round-trip gate:
-
-| Layer | Count | Δ from v0.4.3 |
-|---|---|---|
-| pgrx integration | 194 | +28 |
-| pg_regress golden | 69 | +8 |
-| W3C-shape SPARQL conformance | 35 | +6 |
-| LUBM-shape correctness | 3 | 0 |
-| **Total** | **301** | **+42** |
-
-Plus `tests/regression/scripts/pg-dump-roundtrip.sh` end-to-end
-round-trip gate on `_pgrdf_graphs`.
-
-## Install — prebuilt tarballs (same layout as v0.4.3)
-
-```bash
-curl -L -O https://github.com/styk-tv/pgRDF/releases/download/v0.4.4/pgrdf-0.4.4-pg17-glibc-amd64.tar.gz
-curl -L -O https://github.com/styk-tv/pgRDF/releases/download/v0.4.4/SHA256SUMS
-sha256sum -c SHA256SUMS --ignore-missing
-tar -xzf pgrdf-0.4.4-pg17-glibc-amd64.tar.gz
-cd pgrdf-0.4.4-pg17-glibc-amd64
-sudo cp lib/pgrdf.so $(pg_config --pkglibdir)/
-sudo cp share/extension/* $(pg_config --sharedir)/extension/
+```
+pgrx integration  230  (was 222 at v0.4.4 / Phase E3)
+pg_regress         73  (property-path coverage 108–111)
+w3c-sparql         41  (was 35 — +6 property-path fixtures
+                        36-path-inverse … 41-path-materialised)
+LUBM-shape          3  (unchanged)
+Total: 347 green, plus the pg_dump round-trip gate.
 ```
 
-Then in psql:
+All hand-computed; no `ACCEPT=1` autobaselining of new query
+coverage.
 
-```sql
-CREATE EXTENSION pgrdf;
-SELECT pgrdf.version();  -- → 0.4.4
-```
+## ERRATA
 
-`shared_preload_libraries = 'pgrdf'` required (see
-[INSTALL spec](specs/SPEC.pgRDF.INSTALL.v0.2.md) §6).
-
-### Docker compose
-
-See [`guide/01-install.md`](guide/01-install.md) for the
-compose-based local development path.
-
-## Supported Postgres
-
-PG 14, 15, 16, 17 across {amd64, arm64} = 8 prebuilt tarballs.
-PG 18 deferred per
-[ERRATA E-006](specs/ERRATA.v0.2.md).
-
-## crates.io
-
-v0.4.4 is **not** published to crates.io. The `[patch.crates-io]`
-block for `reasonable` (E-011) blocks `cargo publish`; the
-`publish-crate.yml` workflow remains disabled until upstream
-[gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
-merges and the patch retires. The crate is registered on
-crates.io with v0.3.0 (pre-work seed); v0.4.1 + v0.4.2 + v0.4.3 +
-v0.4.4 binaries are available via the GitHub Release tarballs —
-use those, not `cargo install`.
-
-## Known issues — carried from v0.4.3
-
-- **E-011 — `[patch.crates-io]` fork-dep still in place.**
-  Carried. v0.4.4 continues to patch `reasonable` against
-  [`styk-tv/reasonable@rdf12-passthrough`](https://github.com/styk-tv/reasonable/tree/rdf12-passthrough)
-  for `TermRef::Triple(_)` coexistence with `shacl 0.3.x` under
-  `oxrdf`'s `rdf-12` feature. The patch retires once
-  [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/pull/50)
-  merges.
-- **E-006** — pgrx 0.18 / Postgres 18 deferred (carried).
-- **E-007** — `extension_control_path` GUC blocked by E-006
-  (carried).
-- **E-009** — original SHACL upstream-block resolved at the
-  validation-engine half; remaining piece is the
-  `[patch.crates-io]` route until #50 merges (carried).
+- **E-006** — pgrx 0.17+/0.18 do not build on current rustc;
+  pinned to PG 17 + pgrx 0.16 (carried).
 - **E-010** — cargo audit informational advisories (carried).
-
-### v0.4.2-introduced — resolved in v0.4.4
-
-- **pgrx-tests parallelism flake on partition DDL.** The two Phase
-  A tests (`pg_add_graph_iri_idempotent`,
-  `pg_add_graph_id_iri_synthetic_upgrade`) that occasionally raced
-  under pgrx-tests 0.16's parallel scheduler are now stable: the
-  partition-DDL window takes a statement-outermost transaction
-  advisory lock (CI-perf hardening, this release), so concurrent
-  partition DDL serialises and the default parallel test threads
-  are restored.
+- **E-011** — `reasonable` rdf-12 passthrough patch carried; the
+  `publish-crate.yml` workflow stays **disabled** until upstream
+  [`gtfierro/reasonable#50`](https://github.com/gtfierro/reasonable/pull/50)
+  merges. The v0.4.5 tag fires `release.yml` only (8 platform
+  tarballs PG14-17 × amd64/arm64 + SHA256SUMS); **no crates.io
+  publish this cut**.
 
 See [`specs/ERRATA.v0.2.md`](specs/ERRATA.v0.2.md) and
-[`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md) for the full
-text.
+[`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md) for the full text.
 
 ## What's deferred from v0.4 LLD
 
 Still 🚧 in
 [`SPEC.pgRDF.LLD.v0.4.md`](specs/SPEC.pgRDF.LLD.v0.4.md):
 
-- Property paths (§7) — v0.4.5
 - SPARQL surface backlog — multi-triple OPTIONAL, VALUES,
-  BIND-downstream, aggregates over UNION, DESCRIBE (§11) —
-  v0.4.6
+  BIND-downstream, aggregates over UNION, DESCRIBE (§11)
 - `heap_multi_insert` / `COPY BINARY` ingest (§12 phase B)
 - W3C SPARQL 1.1 manifest runner (§13)
 
-These land in subsequent v0.4.x point releases or in a refreshed
-v0.5.0 cut.
+The §7.1-permitted property-path gated remainder (sequence-arm
+alternation / sequence-inner recursive) and negated property sets
+(`!(...)`) are intentionally out of v0.4 scope. These land in
+subsequent v0.4.x point releases or in a refreshed v0.5.0 cut.
 
-## Upgrading from v0.4.3
+## Upgrading from v0.4.4
 
 pgRDF v0.x reserves the right to break schema between minor
 releases. `ALTER EXTENSION pgrdf UPDATE` is not supported in
@@ -268,17 +162,16 @@ v0.x. Drop and recreate:
 ```sql
 -- Dump first if you care about your data
 DROP EXTENSION pgrdf CASCADE;
--- Install v0.4.4 artifacts
+-- Install v0.4.5 artifacts
 CREATE EXTENSION pgrdf;
 -- Re-ingest
 ```
 
 The schema is forward-compatible at the table-shape level
-(v0.4.3's `_pgrdf_graphs`, `_pgrdf_quads`, `_pgrdf_dictionary`
-are unchanged in v0.4.4); only new UDFs land
-(`pgrdf.construct`, `pgrdf.put_construct_row`,
-`pgrdf.put_construct_rows`). A `pg_dump` from v0.4.3 will restore
-against a v0.4.4 install via the documented `DROP/CREATE
+(v0.4.4's `_pgrdf_graphs`, `_pgrdf_quads`, `_pgrdf_dictionary`
+are unchanged in v0.4.5); only one new debug UDF lands
+(`pgrdf.sparql_sql`). A `pg_dump` from v0.4.4 will restore
+against a v0.4.5 install via the documented `DROP/CREATE
 EXTENSION; pg_restore` path. See
 [`docs/06-installation.md` § Upgrade between v0.x versions](docs/06-installation.md#upgrade-between-v0x-versions).
 
