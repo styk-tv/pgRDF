@@ -1,19 +1,21 @@
+![pgRDF](docs/pgRDF-logo.png)
+
 # pgRDF
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20v0.4%20engine%20surface%20all%20real-yellow)](docs/10-roadmap.md)
-[![Tests](https://img.shields.io/badge/tests-166%20pgrx%20%2B%2061%20regression%20%2B%2029%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
-[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20ASK%20%2F%20UPDATE%20%2F%20GRAPH%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
+[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20v0.4.5%20%E2%80%94%20SPARQL%201.1%20query%20%2B%20update%20%2B%20paths-yellow)](docs/10-roadmap.md)
+[![Tests](https://img.shields.io/badge/tests-230%20pgrx%20%2B%2073%20regression%20%2B%2041%20W3C%20%2B%203%20LUBM-brightgreen)](#tests)
+[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20ASK%20%2F%20UPDATE%20%2F%20CONSTRUCT%20%2F%20PATHS%20%2F%20GRAPH%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![BulkIngest](https://img.shields.io/badge/bulk%20ingest-LLD%20%C2%A74.3%20phase%20A-yellow)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20via%20reasonable-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Validation](https://img.shields.io/badge/SHACL%20validate-SHACL%20Core%20via%20shacl%200.3.1-success)](docs/05-validation.md)
 [![CI](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml/badge.svg)](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml)
-[![W3C](https://img.shields.io/badge/W3C%20SPARQL%201.1-29%20starter%20tests-blue)](tests/w3c-sparql/)
+[![W3C](https://img.shields.io/badge/W3C%20SPARQL%201.1-41%20shape%20tests-blue)](tests/w3c-sparql/)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
@@ -23,7 +25,7 @@
 
 | | |
 |---|---|
-| **Status** | Alpha — **v0.4 engine surface — all four engines real (storage / SPARQL / OWL 2 RL inference / SHACL Core validation)**. Storage CRUD + Turtle ingest. SPARQL SELECT/ASK with N-pattern BGPs + FILTER + DISTINCT/LIMIT/OFFSET/ORDER BY + OPTIONAL + UNION + MINUS + aggregates (COUNT, SUM, AVG, type-aware MIN/MAX, GROUP_CONCAT, SAMPLE) + HAVING (alias + inline aggregate) + BIND + **named-graph SPARQL scoping (`GRAPH <iri> { … }` literal + `GRAPH ?g { … }` variable + composition with OPTIONAL/UNION/MINUS, LLD v0.4 §3 shipped via Phase A countdown slices 120 → 110)**. **Phase 3 storage perf** (shmem dict cache §4.1, prepared-plan cache §4.2, prepared bulk-INSERT §4.3 phase A). **Phase 4 inference** — `pgrdf.materialize` via `reasonable` (OWL 2 RL). **Phase 5 SHACL** — `pgrdf.validate` returns a real W3C `sh:ValidationReport`-shape JSONB via `shacl 0.3.1` + a patched `reasonable` fork ([ERRATA E-011](specs/ERRATA.v0.4.md)). **Phase 6** — regression suite + W3C-shape harness + LUBM-shape gates in CI. **Phase B (v0.4.2)** — graph-level lifecycle UDFs (`pgrdf.drop_graph` / `clear_graph` / `copy_graph` / `move_graph`, LLD v0.4 §5 shipped via countdown slices 99 → 95). **Phase C (v0.4.3)** — **SPARQL UPDATE surface complete**: INSERT DATA / DELETE DATA / INSERT WHERE / DELETE WHERE / DELETE+INSERT WHERE + `WITH <iri>` graph scoping + lifecycle algebra (`DROP / CLEAR / CREATE GRAPH` with `DEFAULT / NAMED / ALL` targets), LLD v0.4 §4 shipped via countdown slices 84 → 78. Deferred to v0.5: CONSTRUCT + property paths + heap_multi_insert phase B + full W3C TTL-manifest runner. |
+| **Status** | **Alpha — v0.4.5 engine surface, all four engines real** (storage · SPARQL 1.1 · OWL 2 RL inference · SHACL Core validation).<br><br>**Query** — SPARQL SELECT/ASK over N-pattern BGPs · FILTER · DISTINCT/LIMIT/OFFSET/ORDER BY · OPTIONAL · UNION · MINUS · aggregates (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE) · HAVING · BIND · named-graph scoping (`GRAPH <iri>` + `GRAPH ?g` + composition) · **CONSTRUCT** (constant/variable/blank-node/multi-triple templates · WHERE-shorthand · round-trip ingest) · **property paths** (`^` `+` `*` `?` · `\|` alternation · materialised-closure no-CTE fallback · `pgrdf.path_max_depth` guard).<br>**Update** — full SPARQL UPDATE: INSERT/DELETE DATA · INSERT/DELETE WHERE · DELETE+INSERT WHERE · `WITH <iri>` scoping · lifecycle algebra (`DROP`/`CLEAR`/`CREATE GRAPH` × `DEFAULT`/`NAMED`/`ALL`).<br>**Storage** — CRUD + Turtle ingest · per-graph LIST partitions · lifecycle UDFs (`drop`/`clear`/`copy`/`move_graph`) · shmem dict cache (§4.1) + prepared-plan cache (§4.2) + prepared bulk-INSERT (§4.3 phase A).<br>**Inference** — `pgrdf.materialize` (OWL 2 RL via `reasonable`). **Validation** — `pgrdf.validate` → real W3C `sh:ValidationReport` JSONB (SHACL Core via `shacl 0.3.1`, [ERRATA E-011](specs/ERRATA.v0.4.md)).<br><br>**Shipped on the v0.4 countdown:** `v0.4.0` SHACL · `v0.4.1` named-graph §3 · `v0.4.2` lifecycle UDFs §5 · `v0.4.3` SPARQL UPDATE §4 · `v0.4.4` CONSTRUCT §6 · **`v0.4.5` property paths §7**.<br>**Ahead for v0.5:** §11 SPARQL backlog — multi-triple OPTIONAL, VALUES, BIND-downstream, aggregates-over-UNION, DESCRIBE, type-aware ORDER BY (→ `v0.4.6`) · reasoning-profile selector + TriG/N-Quads ingest (→ `v0.5.0-rc1`) · `heap_multi_insert` phase B · RDF 1.2 triple terms (gated on upstream, ERRATA E-011). |
 | **Supported PG** | 14, 15, 16, 17. PG 18 support has landed upstream in pgrx 0.18.0 but adoption is deferred to v0.4 — 0.18.0 still fails to build locally and changes the schema-gen model. See [ERRATA](specs/ERRATA.v0.2.md) E-006 (re-checked 2026-05-14). |
 | **Install** | Drop-in via per-file bind mounts (local) or init-container fetch (K8s) per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). No image rebuild. |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
