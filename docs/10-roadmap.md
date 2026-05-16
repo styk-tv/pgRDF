@@ -169,9 +169,9 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
       `STRSTARTS` / `STRENDS` surface shipped step 9; `BIND (expr AS ?v)`
       for projection shipped step 10; type-aware `MIN`/`MAX` over
       `xsd:numeric` shipped post-step-12 — translator slice
-      `7de9c17`. Residual aggregate-over-UNION refinement —
-      GROUP BY on a GRAPH-scope-only var — tracked in
-      `SPEC.pgRDF.LLD.v0.5-FUTURE §8`.)
+      `7de9c17`. The six residual aggregate-over-UNION refinements
+      — incl. GROUP BY on a GRAPH-scope-only var — shipped Phase G
+      group G2, `SPEC.pgRDF.LLD.v0.5-FUTURE §8`.)
 - ✅ `DESCRIBE` — shipped Phase F group F3 (slices 26-24). Sibling
       UDF `pgrdf.describe(q TEXT) → SETOF JSONB`, byte-identical row
       shape to `pgrdf.construct`. The description is the closure of
@@ -1215,8 +1215,8 @@ fixtures `70-validate-stub.sql` (basic shape) and
 
 **Phase G started.** Grouped dispatches: **G1 ✅ shipped** (§3
 reasoning-profile selector + §7 IRI lifecycle overloads — slices
-21-18); G2 (§4 TriG / N-Quads + §8 agg-over-UNION residuals); G3
-(§5 / §6 SHACL + the v0.5.0-rc1 cut).
+21-18); **G2 ✅ shipped** (§4 TriG / N-Quads + §8 agg-over-UNION
+residuals — slices 17-14); G3 (§5 / §6 SHACL + the v0.5.0-rc1 cut).
 
 - ✅ **G1 (§3 + §7)** — `pgrdf.materialize(graph_id, profile TEXT
   DEFAULT 'owl-rl')` adds the `'rdfs'` profile (a strict, sound
@@ -1229,8 +1229,22 @@ reasoning-profile selector + §7 IRI lifecycle overloads — slices
   `<fn>: unknown iri` on an unbound IRI). The bare
   `pgrdf.materialize(g)` form is unchanged.
 
-The remaining v0.5 surface (planned, G2/G3): TriG / N-Quads ingest,
-the W3C SHACL manifest runner, and the SHACL-SPARQL constraint mode.
+- ✅ **G2 (§4 + §8)** — `pgrdf.parse_trig(content, default_graph_id,
+  strict)` + `pgrdf.parse_nquads(...)` ingest TriG / N-Quads,
+  honouring inline / 4th-position graph IRIs (auto-allocate via
+  v0.4 §3.2, or reject under `strict` with the stable
+  `parse_{trig,nquads}: unknown graph iri` prefix), reusing the
+  v0.3 batched-insert path partition-routed per graph. The six
+  v0.5-FUTURE §8 aggregate-over-UNION residuals are closed (the F2
+  stable panics are lifted, correct answers returned): GRAPH-scope
+  group key (text-lane), computed-BIND join key (correlation
+  predicate), BIND in CONSTRUCT/DESCRIBE template (lexical-literal
+  encoder), nested UNION-of-UNION (UNION-over-JOIN distribution),
+  cross-branch HAVING (qU-pooled, lanes-aware), GROUP_CONCAT
+  DISTINCT+SEPARATOR. Closes v0.5-FUTURE §4 + §8.
+
+The remaining v0.5 surface (planned, G3): the W3C SHACL manifest
+runner, and the SHACL-SPARQL constraint mode.
 See
 [LLD v0.5-FUTURE §3](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md#3-reasoning-profile-selector),
 [§4](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md#4-trig--n-quads-ingest),

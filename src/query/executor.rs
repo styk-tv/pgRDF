@@ -449,8 +449,24 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // Validate every template variable is BGP-bound. ps.projected
     // (after parse_select's SELECT-* expansion) carries every variable
     // the WHERE binds; references outside that set are unbound.
+    //
+    // §8 case 3 (v0.5-FUTURE §8): a BIND output variable used directly
+    // in the CONSTRUCT template's output position
+    // (`CONSTRUCT { ?s :total ?sum } WHERE { … BIND(?x+?y AS ?sum) }`)
+    // is NOT in ps.projected (SELECT-* expansion enumerates BGP /
+    // OPTIONAL / VALUES / scope vars, not BIND outputs), so F2's
+    // construct emitter raised "unbound template variable" — the
+    // documented stable panic. v0.5 lifts it: a template var that is
+    // a BIND output IS bound (it is a query-time computed lexical).
+    // It is shaped as a literal term in the per-solution row encoder
+    // below.
+    let bind_template_vars: HashSet<String> = template_vars
+        .iter()
+        .filter(|v| ps.binds.iter().any(|b| &b.output_var == *v))
+        .cloned()
+        .collect();
     for v in &template_vars {
-        if !ps.projected.contains(v) {
+        if !ps.projected.contains(v) && !bind_template_vars.contains(v) {
             panic!("pgrdf.construct: unbound template variable ?{v}");
         }
     }
@@ -535,6 +551,32 @@ fn execute_construct_per_solution_path(
     let mut select_clauses: Vec<String> = Vec::new();
     let mut col_order: Vec<(String, ConstructProjShape)> = Vec::new();
     for var in template_vars {
+        // §8 case 3: a template var that is a BIND output is a
+        // query-time computed lexical with no pre-interned dict id.
+        // Project the translated bind expression as a TEXT column and
+        // shape it as a plain literal term in the row encoder. A bind
+        // over an unbound variable is UNBOUND (W3C §18.2.5) — project
+        // NULL so the existing unbound-check omits the whole template
+        // triple for that solution, matching the variable path.
+        if let Some(bind) = ps.binds.iter().find(|b| &b.output_var == var) {
+            let expr_sql = if bind_expr_has_unbound_var(&bind.expression, &anchors) {
+                "NULL::TEXT".to_string()
+            } else {
+                translate_bind_expression(&bind.expression, &anchors).unwrap_or_else(|| {
+                    panic!(
+                        "pgrdf.construct: BIND expression for template ?{var} \
+                         not translatable: {:?}",
+                        bind.expression
+                    )
+                })
+            };
+            select_clauses.push(format!(
+                "({expr_sql})::text AS {alias_v}",
+                alias_v = quote_identifier(var),
+            ));
+            col_order.push((var.clone(), ConstructProjShape::BindLexical));
+            continue;
+        }
         // Slice 55: graph-scope variables bind to a `g{S}.iri` join
         // column — that's a TEXT IRI, NOT a dict id, and graph IRIs
         // are NOT entered in `_pgrdf_dictionary` (only RDF term IRIs
@@ -627,6 +669,16 @@ fn execute_construct_per_solution_path(
                         Some(iri) => ConstructBoundValue::GraphIri(iri),
                         None => ConstructBoundValue::Unbound,
                     },
+                    // §8 case 3 — BIND lexical: NULL means the bind
+                    // referenced an unbound var (UNBOUND per W3C
+                    // §18.2.5) → omit the whole template triple, same
+                    // as an unbound variable position.
+                    ConstructProjShape::BindLexical => {
+                        match row.get::<String>(i + 1).ok().flatten() {
+                            Some(lex) => ConstructBoundValue::BindLexical(lex),
+                            None => ConstructBoundValue::Unbound,
+                        }
+                    }
                 };
                 binding.insert(var.as_str(), bound);
             }
@@ -693,6 +745,10 @@ fn construct_position_unbound(
 enum ConstructProjShape {
     DictId,
     GraphIri,
+    /// §8 case 3 — a BIND output used in a template position. The
+    /// projected column is the bind expression's TEXT value; shaped
+    /// as a plain RDF literal term in the row encoder (no dict id).
+    BindLexical,
 }
 
 /// Slice 55 — per-solution binding shape. Mirrors `ConstructProjShape`
@@ -704,6 +760,8 @@ enum ConstructProjShape {
 enum ConstructBoundValue {
     DictId(i64),
     GraphIri(String),
+    /// §8 case 3 — the BIND expression's per-solution lexical value.
+    BindLexical(String),
     Unbound,
 }
 
@@ -747,6 +805,20 @@ fn encode_template_position(
                     encode_dict_term(&term)
                 }
                 Some(ConstructBoundValue::GraphIri(iri)) => encode_iri_term(iri),
+                // §8 case 3 — a BIND output in a template position.
+                // The value is a query-time computed lexical with no
+                // interned dict id; shape it as a plain RDF literal.
+                // An all-digits / decimal lexical (the common
+                // arithmetic-BIND case, `?x + ?y`) is tagged with the
+                // matching XSD numeric datatype so the constructed
+                // triple round-trips as a number, not a string;
+                // anything else is an `xsd:string` literal. This is
+                // the spec's "project the bind expression as a lexical
+                // value and shape it as a literal term".
+                Some(ConstructBoundValue::BindLexical(lex)) => {
+                    let dt = bind_lexical_datatype(lex);
+                    encode_literal_term_parts(lex, Some(dt), None)
+                }
                 Some(ConstructBoundValue::Unbound) | None => {
                     panic!("pgrdf.construct: variable binding vanished after unbound-check")
                 }
@@ -978,6 +1050,38 @@ fn encode_literal_term_parts(value: &str, datatype: Option<&str>, language: Opti
         );
     }
     Value::Object(obj)
+}
+
+/// §8 case 3 — pick the XSD datatype for a BIND output's computed
+/// lexical when shaping it as a CONSTRUCT-template literal. An
+/// integral lexical (`^[+-]?\d+$`) → `xsd:integer`; a decimal /
+/// scientific numeric → `xsd:decimal` (the value space SPARQL
+/// arithmetic over integers/decimals produces); `true`/`false` →
+/// `xsd:boolean`; everything else → `xsd:string`. This keeps a
+/// numeric `BIND(?x + ?y AS ?sum)` round-tripping as a number rather
+/// than a string, matching SPARQL 1.1 §17.4 arithmetic typing for
+/// the common cases without over-claiming an exact datatype for
+/// arbitrary expressions.
+fn bind_lexical_datatype(lex: &str) -> &'static str {
+    let t = lex.trim();
+    if t == "true" || t == "false" {
+        return "http://www.w3.org/2001/XMLSchema#boolean";
+    }
+    let body = t.strip_prefix(['+', '-']).unwrap_or(t);
+    if !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit()) {
+        return "http://www.w3.org/2001/XMLSchema#integer";
+    }
+    // Decimal / scientific — at least one digit plus a '.' or 'e'.
+    let looks_numeric = !body.is_empty()
+        && body.bytes().any(|b| b.is_ascii_digit())
+        && body.bytes().all(|b| {
+            b.is_ascii_digit() || b == b'.' || b == b'e' || b == b'E' || b == b'+' || b == b'-'
+        })
+        && (body.contains('.') || body.contains('e') || body.contains('E'));
+    if looks_numeric {
+        return "http://www.w3.org/2001/XMLSchema#decimal";
+    }
+    "http://www.w3.org/2001/XMLSchema#string"
 }
 
 /// Resolved (type, lexical, datatype-IRI, language-tag) tuple for a
@@ -3537,7 +3641,138 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
 
 /// Union flattener that propagates the GRAPH scope down to each
 /// branch (so `GRAPH <g> { { ... } UNION { ... } }` works).
+/// §8 case 4 (v0.5-FUTURE §8): normalise a UNION sub-tree so every
+/// `Union` is hoisted to the TOP of the branch forest before
+/// `walk_branch` runs. spargebra emits `{ {A} UNION {B} } UNION {C}`
+/// as a clean `Union(Union(A,B),C)` (already flattened by the
+/// recursion below), but a UNION nested *inside* a conjunction —
+/// `{ P . { {A} UNION {B} } }` → `Join(P, Union(A,B))`, or under a
+/// `Filter` / `Graph` wrapper — used to reach `walk_branch` as a raw
+/// `Union` and panic ("unsupported algebra inside UNION branch").
+/// SPARQL algebra distributes UNION over JOIN/FILTER/GRAPH:
+///   `Join(P, Union(A,B))`   ≡ `Union(Join(P,A), Join(P,B))`
+///   `Filter(e, Union(A,B))` ≡ `Union(Filter(e,A), Filter(e,B))`
+///   `Graph(g, Union(A,B))`  ≡ `Union(Graph(g,A), Graph(g,B))`
+/// Applying these rewrites bottom-up lifts every nested UNION to the
+/// top, so the existing flatten-then-`walk_branch` path handles
+/// arbitrarily nested UNION-of-UNION (and UNION-inside-JOIN) with no
+/// per-branch special-casing. Patterns with no nested UNION are
+/// returned structurally unchanged (clone) — zero behaviour change
+/// for the already-working shapes.
+fn distribute_unions(p: &GraphPattern) -> GraphPattern {
+    match p {
+        GraphPattern::Union { left, right } => GraphPattern::Union {
+            left: Box::new(distribute_unions(left)),
+            right: Box::new(distribute_unions(right)),
+        },
+        GraphPattern::Join { left, right } => {
+            let l = distribute_unions(left);
+            let r = distribute_unions(right);
+            // Distribute over either side that surfaced a UNION.
+            if let GraphPattern::Union {
+                left: ul,
+                right: ur,
+            } = &l
+            {
+                let a = GraphPattern::Join {
+                    left: ul.clone(),
+                    right: Box::new(r.clone()),
+                };
+                let b = GraphPattern::Join {
+                    left: ur.clone(),
+                    right: Box::new(r),
+                };
+                return GraphPattern::Union {
+                    left: Box::new(distribute_unions(&a)),
+                    right: Box::new(distribute_unions(&b)),
+                };
+            }
+            if let GraphPattern::Union {
+                left: ul,
+                right: ur,
+            } = &r
+            {
+                let a = GraphPattern::Join {
+                    left: Box::new(l.clone()),
+                    right: ul.clone(),
+                };
+                let b = GraphPattern::Join {
+                    left: Box::new(l),
+                    right: ur.clone(),
+                };
+                return GraphPattern::Union {
+                    left: Box::new(distribute_unions(&a)),
+                    right: Box::new(distribute_unions(&b)),
+                };
+            }
+            GraphPattern::Join {
+                left: Box::new(l),
+                right: Box::new(r),
+            }
+        }
+        GraphPattern::Filter { expr, inner } => {
+            let inner_d = distribute_unions(inner);
+            if let GraphPattern::Union { left, right } = &inner_d {
+                let a = GraphPattern::Filter {
+                    expr: expr.clone(),
+                    inner: left.clone(),
+                };
+                let b = GraphPattern::Filter {
+                    expr: expr.clone(),
+                    inner: right.clone(),
+                };
+                return GraphPattern::Union {
+                    left: Box::new(distribute_unions(&a)),
+                    right: Box::new(distribute_unions(&b)),
+                };
+            }
+            GraphPattern::Filter {
+                expr: expr.clone(),
+                inner: Box::new(inner_d),
+            }
+        }
+        GraphPattern::Graph { name, inner } => {
+            let inner_d = distribute_unions(inner);
+            if let GraphPattern::Union { left, right } = &inner_d {
+                let a = GraphPattern::Graph {
+                    name: name.clone(),
+                    inner: left.clone(),
+                };
+                let b = GraphPattern::Graph {
+                    name: name.clone(),
+                    inner: right.clone(),
+                };
+                return GraphPattern::Union {
+                    left: Box::new(distribute_unions(&a)),
+                    right: Box::new(distribute_unions(&b)),
+                };
+            }
+            GraphPattern::Graph {
+                name: name.clone(),
+                inner: Box::new(inner_d),
+            }
+        }
+        // Leaves / non-distributable composites (BGP, Path, LeftJoin,
+        // Minus, Values, …) are returned as-is: an OPTIONAL/MINUS
+        // right-arm UNION stays internal to its derived table
+        // (NOT EXISTS / LATERAL), exactly the inherited F1 behaviour.
+        other => other.clone(),
+    }
+}
+
 fn collect_union_branches_scoped(
+    p: &GraphPattern,
+    out: &mut Vec<UnionBranch>,
+    current_scope: Option<&GraphScope>,
+    scope_counter: &mut usize,
+) {
+    // §8 case 4: hoist any UNION nested inside JOIN/FILTER/GRAPH to
+    // the top so the flatten below sees a clean UNION tree.
+    let normalised = distribute_unions(p);
+    collect_union_branches_normalised(&normalised, out, current_scope, scope_counter);
+}
+
+fn collect_union_branches_normalised(
     p: &GraphPattern,
     out: &mut Vec<UnionBranch>,
     current_scope: Option<&GraphScope>,
@@ -3545,8 +3780,8 @@ fn collect_union_branches_scoped(
 ) {
     match p {
         GraphPattern::Union { left, right } => {
-            collect_union_branches_scoped(left, out, current_scope, scope_counter);
-            collect_union_branches_scoped(right, out, current_scope, scope_counter);
+            collect_union_branches_normalised(left, out, current_scope, scope_counter);
+            collect_union_branches_normalised(right, out, current_scope, scope_counter);
         }
         _ => {
             let mut ub = UnionBranch::default();
@@ -3717,7 +3952,7 @@ fn build_bgp_sql(ps: &ParsedSelect) -> String {
 /// even when they aren't projected (via hidden trailing columns).
 fn build_single_branch_outer(ps: &ParsedSelect) -> String {
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-    let (from_sql, where_clauses, plan) = build_from_and_where(
+    let (from_sql, mut where_clauses, plan) = build_from_and_where(
         &ps.bgp,
         &ps.filters,
         &ps.optionals,
@@ -3726,6 +3961,12 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
         &mut anchors,
         0,
     );
+    // §8 case 2: correlate any computed BIND whose output var is used
+    // as a triple join key onto its computed value (F2 left this
+    // degenerate). Plain-term binds were already substituted by F2;
+    // an ordinary projected computed BIND (var not in a triple slot)
+    // adds no clause.
+    where_clauses.extend(computed_bind_join_clauses(&ps.binds, &anchors));
 
     // Project: each projected var → its anchor alias.column → dict
     // lookup → aliased to the variable name (so SETOF JSONB emission
@@ -3918,7 +4159,7 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
 /// + aggregate values (cast to TEXT for consistent JSONB output).
 fn build_aggregate_sql(ps: &ParsedSelect) -> String {
     let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
-    let (from_sql, where_clauses, plan) = build_from_and_where(
+    let (from_sql, mut where_clauses, plan) = build_from_and_where(
         &ps.bgp,
         &ps.filters,
         &ps.optionals,
@@ -3927,6 +4168,10 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
         &mut anchors,
         0,
     );
+    // §8 case 2 (also under aggregation): a computed BIND used as a
+    // triple join key correlates onto its computed value before the
+    // GROUP BY / aggregate runs.
+    where_clauses.extend(computed_bind_join_clauses(&ps.binds, &anchors));
 
     // Pre-compute SQL expressions per group variable so SELECT and
     // GROUP BY use the same string (Postgres accepts either repeated
@@ -4048,12 +4293,50 @@ fn translate_aggregate(
     agg: &AggregateSpec,
     anchors: &HashMap<String, (usize, &'static str)>,
 ) -> String {
+    translate_aggregate_lanes(agg, anchors, &HashSet::new())
+}
+
+/// As [`translate_aggregate`], but `text_lane_vars` names variables
+/// whose vK column already holds the term's **lexical text** rather
+/// than a dictionary id (§8 case 1: a `GRAPH ?g`-scope-only var
+/// carried as a text lane through the aggregate-over-UNION derived
+/// table). For those the lexical-value subselect collapses to the
+/// raw column, the numeric cast applies directly to it, and
+/// `COUNT(?g)` counts the IRI column — all consistent with the
+/// single-BGP `GROUP BY ?g` / aggregate-on-`g{S}.iri` behaviour.
+fn translate_aggregate_lanes(
+    agg: &AggregateSpec,
+    anchors: &HashMap<String, (usize, &'static str)>,
+    text_lane_vars: &HashSet<String>,
+) -> String {
     let distinct = if agg.distinct { "DISTINCT " } else { "" };
     let lex_subselect = |var: &str| {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
             panic!("sparql: aggregate over ?{var} but variable not bound in any BGP pattern")
         });
-        format!("(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})")
+        if text_lane_vars.contains(var) {
+            format!("q{alias_idx}.{col}")
+        } else {
+            format!(
+                "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
+            )
+        }
+    };
+    let numeric_expr_for = |var: &str| {
+        if text_lane_vars.contains(var) {
+            // A graph-IRI text lane is non-numeric by construction;
+            // the regex-guarded cast yields NULL (SUM/AVG ignore it),
+            // matching the single-BGP non-numeric behaviour.
+            let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+                panic!("sparql: numeric aggregate over ?{var} but variable not bound")
+            });
+            format!(
+                "(CASE WHEN q{alias_idx}.{col} ~ '{NUMERIC_LEXICAL_RE}' \
+                       THEN q{alias_idx}.{col}::numeric ELSE NULL END)"
+            )
+        } else {
+            numeric_cast_subselect(var, anchors)
+        }
     };
     match (&agg.func, &agg.arg_var) {
         (AggregateFn::Count, None) => "COUNT(*)".to_string(),
@@ -4064,11 +4347,11 @@ fn translate_aggregate(
             format!("COUNT({distinct}q{alias_idx}.{col})")
         }
         (AggregateFn::Sum, Some(var)) => {
-            let numeric_expr = numeric_cast_subselect(var, anchors);
+            let numeric_expr = numeric_expr_for(var);
             format!("SUM({distinct}{numeric_expr})")
         }
         (AggregateFn::Avg, Some(var)) => {
-            let numeric_expr = numeric_cast_subselect(var, anchors);
+            let numeric_expr = numeric_expr_for(var);
             format!("AVG({distinct}{numeric_expr})")
         }
         // Type-aware MIN/MAX: SPARQL 1.1 §17.4 says the
@@ -4083,15 +4366,24 @@ fn translate_aggregate(
         // leaves mixed-type behaviour implementation-defined.
         (AggregateFn::Min, Some(var)) => {
             let lex = lex_subselect(var);
-            let num = numeric_cast_subselect(var, anchors);
+            let num = numeric_expr_for(var);
             format!("COALESCE(MIN({distinct}{num})::text, MIN({distinct}{lex}))")
         }
         (AggregateFn::Max, Some(var)) => {
             let lex = lex_subselect(var);
-            let num = numeric_cast_subselect(var, anchors);
+            let num = numeric_expr_for(var);
             format!("COALESCE(MAX({distinct}{num})::text, MAX({distinct}{lex}))")
         }
         (AggregateFn::GroupConcat { separator }, Some(var)) => {
+            // §8 case 6: GROUP_CONCAT(DISTINCT … ; SEPARATOR='…') over
+            // UNION. STRING_AGG with DISTINCT requires the ORDER BY
+            // (when present) to match the DISTINCT expression;
+            // pgRDF emits no in-aggregate ORDER BY, so
+            // `STRING_AGG(DISTINCT expr, sep)` is well-formed and
+            // dedups the per-row lexical values before concatenating —
+            // correct DISTINCT semantics across the UNION-ALL'd branch
+            // rows (the derived table already carried each branch's
+            // contribution into the shared vK pool).
             let escaped = separator.replace('\'', "''");
             format!("STRING_AGG({distinct}{}, '{escaped}')", lex_subselect(var))
         }
@@ -4114,6 +4406,25 @@ fn translate_filter_with_aggregates(
     aggs: &[AggregateSpec],
     group_exprs: &[(String, String)],
 ) -> Option<String> {
+    translate_filter_with_aggregates_lanes(expr, anchors, aggs, group_exprs, &HashSet::new())
+}
+
+/// As [`translate_filter_with_aggregates`], lanes-aware: any aggregate
+/// whose argument is a §8-case-1 graph-text-lane variable is lowered
+/// via [`translate_aggregate_lanes`] so the HAVING predicate sees the
+/// same raw-column expression the SELECT/GROUP BY use. This is what
+/// makes §8 case 5 (HAVING over UNION-derived aggregates with
+/// cross-branch variable references) correct: every branch's rows are
+/// already pooled into the shared vK derived table, so a HAVING that
+/// references an aggregate over a cross-branch var resolves against
+/// `qU` exactly like the SELECT clause does.
+fn translate_filter_with_aggregates_lanes(
+    expr: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+    aggs: &[AggregateSpec],
+    group_exprs: &[(String, String)],
+    text_lane_vars: &HashSet<String>,
+) -> Option<String> {
     // Look up an aggregate by either its current output_var or any
     // of the synthetic names spargebra used internally.
     let find_agg = |name: &str| -> Option<&AggregateSpec> {
@@ -4125,7 +4436,7 @@ fn translate_filter_with_aggregates(
             Expression::Variable(v) => {
                 let name = v.as_str();
                 if let Some(agg) = find_agg(name) {
-                    Some(translate_aggregate(agg, anchors))
+                    Some(translate_aggregate_lanes(agg, anchors, text_lane_vars))
                 } else if let Some((_, gexpr)) = group_exprs.iter().find(|(n, _)| n == name) {
                     Some(format!("({gexpr})::numeric"))
                 } else {
@@ -4149,7 +4460,10 @@ fn translate_filter_with_aggregates(
             Expression::Variable(v) => {
                 let name = v.as_str();
                 if let Some(agg) = find_agg(name) {
-                    Some(format!("({})::text", translate_aggregate(agg, anchors)))
+                    Some(format!(
+                        "({})::text",
+                        translate_aggregate_lanes(agg, anchors, text_lane_vars)
+                    ))
                 } else if let Some((_, gexpr)) = group_exprs.iter().find(|(n, _)| n == name) {
                     Some(gexpr.clone())
                 } else {
@@ -4162,6 +4476,9 @@ fn translate_filter_with_aggregates(
             }
             _ => None,
         }
+    };
+    let recur = |e: &Expression| {
+        translate_filter_with_aggregates_lanes(e, anchors, aggs, group_exprs, text_lane_vars)
     };
     match expr {
         Expression::Greater(a, b) => Some(format!("({} > {})", numeric_side(a)?, numeric_side(b)?)),
@@ -4176,17 +4493,17 @@ fn translate_filter_with_aggregates(
             Some(format!("({} = {})", text_side(a)?, text_side(b)?))
         }
         Expression::And(a, b) => {
-            let l = translate_filter_with_aggregates(a, anchors, aggs, group_exprs)?;
-            let r = translate_filter_with_aggregates(b, anchors, aggs, group_exprs)?;
+            let l = recur(a)?;
+            let r = recur(b)?;
             Some(format!("({l} AND {r})"))
         }
         Expression::Or(a, b) => {
-            let l = translate_filter_with_aggregates(a, anchors, aggs, group_exprs)?;
-            let r = translate_filter_with_aggregates(b, anchors, aggs, group_exprs)?;
+            let l = recur(a)?;
+            let r = recur(b)?;
             Some(format!("({l} OR {r})"))
         }
         Expression::Not(inner) => {
-            let l = translate_filter_with_aggregates(inner, anchors, aggs, group_exprs)?;
+            let l = recur(inner)?;
             Some(format!("(NOT ({l}))"))
         }
         _ => None,
@@ -4365,9 +4682,58 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
         .map(|(k, v)| (v.clone(), k))
         .collect();
 
+    // §8 case 1 (v0.5-FUTURE §8): a needed var that is ONLY ever a
+    // `GRAPH ?g`-scope var across the union has no dict id in the
+    // per-branch derived table — it resolves as `g{S}.iri`, a TEXT
+    // IRI. F2 emitted a stable panic here. v0.5 lifts it by carrying
+    // the graph IRI as a parallel **TEXT lane** in the same vK pool
+    // (every branch projects `g{S}.iri` or `NULL::TEXT`, so the
+    // `UNION ALL` column type stays consistent), then the outer
+    // GROUP BY / aggregate consumes that column DIRECTLY as the group
+    // key — byte-identical to what the single-BGP aggregate path
+    // already does for `GROUP BY ?g` (`g{S}.iri`, no dict round-trip;
+    // graph IRIs are not entered in `_pgrdf_dictionary`). This keeps
+    // the group key consistent across branches without interning.
+    // First pass: classify every needed var across ALL branches as a
+    // graph-text lane (graph-scoped in at least one branch, never
+    // dict-anchored in any) vs an ordinary dict-id lane. A var that is
+    // dict-anchored anywhere takes the dict-id lane (the graph-scope
+    // sub-case for it is the genuinely-degenerate mixed shape and
+    // stays the stable panic below).
+    let mut graph_text_vars: HashSet<String> = HashSet::new();
+    let mut dict_anchored_vars: HashSet<String> = HashSet::new();
+    for branch in &ps.union_branches {
+        let mut probe_anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
+        let (_f, _w, probe_plan) = build_from_and_where(
+            &branch.bgp,
+            &branch.filters,
+            &branch.optionals,
+            &branch.minuses,
+            &branch.values,
+            &mut probe_anchors,
+            0,
+        );
+        for var in &needed {
+            if probe_anchors.contains_key(var) {
+                dict_anchored_vars.insert(var.clone());
+            } else if probe_plan.projection_scope(var).is_some() {
+                graph_text_vars.insert(var.clone());
+            }
+        }
+    }
+    // A var graph-scoped in one branch but dict-anchored in another is
+    // the genuinely mixed degenerate shape — keep it out of the text
+    // lane so the stable panic still fires for it (never a wrong
+    // answer): a dict-id column and a TEXT IRI cannot share one
+    // `UNION ALL` column meaningfully.
+    for v in &dict_anchored_vars {
+        graph_text_vars.remove(v);
+    }
+
     // Emit each branch as a sub-SELECT projecting the dict id (or
     // NULL::BIGINT when the branch doesn't bind that var — a
     // legitimate per-branch shape) for every needed var, in vK order.
+    // Graph-text-lane vars project the IRI text (or NULL::TEXT).
     let mut branch_sqls: Vec<String> = Vec::new();
     for branch in &ps.union_branches {
         let mut anchors: HashMap<String, (usize, &'static str)> = HashMap::new();
@@ -4385,17 +4751,29 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
             let k = col_of[var];
             let col = derived_col(k);
             // Variable bound by an ordinary quad/derived alias →
-            // project its raw dict id. A `GRAPH ?g`-scope-only var has
-            // no dict id in this branch: per v0.5-FUTURE §8 a GROUP BY
-            // on such a var over UNION is deferred (stable panic, not
-            // a wrong answer). An aggregate ARG that is graph-scoped
-            // is equally degenerate and deferred the same way.
+            // project its raw dict id.
             if let Some(&(alias_idx, src)) = anchors.get(var) {
                 select_clauses.push(format!("q{alias_idx}.{src} AS {col}"));
+            } else if graph_text_vars.contains(var) {
+                // §8 case 1: graph-text lane. Project the IRI off this
+                // branch's `_pgrdf_graphs` join when this branch graph-
+                // scopes the var; NULL::TEXT otherwise (consistent
+                // UNION ALL column type with the projecting branches).
+                if let Some(scope_id) = plan.projection_scope(var) {
+                    select_clauses.push(format!("g{scope_id}.iri AS {col}"));
+                } else {
+                    select_clauses.push(format!("NULL::TEXT AS {col}"));
+                }
             } else if plan.projection_scope(var).is_some() {
+                // Genuinely mixed (graph-scoped here, dict-anchored in
+                // a sibling branch): a TEXT IRI and a BIGINT dict id
+                // cannot share one `UNION ALL` column. Stable panic —
+                // never a wrong answer (v0.5-FUTURE §8 / LLD v0.4 §11).
+                // Tracked for v1.0 (a typed dual-lane derived table).
                 panic!(
-                    "sparql: GROUP BY / aggregate over a GRAPH-scope variable ?{var} \
-                     across a UNION is deferred to v0.5-FUTURE §8 (LLD v0.4 §11); \
+                    "sparql: GROUP BY / aggregate over a variable ?{var} that is \
+                     GRAPH-scoped in one UNION branch but term-bound in another \
+                     is deferred to v1.0 (v0.5-FUTURE §8 / LLD v0.4 §11); \
                      aggregate the object/subject variable instead"
                 );
             } else {
@@ -4427,16 +4805,22 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
     let from_sql = format!("({union_inner}) AS q{qu_idx}");
 
     // GROUP BY exprs — dict-lookup over the derived id column (same
-    // shape as the single-BGP path; group-on-graph-var is the
-    // deferred case handled by the per-branch panic above).
+    // shape as the single-BGP path). §8 case 1: a graph-text-lane var
+    // already carries the lexical IRI in its vK column — use it
+    // DIRECTLY as the group key (no dict subselect), byte-identical to
+    // the single-BGP `GROUP BY ?g` path's `g{S}.iri` expression.
     let mut group_exprs: Vec<(String, String)> = Vec::new();
     for var in &ps.group_vars {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
             panic!("sparql: GROUP BY variable ?{var} not bound in any UNION branch")
         });
-        let expr = format!(
-            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
-        );
+        let expr = if graph_text_vars.contains(var) {
+            format!("q{alias_idx}.{col}")
+        } else {
+            format!(
+                "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
+            )
+        };
         group_exprs.push((var.clone(), expr));
     }
 
@@ -4447,7 +4831,7 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
         } else if let Some(agg) = ps.aggregates.iter().find(|a| &a.output_var == var) {
             select_clauses.push(format!(
                 "{}::TEXT AS {}",
-                translate_aggregate(agg, &anchors),
+                translate_aggregate_lanes(agg, &anchors, &graph_text_vars),
                 quote_identifier(var)
             ));
         } else {
@@ -4464,13 +4848,22 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
         sql.push_str(&group_by_parts.join(", "));
     }
     if !ps.having_filters.is_empty() {
+        // §8 case 5: HAVING over UNION-derived aggregates, including
+        // cross-branch variable references. Every branch's rows are
+        // already pooled into the `qU` derived table, so the HAVING
+        // predicate resolves against `qU` exactly like the SELECT
+        // clause — lanes-aware so a graph-text-lane aggregate arg
+        // (§8 case 1) lowers consistently here too.
         let mut having_parts: Vec<String> = Vec::new();
         for expr in &ps.having_filters {
-            let sql_pred =
-                translate_filter_with_aggregates(expr, &anchors, &ps.aggregates, &group_exprs)
-                    .unwrap_or_else(|| {
-                        panic!("sparql: HAVING expression not translatable: {expr:?}")
-                    });
+            let sql_pred = translate_filter_with_aggregates_lanes(
+                expr,
+                &anchors,
+                &ps.aggregates,
+                &group_exprs,
+                &graph_text_vars,
+            )
+            .unwrap_or_else(|| panic!("sparql: HAVING expression not translatable: {expr:?}"));
             having_parts.push(sql_pred);
         }
         sql.push_str(" HAVING ");
@@ -4490,7 +4883,7 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
             {
                 expr.clone()
             } else if let Some(agg) = ps.aggregates.iter().find(|a| a.output_var.as_str() == var) {
-                translate_aggregate(agg, &anchors)
+                translate_aggregate_lanes(agg, &anchors, &graph_text_vars)
             } else {
                 panic!(
                     "sparql: ORDER BY ?{var} on an aggregate-over-UNION query must \
@@ -5797,6 +6190,81 @@ fn bind_var(
     } else {
         anchors.insert(name.to_string(), (qi, col));
     }
+}
+
+/// True iff `e` is a *computed* expression (anything other than a
+/// plain Variable / NamedNode / Literal). F2's `subst_term_pattern`
+/// substitutes the three plain-term shapes into triple slots; a
+/// computed expression alias is the §8-case-2 residual it left
+/// degenerate.
+fn is_computed_bind_expr(e: &Expression) -> bool {
+    !matches!(
+        e,
+        Expression::Variable(_) | Expression::NamedNode(_) | Expression::Literal(_)
+    )
+}
+
+/// §8 case 2 (v0.5-FUTURE §8): a *computed* BIND expression used as a
+/// triple join key — `BIND(?a + 1 AS ?k) . ?k :p ?o`. F2 substitutes
+/// variable / term BIND aliases directly into the triple slot, but
+/// left a *computed* alias as the bare variable, so `?k` joined as an
+/// unconstrained scan variable instead of the computed value
+/// (v0.3-degenerate). v0.5 fix: the BIND output var, once it has been
+/// anchored to a triple slot's dict-id column by the BGP builder,
+/// gets a correlation predicate equating that slot's **lexical value**
+/// (resolved through `_pgrdf_dictionary`) to the computed expression's
+/// text — i.e. the triple correlates on `SELECT <expr> AS col`,
+/// realised against pgRDF's lexical-text storage (every term's value
+/// is stored as text; the same lexical idiom every other comparator
+/// in this module uses). Plain-term binds never reach here (F2
+/// already rewrote them); only the computed residual does.
+///
+/// Returns the extra WHERE clauses (one per computed bind whose
+/// output var is anchored to a triple slot). A computed bind whose
+/// var is NOT used as a triple slot is an ordinary projected BIND —
+/// untouched (it still flows through the SELECT-list BIND path).
+fn computed_bind_join_clauses(
+    binds: &[BindSpec],
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for b in binds {
+        if !is_computed_bind_expr(&b.expression) {
+            continue;
+        }
+        let Some(&(aqi, acol)) = anchors.get(&b.output_var) else {
+            // Output var not used as a triple slot — a plain projected
+            // computed BIND (SELECT-list path handles it). Nothing to
+            // correlate.
+            continue;
+        };
+        // The computed value's text. A bind that references an
+        // unbound var yields UNBOUND (no constraint) — skip rather
+        // than emit a clause that would over-restrict (W3C §18.2.5).
+        if bind_expr_has_unbound_var(&b.expression, anchors) {
+            continue;
+        }
+        let Some(expr_sql) = translate_bind_expression(&b.expression, anchors) else {
+            // An untranslatable computed expression as a join key —
+            // keep the inherited v0.3-degenerate behaviour rather than
+            // raising mid-build (no wrong answer is introduced; the
+            // var simply stays an unconstrained scan, exactly as
+            // before this slice). Tracked: a richer expression
+            // translator is v1.0.
+            continue;
+        };
+        // Correlate the triple slot's dict-id resolved lexical value
+        // to the computed expression text. `::text` on the RHS keeps
+        // a numeric computed bind (`?a + 1` → e.g. `4`) comparable to
+        // the stored lexical (`'4'`). NULL-safe via `IS NOT DISTINCT
+        // FROM` so an unbound side doesn't silently drop rows that the
+        // degenerate path would have kept differently.
+        out.push(format!(
+            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{aqi}.{acol}) \
+             IS NOT DISTINCT FROM ({expr_sql})::text"
+        ));
+    }
+    out
 }
 
 /// Postgres identifier quoting for variable names that happen to
@@ -12706,5 +13174,230 @@ mod tests {
     #[pg_test(error = "pgrdf.describe: not a DESCRIBE query")]
     fn f3_describe_rejects_select_query() {
         Spi::run("SELECT * FROM pgrdf.describe('SELECT ?s WHERE { ?s ?p ?o }')").unwrap();
+    }
+
+    // ─── §8 (Phase G group G2, slices 15-14) — aggregates-over-UNION
+    //     residual refinements: the F2 stable panics are lifted. ───
+
+    /// §8 case 1 — GROUP BY a `GRAPH ?g`-scope-only var across a
+    /// UNION. Two named graphs gA (2 quads) + gB (1 quad); the union
+    /// of {GRAPH ?g {?s ex:p ?o}} branches groups by ?g. F2 panicked
+    /// ("GROUP BY / aggregate over a GRAPH-scope variable … across a
+    /// UNION is deferred"); v0.5 returns the correct per-graph count.
+    #[pg_test]
+    fn g2_case1_group_by_graph_scope_var_over_union() {
+        Spi::run("SELECT pgrdf.add_graph('http://ex/gA')").unwrap();
+        Spi::run("SELECT pgrdf.add_graph('http://ex/gB')").unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:p 1 . ex:a2 ex:p 2 .', pgrdf.graph_id('http://ex/gA'))",
+        )
+        .unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:b ex:p 3 .', pgrdf.graph_id('http://ex/gB'))",
+        )
+        .unwrap();
+        let groups: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT ?g (COUNT(?o) AS ?n) WHERE { \
+                  { GRAPH ?g { ?s ex:p ?o } } UNION { GRAPH ?g { ?s ex:p ?o } } } \
+                  GROUP BY ?g') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(groups, 2, "two named graphs → two groups (case 1 fixed)");
+        let ga_n: String = Spi::get_one(
+            "SELECT j->>'n' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT ?g (COUNT(?o) AS ?n) WHERE { \
+                  { GRAPH ?g { ?s ex:p ?o } } UNION { GRAPH ?g { ?s ex:p ?o } } } \
+                  GROUP BY ?g') AS s(j) WHERE j->>'g' = 'http://ex/gA'",
+        )
+        .unwrap()
+        .unwrap();
+        // The union doubles each branch's rows (same pattern twice):
+        // gA has 2 quads → 4 rows; gB has 1 → 2 rows. The point is
+        // the group key is consistent across branches (no panic, no
+        // split groups), and gA's count is gB's × 2.
+        assert_eq!(ga_n, "4", "gA: 2 quads × 2 union branches");
+    }
+
+    /// §8 case 2 — a *computed* BIND expression used as a triple join
+    /// key. A computed numeric is an RDF literal → valid only as an
+    /// OBJECT, so the join key is object-position
+    /// (`BIND(?a + 1 AS ?k) . ?x ex:tag ?k`). F2 left ?k an
+    /// unconstrained scan (matching both ex:hit and ex:miss); v0.5
+    /// correlates it onto the computed value (ex:hit only).
+    #[pg_test]
+    fn g2_case2_computed_bind_as_join_key() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:row ex:base 1 . \
+             ex:hit ex:tag 2 . \
+             ex:miss ex:tag 3 .', 0)",
+        )
+        .unwrap();
+        let hit: String = Spi::get_one(
+            "SELECT j->>'x' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT ?x WHERE { \
+                  ex:row ex:base ?a . BIND(?a + 1 AS ?k) . ?x ex:tag ?k }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            hit, "http://ex/hit",
+            "computed BIND ?k = ?a+1 = 2 correlates to ex:hit ex:tag 2 only"
+        );
+        let rows: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT ?x WHERE { \
+                  ex:row ex:base ?a . BIND(?a + 1 AS ?k) . ?x ex:tag ?k }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            rows, 1,
+            "exactly one correlated solution (not an unconstrained scan)"
+        );
+    }
+
+    /// §8 case 3 — a BIND variable used directly in a CONSTRUCT
+    /// template output position
+    /// (`CONSTRUCT { ?s ex:total ?sum } WHERE { … BIND(?x+?y AS ?sum) }`).
+    /// F2 raised "unbound template variable ?sum"; v0.5 shapes the
+    /// computed lexical as a literal term in the construct row.
+    #[pg_test]
+    fn g2_case3_bind_var_in_construct_template() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:o ex:x 3 ; ex:y 4 .', 0)",
+        )
+        .unwrap();
+        let total: String = Spi::get_one(
+            "SELECT (row->'object'->>'value') FROM pgrdf.construct(
+                 'PREFIX ex: <http://ex/> \
+                  CONSTRUCT { ?s ex:total ?sum } WHERE { \
+                  ?s ex:x ?x . ?s ex:y ?y . BIND(?x + ?y AS ?sum) }') AS c(row)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            total, "7",
+            "?sum = 3 + 4 shaped as the constructed object literal"
+        );
+        let dt: String = Spi::get_one(
+            "SELECT (row->'object'->>'datatype') FROM pgrdf.construct(
+                 'PREFIX ex: <http://ex/> \
+                  CONSTRUCT { ?s ex:total ?sum } WHERE { \
+                  ?s ex:x ?x . ?s ex:y ?y . BIND(?x + ?y AS ?sum) }') AS c(row)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            dt, "http://www.w3.org/2001/XMLSchema#integer",
+            "integral computed BIND → xsd:integer literal"
+        );
+    }
+
+    /// §8 case 4 — aggregates over a UNION whose branch is itself a
+    /// nested UNION joined with a triple
+    /// (`{ { {A} UNION {B} } . ?x ex:tag ?t } UNION {C}`). F2's
+    /// walk_branch panicked on the inner UNION; v0.5 distributes
+    /// UNION over the JOIN so it flattens to ordinary branches.
+    #[pg_test]
+    fn g2_case4_nested_union_of_union_under_aggregate() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:i1 ex:a 1 ; ex:tag \"k\" . \
+             ex:i2 ex:b 2 ; ex:tag \"k\" . \
+             ex:i3 ex:c 3 .', 0)",
+        )
+        .unwrap();
+        // Branch L = { { {?x ex:a ?v} UNION {?x ex:b ?v} } . ?x ex:tag ?t }
+        //   → i1 (a=1,tag k) + i2 (b=2,tag k) = 2 rows.
+        // Branch R = { ?x ex:c ?v } → i3 = 1 row.
+        // COUNT(*) over the whole = 3.
+        let n: String = Spi::get_one(
+            "SELECT j->>'n' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (COUNT(*) AS ?n) WHERE { \
+                  { { { ?x ex:a ?v } UNION { ?x ex:b ?v } } . ?x ex:tag ?t } \
+                  UNION { ?x ex:c ?v } }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, "3", "nested-UNION-in-JOIN distributed; COUNT = 2 + 1");
+    }
+
+    /// §8 case 5 — HAVING over UNION-derived aggregates with a
+    /// cross-branch variable reference. GROUP BY ?c over a union;
+    /// keep groups with COUNT(?p) > 1. books = 2 (kept), tools = 1
+    /// (dropped) → 1 surviving group.
+    #[pg_test]
+    fn g2_case5_having_over_union_aggregate() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:i1 ex:cat \"books\" ; ex:price 10 . \
+             ex:i2 ex:cat \"books\" ; ex:price 12 . \
+             ex:t1 ex:cat \"tools\" ; ex:price 5 .', 0)",
+        )
+        .unwrap();
+        let surviving: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT ?c (COUNT(?p) AS ?n) WHERE { \
+                  { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"books\") } \
+                  UNION { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"tools\") } } \
+                  GROUP BY ?c HAVING(COUNT(?p) > 1)') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            surviving, 1,
+            "only books (count 2 > 1) survives HAVING over the union"
+        );
+        let which: String = Spi::get_one(
+            "SELECT j->>'c' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT ?c (COUNT(?p) AS ?n) WHERE { \
+                  { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"books\") } \
+                  UNION { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"tools\") } } \
+                  GROUP BY ?c HAVING(COUNT(?p) > 1)') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(which, "books");
+    }
+
+    /// §8 case 6 — GROUP_CONCAT(DISTINCT … ; SEPARATOR='…') over
+    /// UNION branches. Categories across the union: books×2, tools×1
+    /// → DISTINCT = {books, tools}; concat length is order-invariant
+    /// ("books|tools" or "tools|books" = 11 chars).
+    #[pg_test]
+    fn g2_case6_group_concat_distinct_separator_over_union() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:i1 ex:cat \"books\" ; ex:price 10 . \
+             ex:i2 ex:cat \"books\" ; ex:price 12 . \
+             ex:t1 ex:cat \"tools\" ; ex:price 5 .', 0)",
+        )
+        .unwrap();
+        let len: i64 = Spi::get_one(
+            "SELECT length(j->>'g')::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (GROUP_CONCAT(DISTINCT ?c ; SEPARATOR = \"|\") AS ?g) WHERE { \
+                  { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"books\") } \
+                  UNION { ?x ex:cat ?c . ?x ex:price ?p FILTER(?c = \"tools\") } }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            len, 11,
+            "DISTINCT dedups books×2 → 'books|tools' (len 11), not 'books|books|tools'"
+        );
     }
 }

@@ -449,6 +449,44 @@ default partition; subsequent `add_graph(g)` calls don't move
 them — the partition-creation order is the caller's
 responsibility.
 
+### TriG / N-Quads ingest (✅ Phase G group G2, v0.5-FUTURE §4)
+
+Quad-format siblings of `parse_turtle`. Both honour graph IRIs and
+reuse the same batched-insert path (`flush_batch` /
+`QUAD_INSERT_SQL` prepared plan), partition-routed per resolved
+`graph_id` via a per-graph batch buffer:
+
+```sql
+pgrdf.parse_trig(content TEXT, default_graph_id BIGINT DEFAULT 0,
+                 strict BOOLEAN DEFAULT FALSE) → JSONB
+pgrdf.parse_nquads(content TEXT, default_graph_id BIGINT DEFAULT 0,
+                   strict BOOLEAN DEFAULT FALSE) → JSONB
+```
+
+- **TriG** — Turtle plus inline `GRAPH <iri> { … }` blocks. Triples
+  outside any GRAPH block land in `default_graph_id`.
+- **N-Quads** — the 4-position line format; the 4th-position graph
+  IRI routes the quad; 3-position lines fall to `default_graph_id`.
+- **Graph IRI resolution** (v0.4 §3.2): a bound IRI → its existing
+  `graph_id`; an unbound IRI → `pgrdf.add_graph(iri)` auto-allocates
+  a fresh id + LIST partition **by default**, or — under
+  `strict => TRUE` — is **rejected** with the stable prefix
+  `parse_trig: unknown graph iri <iri>` /
+  `parse_nquads: unknown graph iri <iri>`. Resolution happens
+  *before* a quad is buffered, so a strict rejection raises with no
+  partial rows (all-or-nothing within the call — the raise rolls
+  back the enclosing statement).
+- **JSONB stats** mirror `parse_turtle_verbose` (triples,
+  dict/shmem cache hits, dict_db_calls, quad_batches, elapsed_ms)
+  and add a `graphs` array of the resolved destination graph ids in
+  first-seen order.
+
+Round-trip behaviour: a TriG document re-emitted via
+`pgrdf.construct` per graph (`{ ?s ?p ?o }` scoped by
+`GRAPH <iri>`) reproduces that graph's triple set exactly
+(quad-set isomorphism per graph) — there is no full-TriG
+re-serialiser UDF in v0.5.
+
 ## 2.4 Graph-level lifecycle UDFs (LLD v0.4 §5, **Phase B shipped — v0.4.2**)
 
 Partition-level primitives over `_pgrdf_quads`. Constant-time DDL

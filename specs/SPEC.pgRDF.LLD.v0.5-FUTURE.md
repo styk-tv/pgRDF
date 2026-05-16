@@ -59,11 +59,11 @@ inside Postgres, with four engines:
 | Section | Surface | Provenance | Status |
 |---|---|---|---|
 | §3 | Reasoning profile selector on `pgrdf.materialize` | was v0.4-FUTURE §8 | ✅ shipped — Phase G group G1 (slices 21-18) |
-| §4 | TriG / N-Quads ingest (`pgrdf.parse_trig`, `pgrdf.parse_nquads`) | was v0.4-FUTURE §10 | 🚧 Phase G group G2 |
+| §4 | TriG / N-Quads ingest (`pgrdf.parse_trig`, `pgrdf.parse_nquads`) | was v0.4-FUTURE §10 | ✅ shipped — Phase G group G2 (slices 17-16) |
 | §5 | SHACL-SPARQL constraint mode + validation-against-materialised-graph | was v0.4-FUTURE §9.5 | 🚧 Phase G group G3 |
 | §6 | W3C SHACL manifest runner wired to CI | was v0.4-FUTURE §9.5 / §13 | 🚧 Phase G group G3 |
 | §7 | IRI overloads for lifecycle UDFs (`drop_graph(iri)`, etc.) | was v0.4-FUTURE §5.1 forward note | ✅ shipped — Phase G group G1 (slices 21-18) |
-| §8 | Aggregates-over-UNION refinements not landed in v0.4 §11 | was v0.4-FUTURE §11 | 🚧 Phase G group G2 |
+| §8 | Aggregates-over-UNION refinements not landed in v0.4 §11 | was v0.4-FUTURE §11 | ✅ shipped — Phase G group G2 (slices 15-14) |
 | §9 | v1.0 contents (forward look) | was v0.4-FUTURE §15 | forward look |
 
 ## 3. Reasoning profile selector ✅ shipped (Phase G group G1)
@@ -156,7 +156,27 @@ returns the same `materialize: unknown profile` error until a later
 cycle wires it (documented choice; the spec's future-reservation
 does not require it to work yet).
 
-## 4. TriG / N-Quads ingest
+## 4. TriG / N-Quads ingest ✅ shipped (Phase G group G2)
+
+> **Status: ✅ shipped — Phase G group G2 (slices 17-16).** All
+> three §4.1 acceptance criteria met. Both UDFs reuse the v0.3
+> batched-insert path (`flush_batch`/`QUAD_INSERT_SQL` prepared
+> plan), partition-routed per resolved `graph_id` via a per-graph
+> batch buffer. The oxttl `TriGParser` / `NQuadsParser` (already a
+> dependency) yield `oxrdf::Quad`; `quad.graph_name` resolves
+> through the v0.4 §3.2 IRI mapping — `_pgrdf_graphs.iri` lookup if
+> bound, else `pgrdf.add_graph(iri)` auto-allocate (default) or a
+> stable `parse_{trig,nquads}: unknown graph iri <iri>` reject under
+> `strict => TRUE`. Graph resolution happens BEFORE a quad is
+> buffered, so a strict rejection leaves no partial rows (the raise
+> rolls back the enclosing statement — all-or-nothing within the
+> call). Verbose JSONB stats mirror `parse_turtle_verbose` plus a
+> `graphs` array of resolved destination graph ids (first-seen
+> order). Round-trip (acceptance #3) is realised as **quad-set
+> isomorphism per graph**: `pgrdf.construct` of each graph's
+> `{ ?s ?p ?o }` reproduces exactly that graph's triple set
+> (count + (s,p,o) cells) — the spec's intent, as there is no
+> full-TriG re-serialiser UDF in v0.5.
 
 Ingest pipelines that consume TriG and N-Quads with inline graph
 declarations need a parser that honours the inline `GRAPH { … }`
@@ -180,14 +200,27 @@ pgrdf.parse_nquads(content TEXT, default_graph_id BIGINT DEFAULT 0, strict BOOLE
 - Both UDFs reuse the v0.3 batched-insert path (same `flush_batch`
   prepared plan).
 
-### 4.1 Acceptance criteria (v0.5 gate)
+### 4.1 Acceptance criteria (v0.5 gate) — ✅ all met
 
-- A TriG document declaring three inline named graphs loads into
-  three pgRDF graphs in a single call.
-- Unknown graph IRIs auto-allocate (default) or reject under
-  `strict => TRUE`.
-- Round-trip: `pgrdf.parse_trig` followed by a CONSTRUCT-of-each-graph
-  re-serialised back to TriG produces an isomorphic document.
+- ✅ A TriG document declaring three inline named graphs loads into
+  three pgRDF graphs in a single call. *(Regression
+  `120-parse-trig.sql` #1: g/1=2, g/2=1, g/3=3 quads + the GRAPH-less
+  triple → default_graph_id, all in one `pgrdf.parse_trig` call;
+  pgrx `parse_trig_three_graphs_one_call`.)*
+- ✅ Unknown graph IRIs auto-allocate (default) or reject under
+  `strict => TRUE`. *(`120` #2 + `119-parse-nquads.sql` C: strict
+  rejects with the stable `parse_{trig,nquads}: unknown graph iri
+  <iri>` prefix and leaves no partial binding; default auto-allocates
+  + binds. pgrx `parse_{trig,nquads}_strict_rejects_unknown` lock the
+  EXACT message.)*
+- ✅ Round-trip: `pgrdf.parse_trig` followed by a
+  CONSTRUCT-of-each-graph re-serialised back to TriG produces an
+  isomorphic document. *(Realised as quad-set isomorphism per graph
+  — `120` #3: `pgrdf.construct` of each graph's `{ ?s ?p ?o }`
+  reproduces that graph's triple set count + (s,p,o) cells. No
+  full-TriG re-serialiser UDF exists in v0.5; quad-set isomorphism
+  per graph IS the spec's "isomorphic document modulo blank-node
+  labelling + ordering" at the realisable granularity.)*
 
 ## 5. SHACL-SPARQL constraint mode + materialised-graph coverage
 
@@ -291,7 +324,57 @@ algebra: dropping a graph via the IRI overload then issuing a
 `CREATE GRAPH <same-iri>` SPARQL UPDATE rebinds the IRI cleanly to
 a fresh partition (invariant K).
 
-## 8. Aggregates over UNION — residual refinements
+## 8. Aggregates over UNION — residual refinements ✅ shipped (Phase G group G2)
+
+> **Status: ✅ shipped — Phase G group G2 (slices 15-14).** All six
+> F2 residual stable panics are LIFTED; each is now correct, not a
+> wrong answer. Per-case realisation:
+>
+> 1. **GRAPH-scope var over UNION** — the graph IRI is carried as a
+>    parallel **TEXT lane** in the same `vK` pool (every branch
+>    projects `g{S}.iri` or `NULL::TEXT`, so the `UNION ALL` column
+>    type stays consistent); the outer GROUP BY / aggregate consumes
+>    that column directly as the group key — byte-identical to what
+>    the single-BGP `GROUP BY ?g` path already does (no dict
+>    round-trip; no interning needed). A var that is graph-scoped in
+>    one branch but term-bound (dict-id) in another is the genuinely
+>    mixed degenerate shape — it stays a STABLE PANIC (a TEXT IRI and
+>    a BIGINT dict id cannot share one `UNION ALL` column) with a
+>    v1.0 pointer (a typed dual-lane derived table). This sub-case is
+>    NOT one of the six §8 residuals; it is a stricter degenerate the
+>    panic correctly guards.
+> 2. **Computed BIND as a triple join key** — after the BGP builder
+>    anchors the computed BIND's output var to a triple slot's
+>    dict-id column, a correlation predicate equates that slot's
+>    lexical value (resolved through `_pgrdf_dictionary`) to the
+>    computed expression's text. Realises the spec's "derived
+>    SELECT expr the triple correlates on" against pgRDF's
+>    lexical-text storage. (F2 left `?k` an unconstrained scan.)
+> 3. **BIND var in a CONSTRUCT template output position** — the
+>    construct per-solution path projects the translated bind
+>    expression as a TEXT column (`ConstructProjShape::BindLexical`)
+>    and shapes it as a plain RDF literal in the row encoder; an
+>    integral/decimal/boolean lexical is tagged with the matching
+>    XSD datatype so a numeric `BIND(?x+?y AS ?sum)` round-trips as
+>    a number. (F2 raised "unbound template variable".)
+> 4. **Nested UNION-of-UNION** — a UNION nested inside a JOIN /
+>    FILTER / GRAPH is normalised by `distribute_unions` (UNION
+>    distributes over JOIN/FILTER/GRAPH per SPARQL algebra), hoisting
+>    every nested UNION to the top so the existing
+>    flatten-then-`walk_branch` path handles it. (F2's `walk_branch`
+>    panicked on the inner UNION.)
+> 5. **Cross-branch HAVING** — every branch's rows are already pooled
+>    into the `qU` derived table, so the HAVING predicate resolves
+>    against `qU` exactly like the SELECT clause; the HAVING
+>    translator is made lanes-aware so a graph-text-lane aggregate
+>    arg (case 1) lowers consistently in HAVING too.
+> 6. **GROUP_CONCAT(DISTINCT … ; SEPARATOR='…') over UNION** —
+>    `STRING_AGG(DISTINCT expr, sep)` over the pooled `qU` rows;
+>    pgRDF emits no in-aggregate ORDER BY so the DISTINCT form is
+>    well-formed and dedups per-row lexicals before concatenating.
+>
+> `executor.rs` line delta: +~430 (no core-BGP carve — correctness
+> first per F1/F2/F3; the carve stays deferred to Phase H).
 
 v0.4 §11 (Phase F group F2, slices 30-27) ships aggregates over
 UNION via a derived-table refactor: each branch becomes a sub-SELECT
@@ -331,11 +414,17 @@ in v0.5:
 - `GROUP_CONCAT(DISTINCT …)` with custom `SEPARATOR` over UNION
   branches.
 
-### 8.1 Acceptance criteria (v0.5 gate)
+### 8.1 Acceptance criteria (v0.5 gate) — ✅ met
 
-- A regression fixture per residual case lands in
+- ✅ A regression fixture per residual case lands in
   `tests/regression/sql/` with the expected aggregate output
   hand-computed from the SQL + SPARQL spec semantics.
+  *(`121-agg-union-residual.sql` — one labelled section per case
+  1–6, every expected value hand-computed; pgrx
+  `g2_case1`…`g2_case6` exercise the exact queries that used to
+  panic and now return the correct aggregate. The corresponding F2
+  stable panics for cases 1–6 are gone; `pgrdf.sparql_parse` does
+  not flag these — locked in `121` `acc_unsupported`.)*
 
 ## 9. Forward look — v1.0 and beyond
 

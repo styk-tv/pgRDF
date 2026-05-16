@@ -8,6 +8,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ### Added
 
+- TriG / N-Quads ingest + aggregates-over-UNION residual refinements — Phase G group G2 (slices 17-14). `pgrdf.parse_trig(content, default_graph_id, strict)` and `pgrdf.parse_nquads(...)` honour inline/4th-position graph IRIs (auto-allocate via v0.4 §3.2, or reject under `strict`), reusing the v0.3 batched-insert path. Closes the six v0.5-FUTURE §8 aggregate-over-UNION residuals (GRAPH-scope group key, computed-BIND join key, BIND in CONSTRUCT/DESCRIBE template, nested UNION-of-UNION, cross-branch HAVING, GROUP_CONCAT DISTINCT+SEPARATOR) — the F2 stable panics are lifted. Closes v0.5-FUTURE §4 + §8.
 - Reasoning-profile selector + IRI lifecycle overloads — Phase G group G1 (slices 21-18). `pgrdf.materialize(graph_id, profile TEXT DEFAULT 'owl-rl')` adds `'rdfs'` (RDFS rule subset) alongside `'owl-rl'`; JSONB gains a `profile` field; unknown profiles error (`materialize: unknown profile`, no silent fallback). The bare `pgrdf.materialize(g)` form is unchanged. IRI-keyed overloads `pgrdf.{drop,clear,copy,move}_graph(iri TEXT, …)` resolve via `_pgrdf_graphs` and dispatch to the v0.4 §5 partition-DDL path (error `<fn>: unknown iri` on an unbound IRI, distinct from the BIGINT no-op). Closes v0.5-FUTURE §3 (last ONTOSYS P1 gap) + §7.
 
 ## [0.4.6] — 2026-05-16

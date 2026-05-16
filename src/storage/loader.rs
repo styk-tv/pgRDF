@@ -23,13 +23,14 @@
 use crate::query::plan_cache;
 use crate::storage::dict::{put_term_full, term_type};
 use crate::storage::shmem_cache;
-use oxrdf::{NamedOrBlankNode, Term};
-use oxttl::TurtleParser;
+use oxrdf::{GraphName, NamedOrBlankNode, Term};
+use oxttl::{NQuadsParser, TriGParser, TurtleParser};
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys::{Oid, PgBuiltInOids};
 use pgrx::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::mem;
@@ -301,6 +302,196 @@ fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// §4 — TriG / N-Quads quad ingest (graph-routed)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Per-graph quad batch buffers. The v0.3 `flush_batch` prepared plan
+/// is single-graph (`graph_id` is `$4`); a quad stream interleaves
+/// graphs, so we partition the buffers by resolved `graph_id` and
+/// flush each partition through the SAME `QUAD_INSERT_SQL` plan. Net
+/// effect: identical batched-insert path as `parse_turtle`, just
+/// keyed per destination graph.
+/// One graph's pending (subject, predicate, object) id columns
+/// awaiting a `flush_batch`.
+type QuadCols = (Vec<i64>, Vec<i64>, Vec<i64>);
+
+#[derive(Default)]
+struct GraphBatches {
+    /// graph_id → pending (s_ids, p_ids, o_ids) flush buffers.
+    pending: HashMap<i64, QuadCols>,
+}
+
+impl GraphBatches {
+    fn push(&mut self, graph_id: i64, s: i64, p: i64, o: i64, stats: &mut LoaderStats) {
+        let entry = self
+            .pending
+            .entry(graph_id)
+            .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new()));
+        entry.0.push(s);
+        entry.1.push(p);
+        entry.2.push(o);
+        if entry.0.len() >= BATCH_SIZE {
+            let (mut bs, mut bp, mut bo) = mem::take(entry);
+            flush_batch(&mut bs, &mut bp, &mut bo, graph_id, stats);
+        }
+    }
+
+    fn flush_all(&mut self, stats: &mut LoaderStats) {
+        // Deterministic flush order (sorted graph ids) keeps the
+        // quad_batches accounting + any error surface stable across
+        // runs regardless of HashMap iteration order.
+        let mut gids: Vec<i64> = self.pending.keys().copied().collect();
+        gids.sort_unstable();
+        for gid in gids {
+            if let Some((mut bs, mut bp, mut bo)) = self.pending.remove(&gid) {
+                flush_batch(&mut bs, &mut bp, &mut bo, gid, stats);
+            }
+        }
+    }
+}
+
+/// Resolve a parsed `GraphName` to a pgRDF `graph_id`.
+///
+/// * `DefaultGraph` (TriG triples outside any GRAPH block / N-Quads
+///   3-position lines) → `default_graph_id` verbatim.
+/// * A named-node graph IRI → `pgrdf.graph_id(iri)` if already bound;
+///   otherwise, under the default (`strict == false`),
+///   `pgrdf.add_graph(iri)` auto-allocates the next id and creates the
+///   LIST partition. Under `strict == true` an unbound IRI raises with
+///   the stable `{prefix}: unknown graph iri <iri>` error — no
+///   allocation, no partial ingest (the raise aborts the surrounding
+///   statement; nothing has been flushed for an unknown IRI because
+///   resolution happens BEFORE the quad is buffered).
+/// * A blank-node graph label is not a legal pgRDF graph key
+///   (graphs are IRI- or id-addressed); raise with the stable prefix.
+///
+/// Resolved ids are cached for the rest of the call so a repeated
+/// graph IRI costs one lookup, not one per quad.
+fn resolve_graph_id(
+    g: &GraphName,
+    default_graph_id: i64,
+    strict: bool,
+    prefix: &str,
+    cache: &mut HashMap<String, i64>,
+) -> i64 {
+    match g {
+        GraphName::DefaultGraph => default_graph_id,
+        GraphName::NamedNode(n) => {
+            let iri = n.as_str();
+            if let Some(&id) = cache.get(iri) {
+                return id;
+            }
+            // Already bound? (read-only lookup, no side effect)
+            let existing: Option<i64> = Spi::get_one_with_args(
+                "SELECT (SELECT graph_id FROM pgrdf._pgrdf_graphs WHERE iri = $1 LIMIT 1)",
+                &[iri.into()],
+            )
+            .unwrap_or_else(|e| panic!("{prefix}: graph iri lookup failed: {e}"));
+            let id = match existing {
+                Some(id) => id,
+                None if strict => {
+                    panic!("{prefix}: unknown graph iri {iri}");
+                }
+                None => {
+                    // Auto-allocate + create the LIST partition through
+                    // the v0.4 §3.2 IRI-keyed add_graph overload (the
+                    // partition DDL is single-sourced there).
+                    Spi::get_one_with_args::<i64>("SELECT pgrdf.add_graph($1)", &[iri.into()])
+                        .unwrap_or_else(|e| panic!("{prefix}: add_graph({iri}) failed: {e}"))
+                        .unwrap_or_else(|| panic!("{prefix}: add_graph({iri}) returned NULL"))
+                }
+            };
+            cache.insert(iri.to_string(), id);
+            id
+        }
+        GraphName::BlankNode(b) => {
+            panic!(
+                "{prefix}: blank-node graph label _:{} is not a valid pgRDF graph key \
+                 (use an IRI-named graph)",
+                b.as_str()
+            );
+        }
+    }
+}
+
+/// Quad-stream ingest core shared by `parse_trig` / `parse_nquads`.
+/// Reuses the term-interning dict cache + the `flush_batch` prepared
+/// plan exactly like `ingest_turtle_with_stats`, partition-routed by
+/// the per-quad resolved `graph_id`. `prefix` selects the stable
+/// error prefix (`parse_trig` / `parse_nquads`). The `Iterator` is
+/// the oxttl quad parser (TriG or N-Quads); both yield the same
+/// `Result<Quad, _>` item shape.
+fn ingest_quads_with_stats<P, E>(
+    parser: P,
+    default_graph_id: i64,
+    strict: bool,
+    prefix: &'static str,
+) -> (LoaderStats, Vec<i64>)
+where
+    P: Iterator<Item = Result<oxrdf::Quad, E>>,
+    E: std::fmt::Display,
+{
+    let start = Instant::now();
+    let mut cache: HashMap<DictKey, i64> = HashMap::new();
+    let mut graph_id_cache: HashMap<String, i64> = HashMap::new();
+    let mut stats = LoaderStats::default();
+    let mut batches = GraphBatches::default();
+    // Insertion-ordered set of graph ids touched (for the JSONB
+    // `graphs` array — first-seen order is stable + useful).
+    let mut graphs_order: Vec<i64> = Vec::new();
+    let mut graphs_seen: HashSet<i64> = HashSet::new();
+
+    for quad_result in parser {
+        let quad = quad_result.unwrap_or_else(|e| panic!("{prefix}: quad parse error: {e}"));
+        // Resolve the destination graph FIRST. Under `strict` an
+        // unknown IRI raises here, before any term interning or quad
+        // buffering for it — so a rejected IRI never leaves a partial
+        // row (the raise rolls back the enclosing statement).
+        let gid = resolve_graph_id(
+            &quad.graph_name,
+            default_graph_id,
+            strict,
+            prefix,
+            &mut graph_id_cache,
+        );
+        if graphs_seen.insert(gid) {
+            graphs_order.push(gid);
+        }
+        let s = subject_to_id(&quad.subject, &mut cache, &mut stats);
+        let p = intern_term(
+            &mut cache,
+            &mut stats,
+            quad.predicate.as_str(),
+            term_type::URI,
+            None,
+            None,
+        );
+        let o = object_to_id(&quad.object, &mut cache, &mut stats);
+        batches.push(gid, s, p, o, &mut stats);
+        stats.triples += 1;
+    }
+    batches.flush_all(&mut stats);
+    stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    (stats, graphs_order)
+}
+
+/// JSONB stats for the quad-ingest UDFs. Mirrors `stats_to_jsonb`
+/// (same verbose-stats keys + conventions as `parse_turtle_verbose`)
+/// and extends it with a `graphs` array of the resolved destination
+/// graph ids, in first-seen order.
+fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
+    pgrx::JsonB(json!({
+        "triples":          stats.triples,
+        "dict_cache_hits":  stats.dict_cache_hits,
+        "shmem_cache_hits": stats.shmem_cache_hits,
+        "dict_db_calls":    stats.dict_db_calls,
+        "quad_batches":     stats.quad_batches,
+        "graphs":           graphs,
+        "elapsed_ms":       stats.elapsed_ms,
+    }))
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // UDF surface
 // ─────────────────────────────────────────────────────────────────────
 
@@ -356,6 +547,59 @@ fn parse_turtle_verbose(
     let base = base_iri.filter(|s| !s.is_empty());
     let stats = ingest_turtle_with_stats(content.as_bytes(), graph_id, base);
     stats_to_jsonb(&stats)
+}
+
+/// Parse a TriG document from a string and ingest it into pgRDF,
+/// honouring inline `GRAPH <iri> { … }` blocks. Default-graph triples
+/// (outside any GRAPH block) land in `default_graph_id`. Each named
+/// graph's `<iri>` resolves via the v0.4 §3.2 IRI mapping:
+/// `pgrdf.graph_id(iri)` if already bound, else `pgrdf.add_graph(iri)`
+/// auto-allocates a fresh id + LIST partition. Under `strict => TRUE`
+/// an unknown graph IRI is rejected (`parse_trig: unknown graph iri
+/// <iri>`) instead of auto-allocating — resolution happens before any
+/// quad for that IRI is buffered, so a rejection leaves no partial
+/// rows. Reuses the v0.3 batched-insert path, partition-routed per
+/// resolved graph_id.
+///
+/// Returns verbose JSONB stats (same shape as
+/// `pgrdf.parse_turtle_verbose` plus a `graphs` array of the resolved
+/// destination graph ids in first-seen order).
+///
+/// SQL: `pgrdf.parse_trig(content TEXT, default_graph_id BIGINT DEFAULT 0, strict BOOLEAN DEFAULT FALSE) -> JSONB`.
+#[pg_extern]
+fn parse_trig(
+    content: &str,
+    default_graph_id: default!(i64, 0),
+    strict: default!(bool, false),
+) -> pgrx::JsonB {
+    let parser = TriGParser::new().for_slice(content.as_bytes());
+    let (stats, graphs) = ingest_quads_with_stats(parser, default_graph_id, strict, "parse_trig");
+    quad_stats_to_jsonb(&stats, &graphs)
+}
+
+/// Parse an N-Quads document from a string and ingest it into pgRDF.
+/// Each line is a 4-position quad; the fourth-position graph IRI
+/// resolves via the v0.4 §3.2 IRI mapping (bound → its id, unbound →
+/// `pgrdf.add_graph(iri)` auto-allocate by default). 3-position lines
+/// (no fourth term) fall to `default_graph_id`. Under `strict => TRUE`
+/// an unknown graph IRI is rejected (`parse_nquads: unknown graph iri
+/// <iri>`) with no partial ingest. Reuses the v0.3 batched-insert
+/// path, partition-routed per resolved graph_id.
+///
+/// Returns verbose JSONB stats (same shape as
+/// `pgrdf.parse_turtle_verbose` plus a `graphs` array of the resolved
+/// destination graph ids in first-seen order).
+///
+/// SQL: `pgrdf.parse_nquads(content TEXT, default_graph_id BIGINT DEFAULT 0, strict BOOLEAN DEFAULT FALSE) -> JSONB`.
+#[pg_extern]
+fn parse_nquads(
+    content: &str,
+    default_graph_id: default!(i64, 0),
+    strict: default!(bool, false),
+) -> pgrx::JsonB {
+    let parser = NQuadsParser::new().for_slice(content.as_bytes());
+    let (stats, graphs) = ingest_quads_with_stats(parser, default_graph_id, strict, "parse_nquads");
+    quad_stats_to_jsonb(&stats, &graphs)
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -461,5 +705,142 @@ mod tests {
         let db_calls = v["dict_db_calls"].as_i64().unwrap();
         assert_eq!(shmem_hits + db_calls, 5);
         assert_eq!(v["quad_batches"], 1);
+    }
+
+    // ─── §4 (Phase G group G2, slice 17) — N-Quads ingest ───────────
+
+    /// parse_nquads: a 4-position line lands in the named graph
+    /// (auto-allocated by default); a 3-position line falls to the
+    /// default_graph_id. Verbose stats carry the batched-insert shape
+    /// + the `graphs` array of touched ids.
+    #[pg_test]
+    fn parse_nquads_basic() {
+        let nq = r#"<http://ex/a> <http://ex/p> "x" <http://ex/g1> .
+<http://ex/b> <http://ex/p> "y" <http://ex/g1> .
+<http://ex/c> <http://ex/p> "z" ."#;
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.parse_nquads($1, $2)",
+            &[nq.into(), 7_201i64.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        assert_eq!(v["triples"], 3, "3 quads parsed");
+        assert_eq!(v["quad_batches"], 2, "two graphs → two flush batches");
+        let g1: i64 = Spi::get_one("SELECT pgrdf.graph_id('http://ex/g1')")
+            .unwrap()
+            .unwrap();
+        let in_g1: i64 = Spi::get_one_with_args("SELECT pgrdf.count_quads($1)", &[g1.into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_g1, 2, "two quads routed to g1");
+        let in_def: i64 =
+            Spi::get_one_with_args("SELECT pgrdf.count_quads($1)", &[7_201i64.into()])
+                .unwrap()
+                .unwrap();
+        assert_eq!(in_def, 1, "the 3-position line fell to default_graph_id");
+        let graphs = v["graphs"].as_array().unwrap();
+        assert!(graphs.iter().any(|x| x.as_i64() == Some(7_201)));
+        assert!(graphs.iter().any(|x| x.as_i64() == Some(g1)));
+    }
+
+    /// parse_nquads: typed + language-tagged literals round-trip into
+    /// the dictionary (4th-position graph routes them all to g1).
+    #[pg_test]
+    fn parse_nquads_typed_and_lang_literals() {
+        let nq = r#"<http://nq2/n> <http://nq2/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> <http://nq2/g> .
+<http://nq2/n> <http://nq2/label> "hi"@en <http://nq2/g> ."#;
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.parse_nquads($1, $2)",
+            &[nq.into(), 0i64.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(j.0["triples"], 2);
+        let xsd_int: Option<i64> = Spi::get_one(
+            "SELECT (SELECT id FROM pgrdf._pgrdf_dictionary
+                      WHERE term_type = 1
+                        AND lexical_value = 'http://www.w3.org/2001/XMLSchema#integer')",
+        )
+        .unwrap();
+        assert!(xsd_int.is_some(), "xsd:integer datatype IRI interned");
+        let lang_lit: Option<i64> = Spi::get_one(
+            "SELECT (SELECT id FROM pgrdf._pgrdf_dictionary
+                      WHERE term_type = 3 AND lexical_value = 'hi'
+                        AND language_tag = 'en')",
+        )
+        .unwrap();
+        assert!(lang_lit.is_some(), "lang-tagged literal interned with @en");
+    }
+
+    /// parse_nquads strict-mode: an unknown 4th-position IRI rejects
+    /// with the EXACT stable prefix (no auto-allocation).
+    #[pg_test(error = "parse_nquads: unknown graph iri http://ex/never")]
+    fn parse_nquads_strict_rejects_unknown() {
+        let nq = "<http://ex/s> <http://ex/p> \"v\" <http://ex/never> .";
+        Spi::run_with_args("SELECT pgrdf.parse_nquads($1, 0, TRUE)", &[nq.into()]).unwrap();
+    }
+
+    // ─── §4 (Phase G group G2, slice 16) — TriG ingest ──────────────
+
+    /// parse_trig acceptance #1: a TriG document declaring three
+    /// inline named graphs loads into three pgRDF graphs in a single
+    /// call; each graph's quad count + binding is asserted.
+    #[pg_test]
+    fn parse_trig_three_graphs_one_call() {
+        let trig = r#"@prefix ex: <http://example.com/> .
+            ex:default0 ex:p "d" .
+            GRAPH <http://example.com/g/1> { ex:a ex:p "1" . ex:a2 ex:p "1b" }
+            GRAPH <http://example.com/g/2> { ex:b ex:p "2" }
+            GRAPH <http://example.com/g/3> { ex:c ex:p "3" . ex:c2 ex:p "3b" . ex:c3 ex:p "3c" }"#;
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.parse_trig($1, $2)",
+            &[trig.into(), 7_210i64.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        assert_eq!(v["triples"], 7, "1 default + 2 + 1 + 3 = 7 quads");
+
+        for (iri, want) in [
+            ("http://example.com/g/1", 2i64),
+            ("http://example.com/g/2", 1),
+            ("http://example.com/g/3", 3),
+        ] {
+            let gid: i64 = Spi::get_one_with_args("SELECT pgrdf.graph_id($1)", &[iri.into()])
+                .unwrap()
+                .expect("named graph IRI was bound");
+            let n: i64 = Spi::get_one_with_args("SELECT pgrdf.count_quads($1)", &[gid.into()])
+                .unwrap()
+                .unwrap();
+            assert_eq!(n, want, "graph {iri} quad count");
+        }
+        // The default-graph triple landed in default_graph_id.
+        let in_def: i64 =
+            Spi::get_one_with_args("SELECT pgrdf.count_quads($1)", &[7_210i64.into()])
+                .unwrap()
+                .unwrap();
+        assert_eq!(in_def, 1, "the GRAPH-less triple → default_graph_id");
+        // Acceptance #3 realisation (quad-set isomorphism per graph):
+        // CONSTRUCT each graph back out and compare the triple set.
+        let g1_triples: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.construct(
+               'PREFIX ex: <http://example.com/>
+                CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://example.com/g/1> { ?s ?p ?o } }')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            g1_triples, 2,
+            "round-trip: CONSTRUCT-of-g1 yields the same 2 triples (quad-set isomorphism)"
+        );
+    }
+
+    /// parse_trig strict-mode rejects an unknown inline GRAPH IRI
+    /// with the EXACT stable prefix.
+    #[pg_test(error = "parse_trig: unknown graph iri http://example.com/unbound")]
+    fn parse_trig_strict_rejects_unknown() {
+        let trig = "GRAPH <http://example.com/unbound> { <http://ex/s> <http://ex/p> \"v\" }";
+        Spi::run_with_args("SELECT pgrdf.parse_trig($1, 0, TRUE)", &[trig.into()]).unwrap();
     }
 }
