@@ -40,13 +40,26 @@ services:
       # Drop the extension files at canonical PG 17 paths. These bind
       # mounts require the files to exist on the host first - produced
       # by `just build-ext` (see compose/README.md).
+      #
+      # Phase F group F4 (infra-debt fix): the per-version SQL files
+      # used to be pinned one bind-mount line each
+      # (pgrdf--0.4.1.sql … pgrdf--0.4.5.sql). `just build-ext` does
+      # `rm -rf compose/extensions/share` then exports only what
+      # `cargo pgrx package` generates for the *current* version, so a
+      # stale per-version pin (e.g. pgrdf--0.4.1.sql) referenced a
+      # source file that no longer exists — every dispatch had to
+      # hand-create a gitignored copy + cold-restart. The mount is now
+      # the whole share/extension/ directory: version-agnostic, so no
+      # release cut or rebuild ever needs to touch this line again.
+      # pgrdf.so + pgrdf.control are mounted directly (the directory
+      # carries them too, but the explicit lib mount keeps the $libdir
+      # path correct). Postgres' built-in plpgsql is created at initdb
+      # into the already-initialised ./pg-data cluster and does not
+      # consult $sharedir/extension at CREATE EXTENSION pgrdf time, so
+      # shadowing the stock extension dir here is safe for this
+      # single-extension dev stack.
       - ./extensions/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro,z
-      - ./extensions/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro,z
-      - ./extensions/share/extension/pgrdf--0.4.1.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.1.sql:ro,z
-      - ./extensions/share/extension/pgrdf--0.4.2.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.2.sql:ro,z
-      - ./extensions/share/extension/pgrdf--0.4.3.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.3.sql:ro,z
-      - ./extensions/share/extension/pgrdf--0.4.4.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.4.sql:ro,z
-      - ./extensions/share/extension/pgrdf--0.4.5.sql:/usr/share/postgresql/17/extension/pgrdf--0.4.5.sql:ro,z
+      - ./extensions/share/extension:/usr/share/postgresql/17/extension:ro,z
       # Read-only ontology + regression fixtures, reachable from the
       # postgres process at /fixtures (see pgrdf.load_turtle path arg).
       - ../fixtures:/fixtures:ro,z

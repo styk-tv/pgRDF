@@ -111,6 +111,13 @@ SELECT _plan_has_cte_scan(
 -- `?c rdfs:subClassOf* ex:Top` — every transitive subclass of Top
 -- (c1..c5) PLUS Top itself (object bound ⇒ (Top,Top) reflexive,
 -- W3C §9.3) = 6 rows.
+--
+-- Phase F group F4 (LLD v0.4 §11): ORDER BY ?c now sorts IRIs by
+-- Unicode codepoint per SPARQL 1.1 §15.1 (was a locale-dependent
+-- collation pre-F4). `http://example.org/Top` therefore sorts
+-- BEFORE `…/c1` — uppercase 'T' (U+0054) precedes lowercase 'c'
+-- (U+0063) under codepoint order — so the ordered block is
+-- Top, c1, c2, c3, c4, c5.
 SELECT (s.j->>'c') AS subclass_pre
 FROM pgrdf.sparql(
   'PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>

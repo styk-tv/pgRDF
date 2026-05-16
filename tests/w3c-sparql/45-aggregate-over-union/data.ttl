@@ -1,0 +1,6 @@
+@prefix ex: <http://example.org/> .
+
+ex:s1 ex:sales 100 .
+ex:s2 ex:sales 200 .
+ex:r1 ex:returns 30 .
+ex:r2 ex:returns 20 .

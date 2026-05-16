@@ -105,9 +105,10 @@ already enumerated in [`v0.3 §3`](SPEC.pgRDF.LLD.v0.3.md) as
    ERRATA.v0.4 E-011.
 
 Plus the v0.3-deferred SPARQL surface items (§11): multi-triple
-OPTIONAL, VALUES, BIND-downstream, aggregates over UNION, DESCRIBE.
-These share enough translator machinery with §4 and §6 that they
-ship in the same cut for economy. 🚧
+OPTIONAL, VALUES, BIND-downstream, aggregates over UNION, DESCRIBE,
+type-aware ORDER BY. These share enough translator machinery with
+§4 and §6 that they ship in the same cut for economy. ✅ **complete
+in v0.4.6** (Phase F countdown F1-F4).
 
 Capability matrix for the v0.4 target:
 
@@ -130,6 +131,7 @@ Capability matrix for the v0.4 target:
 | `BIND` output in later FILTER / BGP | ⏳ deferred | §11 | ✅ F2 (slices 30-27) — AST substitution pass: BIND var rewritten into later FILTER / triple-slot join / chained BIND before the structural walk (no new translator surface); unbound-var BIND → NULL not error (§18.2.5); composes with GRAPH + F1 OPTIONAL/VALUES; inherited by `pgrdf.construct` + UPDATE WHERE |
 | Aggregates over `UNION` | ⏳ deferred | §11 | ✅ F2 (slices 30-27) — derived-table refactor (each branch → sub-SELECT projecting dict ids into the F1 `vK` pool; existing aggregate translator runs over `(<union>) qU`); COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING, GRAPH scoping, property-path branch; group-by on a GRAPH-scope-only var → v0.5-FUTURE §8 |
 | `DESCRIBE` | ⏳ deferred | §11 | ✅ F3 (slices 26-24) — sibling UDF `pgrdf.describe(q TEXT) → SETOF JSONB` (byte-identical to `pgrdf.construct`); closure of each described resource (every triple with it as subject) transitively expanded one hop through blank-node objects per W3C §16.4 (cycle-safe, dedup'd); `DESCRIBE <iri>` / `DESCRIBE ?v WHERE {…}` / mixed / `DESCRIBE *`; composes with GRAPH scoping; `pgrdf.sparql_parse` reports `form:"DESCRIBE"` (NOT flagged unsupported); DESCRIBE via `pgrdf.sparql` redirect-panics |
+| Type-aware `ORDER BY` (§15.1) | ⏳ deferred | §11 | ✅ F4 (slices 23-22) — value-space ordering: kind rank (numeric < dateTime < boolean < other) + per-kind comparator (numerics numerically `2<10`, `xsd:dateTime` chronologically, `xsd:boolean` false<true, strings by codepoint `COLLATE "C"`) + codepoint tiebreak; total/stable, never raises; `DESC` + multi-key + expression sort keys (`ORDER BY STRLEN(?s)`); all four SQL builders + `SELECT DISTINCT` wrap; expr keys on aggregate/UNION shapes a documented narrow deferral |
 | Real SHACL output | 🚧 stub | §9 | ✅ shipped `ac40bc2` |
 | Reasoning profile selector (RDFS / OWL-RL) | not yet | — | ⏳ v0.5-FUTURE §3 |
 | TriG / N-Quads ingest | not yet | — | ⏳ v0.5-FUTURE §4 |
@@ -1081,19 +1083,20 @@ These items were enumerated under "⏳ v0.4" in
 §4-§7 because the same translator machinery they need
 (LATERAL-style derived-table refactor + AST substitution) is the
 same machinery §4 (UPDATE) and §6 (CONSTRUCT) need. Ship together
-for economy. 🚧 (§11 overall stays 🚧 until Phase F group F4 — the
-v0.4.6 cut; F1 landed multi-triple OPTIONAL + VALUES, F2 landed
-BIND-downstream + aggregates-over-UNION, F3 landed DESCRIBE. After
-F3 the §11 surface backlog is functionally complete EXCEPT
-type-aware `ORDER BY` — F4 assesses/closes that remaining item
-alongside the W3C consolidation + the release cut.)
+for economy. ✅ **§11 is complete** — the full SPARQL surface
+backlog (multi-triple OPTIONAL, VALUES, BIND-downstream,
+aggregates-over-UNION, DESCRIBE, type-aware ORDER BY) shipped across
+the Phase F countdown and is released in **v0.4.6**. Residual
+aggregate-over-UNION refinements are tracked, not lost, in
+[`v0.5-FUTURE §8`](SPEC.pgRDF.LLD.v0.5-FUTURE.md) (stable panics,
+never wrong answers).
 
 Phase F dispatch grouping: **F1 (slices 34-31) — multi-triple
 OPTIONAL + VALUES (✅ landed)**; **F2 (slices 30-27) —
 BIND-downstream + aggregates-over-UNION (✅ landed)**; **F3
-(slices 26-24) — DESCRIBE (✅ landed)**; F4 — type-aware ORDER BY
-assessment + W3C consolidation + docs + the v0.4.6 release cut
-(🚧).
+(slices 26-24) — DESCRIBE (✅ landed)**; **F4 (slices 23-22) —
+type-aware ORDER BY + the Phase F W3C-shape consolidation + docs +
+the v0.4.6 release cut (✅ landed)**.
 
 - **Multi-triple `OPTIONAL { BGP }`.** ✅ **F1 landed.** The v0.3
   OPTIONAL handler supported only a single-triple right side. F1
@@ -1203,11 +1206,51 @@ assessment + W3C consolidation + docs + the v0.4.6 release cut
   WHERE; DESCRIBE is NOT flagged in `unsupported_algebra` (the §11
   acceptance binding; 80-unsupported-shapes gap-6 retired in the
   same commit). Regression-locked: `tests/regression/sql/116-describe.sql`.
+- **Type-aware `ORDER BY` (SPARQL 1.1 §15.1).** ✅ **F4 landed
+  (slices 23-22).** Before F4 the executor emitted a single
+  lexical-string compare over `_pgrdf_dictionary.lexical_value`, so
+  xsd-typed numeric literals sorted as text (`"10"` before `"2"`).
+  F4 expands every sort key into the §15.1 value-space term list:
+  a leading **kind rank** (numerics, then `xsd:dateTime`, then
+  `xsd:boolean`, then everything else) groups comparable lexical
+  spaces together so value comparison is meaningful within a group
+  and the cross-type order is the stable rank, then a per-kind
+  comparator — numerics compared **numerically** (`2 < 10`),
+  `xsd:dateTime` **chronologically**, `xsd:boolean` `false < true`,
+  strings / plain / lang-tagged by **Unicode codepoint**
+  (`COLLATE "C"`, locale-independent) — and a final codepoint
+  tiebreak. The numeric/dateTime casts are regex-guarded so a
+  malformed lexical never raises; it falls through to the codepoint
+  tier (the §15.1-sanctioned stable fallback). ORDER BY is therefore
+  **total and never raises on incomparable operands** — distinct
+  from `<` inside FILTER, which can error. `DESC()` reverses;
+  multi-key (`ORDER BY ?a DESC(?b)`) composes; **expression sort
+  keys** (`ORDER BY (?a + ?b)`, `ORDER BY STRLEN(?s)`) translate
+  through the shared BIND/FILTER expression translator. The four SQL
+  builders (single-branch, aggregate, UNION, aggregate-over-UNION)
+  all order over the underlying SQL expression (group/aggregate
+  expr, dict-lookup, or BIND expr) — never an output alias buried in
+  an expression (Postgres rejects that); `SELECT DISTINCT` + ORDER
+  BY wraps the dedup in an outer derived table so the §15.1 terms
+  run over the deduplicated columns. Expression sort keys on the
+  aggregate / UNION / aggregate-over-UNION shapes (a rare combination
+  — project the expression with BIND, then ORDER BY the bound
+  variable) are a documented narrow deferral (stable panic, never a
+  wrong answer), consistent with the F1/F2 edge-case deferral style.
+  ORDER BY was already a transparently-walked SELECT modifier (never
+  flagged in `unsupported_algebra`; no `80-unsupported-shapes` gap to
+  retire). Regression-locked:
+  `tests/regression/sql/100-sparql-order-by-type-aware.sql` (+ the
+  W3C-shape fixture `47-order-by-type-aware`); the property-path
+  closure fixture `111` expected output was corrected to the §15.1
+  codepoint order (uppercase IRIs now sort before lowercase, as the
+  spec mandates).
 
 Acceptance criteria for each carry the v0.3 LLD's existing wording:
 the relevant regression file gains the deferred shape, the
 `unsupported_algebra` entry for that form disappears from
-`pgrdf.sparql_parse` output.
+`pgrdf.sparql_parse` output (where applicable — ORDER BY was never
+flagged, so it has no entry to retire).
 
 ## 12. Performance work carried forward from v0.3
 
@@ -1232,9 +1275,15 @@ own slices.
   one pg_regress fixture.
 - No `ACCEPT=1` autobaselining of new query coverage. Expected
   outputs are hand-computed from the SQL + spec.
-- The W3C SPARQL 1.1 manifest runner (Phase 6 step 2, gated `if: false`
-  in v0.3) is wired in v0.4 — it gates §11's SPARQL backlog
-  automatically as the deferred forms come online. 🚧
+- The W3C SPARQL 1.1 shape-conformance runner (`tests/w3c-sparql/`,
+  gated `if: false` in v0.3) is wired in v0.4 and gates §11's SPARQL
+  backlog. ✅ All §11 forms are online and W3C-shape-locked: the
+  suite stands at **47 fixtures** (Phase E added 36-41 for property
+  paths; Phase F group F4 added 42-47 — optional-multi-triple,
+  values-inline, bind-downstream, aggregate-over-union, describe, and
+  order-by-type-aware — the `describe` fixture introducing a
+  `describe` per-fixture kind alongside the slice-51 `construct`
+  kind).
 - Test bar at the start of the v0.4 cycle (post-SHACL slice):
   **94 pgrx + 40 pg_regress + 23 W3C + 3 LUBM = 160 tests** green.
   The v0.4 cut targets pg_regress growth to roughly 60-something

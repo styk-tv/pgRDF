@@ -1,0 +1,9 @@
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+SELECT ?name ?mbox ?page
+WHERE {
+  ?person foaf:name ?name .
+  OPTIONAL {
+    ?person foaf:mbox ?mbox .
+    ?person foaf:homepage ?page .
+  }
+}

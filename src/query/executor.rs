@@ -1871,6 +1871,37 @@ struct MinusBlock {
     scope: Option<GraphScope>,
 }
 
+/// A single ORDER BY sort key. SPARQL 1.1 §15.1 permits ordering by a
+/// bare variable or by an arbitrary expression
+/// (`ORDER BY (?a + ?b)`, `ORDER BY STRLEN(?s)`, `ORDER BY DESC(?x)`).
+#[derive(Clone)]
+enum OrderKey {
+    /// `ORDER BY ?v` — sort by the variable's term value.
+    Var(String),
+    /// `ORDER BY (<expr>)` — the spargebra expression is translated
+    /// via the shared BIND/FILTER expression translator at SQL-build
+    /// time (single-branch path; aggregate/UNION paths still require a
+    /// projected variable key).
+    Expr(Expression),
+}
+
+impl OrderKey {
+    /// Aggregate / UNION / aggregate-over-UNION paths order over the
+    /// outer projected output columns only; an expression sort key in
+    /// those shapes is a documented narrow deferral (mirrors the F1/F2
+    /// edge-case deferrals — never a wrong answer, a stable panic).
+    fn require_projected_var(&self, ctx: &str) -> &str {
+        match self {
+            OrderKey::Var(v) => v.as_str(),
+            OrderKey::Expr(e) => panic!(
+                "sparql: ORDER BY expression sort keys are not supported on {ctx} \
+                 (project the expression with BIND, then ORDER BY the bound \
+                 variable); got {e:?}"
+            ),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ParsedSelect {
     projected: Vec<String>,
@@ -1915,10 +1946,13 @@ struct ParsedSelect {
     /// empty in that case; build_bgp_sql dispatches on which is set.
     union_branches: Vec<UnionBranch>,
     distinct: bool,
-    /// (variable_name, ascending). Each entry orders by the term's
-    /// lexical_value in the given direction. Variables that aren't
-    /// projected get an extra (hidden) SELECT-list column.
-    order_by: Vec<(String, bool)>,
+    /// (sort key, ascending). Each entry orders by the key's value in
+    /// the given direction, type-aware per SPARQL 1.1 §15.1. Variable
+    /// keys that aren't projected get an extra (hidden) SELECT-list
+    /// column. Phase F group F4: expression sort keys
+    /// (`ORDER BY (?a + ?b)`, `ORDER BY STRLEN(?s)`) are captured as
+    /// `OrderKey::Expr` and translated via the BIND/FILTER translator.
+    order_by: Vec<(OrderKey, bool)>,
     limit: Option<usize>,
     offset: usize,
     /// Slice 112: monotonically-increasing scope-id counter used to
@@ -3335,11 +3369,15 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
                 };
                 match expr {
                     Expression::Variable(v) => {
-                        ps.order_by.push((v.as_str().to_string(), ascending));
+                        ps.order_by
+                            .push((OrderKey::Var(v.as_str().to_string()), ascending));
                     }
-                    other => panic!(
-                        "sparql: ORDER BY supports only variable expressions today (got {other:?})"
-                    ),
+                    // Phase F group F4 (LLD v0.4 §11): expression sort
+                    // keys (`ORDER BY (?a + ?b)`, `ORDER BY STRLEN(?s)`)
+                    // captured for SQL-build-time translation.
+                    other => {
+                        ps.order_by.push((OrderKey::Expr(other.clone()), ascending));
+                    }
                 }
             }
             walk_select_scoped(inner, ps, current_scope);
@@ -3549,6 +3587,99 @@ fn tp_object_var(tp: &TriplePattern) -> Option<String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Type-aware ORDER BY (SPARQL 1.1 §15.1)
+// ─────────────────────────────────────────────────────────────────────
+
+/// PostgreSQL POSIX regex (used in a `~` predicate) matching the
+/// lexical space of the XSD numeric types pgRDF stores as plain text
+/// in `_pgrdf_dictionary.lexical_value` — `xsd:integer`,
+/// `xsd:decimal`, `xsd:float`, `xsd:double` (incl. scientific
+/// notation, leading sign, bare-fraction `.5`, trailing-dot `5.`).
+/// `INF`/`-INF`/`NaN` (xsd:double specials) are matched too so they
+/// don't fall through to the codepoint tier — `'inf'::numeric` is
+/// invalid in Postgres, so the numeric-cast tier guards specials out
+/// (they land in the codepoint tier within the numeric *kind*, which
+/// is stable and §15.1-permitted as the cross-type fallback).
+const NUMERIC_LEXICAL_RE: &str = r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$";
+
+/// ISO-8601 `xsd:dateTime` lexical space (date + `T` + time, optional
+/// fractional seconds, optional `Z`/±HH:MM offset). Postgres
+/// `timestamptz` parses this; non-matching text stays NULL in the
+/// dateTime tier and falls to the codepoint tier.
+const DATETIME_LEXICAL_RE: &str =
+    r"^-?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$";
+
+/// Emit the SPARQL 1.1 §15.1 value-space ORDER BY term list for one
+/// sort key, given a SQL scalar expression `lex` that evaluates to the
+/// term's **lexical value** as text (NULL when the variable is
+/// unbound).
+///
+/// SPARQL §15.1 ascending order is, lowest→highest:
+///   unbound  <  blank node  <  IRI  <  RDF literal
+/// and within literals comparable datatypes compare by value
+/// (numerics numerically so `2 < 10`; `xsd:dateTime` chronologically;
+/// `xsd:boolean` false<true; strings/plain/lang-tagged by Unicode
+/// codepoint). Cross-type-incomparable literal pairs fall back to a
+/// stable ordering — ORDER BY is **total and never raises** (unlike
+/// `<` inside FILTER, which can error on incomparable operands).
+///
+/// pgRDF stores every term's lexical form as text and does not project
+/// the datatype alongside the value, so the realization is text-driven
+/// and uniform across all four SQL builders (single-branch, aggregate,
+/// UNION, aggregate-over-UNION): a leading **kind rank** groups
+/// comparable lexical spaces together (numerics, then dateTimes, then
+/// booleans, then everything else) so value comparison is meaningful
+/// within a group and the across-group order is the stable rank, then
+/// a per-kind value comparator, with a final codepoint tiebreak. The
+/// numeric/dateTime casts are regex-guarded so a malformed lexical
+/// never raises — it simply falls through to the codepoint tier (the
+/// §15.1-sanctioned stable fallback). `NULLS LAST` on every term keeps
+/// unbound at the bottom on ASC (and the kind rank keeps the relative
+/// order of bound terms identical under DESC, only reversed).
+fn type_aware_order_terms(lex: &str, ascending: bool) -> Vec<String> {
+    let dir = if ascending { "ASC" } else { "DESC" };
+    // Normalise the source scalar to text once. The key may be a
+    // dict lexical (already text), a numeric/bigint aggregate output
+    // (COUNT/SUM → cast to its canonical decimal string, which the
+    // numeric regex then matches so it sorts numerically), or a
+    // BIND/expression scalar. `::text` makes the regex `~` and the
+    // codepoint compare well-typed regardless of the input type.
+    let t = format!("(({lex})::text)");
+    // Kind rank: numeric=0, dateTime=1, boolean=2, other=3. Anything
+    // that fails its regex guard drops to kind 3 (codepoint).
+    let kind = format!(
+        "(CASE \
+           WHEN {t} ~ '{NUMERIC_LEXICAL_RE}' THEN 0 \
+           WHEN {t} ~ '{DATETIME_LEXICAL_RE}' THEN 1 \
+           WHEN {t} IN ('true','false','1','0') THEN 2 \
+           ELSE 3 END)"
+    );
+    // Numeric value (only for kind 0; the regex already excludes the
+    // INF/NaN specials so the cast is always valid here).
+    let num = format!("(CASE WHEN {t} ~ '{NUMERIC_LEXICAL_RE}' THEN {t}::numeric ELSE NULL END)");
+    // Chronological value (only for kind 1).
+    let ts =
+        format!("(CASE WHEN {t} ~ '{DATETIME_LEXICAL_RE}' THEN {t}::timestamptz ELSE NULL END)");
+    // Boolean rank false<true (xsd:boolean lexical is 'true'/'false';
+    // the canonical '1'/'0' forms map alongside).
+    let boolean = format!(
+        "(CASE WHEN {t} IN ('true','1') THEN 1 \
+                WHEN {t} IN ('false','0') THEN 0 ELSE NULL END)"
+    );
+    // Codepoint tiebreak / string-kind comparator. `COLLATE \"C\"`
+    // forces byte/codepoint order (W3C §15.1 for xsd:string + plain +
+    // lang-tagged literals), independent of the database locale.
+    let cp = format!("({t} COLLATE \"C\")");
+    vec![
+        format!("{kind} {dir} NULLS LAST"),
+        format!("{num} {dir} NULLS LAST"),
+        format!("{ts} {dir} NULLS LAST"),
+        format!("{boolean} {dir} NULLS LAST"),
+        format!("{cp} {dir} NULLS LAST"),
+    ]
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Translation
 // ─────────────────────────────────────────────────────────────────────
 
@@ -3640,35 +3771,108 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
         ));
     }
 
+    // Phase F group F4 (LLD v0.4 §11) — type-aware ORDER BY. Each
+    // sort key resolves to a SQL scalar yielding the term's lexical
+    // text, then expands into the SPARQL 1.1 §15.1 value-space term
+    // list (numerics numerically, dateTimes chronologically, strings
+    // by codepoint) rather than the former single lexical compare.
+    //
+    // SELECT DISTINCT needs care: Postgres only lets ORDER BY
+    // reference a *bare* select-list output column under DISTINCT, not
+    // that column buried inside the §15.1 CASE expressions. So when
+    // DISTINCT is set we build the dedup as an inner derived table and
+    // apply the type-aware ORDER BY (+ LIMIT/OFFSET) on the outer
+    // wrapper, referencing the deduplicated columns by name. The
+    // non-DISTINCT path is unchanged (no wrapper).
     let mut order_clauses: Vec<String> = Vec::new();
-    for (idx, (var, ascending)) in ps.order_by.iter().enumerate() {
-        let dir = if *ascending { "ASC" } else { "DESC" };
-        let position = if let Some(pos) = ps.projected.iter().position(|p| p == var) {
-            pos + 1
-        } else {
-            if ps.distinct {
-                panic!(
-                    "sparql: ORDER BY ?{var} requires ?{var} to be in the SELECT \
-                     clause when DISTINCT is used"
-                );
+    for (key, ascending) in &ps.order_by {
+        let lex_expr: String = match key {
+            OrderKey::Expr(expr) => {
+                if ps.distinct {
+                    // An expression sort key over a DISTINCT result is
+                    // only well-defined if it is itself projected;
+                    // SPARQL §15.1 + SQL DISTINCT make a non-projected
+                    // expression key ill-formed. Stable panic (never a
+                    // wrong answer) — mirrors the unprojected-var rule.
+                    panic!(
+                        "sparql: ORDER BY over an expression is not supported together \
+                         with DISTINCT (project the expression with BIND, then \
+                         ORDER BY the bound variable): {expr:?}"
+                    );
+                }
+                // Expression sort key — translate via the shared
+                // BIND/FILTER translator over the BGP anchors.
+                translate_bind_expression(expr, &anchors).unwrap_or_else(|| {
+                    panic!("sparql: ORDER BY expression not translatable: {expr:?}")
+                })
             }
-            // Slice 112: ORDER BY ?g on a graph-var emits a hidden
-            // trailing column pulling the anchor scope's g{S}.iri.
-            if let Some(scope_id) = plan.projection_scope(var) {
-                select_clauses.push(format!("g{scope_id}.iri AS _pgrdf_order_{idx}"));
-                select_clauses.len()
-            } else {
-                let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-                    panic!("sparql: ORDER BY variable ?{var} not bound in any BGP pattern")
-                });
-                select_clauses.push(format!(
-                    "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary
-                       WHERE id = q{alias_idx}.{col}) AS _pgrdf_order_{idx}",
-                ));
-                select_clauses.len()
+            OrderKey::Var(var) => {
+                if ps.projected.iter().any(|p| p == var) {
+                    if ps.distinct {
+                        // Outer wrapper references the deduplicated
+                        // column by name (legal inside the CASE).
+                        format!("_pgrdf_distinct.{}", quote_identifier(var))
+                    } else if let Some(scope_id) = plan.projection_scope(var) {
+                        format!("g{scope_id}.iri")
+                    } else if let Some(bind) = ps.binds.iter().find(|b| &b.output_var == var) {
+                        // BIND-bound projected var: order over the
+                        // BIND expression's SQL (Postgres rejects the
+                        // output alias buried in the §15.1 CASE — an
+                        // alias is only legal as a bare ORDER BY ref).
+                        // An unbound-var BIND projects NULL; ordering
+                        // it sorts NULLS LAST consistently.
+                        if bind_expr_has_unbound_var(&bind.expression, &anchors) {
+                            "NULL::TEXT".to_string()
+                        } else {
+                            translate_bind_expression(&bind.expression, &anchors).unwrap_or_else(
+                                || {
+                                    panic!(
+                                        "sparql: ORDER BY references BIND ?{var} whose \
+                                         expression is not translatable: {:?}",
+                                        bind.expression
+                                    )
+                                },
+                            )
+                        }
+                    } else {
+                        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+                            panic!("sparql: ORDER BY variable ?{var} not bound in any BGP pattern")
+                        });
+                        format!(
+                            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary \
+                               WHERE id = q{alias_idx}.{col})"
+                        )
+                    }
+                } else {
+                    if ps.distinct {
+                        panic!(
+                            "sparql: ORDER BY ?{var} requires ?{var} to be in the SELECT \
+                             clause when DISTINCT is used"
+                        );
+                    }
+                    // Non-projected sort key. The §15.1 type-aware
+                    // terms inline the underlying expression directly
+                    // (a graph-scope `g{S}.iri` or the dict-lookup
+                    // subquery) — no hidden select-list alias, since
+                    // Postgres rejects an output alias buried inside
+                    // an ORDER BY expression (it's only legal as a
+                    // bare ref; that was the pre-F4 ordinal form).
+                    // Slice 112: ORDER BY ?g on a graph-scope var.
+                    if let Some(scope_id) = plan.projection_scope(var) {
+                        format!("g{scope_id}.iri")
+                    } else {
+                        let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
+                            panic!("sparql: ORDER BY variable ?{var} not bound in any BGP pattern")
+                        });
+                        format!(
+                            "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary \
+                               WHERE id = q{alias_idx}.{col})"
+                        )
+                    }
+                }
             }
         };
-        order_clauses.push(format!("{position} {dir} NULLS LAST"));
+        order_clauses.extend(type_aware_order_terms(&lex_expr, *ascending));
     }
 
     let distinct_kw = if ps.distinct { "DISTINCT " } else { "" };
@@ -3680,6 +3884,22 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
         sql.push_str(" WHERE ");
         sql.push_str(&where_clauses.join(" AND "));
     }
+
+    // DISTINCT + ORDER BY: wrap the dedup so the §15.1 type-aware
+    // ORDER BY runs over the deduplicated output columns. LIMIT /
+    // OFFSET move to the outer query so they apply post-ordering.
+    if ps.distinct && !order_clauses.is_empty() {
+        let mut outer = format!("SELECT * FROM ({sql}) AS _pgrdf_distinct ORDER BY ");
+        outer.push_str(&order_clauses.join(", "));
+        if let Some(limit) = ps.limit {
+            outer.push_str(&format!(" LIMIT {limit}"));
+        }
+        if ps.offset > 0 {
+            outer.push_str(&format!(" OFFSET {}", ps.offset));
+        }
+        return outer;
+    }
+
     if !order_clauses.is_empty() {
         sql.push_str(" ORDER BY ");
         sql.push_str(&order_clauses.join(", "));
@@ -3785,15 +4005,29 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
     // and aggregate outputs are in scope.
     if !ps.order_by.is_empty() {
         let mut order_parts: Vec<String> = Vec::new();
-        for (var, ascending) in &ps.order_by {
-            let dir = if *ascending { "ASC" } else { "DESC" };
-            if !ps.projected.contains(var) {
+        for (key, ascending) in &ps.order_by {
+            let var = key.require_projected_var("an aggregate query");
+            // Phase F group F4 (LLD v0.4 §11): type-aware §15.1
+            // ordering. A GROUP BY query's ORDER BY can only reference
+            // an output column as a *bare* alias — Postgres rejects
+            // the alias buried inside the §15.1 CASE expressions
+            // (it's resolved as a non-existent column). So order over
+            // the underlying SQL expression: the group-var dict-lookup
+            // expr, or the aggregate function itself (numeric, sorted
+            // numerically by the numeric kind).
+            let lex_expr: String = if let Some((_, expr)) =
+                group_exprs.iter().find(|(v, _)| v.as_str() == var)
+            {
+                expr.clone()
+            } else if let Some(agg) = ps.aggregates.iter().find(|a| a.output_var.as_str() == var) {
+                translate_aggregate(agg, &anchors)
+            } else {
                 panic!(
                     "sparql: ORDER BY ?{var} on an aggregate query must reference a \
-                     projected variable (group var or aggregate output)"
+                         projected variable (group var or aggregate output)"
                 );
-            }
-            order_parts.push(format!("{} {dir} NULLS LAST", quote_identifier(var)));
+            };
+            order_parts.extend(type_aware_order_terms(&lex_expr, *ascending));
         }
         sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
     }
@@ -3998,15 +4232,22 @@ fn build_union_sql(ps: &ParsedSelect) -> String {
 
     if !ps.order_by.is_empty() {
         let mut order_parts: Vec<String> = Vec::new();
-        for (var, ascending) in &ps.order_by {
-            let dir = if *ascending { "ASC" } else { "DESC" };
-            if !ps.projected.contains(var) {
+        for (key, ascending) in &ps.order_by {
+            let var = key.require_projected_var("a UNION query");
+            if !ps.projected.iter().any(|p| p == var) {
                 panic!(
                     "sparql: ORDER BY ?{var} on UNION must reference a projected \
                      variable (the outer SELECT can't see branch-local columns)"
                 );
             }
-            order_parts.push(format!("{} {dir} NULLS LAST", quote_identifier(var)));
+            // Phase F group F4 (LLD v0.4 §11): type-aware §15.1
+            // ordering. Reference the union derived-table column
+            // (`_pgrdf_union."v"`) rather than the outer output alias
+            // — the column reference is legal inside the §15.1 CASE
+            // expressions whether or not the outer SELECT is DISTINCT
+            // (an output-alias buried in an expression is not).
+            let col = format!("_pgrdf_union.{}", quote_identifier(var));
+            order_parts.extend(type_aware_order_terms(&col, *ascending));
         }
         sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
     }
@@ -4237,15 +4478,26 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
     }
     if !ps.order_by.is_empty() {
         let mut order_parts: Vec<String> = Vec::new();
-        for (var, ascending) in &ps.order_by {
-            let dir = if *ascending { "ASC" } else { "DESC" };
-            if !ps.projected.contains(var) {
+        for (key, ascending) in &ps.order_by {
+            let var = key.require_projected_var("an aggregate-over-UNION query");
+            // Phase F group F4 (LLD v0.4 §11): type-aware §15.1
+            // ordering over the underlying group-var / aggregate
+            // expression (a GROUP BY query rejects the output alias
+            // buried inside the §15.1 CASE expressions — see the
+            // single-BGP aggregate path for the same reasoning).
+            let lex_expr: String = if let Some((_, expr)) =
+                group_exprs.iter().find(|(v, _)| v.as_str() == var)
+            {
+                expr.clone()
+            } else if let Some(agg) = ps.aggregates.iter().find(|a| a.output_var.as_str() == var) {
+                translate_aggregate(agg, &anchors)
+            } else {
                 panic!(
                     "sparql: ORDER BY ?{var} on an aggregate-over-UNION query must \
-                     reference a projected variable (group var or aggregate output)"
+                         reference a projected variable (group var or aggregate output)"
                 );
-            }
-            order_parts.push(format!("{} {dir} NULLS LAST", quote_identifier(var)));
+            };
+            order_parts.extend(type_aware_order_terms(&lex_expr, *ascending));
         }
         sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
     }
@@ -9193,6 +9445,90 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(rows, 3, "x, y, z = 3 distinct");
+    }
+
+    /// Phase F group F4 (LLD v0.4 §11) — type-aware ORDER BY per
+    /// SPARQL 1.1 §15.1: xsd:integer literals sort *numerically*
+    /// (2 before 10), not by lexical string (where "10" < "2").
+    #[pg_test]
+    fn sparql_order_by_numeric_type_aware() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+                 ex:a ex:n \"2\"^^xsd:integer .
+                 ex:b ex:n \"10\"^^xsd:integer .
+                 ex:c ex:n \"1\"^^xsd:integer .
+                 ex:d ex:n \"100\"^^xsd:integer .',
+                8036)",
+        )
+        .unwrap();
+
+        // Smallest-first numerically: 1, 2, 10, 100.
+        let first: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?n WHERE { ?s ex:n ?n } ORDER BY ?n LIMIT 1'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.0["n"], "1", "numeric ascending: smallest is 1");
+
+        let last: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?n WHERE { ?s ex:n ?n } ORDER BY DESC(?n) LIMIT 1'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(last.0["n"], "100", "numeric descending: largest is 100");
+
+        // The full ascending sequence proves "10" sorts AFTER "2"
+        // (numeric), which a lexical string sort would get wrong.
+        // string_agg over the ordered set preserves row order.
+        let seq: String = Spi::get_one(
+            "SELECT string_agg(j->>'n', ',')
+               FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/>
+                  SELECT ?n WHERE { ?s ex:n ?n } ORDER BY ?n'
+               ) AS j",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            seq, "1,2,10,100",
+            "type-aware numeric ORDER BY: 1 < 2 < 10 < 100"
+        );
+    }
+
+    /// Phase F group F4 — ORDER BY over an expression sort key
+    /// (`ORDER BY STRLEN(?s)`): rows ordered by string length, not
+    /// the string value itself.
+    #[pg_test]
+    fn sparql_order_by_expression_key() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:s \"zzzz\" .
+                 ex:b ex:s \"a\" .
+                 ex:c ex:s \"mm\" .',
+                8037)",
+        )
+        .unwrap();
+
+        // STRLEN: \"a\"=1 < \"mm\"=2 < \"zzzz\"=4 — so the first row
+        // by ORDER BY STRLEN(?s) is the single-char \"a\".
+        let first: pgrx::JsonB = Spi::get_one(
+            "SELECT * FROM pgrdf.sparql(
+               'PREFIX ex: <http://example.com/>
+                SELECT ?s WHERE { ?x ex:s ?s } ORDER BY STRLEN(?s) LIMIT 1'
+             )",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.0["s"], "a", "shortest string first");
     }
 
     /// BOUND(?v) is trivially true for every BGP variable, so it

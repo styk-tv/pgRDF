@@ -1,0 +1,10 @@
+@prefix dc:   <http://purl.org/dc/elements/1.1/> .
+@prefix ns:   <http://example.org/ns#> .
+@prefix ex:   <http://example.org/book/> .
+
+ex:book1 dc:title "SPARQL Tutorial" .
+ex:book1 ns:price 42 .
+ex:book2 dc:title "The Semantic Web" .
+ex:book2 ns:price 23 .
+ex:book3 dc:title "RDF Primer" .
+ex:book3 ns:price 33 .

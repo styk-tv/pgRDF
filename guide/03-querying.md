@@ -26,13 +26,13 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | Multi-pattern BGPs with shared variables → INNER joins | ✅ |
 | `DISTINCT`, `REDUCED` → `SELECT DISTINCT` | ✅ |
 | `LIMIT N`, `OFFSET N` | ✅ |
-| `ORDER BY ?var`, `ORDER BY ASC(?var)`, `ORDER BY DESC(?var)` — lexicographic on `lexical_value` | ✅ |
-| `ORDER BY <complex expression>` | ⏳ v0.4 |
+| `ORDER BY ?var`, `ORDER BY ASC(?var)`, `ORDER BY DESC(?var)` — **type-aware** per SPARQL 1.1 §15.1 (numerics numerically, `xsd:dateTime` chronologically, strings by codepoint) | ✅ v0.4.6 |
+| `ORDER BY <expression>` (`ORDER BY (?a + ?b)`, `ORDER BY STRLEN(?s)`), multi-key `ORDER BY ?a DESC(?b)` | ✅ v0.4.6 |
 | `FILTER` — identity (`=`, `!=`, `sameTerm`), boolean (`&&`, `\|\|`, `!`), term-type (`isIRI`, `isLiteral`, `isBlank`), `BOUND` | ✅ |
 | `FILTER` — numeric ordering (`<`/`>`/`<=`/`>=`), `REGEX`, `IN`, `STR` passthrough | ✅ |
 | `FILTER` — arithmetic (`+`/`-`/`*`/`/`), `LANG`, `DATATYPE`, `STRLEN`, `UCASE`, `LCASE`, `CONTAINS`, `STRSTARTS`, `STRENDS` | ✅ |
 | `OPTIONAL { single-triple BGP }` → LEFT JOIN (with inner FILTER honoured) | ✅ |
-| `OPTIONAL { multi-pattern BGP }`, nested OPTIONALs | ⏳ v0.4 |
+| `OPTIONAL { multi-pattern BGP }`, nested OPTIONALs (atomic, W3C §6.1) | ✅ v0.4.6 |
 | `UNION` (n-way, branches may bind different vars) | ✅ |
 | `MINUS { multi-pattern }` keyed by shared vars (no-op when no shared vars per spec) | ✅ |
 | Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`, `SUM`, `AVG`, type-aware `MIN`/`MAX`, `GROUP_CONCAT`, `SAMPLE` with `GROUP BY` | ✅ |
@@ -46,11 +46,11 @@ SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
 | `WITH <iri>` graph scoping, `GRAPH <iri>` in templates + WHERE (cross-graph copy) | ✅ v0.4.3 |
 | Lifecycle algebra — `DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / NAMED / ALL` targets, `SILENT` flag | ✅ v0.4.3 |
 | `CONSTRUCT { template } WHERE { … }` (constant / variable / blank-node / multi-triple templates, GRAPH-scoped WHERE, `CONSTRUCT WHERE { … }` shorthand, round-trip ingest) via `pgrdf.construct(q)` | ✅ v0.4 |
-| `DESCRIBE` | ⏳ v0.4 |
+| `DESCRIBE <iri>` / `DESCRIBE ?v WHERE { … }` / mixed / `DESCRIBE *` via `pgrdf.describe(q)` (W3C §16.4 closure) | ✅ v0.4.6 |
 | Property paths — `^` inverse, `+` / `*` / `?`, `\|` alternation (incl. `(a\|b)+`/`(a\|b)*`/`(a\|b)?`/`^(a\|b)`), materialised-closure fast path | ✅ v0.4.5 |
-| `VALUES (?x) { … }` inline data | ⏳ v0.4 |
-| Aggregates over `UNION` | ⏳ v0.4 |
-| BIND output referenced in later FILTER / BGP | ⏳ v0.4 |
+| `VALUES (?x) { … }` inline data (typed/lang literals, `UNDEF`) | ✅ v0.4.6 |
+| Aggregates over `UNION` (COUNT/SUM/AVG/MIN-MAX/GROUP_CONCAT/SAMPLE, GROUP BY, HAVING) | ✅ v0.4.6 |
+| `BIND` output referenced in a later FILTER / BGP / chained BIND | ✅ v0.4.6 |
 | `SERVICE` (federated SPARQL) | Out of scope for v0.x |
 
 `pgrdf.sparql_parse(q)` reports the parsed shape as JSONB and flags
@@ -241,18 +241,60 @@ NULL and is dropped from the result, matching SPARQL's "type
 error → unbound" semantics. Comparing two strings as if they were
 numbers does not raise an error; it just yields no rows.
 
-If you need string ordering (lexicographic), post-process in SQL —
-the SPARQL surface only does numeric `<`/`>` on `xsd:numeric`
-typed literals; for strings, sort outside the SPARQL UDF:
+(That paragraph is about FILTER comparison `<`/`>`. Result
+*ordering* is separate and is fully handled inside the SPARQL UDF —
+see the next section.)
+
+### Type-aware ORDER BY (SPARQL 1.1 §15.1)
+
+`ORDER BY` sorts across the SPARQL value space, not by raw lexical
+string. Numeric literals compare **numerically**, so a query that
+used to need post-processing in SQL now Just Works:
 
 ```sql
-SELECT j ->> 's' AS s, j ->> 'n' AS n
-  FROM pgrdf.sparql(
-    'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-     SELECT ?s ?n WHERE { ?s foaf:name ?n }'
-  ) AS j
- ORDER BY j ->> 'n';
+-- xsd:integer ranks sort 1, 2, 10, 100 — NOT the lexical
+-- "1","10","100","2" you'd get from a plain string sort.
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.com/>
+   SELECT ?s ?rank
+     WHERE { ?s ex:rank ?rank } ORDER BY ?rank');
+
+-- DESC, multi-key, and expression sort keys all work:
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.com/>
+   SELECT ?s ?name
+     WHERE { ?s ex:name ?name ; ex:rank ?rank }
+   ORDER BY DESC(?rank) ?name');
+
+-- ORDER BY an expression (sort by string length):
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex: <http://example.com/>
+   SELECT ?label WHERE { ?s ex:label ?label }
+   ORDER BY STRLEN(?label)');
 ```
+
+The ordering rules (SPARQL 1.1 §15.1):
+
+- Across kinds the ascending order is unbound (NULL, sorts last) <
+  blank node < IRI < literal — and within literals comparable
+  datatypes compare by value.
+- `xsd:integer` / `xsd:decimal` / `xsd:float` / `xsd:double` →
+  **numeric** comparison (`2 < 10`).
+- `xsd:dateTime` → **chronological** comparison.
+- `xsd:boolean` → `false < true`.
+- `xsd:string`, plain, and language-tagged literals → **Unicode
+  codepoint** order (locale-independent; uppercase `A` sorts before
+  lowercase `a`).
+- Cross-type-incomparable values fall back to a stable order —
+  `ORDER BY` is **total and never raises** (unlike `<` inside
+  FILTER, which can produce a type error / drop rows).
+
+`DESC(?x)` reverses; combine keys with `ORDER BY ?a DESC(?b)`; and
+the sort key may be any expression the FILTER/BIND surface supports
+(`ORDER BY (?a + ?b)`, `ORDER BY STRLEN(?s)`). One narrow exception:
+an *expression* sort key combined with an aggregate / UNION /
+aggregate-over-UNION query is not supported — bind the expression
+with `BIND(... AS ?k)` and `ORDER BY ?k` instead.
 
 ### REGEX
 

@@ -18,7 +18,14 @@
 #                      bag-equivalent sort below works unchanged for
 #                      either shape — both are `{…}` objects per line.
 #                      (Phase D slice 51 — CONSTRUCT W3C-shape fixtures
-#                      30-35.)
+#                      30-35.) `describe` routes through
+#                      `pgrdf.describe` — DESCRIBE emits the same
+#                      structured-term triple-row shape as CONSTRUCT
+#                      (`pgrdf.sparql` only translates SELECT/ASK so a
+#                      DESCRIBE through it would panic), so the
+#                      JSON-line filter + bag-equivalent sort handles
+#                      it unchanged. (Phase F group F4 — DESCRIBE
+#                      W3C-shape fixture 46.)
 #
 # Compares engine output to expected.jsonl. The comparison is
 # bag-equivalent — both sides are sorted before diffing so unordered
@@ -109,8 +116,10 @@ run_one() {
   # `pgrdf.sparql` (the v0.3 default; SELECT/ASK/UPDATE). `construct`
   # → `pgrdf.construct` (CONSTRUCT triple-row shape; pgrdf.sparql
   # only translates SELECT/ASK so a CONSTRUCT through it would panic
-  # `sparql: query form not supported yet`). Any other value is a
-  # fixture-authoring error and fails loudly.
+  # `sparql: query form not supported yet`). Phase F group F4 —
+  # `describe` → `pgrdf.describe` (DESCRIBE; same triple-row shape as
+  # CONSTRUCT, same panic if routed through pgrdf.sparql). Any other
+  # value is a fixture-authoring error and fails loudly.
   local kind="sparql"
   if [ -f "${kind_file}" ]; then
     kind="$(tr -d '[:space:]' < "${kind_file}")"
@@ -157,6 +166,13 @@ run_one() {
       # line shape the JSON-line filter + bag-equivalent sort below
       # already handles for SELECT solution rows.
       sql+="SELECT j::text FROM pgrdf.construct('${q_esc}') AS t(j);"$'\n'
+      ;;
+    describe)
+      # Phase F group F4 — DESCRIBE emits the Concise Bounded
+      # Description as structured-term triple rows (LLD v0.4 §11),
+      # the same `{…}`-per-line shape as CONSTRUCT, so it flows
+      # through the identical JSON-line filter + bag-equivalent sort.
+      sql+="SELECT j::text FROM pgrdf.describe('${q_esc}') AS t(j);"$'\n'
       ;;
     *)
       echo "run.sh: unknown kind '${kind}' in ${test_dir}/kind" >&2

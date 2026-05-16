@@ -1,0 +1,11 @@
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix ex:   <http://example.org/> .
+
+ex:alice foaf:name "Alice" .
+ex:alice foaf:mbox <mailto:alice@work> .
+ex:alice foaf:homepage <http://alice.example/> .
+
+ex:bob   foaf:name "Bob" .
+ex:bob   foaf:mbox <mailto:bob@work> .
+
+ex:carol foaf:name "Carol" .

@@ -1,0 +1,3 @@
+{"object": {"type": "iri", "value": "http://example.org/bob"}, "subject": {"type": "iri", "value": "http://example.org/alice"}, "predicate": {"type": "iri", "value": "http://xmlns.com/foaf/0.1/knows"}}
+{"object": {"type": "iri", "value": "mailto:alice@example.org"}, "subject": {"type": "iri", "value": "http://example.org/alice"}, "predicate": {"type": "iri", "value": "http://xmlns.com/foaf/0.1/mbox"}}
+{"object": {"type": "literal", "value": "Alice", "datatype": "http://www.w3.org/2001/XMLSchema#string"}, "subject": {"type": "iri", "value": "http://example.org/alice"}, "predicate": {"type": "iri", "value": "http://xmlns.com/foaf/0.1/name"}}

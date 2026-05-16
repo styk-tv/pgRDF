@@ -1,0 +1,8 @@
+PREFIX ex: <http://example.org/>
+SELECT ?order ?total
+WHERE {
+  ?order ex:price ?price .
+  ?order ex:qty   ?qty .
+  BIND(?price * ?qty AS ?total)
+  FILTER(?total > 30)
+}

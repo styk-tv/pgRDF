@@ -1,0 +1,7 @@
+@prefix ex:  <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:i1 ex:rank "2"^^xsd:integer .
+ex:i2 ex:rank "10"^^xsd:integer .
+ex:i3 ex:rank "1"^^xsd:integer .
+ex:i4 ex:rank "100"^^xsd:integer .

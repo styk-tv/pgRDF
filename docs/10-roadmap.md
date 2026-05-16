@@ -185,9 +185,24 @@ does not block Phase 3 (Storage Performance) of the v0.3 LLD:
       longer flags it in `unsupported_algebra`; DESCRIBE via
       `pgrdf.sparql` redirect-panics to `pgrdf.describe`. LLD v0.4
       §11. (`80-unsupported-shapes` gap-6 retired same commit.)
-- ⏳ Type-aware ORDER BY (sort numeric literals numerically rather
-      than as strings). LLD v0.4 §11 — the remaining §11 item; F4
-      assesses/closes alongside the W3C consolidation + v0.4.6 cut.
+- ✅ Type-aware ORDER BY — shipped Phase F group F4 (slices 23-22).
+      `ORDER BY` now sorts across the SPARQL 1.1 §15.1 value space: a
+      kind rank (numeric < dateTime < boolean < other) + per-kind
+      comparator (numerics **numerically** so `2 < 10`, `xsd:dateTime`
+      chronologically, `xsd:boolean` false<true, strings by Unicode
+      codepoint via `COLLATE "C"`) + codepoint tiebreak; total and
+      stable, never raises (regex-guarded casts fall through to the
+      codepoint tier). `DESC()`, multi-key, and expression sort keys
+      (`ORDER BY (?a+?b)`, `ORDER BY STRLEN(?s)`) all work; all four
+      SQL builders + `SELECT DISTINCT` compose (expression keys on
+      aggregate/UNION shapes a documented narrow deferral). ORDER BY
+      was already an unflagged SELECT modifier (no
+      `unsupported_algebra`/`80-unsupported-shapes` entry to retire).
+      Regression-locked
+      `tests/regression/sql/100-sparql-order-by-type-aware.sql`
+      + W3C-shape `47-order-by-type-aware`; the `111` property-path
+      closure expected output was corrected to §15.1 codepoint order.
+      LLD v0.4 §11 — **§11 SPARQL backlog now complete**.
 - ✅ `VALUES (?x ?y) { … }` — shipped Phase F group F1 (slices
       34-31). `(VALUES …) AS vN(cols)` derived table joined on
       shared vars; constants → dict ids ahead of execution; `UNDEF`
@@ -1155,12 +1170,16 @@ grouped into four dispatches, all landed:
 See
 [LLD v0.4 §7](../specs/SPEC.pgRDF.LLD.v0.4.md#7-property-paths-deferred-from-v03-now-in-scope).
 
-### Carried backlog — SPARQL surface gaps from v0.3
+### Carried backlog — SPARQL surface gaps from v0.3 (✅ CLOSED — v0.4.6)
 Multi-triple `OPTIONAL { BGP }` (LATERAL-style derived-table refactor),
 `VALUES` inline tables, `BIND` output usable in later FILTER/BGP,
-aggregates over `UNION`, and `DESCRIBE`. Shipped in the same cut
-because they share the translator machinery §4 + §6 already require.
-See
+aggregates over `UNION`, `DESCRIBE`, and type-aware `ORDER BY`. All
+shipped across the Phase F countdown (F1 → F4) and released in
+**v0.4.6** — they share the translator machinery §4 + §6 already
+require. **§11 is complete.** Residual aggregate-over-UNION
+refinements are tracked (not lost) in
+[`v0.5-FUTURE §8`](../specs/SPEC.pgRDF.LLD.v0.5-FUTURE.md) (stable
+panics, never wrong answers). See
 [LLD v0.4 §11](../specs/SPEC.pgRDF.LLD.v0.4.md#11-sparql-surface-backlog-deferred-from-v03-now-in-scope).
 
 ### Performance work carried forward from v0.3
@@ -1173,10 +1192,15 @@ v0.5 if the refactor cost exceeds the §4 / §6 wins. These do not gate
 the surface work in tracks 1-5; they ship in their own slices. See
 [LLD v0.4 §12](../specs/SPEC.pgRDF.LLD.v0.4.md#12-performance-work-carried-forward-from-v03).
 
-### Conformance runner wiring (v0.4)
-The W3C SPARQL 1.1 manifest runner (Phase 6 step 2, gated `if: false`
-in v0.3) is wired in v0.4 — it gates the §11 SPARQL backlog
-automatically as the deferred forms come online. See
+### Conformance runner wiring (v0.4) ✅
+The W3C SPARQL 1.1 shape-conformance runner (`tests/w3c-sparql/`,
+gated `if: false` in v0.3) is wired in v0.4 and gates the §11 SPARQL
+backlog. All §11 forms are online and W3C-shape-locked: the suite
+stands at **47 fixtures** (Phase E added 36-41 for property paths;
+Phase F group F4 added 42-47 — optional-multi-triple, values-inline,
+bind-downstream, aggregate-over-union, describe, order-by-type-aware,
+the `describe` fixture introducing a `describe` per-fixture kind
+alongside the slice-51 `construct` kind). See
 [LLD v0.4 §13](../specs/SPEC.pgRDF.LLD.v0.4.md#13-test-policy-continues-v03-6-unchanged-in-spirit).
 
 ### Track 6 — Real SHACL validation (✅ landed)
@@ -1305,3 +1329,4 @@ above; the v0.3 rows below remain frozen as the shipped baseline.)
 | **Phase F group F1 shipped (multi-triple OPTIONAL + VALUES)** | **235** | **75 + 41 + 3 = 119** | **Total 354 tests across all five layers** (235 pgrx integration + 75 pg_regress + 41 W3C-shape SPARQL + 3 LUBM-shape). Phase F countdown slices 34 → 31 closed: the LATERAL-style derived-table translator refactor (34), multi-triple `OPTIONAL { BGP }` end-to-end (33), `VALUES` inline tables (32), compose-with-surface + `sparql_parse` unsupported-narrowing (31). N-triple OPTIONAL emits as `LEFT JOIN LATERAL (SELECT … ) qOPT ON TRUE` (atomic, W3C §6.1) — nested OPTIONAL, OPTIONAL-internal FILTER, `LeftJoin.expression` join-FILTER, optional-var outer FILTER, GRAPH `<iri>`/`?g` scoping, `+`-path-in-required all compose; `VALUES` → `(VALUES …) AS vN(cols)` derived table joined on shared vars (constants → dict ids ahead of execution, `UNDEF` → NULL no-constraint per W3C §10, typed/lang literals datatype-aware). Both inherited by `pgrdf.construct` + SPARQL UPDATE WHERE (shared BGP walker). `pgrdf.sparql_parse` no longer flags either in `unsupported_algebra` (LLD §11 acceptance; regression-locked). New pg_regress `112-optional-multi-triple` / `113-values-inline` (+2; retired 80's gap-2/gap-3); +5 pgrx tests (230 → 235). Translator stays in `src/query/executor.rs` (`build_optional_block`/`emit_optional_lateral`/`emit_values_table`) — core BGP translation, too entangled with `anchors`/`ScopePlan`/projection for a clean carve; flagged as a Phase H carve candidate. v0.4 LLD §5 phase status: Phase 1 ✅, Phase 2 ✅, Phase 3 🚧, Phase 4 ✅, Phase 5 ✅, Phase 6 🚧. §11 still 🚧 (F2 BIND-downstream + aggregates-over-UNION, F3 DESCRIBE, F4 W3C+docs+v0.4.6 cut pending) |
 | **Phase F group F2 shipped (downstream BIND + aggregates-over-UNION)** | **240** | **77 + 41 + 3 = 121** | **Total 361 tests across all five layers** (240 pgrx integration + 77 pg_regress + 41 W3C-shape SPARQL + 3 LUBM-shape). Phase F countdown slices 30 → 27 closed: BIND-downstream substitution machinery (30), BIND usable in later FILTER + BGP join + chained BIND (29), aggregates-over-UNION derived-table refactor (28), compose-with-surface + `sparql_parse` unsupported-narrowing + 80-gap-8 retirement (27). **Downstream BIND** = an AST substitution pass (`substitute_binds`/`subst_expr`/`subst_triple`, LLD §11's named approach): a BIND var is rewritten to its expression in every later FILTER / triple-slot join key / chained BIND **before** the structural walk, so the existing anchors-driven translator resolves it with zero new surface; unbound-var BIND → NULL not error (W3C §18.2.5). **Aggregates over UNION** = a derived-table refactor reusing F1's `vK` column pool — each branch sub-SELECTs the agg/GROUP-BY vars' dict ids, branches `UNION ALL` into `(<union>) qU`, the existing `translate_aggregate` runs over it unchanged (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE, DISTINCT, GROUP BY, HAVING, GRAPH scoping, property-path branch). Both compose with GRAPH + F1 OPTIONAL/VALUES and are inherited by `pgrdf.construct` + SPARQL UPDATE WHERE (WHERE-side; a BIND var in a CONSTRUCT *template* output position → v0.5-FUTURE §8). New pg_regress `114-bind-downstream` / `115-aggregate-over-union` (+2; retired 80's gap-8); +5 pgrx tests (235 → 240). `pgrdf.sparql_parse` no longer flags either form in `unsupported_algebra` (LLD §11 acceptance; regression-locked). Translator stays in `src/query/executor.rs` (`substitute_binds`/`build_aggregate_over_union_sql`) — same anchors/projection entanglement as F1, Phase H carve candidate. Residual: GROUP-BY-on-GRAPH-scope-only-var over UNION + computed-BIND-as-join-key + BIND-in-construct-template → v0.5-FUTURE §8 (stable panics, never wrong answers). §11 still 🚧 (F3 DESCRIBE, F4 W3C+docs+v0.4.6 cut pending) |
 | **Phase F group F3 shipped (DESCRIBE)** | **248** | **78 + 41 + 3 = 122** | **Total 370 tests across all five layers** (248 pgrx integration + 78 pg_regress + 41 W3C-shape SPARQL + 3 LUBM-shape). Phase F countdown slices 26 → 24 closed: DESCRIBE parse + the `pgrdf.describe` UDF + bare `DESCRIBE <iri>` closure (26), variable / mixed / `DESCRIBE *` forms + blank-node transitive-one-hop expansion (25), compose-with-surface — GRAPH scoping, `sparql_parse` `form:"DESCRIBE"` + `unsupported_algebra` removal, `80`-gap-6 retirement, `pgrdf.sparql` redirect-panic — + full sweep (24). **`pgrdf.describe(q TEXT) → SETOF JSONB`** is the sibling UDF to `pgrdf.construct` (the §6.1 sibling-UDF rationale: the caller signals intent at the SQL boundary; a DESCRIBE through `pgrdf.sparql` panics `sparql: use pgrdf.describe(q) for DESCRIBE queries`). Output is **byte-identical** to `pgrdf.construct`'s `{subject,predicate,object}` structured-term JSONB (same encoders — no new shaper). The description is the **closure** of each described resource: every `(R, ?p, ?o)` triple, transitively expanded one hop through blank-node objects per W3C §16.4 (recursion only ever traverses blank-node objects so it terminates on any finite graph; a visited-set of bnode ids additionally guards bnode cycles; triples dedup'd across the whole result — set semantics). Forms: `DESCRIBE <iri>` (constant, no WHERE — empty IRI → 0 rows, not an error), `DESCRIBE ?v WHERE {…}`, mixed constant+variable, `DESCRIBE *`; composes with `GRAPH <iri>` scoping (closure within the named graph), unscoped scans every graph (slice-112 semantic). spargebra normalises every form to `Project { inner, variables }` (constant terms as leading `Extend { …, NamedNode(iri) }` layers the executor peels). `pgrdf.sparql_parse` reports `form:"DESCRIBE"` + a `describe` block (`kind` ∈ constant/variable/mixed) + `where_shape`, NOT flagged in `unsupported_algebra` (LLD §11 acceptance; regression-locked). New pg_regress `116-describe` (+1; retired 80's gap-6); +8 pgrx tests (240 → 248). The `describe`/closure machinery sits next to `pgrdf.construct` in `src/query/executor.rs` (`describe`/`collect_describe_var_bindings`/`describe_closure`/`closure_one_hop`/`literal_graph_scope`/`lookup_iri_dict_id`) — additive, no core-BGP carve attempted (the entangled core-BGP carve stays a Phase H candidate, as in F1/F2). §11 surface backlog now functionally complete EXCEPT type-aware ORDER BY (F4 assesses/closes that + W3C consolidation + v0.4.6 cut). §11 still 🚧 (F4 pending) |
+| **Phase F group F4 shipped — §11 complete (v0.4.6 cut)** | **250** | **79 + 47 + 3 = 129** | **Total 379 tests across all five layers** (250 pgrx integration + 79 pg_regress + 47 W3C-shape SPARQL + 3 LUBM-shape). Phase F countdown slices 23 → 22 closed, **§11 SPARQL backlog complete**, released as **v0.4.6**. **Type-aware ORDER BY** (the last §11 item — investigation confirmed pre-F4 ORDER BY was a real lexical-only gap: xsd:integer literals sorted `"1","10","100","2"`). F4 expands every sort key into the SPARQL 1.1 §15.1 value-space term list: a kind rank (numeric < dateTime < boolean < other) groups comparable lexical spaces, then a per-kind comparator — numerics **numerically** (`2 < 10`), `xsd:dateTime` chronologically, `xsd:boolean` false<true, strings by Unicode codepoint (`COLLATE "C"`, locale-independent) — + a final codepoint tiebreak; total/stable, **never raises** (regex-guarded numeric/dateTime casts fall through to the codepoint tier — the §15.1 stable fallback). `DESC()` + multi-key + **expression sort keys** (`ORDER BY (?a+?b)`, `ORDER BY STRLEN(?s)`, via the shared BIND/FILTER translator); all four SQL builders (single-branch / aggregate / UNION / aggregate-over-UNION) order over the underlying SQL expr (group/aggregate/dict-lookup/BIND), never an output alias buried in an expression (Postgres rejects that); `SELECT DISTINCT` + ORDER BY wraps the dedup in an outer derived table. Expression sort keys on the aggregate/UNION shapes are a documented narrow deferral (BIND it, then ORDER BY the var) — stable panic, never a wrong answer. ORDER BY was already an unflagged SELECT modifier — no `unsupported_algebra` / `80-unsupported-shapes` entry to retire. New pg_regress `100-sparql-order-by-type-aware` (+1; `111` expected output corrected to §15.1 codepoint order — uppercase IRIs now sort before lowercase, spec-mandated); +2 pgrx tests (248 → 250). **Phase F W3C-shape consolidation**: 6 new fixtures `42-optional-multi-triple` / `43-values-inline` / `44-bind-downstream` / `45-aggregate-over-union` / `46-describe` / `47-order-by-type-aware` (41 → 47); the `46-describe` fixture introduced a `describe` per-fixture kind in `tests/w3c-sparql/run.sh` alongside the slice-51 `construct` kind. **Compose infra-debt fix**: `compose/compose.yml` per-version SQL bind-mounts (`pgrdf--0.4.1.sql` … `pgrdf--0.4.5.sql`) replaced with one version-agnostic `extensions/share/extension` directory mount — `just build-ext` no longer requires a hand-created stale-version copy + cold restart. Residual aggregate-over-UNION refinements tracked in `SPEC.pgRDF.LLD.v0.5-FUTURE §8` (stable panics). v0.4 LLD §5 phase status: Phase 1 ✅, Phase 2 ✅, Phase 3 🚧 (heap_multi_insert phase B still → v0.4.x), Phase 4 ✅, Phase 5 ✅, **§11 SPARQL backlog ✅ (Track closed)**, Phase 6 🚧 (step 3 ⏳). **Phase F complete; Phase G next** (reasoning-profile selector / TriG / N-Quads → v0.5.0-rc1) |

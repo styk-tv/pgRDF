@@ -65,7 +65,7 @@ result rows ─► SETOF JSONB
 | `GRAPH ?g { … }` | `INNER JOIN _pgrdf_graphs g{S} ON g{S}.graph_id = q{first}.graph_id` + `qN.graph_id = q{first}.graph_id` for non-anchor triples | One JOIN per Variable scope; ?g projects as `g{S}.iri` (the IRI string); INNER matches W3C §13.3 — only mapped graphs bind ?g; multi-triple inner BGPs share the anchor's graph_id so triples can't stitch across graphs |
 | GRAPH composition (slice 112) | Per-pattern `Option<GraphScope>`; GRAPH inside OPTIONAL/UNION/MINUS scopes only its contained triples, OPTIONAL/MINUS inside GRAPH inherits the outer scope | Mandatory Variable scopes → INNER JOIN to `_pgrdf_graphs`; OPTIONAL-born scopes → LEFT JOIN so unmatched OPTIONALs still NULL out `?g` instead of dropping outer rows; MINUS scopes stay internal to the NOT EXISTS subquery |
 | DISTINCT / REDUCED | `SELECT DISTINCT …` | REDUCED → DISTINCT (safe over-approximation per spec) |
-| ORDER BY ?v | `ORDER BY (SELECT lex …) ASC/DESC NULLS LAST` or by ordinal | Unprojected ?v → hidden trailing SELECT column |
+| ORDER BY ?v / expr (type-aware, §15.1) | `ORDER BY <kind-rank>, <numeric>, <timestamp>, <bool-rank>, <text COLLATE "C">` (each ASC/DESC NULLS LAST) over the underlying SQL expr | Phase F group F4: SPARQL 1.1 §15.1 value-space order — numerics numerically (`2<10`), `xsd:dateTime` chronologically, `xsd:boolean` false<true, strings by codepoint; total/stable, never raises (regex-guarded casts fall through to the codepoint tier). `DESC()` + multi-key + expression keys (`ORDER BY STRLEN(?s)`, via the BIND/FILTER translator). The four builders order over the group/aggregate/dict-lookup/BIND expr, never an output alias; `SELECT DISTINCT` + ORDER BY wraps the dedup in an outer derived table |
 | LIMIT N / OFFSET N | `LIMIT N` / `OFFSET N` | Postgres-native |
 
 ## Named-graph GRAPH-scope translation (LLD v0.4 §3.3, shipped — Phase A slices 114 → 112)
@@ -384,7 +384,7 @@ Concrete shape:
   same shape but different IRI constants → 1 miss + 1 hit; a
   structurally distinct query → 1 miss + 0 hits.
 
-## Surface today (v0.3 SPARQL surface complete; v0.4 §3.3 GRAPH, §4 UPDATE, §6 CONSTRUCT shipped)
+## Surface today (v0.3 SPARQL surface complete; v0.4 §3.3 GRAPH, §4 UPDATE, §6 CONSTRUCT, §7 property paths, §11 backlog all shipped — v0.4.6)
 
 - ✅ Basic Graph Patterns (1..N triples)
 - ✅ `SELECT` (explicit projection or `SELECT *`); `ASK`
@@ -913,8 +913,43 @@ Concrete shape:
       `80-unsupported-shapes` gap-6 retired in the same commit).
       Regression-locked: `tests/regression/sql/116-describe.sql`.
 - ✅ Property paths (`^`, `+`, `*`, `?`, `\|` incl. `(a\|b)+`/`(a\|b)*`/`(a\|b)?`/`^(a\|b)`) + materialised-closure no-CTE fallback — shipped v0.4 Phase E (the §7.1 sequence-arm / sequence-inner remainder stays gated; negated sets out of v0.4 scope)
-- ⏳ `VALUES` inline data — needs derived-table refactor; v0.4
-- ⏳ Aggregates over UNION; multi-triple OPTIONAL; BIND-in-FILTER — v0.4
+- ✅ Type-aware `ORDER BY` (SPARQL 1.1 §15.1) — shipped v0.4 Phase F
+      group F4 (slices 23-22). Sort keys order across the §15.1
+      value space: a leading **kind rank** (numerics, then
+      `xsd:dateTime`, then `xsd:boolean`, then everything else)
+      groups comparable lexical spaces, then a per-kind comparator —
+      numerics compared **numerically** (so `"2"^^xsd:integer` sorts
+      before `"10"^^xsd:integer`, not the old lexical `"10" < "2"`),
+      `xsd:dateTime` **chronologically**, `xsd:boolean` `false<true`,
+      strings / plain / lang-tagged by **Unicode codepoint**
+      (`COLLATE "C"`, locale-independent) — plus a final codepoint
+      tiebreak. ORDER BY is **total and never raises** (the
+      numeric/dateTime casts are regex-guarded; a malformed lexical
+      falls through to the codepoint tier — the §15.1 stable
+      fallback), distinct from `<` in FILTER which can error.
+      `DESC()` reverses; multi-key (`ORDER BY ?a DESC(?b)`) composes;
+      **expression sort keys** (`ORDER BY (?a + ?b)`,
+      `ORDER BY STRLEN(?s)`) translate via the shared BIND/FILTER
+      expression translator. All four SQL builders (single-branch,
+      aggregate, UNION, aggregate-over-UNION) and `SELECT DISTINCT`
+      compose; an expression sort key on the aggregate/UNION shapes
+      is a documented narrow deferral (project it with BIND, then
+      ORDER BY the bound variable). Regression-locked:
+      `tests/regression/sql/100-sparql-order-by-type-aware.sql`
+      (+ W3C-shape `47-order-by-type-aware`).
+
+      ```sql
+      -- xsd:integer literals sort NUMERICALLY: 1, 2, 10, 100
+      -- (the pre-F4 lexical sort gave 1, 10, 100, 2).
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT ?n WHERE { ?s ex:n ?n } ORDER BY ?n');
+
+      -- DESC + an expression sort key.
+      SELECT * FROM pgrdf.sparql(
+        'PREFIX ex: <http://example.com/>
+         SELECT ?s WHERE { ?x ex:s ?s } ORDER BY DESC(STRLEN(?s))');
+      ```
 - ❌ Federated `SERVICE` — out of scope for v0.x
 
 ## Postgres custom scan hooks
