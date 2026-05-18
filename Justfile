@@ -101,6 +101,11 @@ test-lubm:
 test-pg-dump-roundtrip:
     PGRDF_RUNTIME={{RUN}} bash tests/regression/scripts/pg-dump-roundtrip.sh
 
+# Prove that compose/extensions/ matches a fresh build from this source tree
+# and that the running container has those exact bytes mounted.
+test-artifact-parity:
+    PGRDF_RUNTIME={{RUN}} PGRDF_BUILD_RUNTIME={{BUILD}} bash tests/regression/scripts/verify-installed-artifacts.sh
+
 # Full local test bar: container-based pgrx tests + compose regression.
 # Kept narrow for back-compat; `just test-everything` is the broader sweep.
 test-all: test test-regression
@@ -167,4 +172,5 @@ smoke: build-ext compose-up
 smoke-cold: compose-down build-ext compose-up
     sleep 5
     cd compose && {{RUN}} compose exec postgres psql -U pgrdf -d pgrdf -c "CREATE EXTENSION IF NOT EXISTS pgrdf;"
+    just test-artifact-parity
     just test-conformance

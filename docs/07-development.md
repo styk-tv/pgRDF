@@ -36,6 +36,7 @@ the §7 GUC path activates with PG 18 — see ERRATA E-007).
 just build-ext         # builds linux .so in a builder container (Colima)
 just compose-up        # boots compose stack on podman
 just psql              # → pgrdf=# CREATE EXTENSION pgrdf;
+just test-artifact-parity  # mounted bytes == fresh build == live container
 ```
 
 Use this loop for:

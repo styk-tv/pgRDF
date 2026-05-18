@@ -6,6 +6,19 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Compose install-artifact parity verification. New
+  `tests/regression/scripts/verify-installed-artifacts.sh` proves a
+  fresh build matches `compose/extensions/`, the running container is
+  mounting this repo's exact extension files, the container bytes match
+  the host bytes, and the SQL-visible version surface matches
+  `pgrdf.control`. Wired into the compose PG17 regression job in CI,
+  exposed as `just test-artifact-parity`, and folded into
+  `just smoke-cold`. The compose-runtime default container name is now
+  standardised as `pgrdf-pgrdf-postgres` across the harness scripts and
+  docs.
+
 ## [0.5.0] — 2026-05-16
 
 **The complete RDF / SPARQL / SHACL / OWL surface.** v0.5.0 is the

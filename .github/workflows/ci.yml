@@ -57,6 +57,8 @@ jobs:
   regression:
     runs-on: ubuntu-22.04
     needs: test
+    env:
+      PGRDF_CONTAINER: pgrdf-pgrdf-postgres
     steps:
       - uses: actions/checkout@v4
       - name: Set up Docker Buildx
@@ -101,12 +103,19 @@ jobs:
           cd compose && docker compose up -d
           # The compose service includes a healthcheck; wait on it.
           for i in $(seq 1 30); do
-            status=$(docker inspect -f '{{.State.Health.Status}}' pgrdf-postgres 2>/dev/null || echo "starting")
+            status=$(docker inspect -f '{{.State.Health.Status}}' "${PGRDF_CONTAINER}" 2>/dev/null || echo "starting")
             echo "postgres health: $status"
             [ "$status" = "healthy" ] && break
             sleep 2
           done
-          docker exec pgrdf-postgres pg_isready -U pgrdf -d pgrdf
+          docker exec "${PGRDF_CONTAINER}" pg_isready -U pgrdf -d pgrdf
+          docker exec "${PGRDF_CONTAINER}" psql -U pgrdf -d pgrdf -v ON_ERROR_STOP=1 \
+            -c "CREATE EXTENSION IF NOT EXISTS pgrdf;"
+      - name: Verify installed artifact parity
+        env:
+          PGRDF_RUNTIME: docker
+          PGRDF_BUILD_RUNTIME: docker
+        run: bash tests/regression/scripts/verify-installed-artifacts.sh
       - name: Run regression suite
         env:
           PGRDF_RUNTIME: docker
@@ -163,7 +172,7 @@ jobs:
         run: bash tests/perf/lubm-shape/run.sh
       - name: Postgres logs (on failure)
         if: failure()
-        run: docker logs pgrdf-postgres | tail -100
+        run: docker logs "${PGRDF_CONTAINER}" | tail -100
       - name: Tear down compose
         if: always()
         run: cd compose && docker compose down -v

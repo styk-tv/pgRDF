@@ -114,6 +114,26 @@ Driven by `just test-pg-dump-roundtrip`; folded into
 just test-pg-dump-roundtrip
 ```
 
+### Artifact parity
+
+`tests/regression/scripts/verify-installed-artifacts.sh` proves the
+local deployment surface is the one you think it is:
+
+1. fresh build from the current source tree into a temp export;
+2. byte-compare temp export vs `compose/extensions/`;
+3. verify the running container's mount sources point at this repo;
+4. hash-compare the container bytes vs the host files.
+5. after `CREATE EXTENSION pgrdf`, confirm `extversion` and
+   `pgrdf.version()` both match `pgrdf.control`'s `default_version`.
+
+This closes the gap that behavioral tests cannot catch on their own:
+the live compose stack reporting `0.5.0` while actually mounting stale
+or wrong local artifacts.
+
+```bash
+just test-artifact-parity
+```
+
 ## Layer 3.5 — ontology smoke (manual)
 
 `tests/perf/smoke-ontologies.sh` loads each TTL under

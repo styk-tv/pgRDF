@@ -40,7 +40,7 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUNTIME="${PGRDF_RUNTIME:-podman}"
-CONTAINER="${PGRDF_CONTAINER:-pgrdf-postgres}"
+CONTAINER="${PGRDF_CONTAINER:-pgrdf-pgrdf-postgres}"
 USR="${POSTGRES_USER:-pgrdf}"
 DB="${POSTGRES_DB:-pgrdf}"
 

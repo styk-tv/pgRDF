@@ -238,6 +238,7 @@ For people working on pgRDF itself.
 |---|---|---|
 | pgrx integration | UDF correctness inside a managed PG | `just test` |
 | pg_regress-style | UDF correctness over the wire to compose Postgres | `just test-regression` |
+| Artifact parity | Mounted extension bytes match a fresh build and the live container | `just test-artifact-parity` |
 | W3C-shape SPARQL | Per-test data.ttl + query.rq vs expected.jsonl | `just test-w3c` |
 | LUBM-shape | LUBM-style correctness gates against a hand-authored fixture | `just test-lubm` |
 | Ontology smoke | Real-world Turtle parses cleanly | `tests/perf/smoke-ontologies.sh` |
@@ -247,8 +248,10 @@ For people working on pgRDF itself.
 | Cold-compose smoke | Wipe compose, rebuild, re-up, run test-conformance | `just smoke-cold` |
 
 `just test-everything` is the comprehensive entry point; `just
-smoke-cold` is the cold-compose verification (use after touching
-anything in `compose/`, `fixtures/`, or the test SQL fixtures).
+smoke-cold` is the cold-compose verification (it now includes
+artifact-parity proof after rebuild, before the compose-based test
+bar). Use it after touching anything in `compose/`, `fixtures/`, or
+the test SQL fixtures.
 
 Current bar — **274 pgrx + 85 pg_regress + 51 W3C-sparql + 25
 W3C SHACL Core + 3 LUBM-shape** green across the full pgrx PG

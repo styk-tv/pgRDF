@@ -61,7 +61,7 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 FIX_DIR="${REPO_ROOT}/tests/w3c-shacl/fixtures/core"
-CONTAINER="${PGRDF_CONTAINER:-pgrdf-postgres}"
+CONTAINER="${PGRDF_CONTAINER:-pgrdf-pgrdf-postgres}"
 RUNTIME="${PGRDF_RUNTIME:-podman}"
 PSQL_USER="${POSTGRES_USER:-pgrdf}"
 PSQL_DB="${POSTGRES_DB:-pgrdf}"

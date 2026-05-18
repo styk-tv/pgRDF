@@ -20,7 +20,7 @@
 #      then re-query `_pgrdf_graphs` and verify the two seeded rows
 #      survived the round trip.
 #
-# Defaults match `tests/regression/run.sh`: container `pgrdf-postgres`,
+# Defaults match `tests/regression/run.sh`: container `pgrdf-pgrdf-postgres`,
 # runtime `podman`, user `pgrdf`, db `pgrdf`. Override via:
 #
 #   PGRDF_CONTAINER=… PGRDF_RUNTIME=… POSTGRES_USER=… POSTGRES_DB=…
@@ -58,7 +58,7 @@
 
 set -eu
 
-CONTAINER="${PGRDF_CONTAINER:-pgrdf-postgres}"
+CONTAINER="${PGRDF_CONTAINER:-pgrdf-pgrdf-postgres}"
 RUNTIME="${PGRDF_RUNTIME:-podman}"
 USR="${POSTGRES_USER:-pgrdf}"
 DB="${POSTGRES_DB:-pgrdf}"

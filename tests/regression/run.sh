@@ -18,7 +18,7 @@ set -u
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SQL_DIR="${REPO_ROOT}/tests/regression/sql"
 EXPECTED_DIR="${REPO_ROOT}/tests/regression/expected"
-CONTAINER="${PGRDF_CONTAINER:-pgrdf-postgres}"
+CONTAINER="${PGRDF_CONTAINER:-pgrdf-pgrdf-postgres}"
 RUNTIME="${PGRDF_RUNTIME:-podman}"
 PSQL_USER="${POSTGRES_USER:-pgrdf}"
 PSQL_DB="${POSTGRES_DB:-pgrdf}"
