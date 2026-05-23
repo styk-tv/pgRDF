@@ -34,7 +34,7 @@ jobs:
           mkdir -p dist && cd dist
           gh release download "${{ steps.v.outputs.tag }}" \
             --repo styk-tv/pgRDF \
-            --pattern 'pgrdf-*.tar.gz' --pattern 'SHA256SUMS'
+            --pattern 'pgrdf-*.tar.gz' --pattern 'pgrdf-*.zip' --pattern 'SHA256SUMS'
           sha256sum -c SHA256SUMS
       - name: ghcr login
         run: echo "${{ github.token }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin

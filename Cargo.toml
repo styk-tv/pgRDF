@@ -1,6 +1,6 @@
 [package]
 name = "pgrdf"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 # MSRV. Matches the CI build container (compose/builder.Containerfile
 # `FROM rust:1.91-bookworm`) — the only Rust version pgRDF artifacts
@@ -10,7 +10,7 @@ edition = "2021"
 # imposes a 1.84 floor; this declaration tightens that to the value CI
 # verifies. Bump together with the Containerfile when upgrading.
 rust-version = "1.91"
-license = "Apache-2.0"
+license = "MIT"
 authors = ["Peter Styk <peter@styk.tv>"]
 description = "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning"
 repository = "https://github.com/styk-tv/pgRDF"

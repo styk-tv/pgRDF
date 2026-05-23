@@ -12,6 +12,7 @@ PG_MAJOR := env_var_or_default("PG_MAJOR", "17")
 # Override either via env: `PGRDF_BUILD_RUNTIME=podman just build-ext` etc.
 BUILD := env_var_or_default("PGRDF_BUILD_RUNTIME", "docker")
 RUN   := env_var_or_default("PGRDF_RUN_RUNTIME",   "podman")
+PGXN_DIST_DIR := env_var_or_default("PGRDF_PGXN_DIST_DIR", "dist/pgxn")
 
 # Linux build cache lives in a docker named volume inside Colima
 # (which has 100 GB). A bind-mount to the macOS host was the cleaner
@@ -120,6 +121,18 @@ test-everything: test test-conformance
 # Build the extension package locally (target/release/pgrdf-pgN/).
 package:
     cargo pgrx package --pg-config "$(cargo pgrx info pg-config pg{{PG_MAJOR}})"
+
+# Build a PGXN-ready source archive locally and place it under an ignored dir.
+pgxn-dist:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver="$(sed -n "s/^default_version = '\\(.*\\)'/\\1/p" pgrdf.control)"
+    outdir="{{PGXN_DIST_DIR}}"
+    out="${outdir}/pgrdf-${ver}.zip"
+    mkdir -p "${outdir}"
+    make dist
+    mv "pgrdf-${ver}.zip" "${out}"
+    printf '%s\n' "${out}"
 
 # Build extension inside the linux builder container; export artifacts to
 # compose/extensions/ on the host. The compose stack (podman) bind-mounts

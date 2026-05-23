@@ -10,7 +10,7 @@
 > v0.5 `mode`-arg scope is tracked in
 > [`specs/ERRATA.v0.5.md`](../specs/ERRATA.v0.5.md) **E-012**
 > (SHACL-SPARQL upstream stub) and **E-013** (Core manifest gate
-> invariant + one excluded fixture).
+> invariant + final 25 / 25 full-pass).
 
 ## Surface
 
@@ -190,14 +190,14 @@ calling Postgres transaction.
 W3C `data-shapes-test-suite` SHACL **Core** tests
 (`tests/w3c-shacl/`, structured like `tests/w3c-sparql/`), wired
 into CI on every PG major (14-17) as a real gate. The vendored Core
-suite is a genuine **full-pass — 24 / 24** on the W3C `sh:conforms`
+suite is a genuine **full-pass — 25 / 25** on the W3C `sh:conforms`
 invariant; per ERRATA.v0.5 **E-013** the gate compares `conforms`
 (not the violation *count*, which drifts ±1 from pgRDF's
 blank-node-relabelling dictionary rehydrate — a serialization
-artifact that does not flip conformance). One W3C Core fixture
-(`prop-nodeKind-001`) is documented-excluded for an upstream
-`sh:nodeKind` multi-value bug (E-013) and carried to Phase H+I for
-the final v0.5.0. `just test-shacl-manifest --sparql` asserts the
+artifact that does not flip conformance). There is no excluded Core
+fixture: `prop-nodeKind-001` is graded in `fixtures/core/` and passes
+with the W3C-authoritative `conforms:false` result. `just
+test-shacl-manifest --sparql` asserts the
 E-012 known state (`conforms:null` for every fixture — the upstream
 SparqlEngine stub).
 
@@ -225,7 +225,7 @@ SparqlEngine stub).
   the Core violation; `'sparql'` structured report; §5.3 #2
   materialised-graph entailment (RDFS profile).
 - [`tests/w3c-shacl/`](../tests/w3c-shacl/) — the W3C SHACL Core
-  manifest gate (24/24, `conforms` invariant; E-013).
+  manifest gate (25/25, `conforms` invariant; E-013).
 
 Plus seven `#[pg_test]` integration tests in
 `src/validation/shacl.rs::tests` (conforming, violations, unknown
@@ -264,6 +264,6 @@ version (the `features = ["rdf-12"]` opt-in stays).
   SHACL-SPARQL mode is an upstream stub; the `mode` arg ships
   forward-compatible.
 - ERRATA: [`E-013`](../specs/ERRATA.v0.5.md) — the W3C SHACL Core
-  gate `sh:conforms` invariant + the one excluded fixture.
+  gate `sh:conforms` invariant + the final 25/25 full-pass.
 - ERRATA: [`E-009`](../specs/ERRATA.v0.2.md) — original
   dep-block, now resolved.

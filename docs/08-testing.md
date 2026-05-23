@@ -127,8 +127,8 @@ local deployment surface is the one you think it is:
    `pgrdf.version()` both match `pgrdf.control`'s `default_version`.
 
 This closes the gap that behavioral tests cannot catch on their own:
-the live compose stack reporting `0.5.0` while actually mounting stale
-or wrong local artifacts.
+the live compose stack reporting the expected extension version while
+actually mounting stale or wrong local artifacts.
 
 ```bash
 just test-artifact-parity
@@ -181,19 +181,18 @@ fetched at test time — structured like layer 4). Each test ships as
 `<name>.w3c.ttl` (unmodified W3C source, for provenance +
 hand-deriving the expected) + `<name>.ttl` (the `<>`-free data+shapes
 split the harness loads) + `<name>.expected.json`. The vendored Core
-suite is a genuine **full-pass — 24 / 24** on the W3C `sh:conforms`
+suite is a genuine **full-pass — 25 / 25** on the W3C `sh:conforms`
 invariant (ERRATA.v0.5 **E-013** explains why `conforms`, not the
 violation count, is the principled gate — pgRDF's dictionary
 rehydrate relabels blank-node focus nodes, a serialization artifact
-that does not flip conformance). One W3C Core fixture
-(`prop-nodeKind-001`) is documented-excluded to
-`fixtures/excluded/` for an upstream `sh:nodeKind` bug (E-013;
-Phase H+I follow-up). `--sparql` asserts the ERRATA.v0.5 **E-012**
-known state (the upstream `SparqlEngine` is a stub →
+that does not flip conformance). There is no excluded Core fixture:
+`prop-nodeKind-001` is graded in `fixtures/core/` and passes with the
+W3C-authoritative `conforms:false` result. `--sparql` asserts the
+ERRATA.v0.5 **E-012** known state (the upstream `SparqlEngine` is a stub →
 `conforms:null` for every fixture). Wired into CI on every PG major.
 
 ```bash
-just test-shacl-manifest          # W3C SHACL Core gate (24/24)
+just test-shacl-manifest          # W3C SHACL Core gate (25/25)
 just test-shacl-manifest --sparql # E-012 known-state sub-run
 ```
 

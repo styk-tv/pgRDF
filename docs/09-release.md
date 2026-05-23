@@ -4,13 +4,45 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is **`v0.5.0`** — the final v0.5 release. It is
-flagged `isPrerelease=false` + `isLatest=true` and **supersedes
-`v0.4.6` as "latest"** (the `v0.5.0-rc1` tag stays a prerelease,
-preserved as the rc record). Cargo.toml reads `version = "0.5.0"`
-(bumped from `0.5.0-rc1` during the v0.5.0 release pre-flight,
-Phase H). See `CHANGELOG.md` for the running set of `[Unreleased]`
-entries that move into the next `[N.M.P]` block at tag time.
+The current cut is **`v0.5.1`** — a maintenance release on top of the
+v0.5.0 engine surface. It is flagged `isPrerelease=false` +
+`isLatest=true` and supersedes `v0.5.0` as "latest". Cargo.toml reads
+`version = "0.5.1"` and the tagged release now carries both the binary
+tarball matrix and the PGXN source zip. See `CHANGELOG.md` for the
+running set of `[Unreleased]` entries that move into the next `[N.M.P]`
+block at tag time.
+
+## v0.5.1 — 2026-05-23
+
+Maintenance cut only. **No engine delta vs v0.5.0.** The release
+packages the existing v0.5.0 RDF / SPARQL / SHACL / OWL surface as
+`0.5.1`, adds PGXN source-distribution assets (`META.json`,
+`README.pgxn.md`, `INSTALL.md`, `Makefile`, release `pgrdf-0.5.1.zip`),
+keeps the compose artifact-parity check from the prep commit, and
+aligns the legal surface to MIT (`NOTICE` removed from the tarballs and
+repo root).
+
+### Control-version reconciliation
+
+`Cargo.toml` `version`, `pgrdf.control` `default_version`, `META.json`
+`version`, the `cargo pgrx package` SQL filename, and Postgres
+`extversion` are all identically `0.5.1`. `00-smoke.out` literals move
+to `0.5.1`.
+
+### Cut file set
+
+`Cargo.toml` + `Cargo.lock` + `pgrdf.control` + `META.json` +
+`README.pgxn.md` + `INSTALL.md` + `README.md` + install/doc refreshes +
+`tests/regression/expected/00-smoke.out` + `CHANGELOG.md` +
+`RELEASE_NOTES.md` + `.github/workflows/release.yml` /
+`oci-publish.yml` (PGXN zip asset path).
+
+### Release artifact matrix
+
+- 8 binary tarballs: `pg14..17 × amd64/arm64`
+- `pgrdf-0.5.1.zip` PGXN source archive
+- aggregate `SHA256SUMS`
+- OCI publish still reuses the tagged GitHub assets (no rebuild)
 
 ## v0.5.0 — 2026-05-16
 

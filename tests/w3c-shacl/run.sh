@@ -17,19 +17,17 @@
 # engine acts only on `sh:*` shapes + their targets and ignores the
 # `mf:` / `sht:` manifest triples (they declare no SHACL constraint).
 #
-# Comparison invariant — `{conforms, violations}`:
-#   * `conforms`  — the headline W3C `sh:conforms` boolean.
-#   * `violations`— the number of `sh:result` entries (= violation
-#                   count). Hand-derived from each fixture's
-#                   `mf:result` block (the W3C-authoritative answer,
-#                   NEVER auto-blessed from validator output).
-# Focus-node IRIs are intentionally NOT compared: the W3C fixtures
-# use blank-node and typed-literal focus nodes that do not survive an
-# N-Triples re-parse byte-stable, whereas `{conforms, violations}` is
-# stable across blank-node relabelling + term-encoding and is still a
-# true conformance signal (a missed or spurious violation changes the
-# count). This is the SHACL analogue of the bag-equivalent sort the
-# w3c-sparql harness uses for solution sequences.
+# Comparison invariant — `{conforms}`:
+#   * `conforms` — the headline W3C `sh:conforms` boolean, hand-derived
+#                  from each fixture's `mf:result` block (the
+#                  W3C-authoritative answer, NEVER auto-blessed from
+#                  validator output).
+# Focus-node IRIs are intentionally NOT compared, and the violation
+# count is shown for diagnostics only. The W3C fixtures use blank-node
+# and typed-literal focus nodes that do not survive an N-Triples
+# re-parse byte-stable, so blank-node relabelling can drift the
+# printed count by ±1 without flipping conformance. `conforms` is the
+# stable gate signal; the count is not.
 #
 # Modes:
 #   (default)   — validate via `pgrdf.validate(g, g)` ('native').

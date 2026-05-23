@@ -33,3 +33,12 @@ fixtures/ontologies/
 # Local reference symlinks (point outside the repo; per-workstation only)
 ref-*/
 ref-*
+
+# Local WIP / private notes
+_WIP/
+RESPONSE*
+SPEC.NATS*
+
+# Generated PGXN source archive
+pgrdf-*.zip
+dist/pgxn/

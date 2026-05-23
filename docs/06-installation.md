@@ -17,7 +17,8 @@ postgres \
 No image rebuild, no entrypoint wrappers, no init scripts. This is
 the spec-preferred forward path; pgRDF will switch to it once pgrx
 ships a stable 0.17+/0.18 line that builds on current rustc (see
-ERRATA E-006, E-007). Until then v0.3 pins to PG 17 + pgrx 0.16.1
+ERRATA E-006, E-007). Until then the current v0.5.x line pins to
+PG 17 + pgrx 0.16.1
 and uses the per-file bind-mount pattern below.
 
 ## 6.2 PG 14–17 — file placement (INSTALL spec §4.3)
@@ -58,7 +59,7 @@ Once the files are in place and Postgres is running:
 
 ```sql
 CREATE EXTENSION pgrdf;
-SELECT pgrdf.version();   -- → '0.3.0'
+SELECT pgrdf.version();   -- → '0.5.1'
 ```
 
 The extension declares `superuser = true` because we manipulate

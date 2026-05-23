@@ -6,6 +6,13 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-05-23
+
+**Maintenance release on top of the v0.5.0 engine surface.** No RDF /
+SPARQL / SHACL / OWL engine delta; this cut packages PGXN source
+distribution support, aligns the release/legal surface with MIT, and
+refreshes the install + conformance docs.
+
 ### Added
 
 - Compose install-artifact parity verification. New
@@ -18,6 +25,29 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   `just smoke-cold`. The compose-runtime default container name is now
   standardised as `pgrdf-pgrdf-postgres` across the harness scripts and
   docs.
+- PGXN release mechanics. Added root `META.json`, `Makefile`,
+  `INSTALL.md`, and `README.pgxn.md`; added `just pgxn-dist`; and wired
+  the tagged GitHub release to attach `pgrdf-<version>.zip` alongside
+  the existing binary tarballs.
+
+### Changed
+
+- License surface aligned to MIT across `LICENSE`, `Cargo.toml`,
+  `README.md`, release notes, and release packaging. Release tarballs
+  now ship `LICENSE` only; `NOTICE` is removed.
+- Public install docs refreshed to current `0.5.1` examples and the
+  PGXN path (`README.md`, `guide/01-install.md`,
+  `docs/06-installation.md`, `compose/README.md`, `INSTALL.md`,
+  `README.pgxn.md`).
+- W3C SHACL docs synced to the genuine **25 / 25** Core full-pass and
+  the `--sparql` known-state contract (`docs/05-validation.md`,
+  `docs/08-testing.md`, `tests/w3c-shacl/README.md`,
+  `tests/w3c-shacl/run.sh`).
+
+### Fixed
+
+- Removed a tracked local absolute-path reference from
+  `specs/ERRATA.v0.4.md`.
 
 ## [0.5.0] — 2026-05-16
 

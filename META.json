@@ -1,0 +1,51 @@
+{
+  "name": "pgrdf",
+  "abstract": "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning",
+  "description": "pgRDF is a Rust-native PostgreSQL extension for RDF storage, SPARQL 1.1 query and update, SHACL validation, and OWL 2 RL or RDFS materialization inside PostgreSQL.",
+  "version": "0.5.1",
+  "maintainer": [
+    "Peter Styk <peter@styk.tv>"
+  ],
+  "license": "mit",
+  "release_status": "stable",
+  "provides": {
+    "pgrdf": {
+      "abstract": "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning",
+      "file": "pgrdf.control",
+      "docfile": "README.pgxn.md",
+      "version": "0.5.1"
+    }
+  },
+  "prereqs": {
+    "runtime": {
+      "requires": {
+        "PostgreSQL": "14.0.0"
+      }
+    }
+  },
+  "resources": {
+    "homepage": "https://pgrdf.styk.tv/",
+    "bugtracker": {
+      "web": "https://github.com/styk-tv/pgRDF/issues"
+    },
+    "repository": {
+      "url": "git://github.com/styk-tv/pgRDF.git",
+      "web": "https://github.com/styk-tv/pgRDF",
+      "type": "git"
+    }
+  },
+  "meta-spec": {
+    "version": "1.0.0",
+    "url": "https://pgxn.org/meta/spec.txt"
+  },
+  "generated_by": "pgRDF repository metadata",
+  "tags": [
+    "rdf",
+    "sparql",
+    "shacl",
+    "owl",
+    "postgresql",
+    "pgrx",
+    "knowledge graph"
+  ]
+}

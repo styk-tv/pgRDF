@@ -25,7 +25,7 @@ just psql                 # opens a psql shell to the pgrdf database
 
 pgrdf=# CREATE EXTENSION pgrdf;
 pgrdf=# SELECT pgrdf.version();
-        --  → 0.3.0
+        --  → 0.5.1
 ```
 
 That's it. The extension is installed and you can move on to
@@ -59,7 +59,21 @@ The shape:
 The reference manifest in INSTALL spec §5 is a complete `StatefulSet`
 + `ConfigMap` + `Service` you can copy.
 
-## Path C — Already-running Postgres (manual install)
+## Path C — PGXN source install
+
+If the host already has PostgreSQL development headers plus the Rust
+toolchain, PGXN can build and install pgRDF from source directly:
+
+```bash
+pgxn install pgrdf --pg_config /path/to/pg_config
+psql -d yourdb -c "CREATE EXTENSION pgrdf;"
+```
+
+This is the source-install path. For prerequisites and the direct
+`make` fallback from an unpacked source archive, see the repo-root
+[`INSTALL.md`](../INSTALL.md).
+
+## Path D — Already-running Postgres (manual install)
 
 If you have a Postgres server you control (RDS isn't this — see the
 next section):
@@ -67,9 +81,9 @@ next section):
 ```bash
 # Download the matching tarball from
 # https://github.com/styk-tv/pgRDF/releases/latest
-wget https://github.com/styk-tv/pgRDF/releases/download/v0.3.0/pgrdf-0.3.0-pg17-glibc-amd64.tar.gz
+wget https://github.com/styk-tv/pgRDF/releases/download/v0.5.1/pgrdf-0.5.1-pg17-glibc-amd64.tar.gz
 
-tar -xzf pgrdf-0.3.0-pg17-glibc-amd64.tar.gz
+tar -xzf pgrdf-0.5.1-pg17-glibc-amd64.tar.gz
 sudo cp lib/pgrdf.so                 $(pg_config --pkglibdir)/
 sudo cp share/extension/pgrdf.control $(pg_config --sharedir)/extension/
 sudo cp share/extension/pgrdf--*.sql  $(pg_config --sharedir)/extension/
@@ -99,7 +113,7 @@ in any managed-service extension catalogue. Options:
 SELECT extversion FROM pg_extension                -- matches the tarball you fetched
  WHERE extname = 'pgrdf';
 SHOW shared_preload_libraries;                     -- contains 'pgrdf'
-SELECT pgrdf.version();                            -- → '0.3.0'
+SELECT pgrdf.version();                            -- → '0.5.1'
 SELECT pgrdf.stats() -> 'shmem_ready';             -- → true (preload OK)
 ```
 

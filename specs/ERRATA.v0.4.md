@@ -29,7 +29,7 @@ resolution text; status notes below are deltas only.
 | Resolves | The remaining `rdf-12 / TermRef::Triple` half of [E-009](ERRATA.v0.2.md) |
 | Fork branch | https://github.com/styk-tv/reasonable/tree/rdf12-passthrough |
 | Upstream PR | <https://github.com/gtfierro/reasonable/pull/50> (filed 2026-05-15) |
-| Local PR draft | `/Users/neoxr/git_styk/reasonable/PR-DRAFT.md` (now reflected upstream) |
+| Local PR draft | `PR-DRAFT.md` in the `styk-tv/reasonable` fork workspace (now reflected upstream) |
 
 #### Context
 
@@ -132,8 +132,8 @@ is a load-bearing part of the v0.4.0 build graph.
 
 #### PR draft
 
-Held in `/Users/neoxr/git_styk/reasonable/PR-DRAFT.md` pending
-user authorisation. The fork is now confirmed to unblock pgRDF
+Held in the `styk-tv/reasonable` fork workspace as `PR-DRAFT.md`
+pending user authorisation. The fork is now confirmed to unblock pgRDF
 locally via `[patch.crates-io]`; the PR can be filed.
 
 #### Next steps for pgRDF

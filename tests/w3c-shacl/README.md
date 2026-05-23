@@ -13,7 +13,7 @@ major and runnable locally via `just test-shacl-manifest`.
     ├── run.sh                          (the harness)
     └── fixtures/core/
         ├── <name>.ttl                  (vendored W3C SHACL Core test)
-        └── <name>.expected.json        (hand-derived {conforms,violations})
+        └── <name>.expected.json        (hand-derived {conforms})
 
 The `.ttl` fixtures are a curated, **vendored** subset of the W3C
 `data-shapes-test-suite` SHACL Core tests
@@ -30,12 +30,11 @@ manifest triples, so the harness loads the `<>`-free split). The
 harness skips the `*.w3c.ttl` provenance copies.
 
 **Status:** the vendored W3C SHACL **Core** suite is a genuine
-**full-pass — 24 / 24** on the `sh:conforms` invariant (see ERRATA
-E-013 for why `conforms`, not violation count, is the gate). One W3C
-Core fixture (`prop-nodeKind-001`) is documented-excluded to
-`fixtures/excluded/` — a true upstream `sh:nodeKind` enforcement bug
-in `shacl 0.3.1` (ERRATA.v0.5 **E-013**); it is a Phase H+I
-follow-up for the final v0.5.0, NOT a silent omission.
+**full-pass — 25 / 25** on the `sh:conforms` invariant (see ERRATA
+E-013 for why `conforms`, not violation count, is the gate). There
+is no excluded Core fixture: `prop-nodeKind-001` is graded in
+`fixtures/core/` and passes with the W3C-authoritative
+`conforms:false` result.
 
 Each fixture is a self-contained W3C test `.ttl`: data triples +
 `sh:` shapes + an `mf:Manifest` whose `mf:result` carries the
@@ -76,18 +75,18 @@ Full rationale: `specs/ERRATA.v0.5.md` **E-013**.
 | `just test-shacl-manifest --sparql` | `pgrdf.validate(g,g,'sparql')` | §6.1 #2 — ERRATA.v0.5 E-012 known-state |
 
 `--sparql` runs the same Core fixtures through the upstream SPARQL
-*evaluation* engine. Per
+mode surface. Per
 [`specs/ERRATA.v0.5.md`](../../specs/ERRATA.v0.5.md) **E-012**,
 `shacl 0.3.1` has **no SHACL-SPARQL (`sh:select`) constraint
-component** — `ShaclValidationMode::Sparql` is an alternative
-evaluation engine for the same SHACL **Core** constraints, not
-SHACL-SPARQL constraint-language support. The known state for the
-vendored Core fixtures is therefore "identical to `'native'`"
-(Core-violation parity); the `--sparql` sub-run asserts that bounded
-known set rather than a raw failure. A true W3C SHACL-SPARQL
-manifest cannot pass with the current upstream crate and is NOT
-vendored here — it is fully scoped in E-012 and revisited when a
-future rudof release adds SHACL-SPARQL parsing.
+component** and its `SparqlEngine` is an upstream stub
+(`unimplemented!()`). pgRDF therefore does **not** invoke it:
+`pgrdf.validate(..., 'sparql')` returns a deterministic structured
+report (`conforms:null` + an `error` naming the gap) for every
+fixture. The `--sparql` sub-run asserts exactly that bounded known
+state rather than a raw failure. A true W3C SHACL-SPARQL manifest
+cannot pass with the current upstream crate and is NOT vendored here
+— it is fully scoped in E-012 and revisited when a future rudof
+release ships the engine.
 
 ## Runner
 
