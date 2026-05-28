@@ -8,13 +8,36 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ### Added
 
-- Public top-level **`ROADMAP.md`** — v0.6 forward look (8 tracks,
-  scale gates at LUBM-10 / LUBM-100 / LUBM-1000, SHACL-SPARQL
-  dual-path Track H added in r2). Stakeholder-facing "what and why";
-  the engineering "how and when" stays in `docs/10-roadmap.md`.
+- New regression `tests/regression/sql/124-end-to-end-lexical-rehydration.sql`
+  per CX-002 EVAL recommendation. Locks the dictionary rehydrate path
+  against term-lexical drift across the full pipeline: parse_turtle →
+  CONSTRUCT → materialize(RDFS) → CONSTRUCT → validate(SHACL Native)
+  → put_construct_rows → dict de-dup. Asserts EXACT lexical values
+  (IRIs + literals + datatypes + language tags) on every term shape
+  pgRDF supports (custom-scheme IRIs like `ckp://Task#001` included).
+  Track G task TG-4 / Track F task TF-4 (shared single source-of-truth).
 
 ### Changed
 
+- **`Cargo.toml` / `Cargo.lock`** — bumped `shacl` from `0.3` (0.3.1)
+  to `0.3.2` (workspace also rolls forward: sparql_service, rudof_rdf,
+  rudof_iri, prefixmap, mie all 0.3.1 → 0.3.2). shacl 0.3.2 closes
+  ERRATA.v0.5 E-012 by shipping `IRComponent::Sparql` + sh:sparql
+  parser + functional `SparqlEngine` target-resolution methods that
+  0.3.1 stubbed with `unimplemented!()`. Track H task TH-15. No
+  behaviour change in this commit alone (the short-circuit guard
+  still intercepts; deleted in the next commit).
+- **`src/validation/shacl.rs`** — deleted the 16-line E-012
+  short-circuit guard. `pgrdf.validate(d, s, 'sparql')` now routes
+  Core constraint evaluation through rudof's working `SparqlEngine`
+  instead of returning a deterministic-unavailable structured
+  report. Same shape, same data, same conforms verdict as 'native'
+  on Core constraints; surface signature unchanged. Track H tasks
+  TH-14 (guard delete) + TH-13 (pgrx test rewrite) shipped together.
+- **`tests/regression/sql/122-shacl-modes.sql`** + matching
+  expected/ — §D regression updated to assert the new post-E-012
+  contract: `conforms` reports a real verdict (`false` on Alice),
+  no `error` field, Alice surfaces in results. Track H task TH-13.
 - **`src/query/plan_cache.rs`** — added `shmem_cache::is_ready()`
   guards to `insert()`, `record_hit()`, `record_miss()`. Brings the
   plan-cache module to parity with the dict-cache module's defensive
@@ -27,6 +50,19 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   documenting the `shared_preload_libraries='pgrdf'` requirement.
   Track G task TG-5; carries the documentation commitment from
   `NOTIFIES.pgRDF.0.5.1.shared-preload-required-RESPONSE.md`.
+- Public top-level **`ROADMAP.md`** — v0.6 forward look (8 tracks,
+  scale gates at LUBM-10 / LUBM-100 / LUBM-1000, SHACL-SPARQL
+  dual-path Track H added in r2). Stakeholder-facing "what and why";
+  the engineering "how and when" stays in `docs/10-roadmap.md`.
+
+### Errata
+
+- **E-012** — closed upstream by `shacl 0.3.2` (2026-05-26) +
+  pgRDF-side guard deletion (this release). LLD v0.5 §5.3 #1 status
+  flip (from "adjusted per E-012" to "fully met") and the formal
+  `specs/ERRATA.v0.5.md` close-out land as TH-2 in a follow-up
+  commit (it's the first v0.6-era delta to ERRATA, so it opens
+  `specs/ERRATA.v0.6.md` per TG-2 as a side-effect).
 
 ## [0.5.1] — 2026-05-23
 
