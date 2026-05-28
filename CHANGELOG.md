@@ -8,6 +8,25 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ### Added
 
+- **`tests/w3c-shacl/fixtures/sparql/`** — Track H task TH-7 MVP:
+  W3C SHACL-SPARQL manifest fixture vendoring. First fixture
+  `node-sparql-001` (sh:sparql at node level, 3×sh:targetNode,
+  BGP + FILTER predicate-equality). Vendored as `<name>.w3c.ttl`
+  (unmodified W3C provenance from
+  `data-shapes-test-suite/tests/sparql/node/sparql-001.ttl` on the
+  `w3c/data-shapes` gh-pages branch) + `<name>.ttl` (the
+  `<>`-stripped data+shapes split oxttl can parse) +
+  `<name>.expected.json` (`{"conforms":false}` hand-derived from
+  the W3C `mf:result` block: 3 violation results, one per labelled
+  Invalid* target). The harness `tests/w3c-shacl/run.sh` `--sparql`
+  flag now walks this directory instead of running Core fixtures
+  through sparql mode — a real W3C SHACL-SPARQL conformance gate
+  (`mf:result`-matching) replaces the pre-TH-7 weak "conforms is
+  Boolean" assertion (which was redundant with the default Core
+  run). Additional W3C SHACL-SPARQL fixtures (`node-sparql-002`,
+  `property/sparql-001`, `pre-binding-001` …) land incrementally
+  as Track A SPARQL feature work (FILTER NOT EXISTS, advanced
+  builtins) and TH-9 enhancements (`$PATH` pre-binding) ship.
 - **`src/validation/pgrdf_sparql.rs`** — Track H Architecture-1 (pgRDF-native
   SHACL-SPARQL execution) module. TH-12 scaffold + TH-11 schema walker +
   TH-9 focus-node iteration / `$this` **VALUES-pre-binding** / SPI dispatch to

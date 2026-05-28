@@ -47,11 +47,20 @@
 #                 therefore asserts ONLY the pgRDF-side contract:
 #                 `conforms` is a real Boolean (true or false, NOT
 #                 JSON null), the run completes without panic, and
-#                 mode-dispatch reaches the upstream engine. The
-#                 per-fixture conforms verdict is not bound to a
-#                 specific value here — uneven upstream coverage is
-#                 tracked via the W3C SHACL-SPARQL manifest fixtures
-#                 vendoring under tests/w3c-shacl/sparql/ (TH-7).
+#                 Per-fixture conforms verdict is compared against
+#                 hand-derived expected.json mirroring the W3C
+#                 `mf:result`. **TH-7 (v0.5.8) and onward**: vendoring
+#                 under tests/w3c-shacl/fixtures/sparql/ is incremental
+#                 — fixtures whose SPARQL features pgRDF does not yet
+#                 translate (e.g. FILTER NOT EXISTS, advanced builtins
+#                 like isLiteral/langMatches) are deferred until the
+#                 corresponding Track A work lands; the sub-run gates
+#                 only on the fixtures that ship in the directory.
+#                 Some fixtures may report `conforms:true` under
+#                 rudof's SparqlValidator even when their W3C
+#                 `mf:result` says false — rudof's MinCount/MaxCount
+#                 coverage gap surfaces as a per-fixture mismatch
+#                 surfaced and tracked, not silently suppressed.
 #
 # Usage:
 #   bash tests/w3c-shacl/run.sh                      # Core, native
@@ -63,9 +72,14 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-FIX_DIR="${REPO_ROOT}/tests/w3c-shacl/fixtures/core"
+CORE_DIR="${REPO_ROOT}/tests/w3c-shacl/fixtures/core"
+SPARQL_DIR="${REPO_ROOT}/tests/w3c-shacl/fixtures/sparql"
 CONTAINER="${PGRDF_CONTAINER:-pgrdf-pgrdf-postgres}"
-RUNTIME="${PGRDF_RUNTIME:-podman}"
+# Default to docker (Colima). Multi-agent workstation discipline: this
+# repo is docker-only; podman belongs to parallel agents we must not
+# touch. The earlier `${PGRDF_RUNTIME:-podman}` default was a v0.4-era
+# leftover; CI also runs docker (compose spins under Colima).
+RUNTIME="${PGRDF_RUNTIME:-docker}"
 PSQL_USER="${POSTGRES_USER:-pgrdf}"
 PSQL_DB="${POSTGRES_DB:-pgrdf}"
 ACCEPT="${ACCEPT:-0}"
@@ -88,11 +102,20 @@ for arg in "$@"; do
 done
 
 if [ "${SPARQL_MODE}" -eq 1 ]; then
+  # TH-7 (v0.5.8) — the `--sparql` flag now walks the W3C SHACL-SPARQL
+  # vendored manifest under `fixtures/sparql/`, not the Core fixtures
+  # under `fixtures/core/`. The pre-TH-7 meaning ("run Core fixtures
+  # through `mode => 'sparql'`, assert pgRDF-side contract only") was
+  # redundant with the default Core run — the new meaning is a real
+  # SHACL-SPARQL conformance gate against per-fixture
+  # W3C-authoritative `expected.json` (matching the W3C `mf:result`).
   MODE_ARG=", 'sparql'"
   MODE_LABEL="sparql"
+  FIX_DIR="${SPARQL_DIR}"
 else
   MODE_ARG=""
   MODE_LABEL="native"
+  FIX_DIR="${CORE_DIR}"
 fi
 
 declare -a tests=()
@@ -185,40 +208,6 @@ for name in "${tests[@]}"; do
     | grep -oE '(true|false|null)$' | head -1)"
   vcount="$(printf '%s' "${jline}" | grep -oE '"focusNode"' | wc -l | tr -d ' ')"
   actual="{\"conforms\":${conforms}}"
-
-  if [ "${SPARQL_MODE}" -eq 1 ]; then
-    # ERRATA.v0.5 E-012 RESOLVED 2026-05-28 by shacl 0.3.2 + pgRDF
-    # TH-14 guard delete. The pre-0.3.2 short-circuit returned
-    # `{"conforms":null}` for every fixture; with the guard gone,
-    # `'sparql'` mode dispatches into rudof's working `SparqlEngine`
-    # and the per-fixture verdict depends on which Core constraints
-    # rudof's `SparqlValidator` trait covers upstream. The
-    # cardinality-constraint carve-out (MinCount / MaxCount NOT yet
-    # covered) means some fixtures will report `conforms:true` even
-    # when `'native'` would report `conforms:false` — that's a
-    # rudof-side upstream gap, not a pgRDF regression.
-    #
-    # What this sub-run asserts now (the pgRDF-side contract):
-    # - `conforms` is a real Boolean ({"conforms":true} or
-    #   {"conforms":false}) — NOT JSON null (which would mean the
-    #   E-012 short-circuit guard is still firing somehow)
-    # - the run completes without panic
-    #
-    # When `tests/w3c-shacl/sparql/` vendors the W3C SHACL-SPARQL
-    # manifest (TH-7), this sub-run upgrades to per-fixture
-    # `expected.json` matching the W3C `mf:result` like the Core
-    # sub-run already does.
-    if [ "${conforms}" = "true" ] || [ "${conforms}" = "false" ]; then
-      printf '  \033[32mPASS\033[0m     %s  conforms=%s (sparql dispatch reached)\n' "${name}" "${conforms}"
-      pass=$((pass + 1))
-    else
-      printf '  \033[31mFAIL\033[0m     %s  (sparql sub-run conforms is JSON null — E-012 guard still firing?)\n' "${name}"
-      printf '    expected: conforms is a Boolean (true|false)\n'
-      printf '    actual:   conforms=%s  raw=%s\n' "${conforms}" "${actual}"
-      fail=$((fail + 1))
-    fi
-    continue
-  fi
 
   if [ ! -f "${expected}" ]; then
     if [ "${ACCEPT}" = "1" ]; then
