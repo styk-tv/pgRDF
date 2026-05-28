@@ -65,10 +65,22 @@ pub fn contains(sql: &str) -> bool {
 
 /// Insert a freshly-prepared plan and bump the insert counter.
 /// Called on the miss path after `client.prepare(...).keep()`.
+///
+/// The per-backend `PLANS` HashMap insert always runs (it's a local
+/// thread_local!). The shmem counter increment is guarded by
+/// `shmem_cache::is_ready()` — matches the discipline the dict-cache
+/// module already enforces (`shmem_cache::lookup`, `stage_for_commit`,
+/// etc.) so a lazy-loaded backend (extension .so loaded outside
+/// `shared_preload_libraries`) degrades to a no-op stats path rather
+/// than panicking with "PgAtomic was not initialized" on the first
+/// plan-cache miss.
 pub fn insert(sql: String, plan: OwnedPreparedStatement) {
     PLANS.with(|c| {
         c.borrow_mut().insert(sql, plan);
     });
+    if !crate::storage::shmem_cache::is_ready() {
+        return;
+    }
     INSERTS.get().fetch_add(1, Ordering::Relaxed);
 }
 
@@ -78,10 +90,16 @@ pub fn local_size() -> usize {
 }
 
 pub fn record_hit() {
+    if !crate::storage::shmem_cache::is_ready() {
+        return;
+    }
     HITS.get().fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn record_miss() {
+    if !crate::storage::shmem_cache::is_ready() {
+        return;
+    }
     MISSES.get().fetch_add(1, Ordering::Relaxed);
 }
 
