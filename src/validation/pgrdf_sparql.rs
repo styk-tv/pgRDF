@@ -1,22 +1,22 @@
 //! Track H Architecture-1 — pgRDF-native SHACL-SPARQL execution.
 //!
-//! TH-12 SCAFFOLD only. The full implementation lands across
-//! TH-11 → TH-8 per `_WIP/SPEC.ROADMAP.TRACK.TASKS.v1.0-devel.md §10
-//! TH-12 native handler design`.
+//! TH-9 (this file as of v0.5.7): focus-node iteration + `$this`
+//! substitution + SPI dispatch to `pgrdf.sparql` + result-row mapping.
 //!
 //! ## Goal
 //!
 //! Provide a third validation backend (`mode => 'pgrdf'`) alongside
 //! `'native'` (rudof in-memory) and `'sparql'` (rudof endpoint-shaped).
-//! For shapes that carry `IRComponent::Sparql` constraints
+//! For shapes that carry `IRComponent::BasicSparql` constraints
 //! (`sh:sparql [ sh:select "…" ]` — the SHACL Part-2 vocabulary that
-//! `shacl 0.3.2` now parses), pgRDF intercepts the constraint, walks
-//! the focus-node set produced by the shape's targets, substitutes
-//! `$this` per focus node, and executes through `pgrdf.sparql` — the
-//! same dictionary-indexed hexastore path that already powers
-//! `pgrdf.sparql` and `pgrdf.construct`. Core constraints continue to
-//! evaluate through rudof's `NativeEngine`; only the `Sparql` variant
-//! is intercepted.
+//! `shacl 0.3.2` parses), pgRDF intercepts the constraint, walks the
+//! focus-node set produced by the shape's targets, substitutes `$this`
+//! per focus node, executes through `pgrdf.sparql` — the same
+//! dictionary-indexed hexastore path that already powers
+//! `pgrdf.sparql` and `pgrdf.construct` — and maps every binding row
+//! to a `sh:ValidationResult`. Core constraints continue to evaluate
+//! through rudof's `NativeEngine`; only the `BasicSparql` variant is
+//! intercepted.
 //!
 //! ## Why
 //!
@@ -29,101 +29,143 @@
 //! O(1) per-focus-node lookup via dictionary, indexes used by the
 //! planner, prepared-plan cache reuse across the focus iteration.
 //!
-//! ## Module shape (locked in TH-12)
+//! ## Module shape
 //!
-//! - **Public entry point** (this file): `run_pgrdf_sparql(data_g,
-//!   shapes_g) → serde_json::Value`. Returns a ValidationReport in
-//!   the same JSON shape as `'native'` / `'sparql'`.
-//! - **Mode name**: `'pgrdf'` (locked; alternatives `'pg'`, `'sql'`,
-//!   `'native-sql'`, `'fast'` rejected).
+//! - **Public entry point**: `run_pgrdf_sparql(data_g, shapes_g) →
+//!   serde_json::Value`. Returns a ValidationReport in the same JSON
+//!   shape as `'native'` / `'sparql'`.
+//! - **Mode name**: `'pgrdf'`.
 //! - **Schema walk** (TH-11/TH-10): `walk_schema_for_sparql(schema)`
-//!   returns `Vec<(IRShape, IRComponent::Sparql)>`. Iterates the
-//!   compiled `IRSchema`; collects only the SPARQL constraints.
-//! - **Per-shape evaluation** (TH-9): for each `(shape, sparql)`,
-//!   resolve the shape's target set against the data graph
-//!   (`target_node`, `target_class`, `target_subject_of`,
-//!   `target_object_of`, `implicit_target_class`); for each focus
-//!   node, dict-lookup its lexical, substitute `$this` in the
-//!   `sh:select` text, run `pgrdf.sparql`, map result rows to
+//!   returns `Vec<(IRShape, BasicSparql)>`.
+//! - **Per-shape evaluation** (TH-9, this commit): for each
+//!   `(shape, sparql)`, resolve the shape's target set against the
+//!   data graph (Class, ImplicitClass, Node, SubjectsOf, ObjectsOf);
+//!   for each focus node, lexical-substitute `$this` in the
+//!   `sh:select` text, run `pgrdf.sparql`, map each binding row to a
 //!   `sh:ValidationResult` JSONB.
-//! - **Dispatcher integration** (TH-8): a third arm in
+//! - **Dispatcher integration** (TH-8, next): a third arm in
 //!   `validate()`'s `match mode` calls
-//!   `pgrdf_sparql::run_pgrdf_sparql(...)`. Until TH-8, this scaffold
+//!   `pgrdf_sparql::run_pgrdf_sparql(...)`. Until TH-8, this module
 //!   is unreachable from SQL — `validate()` continues to accept only
 //!   `'native'` / `'sparql'`.
 //!
-//! ## What this scaffold delivers (TH-12 acceptance)
+//! ## What TH-9 delivers
 //!
-//! - Module exists at the locked path.
-//! - Public function signature matches the dispatcher's eventual
-//!   call site.
-//! - Body returns a deterministic placeholder so call sites can be
-//!   stubbed without spurious test failures.
-//! - The `_status` field in the response makes it impossible to
-//!   silently ship an unfinished `'pgrdf'` mode — if a future commit
-//!   wires this in without removing the `_status` marker, regression
-//!   tests will surface the placeholder shape.
+//! - Target resolution for the five well-formed `Target` variants
+//!   (Node, Class, ImplicitClass, SubjectsOf, ObjectsOf).
+//! - `$this` lexical substitution.
+//! - `pgrdf.sparql` SPI dispatch per focus node.
+//! - Result-row → `sh:ValidationResult` mapping (focusNode,
+//!   resultPath, sourceShape, resultMessage, resultSeverity, value,
+//!   sourceConstraintComponent = `sh:SPARQLConstraintComponent`).
+//!
+//! TH-8 wires this module into the SQL dispatcher; the live
+//! integration tests + the W3C SHACL-SPARQL manifest sub-run land
+//! with TH-7 / TH-6.
 
+use crate::validation::shacl::serialise_graph_to_ntriples;
+use pgrx::prelude::*;
+use rudof_rdf::rdf_core::term::Object;
+use rudof_rdf::rdf_core::RDFFormat;
+use rudof_rdf::rdf_core::SHACLPath;
 use serde_json::{json, Value};
 use shacl::ir::components::BasicSparql;
 use shacl::ir::{IRComponent, IRSchema, IRShape};
+use shacl::types::{Severity, Target};
+use shacl::validator::store::ShaclDataManager;
+use std::io::Cursor;
 
-/// TH-12 scaffold. Execute the pgRDF-native SHACL-SPARQL path.
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const SH_SPARQL_CONSTRAINT_COMPONENT: &str = "http://www.w3.org/ns/shacl#SPARQLConstraintComponent";
+
+/// Public entry point — Track H Architecture-1 (pgRDF-native)
+/// SHACL-SPARQL execution.
 ///
-/// Returns a deterministic placeholder JSONB until TH-10 → TH-8 land:
+/// Rehydrates the shapes graph, compiles it to an `IRSchema`, walks
+/// every `IRComponent::BasicSparql` constraint, resolves each owning
+/// shape's targets against the data graph, lexical-substitutes `$this`
+/// per focus node, and dispatches the rewritten query through
+/// `pgrdf.sparql` (the dictionary-indexed hexastore path).
 ///
-/// ```text
+/// Output shape — parity with the `'native'` / `'sparql'` modes:
+///
+/// ```json
 /// {
-///   "conforms": true,
-///   "results":  [],
-///   "mode":     "pgrdf",
-///   "_status":  "scaffold (TH-12); implementation pending TH-10..TH-8"
+///   "conforms":        true | false,
+///   "results":         [ ValidationResult, ... ],
+///   "data_graph_id":   <i64>,
+///   "shapes_graph_id": <i64>,
+///   "shapes_triples":  <i64>,
+///   "mode":            "pgrdf",
+///   "error":           "<message-if-shapes-compile-failed>"
 /// }
 /// ```
 ///
-/// **Not yet wired** into `validate()` — the dispatcher still
-/// short-circuits to the existing `'native'` / `'sparql'` arms until
-/// TH-8 lands.
-#[allow(dead_code)]
-pub fn run_pgrdf_sparql(_data_graph_id: i64, _shapes_graph_id: i64) -> Value {
+/// `data_triples` is omitted: the pgRDF-native path doesn't rehydrate
+/// the data graph (that's the whole point — we hit the hexastore
+/// directly), so the count would require an extra SPI scan that
+/// serves no purpose here.
+pub fn run_pgrdf_sparql(data_graph_id: i64, shapes_graph_id: i64) -> Value {
+    let (shapes_nt, shapes_count) = serialise_graph_to_ntriples(shapes_graph_id);
+    let schema = match ShaclDataManager::load(
+        &mut Cursor::new(shapes_nt.as_bytes()),
+        "pgrdf-shapes",
+        &RDFFormat::NTriples,
+        None,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return json!({
+                "conforms":        Value::Null,
+                "results":         [],
+                "data_graph_id":   data_graph_id,
+                "shapes_graph_id": shapes_graph_id,
+                "shapes_triples":  shapes_count,
+                "mode":            "pgrdf",
+                "error":           format!("shapes compile failed: {e}"),
+            });
+        }
+    };
+
+    let extracted = walk_schema_for_sparql(&schema);
+    let mut violations: Vec<Value> = Vec::new();
+    for (shape, sparql) in extracted.iter() {
+        let focus_iris = resolve_focus_nodes(shape.targets(), data_graph_id);
+        for focus_iri in &focus_iris {
+            let substituted = substitute_this(sparql.select(), focus_iri);
+            for row in call_pgrdf_sparql_spi(&substituted) {
+                violations.push(build_violation(shape, sparql, focus_iri, &row));
+            }
+        }
+    }
+
     json!({
-        "conforms": true,
-        "results": [],
-        "mode": "pgrdf",
-        "_status": "scaffold (TH-12); implementation pending TH-10..TH-8"
+        "conforms":        violations.is_empty(),
+        "results":         violations,
+        "data_graph_id":   data_graph_id,
+        "shapes_graph_id": shapes_graph_id,
+        "shapes_triples":  shapes_count,
+        "mode":            "pgrdf",
     })
 }
 
 /// TH-11 — Extract every `IRComponent::BasicSparql` constraint from a
 /// compiled `IRSchema`, paired with the shape that owns it.
 ///
-/// The upstream variant the SPEC originally named `IRComponent::Sparql`
-/// is actually `IRComponent::BasicSparql` in `shacl 0.3.2`; the wrapped
-/// value is a `BasicSparql` struct exposing `.select() -> &String`
-/// (the raw SPARQL SELECT text), `.message() -> Option<&MessageMap>`,
-/// `.deactivated() -> Option<bool>`, and `.prefixes() -> Option<&PrefixMap>`.
-///
-/// Walk semantics (matches the v0.5 §5.3 contract a SPARQL-based
-/// constraint expects):
+/// Walk semantics:
 /// - Iterates every shape via `IRSchema::iter()` — both node shapes
-///   and property shapes (a property shape can carry SPARQL
-///   constraints just like a node shape).
-/// - Skips deactivated shapes (`shape.deactivated() == true`) — a
-///   deactivated shape contributes no constraints per SHACL spec
-///   §3.3 / W3C SHACL Recommendation.
+///   and property shapes.
+/// - Skips deactivated shapes (`shape.deactivated() == true`) per
+///   SHACL §3.3.
 /// - Skips deactivated constraints within a live shape
-///   (`sparql.deactivated() == Some(true)`) — `sh:deactivated`
-///   carried by the `sh:sparql` block itself.
+///   (`sparql.deactivated() == Some(true)`).
 /// - Returns owned values (clones) so the caller does not need to
-///   hold the schema borrow across the per-shape SPI loop in
-///   `run_pgrdf_sparql` (TH-10 / TH-9 / TH-8 spawn SPI scans per
-///   focus node; a held borrow would conflict with the SPI runtime).
+///   hold the schema borrow across the per-shape SPI loop — holding
+///   a borrow across SPI would conflict with the SPI runtime.
 ///
-/// Output ordering matches `IRSchema::iter()` (insertion order of the
-/// IR builder), so successive calls against the same schema are
-/// deterministic — important once TH-3 / TH-4 lock LUBM benchmark
-/// comparison rows.
-#[allow(dead_code)]
+/// Output ordering matches `IRSchema::iter()` (insertion order of
+/// the IR builder), so successive calls against the same schema are
+/// deterministic.
 pub fn walk_schema_for_sparql(schema: &IRSchema) -> Vec<(IRShape, BasicSparql)> {
     let mut out = Vec::new();
     for (_id, shape) in schema.iter() {
@@ -142,6 +184,237 @@ pub fn walk_schema_for_sparql(schema: &IRSchema) -> Vec<(IRShape, BasicSparql)> 
     out
 }
 
+/// TH-9 — Resolve a shape's target declarations to a set of focus-node
+/// IRIs.
+///
+/// SHACL §5.1 defines five well-formed target forms:
+/// - `sh:targetNode` (Node): the focus node is the named term itself.
+/// - `sh:targetClass` (Class) / implicit class (ImplicitClass): focus
+///   nodes are every subject of `?s rdf:type <class>` in the data
+///   graph (no rdfs:subClassOf transitive closure here — SHACL Core
+///   spec §1.5 says target-class membership is direct typing; users
+///   who want transitivity run `pgrdf.materialize` first).
+/// - `sh:targetSubjectsOf` (SubjectsOf): every distinct subject of
+///   `?s <pred> ?o`.
+/// - `sh:targetObjectsOf` (ObjectsOf): every distinct object of
+///   `?s <pred> ?o` that is itself an IRI (literals and blank nodes
+///   are skipped — SHACL §5.5).
+///
+/// `Wrong*` variants flag malformed targets per spec §5.6; pgRDF
+/// treats them as no-focus for now (the dual-path comparison
+/// TH-7/TH-3 will exercise edge cases against the W3C manifest).
+///
+/// Output is sorted + deduplicated so successive calls against the
+/// same (targets, data_graph) pair return a byte-identical IRI list —
+/// required by the benchmark-row determinism contract TH-3 / TH-4
+/// will land.
+pub fn resolve_focus_nodes(targets: &[Target], data_graph_id: i64) -> Vec<String> {
+    let mut focus: Vec<String> = Vec::new();
+    for target in targets {
+        match target {
+            Target::Node(Object::Iri(iri)) => {
+                focus.push(iri.as_str().to_string());
+            }
+            Target::Class(Object::Iri(class_iri))
+            | Target::ImplicitClass(Object::Iri(class_iri)) => {
+                focus.extend(spi_class_targets(class_iri.as_str(), data_graph_id));
+            }
+            Target::SubjectsOf(pred_iri) => {
+                focus.extend(spi_subjects_of(pred_iri.as_str(), data_graph_id));
+            }
+            Target::ObjectsOf(pred_iri) => {
+                focus.extend(spi_objects_of(pred_iri.as_str(), data_graph_id));
+            }
+            // Wrong* — SHACL §5.6: ill-formed targets. Skip for MVP.
+            _ => {}
+        }
+    }
+    focus.sort();
+    focus.dedup();
+    focus
+}
+
+/// TH-9 — Replace every occurrence of `$this` with `<focus_iri>`.
+///
+/// SHACL Part 2 §5.2 defines `$this` as a pre-bound variable that
+/// every SHACL-SPARQL constraint receives. Lexical substitution
+/// produces a self-contained SPARQL SELECT runnable through
+/// `pgrdf.sparql` with no session-state required.
+///
+/// Naive replacement is sufficient for the MVP and the W3C
+/// SHACL-SPARQL manifest fixtures TH-7 vendors. A future refinement
+/// (TH-7 once edge cases surface) would tokenise to avoid matching
+/// `$this` inside a string literal — SPARQL strings can carry `$`
+/// followed by an identifier without it being a variable reference.
+pub fn substitute_this(sparql: &str, focus_iri: &str) -> String {
+    let replacement = format!("<{focus_iri}>");
+    sparql.replace("$this", &replacement)
+}
+
+// ───────────────────── SPI helpers (TH-9) ────────────────────────
+
+/// Single-quote escape for inline SQL string literals. IRIs from a
+/// compiled `IRSchema` are already validated as well-formed URIs by
+/// the `ShaclDataManager::load` pass; this exists strictly as
+/// belt-and-braces hygiene so a corrupt-but-loadable IRI cannot
+/// inject SQL through the JOIN predicates below.
+fn esc(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Resolve `sh:targetClass <class>` (and `sh:targetImplicitClass`)
+/// against the data graph — every subject with `?s rdf:type <class>`.
+fn spi_class_targets(class_iri: &str, data_graph_id: i64) -> Vec<String> {
+    let sql = format!(
+        "SELECT DISTINCT s.lexical_value
+         FROM pgrdf._pgrdf_quads q
+         JOIN pgrdf._pgrdf_dictionary p ON p.id = q.predicate_id
+         JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id
+         JOIN pgrdf._pgrdf_dictionary s ON s.id = q.subject_id
+         WHERE q.graph_id = $1
+           AND p.term_type = 1 AND p.lexical_value = '{}'
+           AND o.term_type = 1 AND o.lexical_value = '{}'
+           AND s.term_type = 1",
+        esc(RDF_TYPE),
+        esc(class_iri),
+    );
+    spi_collect_lexicals(&sql, data_graph_id)
+}
+
+/// Resolve `sh:targetSubjectsOf <pred>` — every distinct subject of
+/// `?s <pred> ?o` in the data graph.
+fn spi_subjects_of(pred_iri: &str, data_graph_id: i64) -> Vec<String> {
+    let sql = format!(
+        "SELECT DISTINCT s.lexical_value
+         FROM pgrdf._pgrdf_quads q
+         JOIN pgrdf._pgrdf_dictionary p ON p.id = q.predicate_id
+         JOIN pgrdf._pgrdf_dictionary s ON s.id = q.subject_id
+         WHERE q.graph_id = $1
+           AND p.term_type = 1 AND p.lexical_value = '{}'
+           AND s.term_type = 1",
+        esc(pred_iri),
+    );
+    spi_collect_lexicals(&sql, data_graph_id)
+}
+
+/// Resolve `sh:targetObjectsOf <pred>` — every distinct object of
+/// `?s <pred> ?o` whose object is itself an IRI (literals / blanks
+/// skipped per SHACL §5.5).
+fn spi_objects_of(pred_iri: &str, data_graph_id: i64) -> Vec<String> {
+    let sql = format!(
+        "SELECT DISTINCT o.lexical_value
+         FROM pgrdf._pgrdf_quads q
+         JOIN pgrdf._pgrdf_dictionary p ON p.id = q.predicate_id
+         JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id
+         WHERE q.graph_id = $1
+           AND p.term_type = 1 AND p.lexical_value = '{}'
+           AND o.term_type = 1",
+        esc(pred_iri),
+    );
+    spi_collect_lexicals(&sql, data_graph_id)
+}
+
+/// One-column SPI scan — column #1 is a lexical IRI string.
+fn spi_collect_lexicals(sql: &str, data_graph_id: i64) -> Vec<String> {
+    let mut out = Vec::new();
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                sql,
+                None,
+                &[unsafe {
+                    pgrx::datum::DatumWithOid::new(
+                        data_graph_id,
+                        pgrx::pg_sys::PgBuiltInOids::INT8OID.into(),
+                    )
+                }],
+            )
+            .expect("pgrdf_sparql: target-resolution SPI failed");
+        for row in table {
+            if let Some(iri) = row.get::<String>(1).ok().flatten() {
+                out.push(iri);
+            }
+        }
+    });
+    out
+}
+
+/// Dispatch the rewritten SPARQL through `pgrdf.sparql` and collect
+/// every binding row as JSONB. Empty result-set ⇒ no violations.
+///
+/// SPARQL parse errors are recorded as a single synthetic row with
+/// an `_error` key so the surrounding violation builder can surface
+/// the failure without crashing the whole `validate()` call — a
+/// SHACL-SPARQL constraint that fails to parse is itself a
+/// data-quality signal worth reporting.
+fn call_pgrdf_sparql_spi(query: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let escaped = query.replace('\'', "''");
+    let sql = format!("SELECT * FROM pgrdf.sparql('{escaped}')");
+    Spi::connect(|client| match client.select(&sql, None, &[]) {
+        Ok(table) => {
+            for row in table {
+                if let Some(json) = row.get::<pgrx::JsonB>(1).ok().flatten() {
+                    out.push(json.0);
+                }
+            }
+        }
+        Err(e) => {
+            out.push(json!({ "_error": format!("{e}") }));
+        }
+    });
+    out
+}
+
+/// Shape one SPARQL binding row into a `sh:ValidationResult` JSONB.
+///
+/// SHACL §4.6 defines the result fields. The pgRDF-native path
+/// supplies the focus node from the substitution context (it's
+/// already in the URL we ran the query for), and lifts an optional
+/// `?value` binding into the `value` slot. `resultPath` mirrors the
+/// owning shape's path if it has one (property shape), else null.
+/// `resultMessage` prefers the SPARQL constraint's `sh:message`
+/// over any per-shape message; this matches rudof's `NativeEngine`
+/// shape.
+fn build_violation(shape: &IRShape, sparql: &BasicSparql, focus_iri: &str, row: &Value) -> Value {
+    let source_shape = match shape.id() {
+        Object::Iri(iri) => Value::String(iri.as_str().to_string()),
+        Object::BlankNode(label) => Value::String(format!("_:{label}")),
+        _ => Value::Null,
+    };
+    let result_path = match shape.path() {
+        Some(SHACLPath::Predicate { pred }) => Value::String(pred.as_str().to_string()),
+        Some(other) => Value::String(format!("{other}")),
+        None => Value::Null,
+    };
+    let result_message = sparql
+        .message()
+        .and_then(|m| m.iter().next().map(|(_, msg)| Value::String(msg.clone())))
+        .unwrap_or(Value::Null);
+    let result_severity = match shape.severity() {
+        Severity::Trace => Value::String("sh:Trace".to_string()),
+        Severity::Debug => Value::String("sh:Debug".to_string()),
+        Severity::Info => Value::String("sh:Info".to_string()),
+        Severity::Warning => Value::String("sh:Warning".to_string()),
+        Severity::Violation => Value::String("sh:Violation".to_string()),
+        Severity::Generic(iri) => Value::String(iri.as_str().to_string()),
+    };
+    // ?value binding lifted into `value`, if present. The shape from
+    // `pgrdf.sparql` is `{"varname": {"type":"iri|literal|bnode",
+    // "value": "..."}}`; pull whatever's under `value` opaquely.
+    let value = row.get("value").cloned().unwrap_or(Value::Null);
+
+    json!({
+        "focusNode":      focus_iri,
+        "resultPath":     result_path,
+        "sourceShape":    source_shape,
+        "resultMessage":  result_message,
+        "resultSeverity": result_severity,
+        "value":          value,
+        "sourceConstraintComponent": SH_SPARQL_CONSTRAINT_COMPONENT,
+    })
+}
+
 #[cfg(test)]
 mod th11_walk_schema_unit_tests {
     use super::walk_schema_for_sparql;
@@ -151,9 +424,9 @@ mod th11_walk_schema_unit_tests {
     /// An empty `IRSchema` (no shapes, no components) yields an empty
     /// extraction vector. Establishes the function shape + the
     /// "empty in, empty out" baseline. Full-schema extraction with
-    /// real `BasicSparql` constraints is covered once TH-9 / TH-8 wire
-    /// the end-to-end path through `pgrdf.validate(..., 'pgrdf')` and
-    /// the pgrx tests / regression fixtures land per
+    /// real `BasicSparql` constraints is covered once TH-8 wires the
+    /// end-to-end path through `pgrdf.validate(..., 'pgrdf')` and the
+    /// pgrx tests / regression fixtures land per
     /// SPEC.ROADMAP.TRACK.TASKS §8 TH-9 / TH-7.
     #[test]
     fn empty_schema_yields_empty_vec() {
@@ -163,6 +436,48 @@ mod th11_walk_schema_unit_tests {
             extracted.is_empty(),
             "empty IRSchema must yield zero (shape, sparql) pairs; got {} pair(s)",
             extracted.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod th9_substitute_this_unit_tests {
+    use super::substitute_this;
+
+    /// Single `$this` occurrence: replaced with `<iri>` (angle-bracketed).
+    #[test]
+    fn single_substitution_wraps_in_angle_brackets() {
+        let q = "SELECT $this WHERE { $this a ?c }";
+        let out = substitute_this(q, "http://example.org/alice");
+        assert_eq!(
+            out,
+            "SELECT <http://example.org/alice> \
+             WHERE { <http://example.org/alice> a ?c }"
+        );
+    }
+
+    /// Zero `$this` occurrences: query passed through unchanged.
+    /// A well-formed SHACL-SPARQL constraint always references `$this`
+    /// at least once, but a constraint without it is still a legal
+    /// SPARQL SELECT — must not be mangled.
+    #[test]
+    fn zero_substitutions_passes_through() {
+        let q = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }";
+        let out = substitute_this(q, "http://example.org/x");
+        assert_eq!(out, q);
+    }
+
+    /// IRI with characters that need no SQL escaping (the most
+    /// common case — query strings, fragments, percent-encoded
+    /// segments) round-trip cleanly.
+    #[test]
+    fn iri_with_query_string_substitutes_intact() {
+        let q = "SELECT $this WHERE { $this ?p ?o }";
+        let out = substitute_this(q, "http://example.org/x?q=1&r=2#frag");
+        assert_eq!(
+            out,
+            "SELECT <http://example.org/x?q=1&r=2#frag> \
+             WHERE { <http://example.org/x?q=1&r=2#frag> ?p ?o }"
         );
     }
 }

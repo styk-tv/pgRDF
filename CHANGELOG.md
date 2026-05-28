@@ -8,6 +8,28 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ### Added
 
+- **`src/validation/pgrdf_sparql.rs`** — Track H Architecture-1 (pgRDF-native
+  SHACL-SPARQL execution) module. TH-12 scaffold + TH-11 schema walker +
+  TH-9 focus-node iteration / `$this` substitution / SPI dispatch to
+  `pgrdf.sparql` / result-row → `sh:ValidationResult` mapping all land.
+  Public entry `run_pgrdf_sparql(data_g, shapes_g) → JSONB`. Target
+  resolution covers five well-formed `Target` variants (Node, Class,
+  ImplicitClass, SubjectsOf, ObjectsOf) via direct SPI scans of
+  `_pgrdf_quads`+`_pgrdf_dictionary` (no `InMemoryGraph` rehydrate —
+  the whole performance point). Constraint dispatch routes the
+  rewritten SPARQL through `pgrdf.sparql` (the dictionary-indexed
+  hexastore path), so plan-cache reuse and indexes kick in across the
+  focus-node iteration. Module ships with 4 plain Rust unit tests
+  (empty-schema walk + 3 `$this` substitution edge cases); end-to-end
+  pgrx + W3C SHACL-SPARQL manifest sub-run + LUBM benchmark land in
+  TH-8 / TH-7 / TH-6 / TH-4 / TH-3. **Not yet reachable from SQL** —
+  the SQL dispatcher (`validate()`) still accepts only `'native'` /
+  `'sparql'` until TH-8 wires the `'pgrdf'` mode arm.
+- **`src/validation/shacl.rs`** — `serialise_graph_to_ntriples`
+  visibility flipped from private to `pub(crate)` so the Track H
+  pgRDF-native handler can rehydrate the shapes graph through the
+  same SPI scan without duplication. No behaviour change for the
+  existing `'native'` / `'sparql'` paths.
 - New regression `tests/regression/sql/124-end-to-end-lexical-rehydration.sql`
   per CX-002 EVAL recommendation. Locks the dictionary rehydrate path
   against term-lexical drift across the full pipeline: parse_turtle →
@@ -66,6 +88,25 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   scale gates at LUBM-10 / LUBM-100 / LUBM-1000, SHACL-SPARQL
   dual-path Track H added in r2). Stakeholder-facing "what and why";
   the engineering "how and when" stays in `docs/10-roadmap.md`.
+
+### Fixed
+
+- **`src/storage/graphs.rs`** — fixed a lock-order inversion in the
+  pgrx test `pg_drop_graph_idempotent_absent`. The test seeded a
+  graph row by INSERTing directly into `_pgrdf_graphs` (bypassing
+  `add_graph` to avoid a different partition-DDL flake) and then
+  called `drop_graph`, which acquires the partition-DDL advisory
+  gate; the production path acquires the gate first, then the
+  table-level lock — classic A→B vs B→A deadlock with the test
+  taking the inverse order. Fix calls
+  `acquire_partition_ddl_gate()` once at the top of the test before
+  the seed INSERT; the gate is re-entrant within a transaction so
+  drop_graph's own acquire later is a no-op count bump. Audited
+  three sibling INSERT-direct tests (`graph_id_after_iri_add`,
+  `graph_iri_direct_insert_lookup`, `graph_iri_roundtrip`); none
+  subsequently take the advisory gate, so they don't form the
+  inverse-order trap and were left unchanged. Track G flake
+  follow-up.
 
 ### Errata
 

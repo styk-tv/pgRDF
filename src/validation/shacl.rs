@@ -314,7 +314,11 @@ fn validate(
 /// graphs and SHACL Core data graphs are usually pure base; we still
 /// take inferred rows in case a caller has run `pgrdf.materialize`
 /// first and wants to validate the materialised closure.)
-fn serialise_graph_to_ntriples(graph_id: i64) -> (String, i64) {
+///
+/// `pub(crate)` so the Track H pgRDF-native handler (`validation::pgrdf_sparql`)
+/// can rehydrate the shapes graph through the same path without
+/// duplicating the SPI scan.
+pub(crate) fn serialise_graph_to_ntriples(graph_id: i64) -> (String, i64) {
     let mut count: i64 = 0;
     let mut serializer = NTriplesSerializer::new().for_writer(Vec::<u8>::new());
 
