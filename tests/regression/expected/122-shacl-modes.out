@@ -3,9 +3,10 @@ native
 b_unknown_mode: OK
 false
 1
-null
+false
 sparql
 t
+f
 true
 materialised
 false

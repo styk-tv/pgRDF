@@ -191,37 +191,20 @@ fn validate(
     // branch can each embed it without contending for `mode`'s move.
     let mode_str = mode;
 
-    // §5.2 / ERRATA.v0.5 E-012 — `shacl 0.3.1`'s `SparqlEngine` is an
-    // upstream STUB: every target-resolution method
+    // §5.2 / ERRATA.v0.5 E-012 (RESOLVED in shacl 0.3.2, 2026-05-26).
+    // The earlier E-012 short-circuit guard intercepted
+    // `ShaclValidationMode::Sparql` before reaching the upstream engine
+    // because every `SparqlEngine` target-resolution method
     // (`target_node` / `target_class` / `target_subject_of` /
-    // `target_object_of` / `implicit_target_class`) is
-    // `unimplemented!()`, so invoking `ShaclValidationMode::Sparql`
-    // on ANY shapes graph with a target panics `not implemented`
-    // inside the crate. Rather than crash the SQL call (a panic the
-    // caller can neither catch nor act on), `'sparql'` mode returns a
-    // clean, deterministic structured report carrying an `error`
-    // that names the upstream gap. This keeps the surface
-    // forward-compatible: the day a rudof release implements the
-    // SPARQL engine + a SHACL-SPARQL constraint component, delete
-    // this guard and the `&validation_mode` call below already routes
-    // correctly (no signature change). Regression `122-shacl-modes`
-    // + the pgrx `validate_sparql_mode_*` tests lock this contract.
-    if matches!(validation_mode, ShaclValidationMode::Sparql) {
-        return pgrx::JsonB(json!({
-            "conforms":        Value::Null,
-            "results":         [],
-            "data_graph_id":   data_graph_id,
-            "shapes_graph_id": shapes_graph_id,
-            "data_triples":    Value::Null,
-            "shapes_triples":  Value::Null,
-            "mode":            mode_str,
-            "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
-            "error":           "validate: 'sparql' mode unavailable — \
-                                shacl 0.3.1 SparqlEngine is an upstream \
-                                stub (unimplemented!); see ERRATA.v0.5 \
-                                E-012. Use 'native' (default).",
-        }));
-    }
+    // `target_object_of` / `implicit_target_class`) ended in
+    // `unimplemented!()`, and the `IRComponent` enum had no `Sparql`
+    // variant (sh:sparql / sh:select constraints were silently dropped
+    // at IR-compile time). Both gaps closed upstream in shacl 0.3.2 —
+    // pgRDF now routes `'sparql'` mode through the real working
+    // engine without an intermediate guard. ERRATA.v0.5 E-012 closes
+    // alongside this commit; the `mode` argument signature is
+    // unchanged (the v0.5 §5.2 contract held forward-compatible
+    // exactly so this gate could be deleted with no API churn).
 
     // 1. Rehydrate data + shapes graphs as N-Triples text.
     let (data_nt, data_count) = serialise_graph_to_ntriples(data_graph_id);
@@ -732,21 +715,18 @@ mod tests {
                 .unwrap();
     }
 
-    /// §5.2 / ERRATA.v0.5 E-012 — `'sparql'` mode is wired but
-    /// returns a clean, deterministic structured report (NOT a
-    /// panic): `shacl 0.3.1`'s SparqlEngine is an upstream stub
-    /// (`unimplemented!()` in every target-resolution method), so
-    /// invoking it would crash the SQL call. Instead the JSONB
-    /// carries `mode:"sparql"`, `conforms:null`, and an `error`
-    /// naming the upstream gap. The SAME shapes graph still validates
-    /// correctly under `'native'` — proving the `sh:sparql`/
-    /// `sh:select` block (silently dropped upstream, E-012) does not
-    /// break native parsing. This locks the realisable v0.5
-    /// contract; the day rudof implements the engine, the guard is
-    /// deleted and `'sparql'` routes through with no signature
-    /// change.
+    /// §5.2 — `'sparql'` mode dispatches Core constraint evaluation
+    /// through rudof's working `SparqlEngine` (shacl 0.3.2, closes
+    /// ERRATA.v0.5 E-012). The same shape that fires under `'native'`
+    /// now also fires under `'sparql'` — both modes return
+    /// `conforms:false` with a focusNode pointing at the violating
+    /// resource. No `error` field appears in the `'sparql'` JSONB any
+    /// more (that was the E-012 short-circuit signal; the upstream
+    /// engine works now, so there's nothing to report). TH-13:
+    /// replaces the pre-0.3.2 `validate_sparql_mode_structured_unavailable`
+    /// test which asserted the deletion-pending short-circuit shape.
     #[pg_test]
-    fn validate_sparql_mode_structured_unavailable() {
+    fn validate_sparql_mode_returns_real_violation() {
         let g_data: i64 = 8530;
         let g_shapes: i64 = 8531;
         Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
@@ -764,10 +744,11 @@ mod tests {
         .unwrap();
         Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
         // PersonShape requires ex:age (xsd:integer, minCount 1). Alice
-        // lacks it — a Core sh:minCount violation. The trailing
-        // sh:sparql/sh:select block is silently a no-op upstream
-        // (E-012): it must NOT crash the 'native' parse and must NOT
-        // add or remove a Core violation.
+        // lacks it — Core sh:minCount violation. The shape is
+        // intentionally Core-only here so the test isolates the
+        // dispatch-mode behaviour from any shacl 0.3.2 SHACL-SPARQL
+        // constraint-vocabulary subtleties (those are covered
+        // separately in TH-9 / TH-13's W3C-manifest-driven gate).
         Spi::run_with_args(
             "SELECT pgrdf.parse_turtle($1, $2)",
             &[
@@ -781,16 +762,6 @@ mod tests {
                          sh:path ex:age ;
                          sh:minCount 1 ;
                          sh:datatype xsd:integer ;
-                     ] ;
-                     sh:sparql [
-                         a sh:SPARQLConstraint ;
-                         sh:message \"every Person needs an ex:age (SPARQL)\" ;
-                         sh:select \"\"\"
-                             SELECT $this WHERE {
-                                 $this a <http://xmlns.com/foaf/0.1/Person> .
-                                 FILTER NOT EXISTS { $this <http://example.org/age> ?a }
-                             }
-                         \"\"\" ;
                      ] ."
                 .into(),
                 g_shapes.into(),
@@ -798,8 +769,7 @@ mod tests {
         )
         .unwrap();
 
-        // 'native' — the sh:sparql block is a no-op (E-012); the Core
-        // sh:minCount violation on Alice still surfaces.
+        // 'native' — the Core engine fires sh:minCount on Alice.
         let native: pgrx::JsonB = Spi::get_one_with_args(
             "SELECT pgrdf.validate($1, $2, 'native')",
             &[g_data.into(), g_shapes.into()],
@@ -816,7 +786,9 @@ mod tests {
             .any(|r| r["focusNode"] == "http://example.org/alice");
         assert!(n_alice, "native mode: no Core violation for ex:alice");
 
-        // 'sparql' — deterministic structured report, no panic.
+        // 'sparql' — same shape, same data, evaluation routed through
+        // rudof's `SparqlEngine` (working in 0.3.2). Same conforms
+        // verdict and the same Alice focusNode in the report.
         let sparql: pgrx::JsonB = Spi::get_one_with_args(
             "SELECT pgrdf.validate($1, $2, 'sparql')",
             &[g_data.into(), g_shapes.into()],
@@ -827,14 +799,24 @@ mod tests {
         assert_eq!(sv["mode"], serde_json::json!("sparql"));
         assert_eq!(
             sv["conforms"],
-            serde_json::Value::Null,
-            "'sparql' mode reports conforms:null (upstream stub, E-012)"
+            serde_json::json!(false),
+            "'sparql' mode now evaluates Core constraints \
+             via the working upstream engine (shacl 0.3.2, \
+             E-012 closed); expected conforms:false on Alice"
         );
-        let err = sv["error"].as_str().unwrap_or("");
+        // E-012 short-circuit signal is gone — no `error` field.
         assert!(
-            err.contains("'sparql' mode unavailable") && err.contains("E-012"),
-            "'sparql' error must name the upstream gap + ERRATA ref; got: {err:?}"
+            sv.get("error").is_none() || sv["error"].is_null(),
+            "'sparql' mode JSONB should carry no `error` field once \
+             the upstream engine works; got: {:?}",
+            sv.get("error")
         );
+        let s_alice = sv["results"]
+            .as_array()
+            .expect("sparql results array")
+            .iter()
+            .any(|r| r["focusNode"] == "http://example.org/alice");
+        assert!(s_alice, "sparql mode: no Core violation for ex:alice");
         // Forward-compat anchor: data/shapes graph ids still echoed.
         assert_eq!(sv["data_graph_id"], g_data);
         assert_eq!(sv["shapes_graph_id"], g_shapes);

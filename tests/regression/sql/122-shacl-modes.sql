@@ -11,27 +11,28 @@
 -- with `mode` ∈ {'native','sparql'}; the JSONB gains a `mode` field;
 -- an unknown mode errors with prefix `validate: unknown mode`.
 --
--- §5.2 / §5.3 acceptance — status per ERRATA.v0.5 E-012:
---
---   `shacl 0.3.1` has NO SHACL-SPARQL constraint component AND its
---   SparqlEngine is an upstream stub (`unimplemented!()` in every
---   target-resolution method — invoking it would panic). So the
---   REALISABLE v0.5 contract, locked here:
+-- §5.2 / §5.3 acceptance — ERRATA.v0.5 E-012 closed upstream in
+-- shacl 0.3.2 (2026-05-26). The `IRComponent::Sparql` variant +
+-- sh:sparql parser + functional SparqlEngine target-resolution
+-- methods all landed in commits fa7a6c34 / a9b96f98 / c7df40e6 /
+-- 5445a050. pgRDF's TH-14 deletes the short-circuit guard;
+-- `mode => 'sparql'` now routes Core constraint evaluation through
+-- the working engine. The v0.5 §5.3 contract this file locks
+-- AFTER E-012 closure:
 --
 --     A.  mode field present; default-arg form ⇒ "native"; the v0.4
 --         2-arg surface is byte-identical (no regression).
 --     B.  unknown mode ⇒ stable `validate: unknown mode` prefix
 --         (validated BEFORE any work; no silent fallback).
---     C.  'native' correctly IGNORES a silently-dropped sh:sparql /
---         sh:select block (E-012 Gap 1) while still reporting the
---         Core violation on the same shape.
---     D.  'sparql' returns a DETERMINISTIC structured report
---         (conforms:null + an `error` naming the upstream gap +
---         E-012) — never a panic, never a crash.
+--     C.  'native' still correctly evaluates the Core constraint
+--         even on a shape that also carries a sh:sparql/sh:select
+--         block (Core path is mode-agnostic).
+--     D.  'sparql' produces a real verdict (conforms:false on
+--         Alice) with the violation in the results array; no
+--         `error` field (the E-012 short-circuit signal is gone).
 --     E.  §5.3 #2 — validation against a `pgrdf.materialize`-d data
 --         graph reports violations against ENTAILED triples
---         ('native' mode, the working engine; unaffected by the
---         'sparql' gap). RDFS profile reused from G1.
+--         ('native' mode). RDFS profile reused from G1.
 --
 -- All expected values hand-computed; never ACCEPT=1.
 
@@ -111,12 +112,27 @@ SELECT count(*)::int AS c_alice_violation
   FROM jsonb_array_elements(pgrdf.validate(12201, 12202, 'native') -> 'results') r
   WHERE r ->> 'focusNode' = 'http://example.org/alice';
 
--- ─── D — 'sparql' ⇒ deterministic structured report, no panic ───
--- conforms:null, mode echoed, and an error naming the upstream gap.
-SELECT (pgrdf.validate(12201, 12202, 'sparql') -> 'conforms')::text AS d_conforms;
+-- ─── D — 'sparql' ⇒ real evaluation via rudof SparqlEngine ──────
+-- ERRATA.v0.5 E-012 closed in shacl 0.3.2 (2026-05-26): the
+-- target-resolution methods are implemented and `IRComponent::Sparql`
+-- exists. pgRDF deleted the short-circuit guard (TH-14); `'sparql'`
+-- mode now routes Core constraint evaluation through the working
+-- upstream `SparqlEngine` (same Core constraints, alternative
+-- evaluation backend). Same conforms verdict on Alice as 'native'.
+-- The previously-asserted `error` field (the E-012 short-circuit
+-- signal) is gone in the new contract.
+SELECT (pgrdf.validate(12201, 12202, 'sparql') ->> 'conforms') AS d_conforms;
 SELECT (pgrdf.validate(12201, 12202, 'sparql') ->> 'mode') AS d_mode;
-SELECT (pgrdf.validate(12201, 12202, 'sparql') ->> 'error'
-        LIKE '%''sparql'' mode unavailable%E-012%') AS d_error_named;
+-- EXISTS instead of count() — shacl 0.3.2 may evaluate both the
+-- Core sh:minCount AND the sh:sparql/sh:select constraint on the
+-- same focus node; the exact violation cardinality depends on
+-- upstream dedup behaviour. EXISTS locks the meaningful contract
+-- (Alice surfaces as a violator) without binding to a count.
+SELECT EXISTS (
+  SELECT 1 FROM jsonb_array_elements(pgrdf.validate(12201, 12202, 'sparql') -> 'results') r
+  WHERE r ->> 'focusNode' = 'http://example.org/alice'
+) AS d_alice_violates;
+SELECT (pgrdf.validate(12201, 12202, 'sparql') ? 'error') AS d_has_error_field;
 
 -- ─── E — §5.3 #2 — validation against a materialised graph ──────
 -- ex:fido is typed ex:Dog; AnimalShape targets ex:Animal and
