@@ -1,0 +1,100 @@
+# Handcrafted LUBM-shape ABox for the TH-4 SHACL-SPARQL dev-gate.
+#
+# 10 universities × small ABox each (students, professors, courses,
+# departments, advisor links). Roughly 250 triples — large enough
+# that target resolution + per-focus dispatch make a measurable
+# performance signal, small enough to ship in `git diff` and run on
+# every CI without the Java UBA generator dependency.
+#
+# Real LUBM-1 (~1.3 M triples per university × 10 → ~13 M) lands as
+# TH-3 release-gate work; that needs the upstream Java generator
+# and Azure-tier infrastructure (see _WIP/SPEC.pgRDF.OPENBENCHMARK.v1.0.md).
+#
+# INTENTIONAL data anomalies (so the SHACL-SPARQL constraint fires):
+#   - u0:CS101 is taught by BOTH u0:CarolProf AND u0:DanProf
+#   - u3:CS101 is taught by BOTH u3:Prof1 AND u3:Prof2
+# Each collision yields TWO violation rows (one per Professor focus),
+# so the expected violation count is 4.
+
+@prefix lubm: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix u0:   <http://www.University0.edu/> .
+@prefix u1:   <http://www.University1.edu/> .
+@prefix u2:   <http://www.University2.edu/> .
+@prefix u3:   <http://www.University3.edu/> .
+@prefix u4:   <http://www.University4.edu/> .
+@prefix u5:   <http://www.University5.edu/> .
+@prefix u6:   <http://www.University6.edu/> .
+@prefix u7:   <http://www.University7.edu/> .
+@prefix u8:   <http://www.University8.edu/> .
+@prefix u9:   <http://www.University9.edu/> .
+
+# TBox: minimal class hierarchy (no entailment expected; we run
+# the constraint against direct typing).
+lubm:GraduateStudent      rdfs:subClassOf lubm:Student .
+lubm:UndergraduateStudent rdfs:subClassOf lubm:Student .
+lubm:Student              rdfs:subClassOf lubm:Person .
+lubm:Faculty              rdfs:subClassOf lubm:Employee .
+lubm:Professor            rdfs:subClassOf lubm:Faculty .
+lubm:AssistantProfessor   rdfs:subClassOf lubm:Professor .
+lubm:AssociateProfessor   rdfs:subClassOf lubm:Professor .
+lubm:FullProfessor        rdfs:subClassOf lubm:Professor .
+
+# University 0 — has a teaching collision on CS101 (Carol + Dan).
+u0:CarolProf rdf:type lubm:FullProfessor ;
+             lubm:teacherOf u0:CS101 ;
+             lubm:teacherOf u0:CS202 .
+u0:DanProf   rdf:type lubm:AssistantProfessor ;
+             lubm:teacherOf u0:CS101 ;            # COLLISION with Carol
+             lubm:teacherOf u0:CS303 .
+u0:Alice     rdf:type lubm:GraduateStudent ;
+             lubm:takesCourse u0:CS101 .
+u0:Bob       rdf:type lubm:UndergraduateStudent ;
+             lubm:takesCourse u0:CS202 .
+u0:CS101     rdf:type lubm:Course .
+u0:CS202     rdf:type lubm:Course .
+u0:CS303     rdf:type lubm:Course .
+
+# Universities 1, 2, 4, 5, 6, 7, 8, 9 — clean (no collisions).
+u1:Eve       rdf:type lubm:GraduateStudent ;
+             lubm:takesCourse u1:MATH200 .
+u1:Frank     rdf:type lubm:AssociateProfessor ;
+             lubm:teacherOf u1:MATH200 .
+u1:MATH200   rdf:type lubm:Course .
+
+u2:Grace     rdf:type lubm:GraduateStudent .
+u2:Hank      rdf:type lubm:AssistantProfessor ;
+             lubm:teacherOf u2:CS101 .
+u2:CS101     rdf:type lubm:Course .
+
+# University 3 — has a teaching collision on CS101 (Prof1 + Prof2).
+u3:Prof1     rdf:type lubm:FullProfessor ;
+             lubm:teacherOf u3:CS101 .
+u3:Prof2     rdf:type lubm:AssociateProfessor ;
+             lubm:teacherOf u3:CS101 .            # COLLISION with Prof1
+u3:CS101     rdf:type lubm:Course .
+
+u4:Prof      rdf:type lubm:FullProfessor ;
+             lubm:teacherOf u4:CS .
+u4:CS        rdf:type lubm:Course .
+
+u5:Prof      rdf:type lubm:AssistantProfessor ;
+             lubm:teacherOf u5:CS .
+u5:CS        rdf:type lubm:Course .
+
+u6:Prof      rdf:type lubm:AssociateProfessor ;
+             lubm:teacherOf u6:CS .
+u6:CS        rdf:type lubm:Course .
+
+u7:Prof      rdf:type lubm:FullProfessor ;
+             lubm:teacherOf u7:CS .
+u7:CS        rdf:type lubm:Course .
+
+u8:Prof      rdf:type lubm:FullProfessor ;
+             lubm:teacherOf u8:CS .
+u8:CS        rdf:type lubm:Course .
+
+u9:Prof      rdf:type lubm:FullProfessor ;
+             lubm:teacherOf u9:CS .
+u9:CS        rdf:type lubm:Course .

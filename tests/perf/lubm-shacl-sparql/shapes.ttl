@@ -1,0 +1,29 @@
+# TH-4 dev-gate shape — "every Course is taught by at most one
+# Professor" expressed as a SHACL-SPARQL constraint that returns a
+# violation row for every (Professor, sharedCourse) pair where two
+# distinct Professors share a teacherOf target.
+#
+# Pure BGP + simple FILTER `!=` — no FILTER NOT EXISTS, no advanced
+# builtins. Translates cleanly through pgRDF's SPARQL executor.
+#
+# Targets every lubm:Professor (sh:targetClass picks up direct
+# typing only — no rdfs:subClassOf expansion in this dev-gate, so
+# only direct lubm:Professor / FullProfessor / etc. count via
+# implicit class targeting through the IR).
+
+@prefix ex:   <http://example.org/lubm-shapes#> .
+@prefix lubm: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+
+ex:CourseTaughtByOneProfessor a sh:NodeShape ;
+  sh:targetClass lubm:FullProfessor ;
+  sh:targetClass lubm:AssociateProfessor ;
+  sh:targetClass lubm:AssistantProfessor ;
+  sh:sparql [ a sh:SPARQLConstraint ;
+              sh:message "Course must be taught by at most one Professor" ;
+              sh:select """SELECT $this ?value WHERE {
+                  $this <http://swat.cse.lehigh.edu/onto/univ-bench.owl#teacherOf> ?value .
+                  ?other <http://swat.cse.lehigh.edu/onto/univ-bench.owl#teacherOf> ?value .
+                  FILTER ($this != ?other)
+              }""" ] .

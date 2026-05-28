@@ -182,6 +182,18 @@ jobs:
         # the Java generator + cross-engine comparison vs Jena TDB /
         # Apache AGE is v0.4 work — see tests/perf/README.md.
         run: bash tests/perf/lubm-shape/run.sh
+      - name: Run LUBM-shape SHACL-SPARQL dev-gate (TH-4)
+        env:
+          PGRDF_RUNTIME: docker
+        # TH-4 (v0.5.9) — handcrafted ~10-university LUBM-shape ABox
+        # with one SHACL-SPARQL constraint ("Course taught by at most
+        # one Professor"). Times both 'sparql' (rudof, NOT a real gate
+        # per E-014) and 'pgrdf' (pgRDF-native, real W3C-style verdict)
+        # and locks the per-mode comparison row. Dev-gate, not
+        # release-gate: real LUBM-10/100/1000 with the Java UBA
+        # generator + cross-engine timing land as TH-3 + the
+        # OPENBENCHMARK trajectory.
+        run: bash tests/perf/lubm-shacl-sparql/run.sh
       - name: Postgres logs (on failure)
         if: failure()
         run: docker logs "${PGRDF_CONTAINER}" | tail -100

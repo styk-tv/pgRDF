@@ -1177,6 +1177,119 @@ ex:ValidResource1
         );
     }
 
+    /// TH-4 — LUBM-shape SHACL-SPARQL dev-gate. Loads the
+    /// handcrafted ~10-university LUBM-shape ABox + the "Course
+    /// taught by at most one Professor" SHACL-SPARQL constraint
+    /// from `tests/perf/lubm-shacl-sparql/`. Asserts the per-mode
+    /// verdict — `pgrdf` mode catches 4 violations (2 collisions ×
+    /// 2 Professor focuses each), `sparql` mode misses them per
+    /// ERRATA.v0.6 E-014. Locks the dev-gate at the pgrx test
+    /// boundary so `just test` exercises the path; the compose
+    /// harness `tests/perf/lubm-shacl-sparql/run.sh` runs the same
+    /// content through the regression container in CI.
+    #[pg_test]
+    fn lubm_shacl_sparql_dev_gate() {
+        let g_data: i64 = 9100;
+        let g_shapes: i64 = 9101;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        // Trimmed inline copy of tests/perf/lubm-shacl-sparql/data.ttl —
+        // 4 universities (u0..u3) covering both collisions; the other
+        // 6 universities in the disk fixture are noise for the
+        // performance-signal path, not the correctness gate, so the
+        // pgrx test inlines the minimal version.
+        let data = r#"@prefix lubm: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix u0:   <http://www.University0.edu/> .
+@prefix u1:   <http://www.University1.edu/> .
+@prefix u2:   <http://www.University2.edu/> .
+@prefix u3:   <http://www.University3.edu/> .
+
+u0:CarolProf rdf:type lubm:FullProfessor ;
+             lubm:teacherOf u0:CS101 ;
+             lubm:teacherOf u0:CS202 .
+u0:DanProf   rdf:type lubm:AssistantProfessor ;
+             lubm:teacherOf u0:CS101 ;
+             lubm:teacherOf u0:CS303 .
+u1:Frank     rdf:type lubm:AssociateProfessor ;
+             lubm:teacherOf u1:MATH200 .
+u2:Hank      rdf:type lubm:AssistantProfessor ;
+             lubm:teacherOf u2:CS101 .
+u3:Prof1     rdf:type lubm:FullProfessor ;
+             lubm:teacherOf u3:CS101 .
+u3:Prof2     rdf:type lubm:AssociateProfessor ;
+             lubm:teacherOf u3:CS101 .
+u0:CS101     rdf:type lubm:Course .
+u0:CS202     rdf:type lubm:Course .
+u0:CS303     rdf:type lubm:Course .
+u1:MATH200   rdf:type lubm:Course .
+u2:CS101     rdf:type lubm:Course .
+u3:CS101     rdf:type lubm:Course .
+"#;
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[data.into(), g_data.into()],
+        )
+        .unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        let shapes = r#"@prefix ex:   <http://example.org/lubm-shapes#> .
+@prefix lubm: <http://swat.cse.lehigh.edu/onto/univ-bench.owl#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+
+ex:CourseTaughtByOneProfessor a sh:NodeShape ;
+  sh:targetClass lubm:FullProfessor ;
+  sh:targetClass lubm:AssociateProfessor ;
+  sh:targetClass lubm:AssistantProfessor ;
+  sh:sparql [ a sh:SPARQLConstraint ;
+              sh:message "Course must be taught by at most one Professor" ;
+              sh:select """SELECT $this ?value WHERE {
+                  $this <http://swat.cse.lehigh.edu/onto/univ-bench.owl#teacherOf> ?value .
+                  ?other <http://swat.cse.lehigh.edu/onto/univ-bench.owl#teacherOf> ?value .
+                  FILTER ($this != ?other)
+              }""" ] .
+"#;
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[shapes.into(), g_shapes.into()],
+        )
+        .unwrap();
+
+        // 'pgrdf' mode — REAL W3C-style verdict. 4 violations:
+        //   CarolProf focusing CS101 (other=DanProf)
+        //   DanProf   focusing CS101 (other=CarolProf)
+        //   Prof1     focusing CS101 (other=Prof2)
+        //   Prof2     focusing CS101 (other=Prof1)
+        let pgrdf: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2, 'pgrdf')",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let pv = &pgrdf.0;
+        assert_eq!(pv["mode"], serde_json::json!("pgrdf"));
+        assert_eq!(pv["conforms"], serde_json::json!(false));
+        let pgrdf_violations = pv["results"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(
+            pgrdf_violations, 4,
+            "pgrdf mode: expected 4 violations (2 collisions × 2 Professor focuses); \
+             got {pgrdf_violations}. Full JSONB: {pv:#}"
+        );
+
+        // 'sparql' mode — ERRATA.v0.6 E-014: rudof's SparqlEngine
+        // returns the wrong verdict on this shape topology. Asserts
+        // only the pgRDF-side contract (call returns a real Boolean,
+        // mode echoed). The "0 violations" outcome is documented
+        // expected behaviour, not a passing conformance gate.
+        let sparql: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2, 'sparql')",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let sv = &sparql.0;
+        assert_eq!(sv["mode"], serde_json::json!("sparql"));
+        assert!(sv["conforms"].is_boolean());
+    }
+
     /// TH-8 — `mode => 'pgrdf'` on a shape graph with no SPARQL
     /// constraints reports conforms = true (empty results), and the
     /// `elapsed_ms` meta-field is present. Locks the "no-op for
