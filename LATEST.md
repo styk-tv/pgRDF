@@ -1,51 +1,28 @@
-# Latest published OCI bundle
+# pgRDF — latest published artifacts
 
-Latest = **0.5.0** (4 PostgreSQL majors × 2 architectures, behind one
-aggregate index)
+One publishable surface ships from this repo: the PostgreSQL **extension** (oras-pulled OCI artifact). This file tracks the head on **PostgreSQL 17**. Older PG majors (14, 15, 16) are still built per release — see [Repo packages view](https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle) for the full matrix.
 
-|  |  |
-|---|---|
-| Pull URI | `ghcr.io/styk-tv/pgrdf-bundle:0.5.0` |
-| Also tagged | `v0.5.0` |
-| Index digest | `sha256:d25560197296f396718e8bf997d851cbcad5599bf2cb11d52e4e1e06e958f00f` |
-| Created (UTC) | 2026-05-16 19:48:26 |
-| PostgreSQL majors | 14, 15, 16, 17 |
-| Architectures | linux/amd64, linux/arm64 |
-| Leaf artifacts | 8 (`0.5.0-pg{14,15,16,17}-{amd64,arm64}`) |
-| GHCR view | <https://github.com/users/styk-tv/packages/container/package/pgrdf-bundle> |
-| Repo packages view | <https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle> |
+## pgRDF extension — `v0.5.8` (PostgreSQL 17)
 
-## Per-PG × arch leaf artifacts
+`oras pull ghcr.io/styk-tv/pgrdf-bundle:0.5.8-pg17-<arch>` → drop `lib/pgrdf.so` + `share/extension/{pgrdf.control, pgrdf--0.5.8.sql}` next to your `postgres:17` install.
 
-| Tag | Digest (short) |
-|---|---|
-| `0.5.0-pg17-arm64` | `sha256:733cd…` |
-| `0.5.0-pg17-amd64` | `sha256:e0484…` |
-| `0.5.0-pg16-arm64` | `sha256:19141…` |
-| `0.5.0-pg16-amd64` | `sha256:8369c…` |
-| `0.5.0-pg15-arm64` | `sha256:e0868…` |
-| `0.5.0-pg15-amd64` | `sha256:42eab…` |
-| `0.5.0-pg14-arm64` | `sha256:ed9dc…` |
-| `0.5.0-pg14-amd64` | `sha256:5a9e6…` |
+| arch  | Pull URI                                            | Digest                                                                  | Created (UTC)       |
+|-------|-----------------------------------------------------|-------------------------------------------------------------------------|---------------------|
+| amd64 | `ghcr.io/styk-tv/pgrdf-bundle:0.5.8-pg17-amd64`     | `sha256:b7a5cd2bd37942c00d354f0241f1138b609bae80ab2ab2f30e35242155a1cc3b` | 2026-05-28 16:23:13 |
+| arm64 | `ghcr.io/styk-tv/pgrdf-bundle:0.5.8-pg17-arm64`     | `sha256:a4e39ec274fb81fe1efdbd3b09022bda75467fdc4cd6ea75d4e4e04cc556735c` | 2026-05-28 16:23:16 |
 
-Pull a specific PG-major + arch directly:
+|                       |                                                                          |
+|-----------------------|--------------------------------------------------------------------------|
+| Artifact type         | `application/vnd.styk.pgrdf.bundle.v1+tar`                               |
+| Aggregate index       | `ghcr.io/styk-tv/pgrdf-bundle:0.5.8` (also tagged `v0.5.8`)              |
+| Tarball mirror        | https://github.com/styk-tv/pgRDF/releases/tag/v0.5.8                     |
+| Repo packages view    | https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle             |
+| Older PG majors       | `0.5.8-pg{14,15,16}-{amd64,arm64}` published alongside; same v0.5.8 tag  |
 
-```bash
-oras pull ghcr.io/styk-tv/pgrdf-bundle:0.5.0-pg17-arm64
-```
+## Pin policy
 
-Or pull the aggregate index and let your client pick:
+- There is **no `latest` synonym** on the extension OCI artifact — pin by `pg`×`arch` explicitly (e.g. `0.5.8-pg17-amd64`).
+- Tagged versions are immutable on GHCR.
+- The aggregate `vX.Y.Z` / `X.Y.Z` index references all 8 per-PG×arch leaves for that release; pull it to let your client pick.
 
-```bash
-oras pull ghcr.io/styk-tv/pgrdf-bundle:0.5.0
-```
-
-## Notes on `Latest` lag
-
-The most recent git tag at the time of writing is **v0.5.8**; the OCI
-bundle above is **v0.5.0**. `.github/workflows/oci-publish.yml` runs on
-the `release: [published]` event but has fired exactly once
-(v0.5.0 ⇒ 2026-05-16). v0.5.1 → v0.5.8 are tagged + have GitHub releases
-but did not trigger the OCI publish. Follow-up tracker noted separately;
-once the trigger condition is fixed, this file updates to whatever the
-new latest is.
+See [`CHANGELOG.md`](./CHANGELOG.md) and [`RELEASE_NOTES.md`](./RELEASE_NOTES.md) for what changed per version.
