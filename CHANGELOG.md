@@ -6,6 +6,28 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Public top-level **`ROADMAP.md`** — v0.6 forward look (8 tracks,
+  scale gates at LUBM-10 / LUBM-100 / LUBM-1000, SHACL-SPARQL
+  dual-path Track H added in r2). Stakeholder-facing "what and why";
+  the engineering "how and when" stays in `docs/10-roadmap.md`.
+
+### Changed
+
+- **`src/query/plan_cache.rs`** — added `shmem_cache::is_ready()`
+  guards to `insert()`, `record_hit()`, `record_miss()`. Brings the
+  plan-cache module to parity with the dict-cache module's defensive
+  discipline. Correct (preloaded) deployments are unaffected;
+  lazy-loaded backends now degrade to a no-op stats path instead of
+  panicking with `PgAtomic was not initialized` on the first
+  plan-cache miss. Track G task TG-7; regression locked by TG-6
+  (plain Rust unit tests outside the pgrx postmaster fixture).
+- **`README.md`** — new "Required `postgresql.conf` changes" section
+  documenting the `shared_preload_libraries='pgrdf'` requirement.
+  Track G task TG-5; carries the documentation commitment from
+  `NOTIFIES.pgRDF.0.5.1.shared-preload-required-RESPONSE.md`.
+
 ## [0.5.1] — 2026-05-23
 
 **Maintenance release on top of the v0.5.0 engine surface.** No RDF /
