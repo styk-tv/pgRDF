@@ -22,13 +22,20 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # `contents: write` is required by the final dispatch step in the
+  # index job (`POST /repos/.../dispatches`) — GitHub's
+  # repository_dispatch endpoint demands a token with write access to
+  # the repo, even though no commit or push actually happens. Without
+  # it the dispatch returns 403 "Resource not accessible by
+  # integration" and the index job fails AFTER the bundle has been
+  # pushed + attested (v0.5.12 hit exactly this). `contents: read`
+  # was sufficient until the dispatch step was added in 83ceb44.
+  contents: write
   packages: write
   # SLSA Build Provenance v1 needs Sigstore-backed OIDC tokens +
-  # attestation API write access. PROVENANCE.md §"What's pending the
-  # wire-up" tracks this becoming live; once it does, every leaf and
-  # every aggregate index pushed by this workflow carries an attestation
-  # that `gh attestation verify` can check.
+  # attestation API write access. Every leaf and every aggregate
+  # index pushed by this workflow carries an attestation that
+  # `gh attestation verify` can check.
   id-token: write
   attestations: write
 
