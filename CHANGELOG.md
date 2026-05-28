@@ -10,8 +10,17 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 - **`src/validation/pgrdf_sparql.rs`** — Track H Architecture-1 (pgRDF-native
   SHACL-SPARQL execution) module. TH-12 scaffold + TH-11 schema walker +
-  TH-9 focus-node iteration / `$this` substitution / SPI dispatch to
+  TH-9 focus-node iteration / `$this` **VALUES-pre-binding** / SPI dispatch to
   `pgrdf.sparql` / result-row → `sh:ValidationResult` mapping all land.
+  **Substitution mechanism note**: SHACL Part 2 §5.2 says `$this` is a
+  pre-bound *variable*, not a textual macro. The first TH-9 cut tried
+  naive text-replacement (`$this` → `<iri>`) — the SPARQL 1.1 grammar
+  rejects IRIs in SELECT projections, so `SELECT <iri>` raised
+  `parse error: expected DISTINCT` at the `pgrdf.sparql` boundary.
+  Corrected within the same micro-release: `$this` → `?_pgrdf_this`
+  plus a `VALUES ?_pgrdf_this { <iri> }` inline-data block injected
+  at the head of the WHERE clause. End-to-end pgrx integration test
+  `validate_pgrdf_mode_real_violation` proves the fix.
   Public entry `run_pgrdf_sparql(data_g, shapes_g) → JSONB`. Target
   resolution covers five well-formed `Target` variants (Node, Class,
   ImplicitClass, SubjectsOf, ObjectsOf) via direct SPI scans of
@@ -19,17 +28,31 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   the whole performance point). Constraint dispatch routes the
   rewritten SPARQL through `pgrdf.sparql` (the dictionary-indexed
   hexastore path), so plan-cache reuse and indexes kick in across the
-  focus-node iteration. Module ships with 4 plain Rust unit tests
-  (empty-schema walk + 3 `$this` substitution edge cases); end-to-end
-  pgrx + W3C SHACL-SPARQL manifest sub-run + LUBM benchmark land in
-  TH-8 / TH-7 / TH-6 / TH-4 / TH-3. **Not yet reachable from SQL** —
-  the SQL dispatcher (`validate()`) still accepts only `'native'` /
-  `'sparql'` until TH-8 wires the `'pgrdf'` mode arm.
+  focus-node iteration. Module ships with 6 plain Rust unit tests
+  (empty-schema walk + 5 `$this` substitution edge cases including
+  lowercase WHERE and missing WHERE).
+  W3C SHACL-SPARQL manifest sub-run + LUBM benchmark land in TH-7 /
+  TH-6 / TH-4 / TH-3.
 - **`src/validation/shacl.rs`** — `serialise_graph_to_ntriples`
   visibility flipped from private to `pub(crate)` so the Track H
   pgRDF-native handler can rehydrate the shapes graph through the
-  same SPI scan without duplication. No behaviour change for the
-  existing `'native'` / `'sparql'` paths.
+  same SPI scan without duplication. **TH-8**: dispatcher arm for
+  `mode => 'pgrdf'` short-circuits to
+  `pgrdf_sparql::run_pgrdf_sparql(...)` before the rudof
+  serialise-and-rehydrate path runs (the whole point of the
+  pgRDF-native mode is to avoid `InMemoryGraph` materialisation of
+  the data graph). `elapsed_ms` layered post-hoc for benchmark-row
+  parity with `'native'` / `'sparql'` modes. Unknown-mode error
+  message updated to list `'pgrdf'` alongside `'native'` /
+  `'sparql'`. Two new pgrx integration tests
+  (`validate_pgrdf_mode_real_violation`: end-to-end ex:alice as
+  foaf:Person without ex:age ⇒ sh:Violation with
+  `sourceConstraintComponent = sh:SPARQLConstraintComponent`;
+  `validate_pgrdf_mode_empty_when_no_sparql_constraint`: no
+  sh:sparql block ⇒ vacuous conform).
+  `validate_unknown_mode_errors` expected string updated for the
+  new mode list. No behaviour change for the existing `'native'` /
+  `'sparql'` paths.
 - New regression `tests/regression/sql/124-end-to-end-lexical-rehydration.sql`
   per CX-002 EVAL recommendation. Locks the dictionary rehydrate path
   against term-lexical drift across the full pipeline: parse_turtle →

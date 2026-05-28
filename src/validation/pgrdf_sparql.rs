@@ -234,21 +234,79 @@ pub fn resolve_focus_nodes(targets: &[Target], data_graph_id: i64) -> Vec<String
     focus
 }
 
-/// TH-9 — Replace every occurrence of `$this` with `<focus_iri>`.
+/// TH-9 — Rewrite a `$this`-bearing SHACL-SPARQL constraint into a
+/// self-contained SPARQL SELECT pre-bound to one focus node.
 ///
-/// SHACL Part 2 §5.2 defines `$this` as a pre-bound variable that
-/// every SHACL-SPARQL constraint receives. Lexical substitution
-/// produces a self-contained SPARQL SELECT runnable through
-/// `pgrdf.sparql` with no session-state required.
+/// SHACL Part 2 §5.2 defines `$this` as a **pre-bound variable** that
+/// every SHACL-SPARQL constraint receives. The naive "text-replace
+/// `$this` with `<iri>`" fails the SPARQL 1.1 grammar — the SELECT
+/// projection clause accepts variables only, never IRI terms. So a
+/// constraint like `SELECT $this WHERE { $this a foaf:Person ... }`
+/// must be rewritten so `$this` continues to be a variable while
+/// receiving its initial binding.
 ///
-/// Naive replacement is sufficient for the MVP and the W3C
-/// SHACL-SPARQL manifest fixtures TH-7 vendors. A future refinement
-/// (TH-7 once edge cases surface) would tokenise to avoid matching
-/// `$this` inside a string literal — SPARQL strings can carry `$`
-/// followed by an identifier without it being a variable reference.
+/// Strategy:
+/// 1. Replace every `$this` with the synthetic variable
+///    `?_pgrdf_this` (a name unlikely to collide with user-authored
+///    variables — SHACL constraints typically use short names like
+///    `?value`, `?p`, `?o`).
+/// 2. Inject a `VALUES ?_pgrdf_this { <focus_iri> }` block at the
+///    head of the first `WHERE` clause's brace. SPARQL 1.1 §10.1
+///    explicitly allows inline data via `VALUES` at the top of a
+///    group graph pattern; this is the standard mechanism for
+///    pre-binding values that the SHACL Part-2 evaluation semantics
+///    describes.
+///
+/// Example — `SELECT $this WHERE { $this a foaf:Person . FILTER NOT
+/// EXISTS { $this :age ?a } }` with focus `<ex:alice>` becomes:
+///
+/// ```sparql
+/// SELECT ?_pgrdf_this WHERE {
+///   VALUES ?_pgrdf_this { <http://example.org/alice> }
+///   ?_pgrdf_this a foaf:Person .
+///   FILTER NOT EXISTS { ?_pgrdf_this :age ?a }
+/// }
+/// ```
+///
+/// If no `WHERE` keyword is found (malformed input), pass the
+/// variable-rewritten text through unmodified — the downstream
+/// `pgrdf.sparql` parser will surface the real grammar error.
+///
+/// Naive (lexical) replacement of `$this` is sufficient for the MVP
+/// and the W3C SHACL-SPARQL manifest fixtures TH-7 vendors. A future
+/// refinement (TH-7 once edge cases surface) would tokenise to avoid
+/// matching `$this` inside a string literal — SPARQL strings can
+/// carry `$` followed by an identifier without it being a variable
+/// reference.
 pub fn substitute_this(sparql: &str, focus_iri: &str) -> String {
-    let replacement = format!("<{focus_iri}>");
-    sparql.replace("$this", &replacement)
+    const FOCUS_VAR: &str = "?_pgrdf_this";
+    let with_var = sparql.replace("$this", FOCUS_VAR);
+    inject_values_at_first_where(&with_var, focus_iri, FOCUS_VAR)
+}
+
+/// Scan for the first case-insensitive `WHERE` keyword and inject
+/// `VALUES <var> { <iri> }` immediately after its opening `{`.
+fn inject_values_at_first_where(sparql: &str, focus_iri: &str, focus_var: &str) -> String {
+    let upper = sparql.to_uppercase();
+    let where_pos = match upper.find("WHERE") {
+        Some(p) => p,
+        None => return sparql.to_string(),
+    };
+    let after_where = &sparql[where_pos + "WHERE".len()..];
+    let brace_offset = match after_where.find('{') {
+        Some(p) => p,
+        None => return sparql.to_string(),
+    };
+    let split_at = where_pos + "WHERE".len() + brace_offset + 1;
+    let mut out = String::with_capacity(sparql.len() + 64);
+    out.push_str(&sparql[..split_at]);
+    out.push_str(" VALUES ");
+    out.push_str(focus_var);
+    out.push_str(" { <");
+    out.push_str(focus_iri);
+    out.push_str("> } ");
+    out.push_str(&sparql[split_at..]);
+    out
 }
 
 // ───────────────────── SPI helpers (TH-9) ────────────────────────
@@ -444,40 +502,75 @@ mod th11_walk_schema_unit_tests {
 mod th9_substitute_this_unit_tests {
     use super::substitute_this;
 
-    /// Single `$this` occurrence: replaced with `<iri>` (angle-bracketed).
+    /// `$this` is rewritten to the synthetic variable `?_pgrdf_this`
+    /// and a `VALUES ?_pgrdf_this { <iri> }` pre-binding is injected
+    /// at the head of the WHERE clause. The result is well-formed
+    /// SPARQL 1.1 that the pgRDF SPARQL parser accepts (a
+    /// `SELECT <iri>` projection — what naive text-substitution
+    /// would produce — is rejected by the SPARQL grammar).
     #[test]
-    fn single_substitution_wraps_in_angle_brackets() {
+    fn single_substitution_uses_values_prebinding() {
         let q = "SELECT $this WHERE { $this a ?c }";
         let out = substitute_this(q, "http://example.org/alice");
+        // Note: double space after `} ` is harmless whitespace — the
+        // SPARQL grammar is whitespace-insensitive. The test pins the
+        // exact bytes so future regressions surface immediately.
         assert_eq!(
             out,
-            "SELECT <http://example.org/alice> \
-             WHERE { <http://example.org/alice> a ?c }"
+            "SELECT ?_pgrdf_this WHERE { VALUES ?_pgrdf_this \
+             { <http://example.org/alice> }  ?_pgrdf_this a ?c }"
         );
     }
 
-    /// Zero `$this` occurrences: query passed through unchanged.
-    /// A well-formed SHACL-SPARQL constraint always references `$this`
-    /// at least once, but a constraint without it is still a legal
-    /// SPARQL SELECT — must not be mangled.
+    /// Zero `$this` occurrences: `WHERE { ... }` still gets the
+    /// VALUES pre-binding (harmlessly unused) so the rewrite is
+    /// uniform; a SHACL-SPARQL constraint that doesn't reference
+    /// `$this` is unusual but legal — must not be mangled.
     #[test]
-    fn zero_substitutions_passes_through() {
+    fn zero_substitutions_still_injects_values() {
         let q = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }";
         let out = substitute_this(q, "http://example.org/x");
-        assert_eq!(out, q);
+        assert_eq!(
+            out,
+            "SELECT ?s ?p ?o WHERE { VALUES ?_pgrdf_this \
+             { <http://example.org/x> }  ?s ?p ?o }"
+        );
     }
 
-    /// IRI with characters that need no SQL escaping (the most
-    /// common case — query strings, fragments, percent-encoded
-    /// segments) round-trip cleanly.
+    /// IRI with query string + fragment characters round-trips into
+    /// the VALUES block intact (no escaping needed inside SPARQL
+    /// `<…>` IRI delimiters — the SPARQL grammar allows almost any
+    /// character there).
     #[test]
-    fn iri_with_query_string_substitutes_intact() {
+    fn iri_with_query_string_round_trips_into_values() {
         let q = "SELECT $this WHERE { $this ?p ?o }";
         let out = substitute_this(q, "http://example.org/x?q=1&r=2#frag");
         assert_eq!(
             out,
-            "SELECT <http://example.org/x?q=1&r=2#frag> \
-             WHERE { <http://example.org/x?q=1&r=2#frag> ?p ?o }"
+            "SELECT ?_pgrdf_this WHERE { VALUES ?_pgrdf_this \
+             { <http://example.org/x?q=1&r=2#frag> }  ?_pgrdf_this ?p ?o }"
         );
+    }
+
+    /// Case-insensitive `WHERE` (lowercase `where`) — SPARQL keywords
+    /// are case-insensitive per W3C §4.2.
+    #[test]
+    fn lowercase_where_keyword_is_recognised() {
+        let q = "SELECT $this where { $this a ?c }";
+        let out = substitute_this(q, "http://example.org/x");
+        assert!(
+            out.contains("VALUES ?_pgrdf_this { <http://example.org/x> }"),
+            "lowercase where: VALUES block missing; got: {out}"
+        );
+    }
+
+    /// No `WHERE` keyword in input: pass through with `$this` →
+    /// `?_pgrdf_this` rewrite only. Downstream parser surfaces the
+    /// real grammar error.
+    #[test]
+    fn missing_where_passes_through_with_var_rewrite() {
+        let q = "SELECT $this { $this a ?c }";
+        let out = substitute_this(q, "http://example.org/x");
+        assert_eq!(out, "SELECT ?_pgrdf_this { ?_pgrdf_this a ?c }");
     }
 }

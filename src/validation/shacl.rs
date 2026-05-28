@@ -178,12 +178,31 @@ fn validate(
     // prefix `validate: unknown mode` per §5.2 (mirrors §3's
     // `materialize: unknown profile` discipline); the pgrx negative
     // test pins the full message.
+    //
+    // `'pgrdf'` (TH-8) short-circuits to the Track H Architecture-1
+    // handler before the rudof pipeline runs — the whole point of the
+    // mode is to avoid serialising the data graph to N-Triples /
+    // rehydrating into `InMemoryGraph`. Returns the JSONB shape
+    // `run_pgrdf_sparql` produces directly; `elapsed_ms` is layered
+    // here so the meta-field shape stays comparable with the
+    // `'native'` / `'sparql'` modes for benchmark-row diffs.
     let validation_mode = match mode.as_str() {
         "native" => ShaclValidationMode::Native,
         "sparql" => ShaclValidationMode::Sparql,
+        "pgrdf" => {
+            let mut value =
+                crate::validation::pgrdf_sparql::run_pgrdf_sparql(data_graph_id, shapes_graph_id);
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "elapsed_ms".to_string(),
+                    json!(start.elapsed().as_secs_f64() * 1000.0),
+                );
+            }
+            return pgrx::JsonB(value);
+        }
         other => panic!(
             "validate: unknown mode {other:?} \
-             (supported: 'native', 'sparql')"
+             (supported: 'native', 'sparql', 'pgrdf')"
         ),
     };
     // Canonical mode string echoed back in every JSONB return site.
@@ -711,7 +730,9 @@ mod tests {
     /// `validate: unknown mode` BEFORE any work (no silent fallback
     /// to `'native'`). Mirrors §3's `materialize: unknown profile`
     /// discipline. The pgrx negative pins the full message.
-    #[pg_test(error = "validate: unknown mode \"endpoint\" (supported: 'native', 'sparql')")]
+    #[pg_test(
+        error = "validate: unknown mode \"endpoint\" (supported: 'native', 'sparql', 'pgrdf')"
+    )]
     fn validate_unknown_mode_errors() {
         let _j: pgrx::JsonB =
             Spi::get_one("SELECT pgrdf.validate(999992::bigint, 999993::bigint, 'endpoint')")
@@ -931,5 +952,172 @@ mod tests {
             fido,
             "no violation reported against entailment-bound ex:fido"
         );
+    }
+
+    /// TH-8 — Track H Architecture-1 dispatcher integration.
+    ///
+    /// `mode => 'pgrdf'` short-circuits to the pgRDF-native handler
+    /// before rudof's serialise-and-rehydrate path runs. End-to-end
+    /// coverage: a real `sh:select` SPARQL constraint, evaluated
+    /// against a data graph via direct SPI scans of the hexastore,
+    /// must produce a real `sh:Violation` row for the offending focus
+    /// node — same observable behaviour as `'native'` / `'sparql'` but
+    /// over a completely different evaluation path.
+    ///
+    /// **Fixture choice.** The natural SHACL idiom for "must carry
+    /// property X" is `FILTER NOT EXISTS { $this :X ?o }`, but the
+    /// pgRDF SPARQL executor doesn't yet translate `Not(Exists(_))`
+    /// (Track A). For this end-to-end smoke test we use a constraint
+    /// that returns ROWS for the targets we want to flag: every
+    /// `foaf:Person` that carries an `ex:age` literal. The data has
+    /// `ex:alice a foaf:Person` with `ex:age 42` ⇒ the constraint
+    /// returns alice ⇒ one `sh:Violation` row with
+    /// `focusNode = ex:alice` and
+    /// `sourceConstraintComponent = sh:SPARQLConstraintComponent`.
+    /// The pattern is intentionally inverted from natural-language
+    /// "Persons must NOT have ex:age" — what matters end-to-end is
+    /// that pgrdf-mode dispatch correctly identifies the focus node
+    /// and maps the binding row to a violation result. A natural
+    /// "must HAVE" constraint will replace this once Track A lifts
+    /// `FILTER NOT EXISTS` (LLD v0.6 §SPARQL).
+    #[pg_test]
+    fn validate_pgrdf_mode_real_violation() {
+        let g_data: i64 = 8560;
+        let g_shapes: i64 = 8561;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:alice a foaf:Person ; foaf:name \"Alice\" ; ex:age 42 ."
+                    .into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:PersonShape a sh:NodeShape ;
+                     sh:targetClass foaf:Person ;
+                     sh:sparql [ a sh:SPARQLConstraint ;
+                                 sh:message \"Person has ex:age (SPARQL)\" ;
+                                 sh:select \"\"\"SELECT $this WHERE {
+                                     $this a <http://xmlns.com/foaf/0.1/Person> .
+                                     $this <http://example.org/age> ?a }\"\"\" ] ."
+                    .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+
+        let pgrdf: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2, 'pgrdf')",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let pv = &pgrdf.0;
+
+        assert_eq!(pv["mode"], serde_json::json!("pgrdf"));
+        assert_eq!(pv["data_graph_id"], g_data);
+        assert_eq!(pv["shapes_graph_id"], g_shapes);
+        assert!(
+            pv.get("elapsed_ms").is_some(),
+            "'pgrdf' mode must echo elapsed_ms for benchmark-row parity; got: {:?}",
+            pv.get("elapsed_ms")
+        );
+        assert_eq!(
+            pv["conforms"],
+            serde_json::json!(false),
+            "ex:alice violates the SPARQL constraint (missing ex:age); \
+             pgrdf-mode report claims conforms=true: {pv}"
+        );
+        let results = pv["results"].as_array().expect("results array");
+        assert!(
+            !results.is_empty(),
+            "pgrdf-mode reports conforms=false but results array is empty: {pv}"
+        );
+        let alice = results
+            .iter()
+            .find(|r| r["focusNode"] == "http://example.org/alice");
+        let alice = alice.unwrap_or_else(|| {
+            panic!("no violation reported against ex:alice in pgrdf mode: {pv}");
+        });
+        assert_eq!(
+            alice["sourceConstraintComponent"],
+            serde_json::json!("http://www.w3.org/ns/shacl#SPARQLConstraintComponent"),
+            "violation must carry sh:SPARQLConstraintComponent; got: {alice}"
+        );
+        assert_eq!(
+            alice["resultSeverity"],
+            serde_json::json!("sh:Violation"),
+            "default severity should be sh:Violation; got: {alice}"
+        );
+    }
+
+    /// TH-8 — `mode => 'pgrdf'` on a shape graph with no SPARQL
+    /// constraints reports conforms = true (empty results), and the
+    /// `elapsed_ms` meta-field is present. Locks the "no-op for
+    /// SPARQL-free shapes" baseline.
+    #[pg_test]
+    fn validate_pgrdf_mode_empty_when_no_sparql_constraint() {
+        let g_data: i64 = 8570;
+        let g_shapes: i64 = 8571;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 ex:x ex:p \"y\" ."
+                    .into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        // Pure Core constraint (sh:minCount) — no sh:sparql block.
+        // The Track H pgRDF-native path only intercepts BasicSparql
+        // constraints; Core-only shapes evaluate to "no SPARQL work
+        // to do" and conform vacuously.
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix sh: <http://www.w3.org/ns/shacl#> .
+                 ex:Shape a sh:NodeShape ;
+                     sh:targetNode ex:y ;
+                     sh:property [ sh:path ex:q ; sh:minCount 1 ] ."
+                    .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+
+        let pgrdf: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2, 'pgrdf')",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let pv = &pgrdf.0;
+
+        assert_eq!(pv["mode"], serde_json::json!("pgrdf"));
+        assert_eq!(
+            pv["conforms"],
+            serde_json::json!(true),
+            "no sh:sparql constraints ⇒ pgrdf-mode conforms vacuously"
+        );
+        assert_eq!(
+            pv["results"].as_array().map(Vec::len),
+            Some(0),
+            "no sh:sparql constraints ⇒ empty results"
+        );
+        assert!(pv.get("elapsed_ms").is_some());
     }
 }
