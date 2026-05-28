@@ -95,6 +95,30 @@ test-shacl-manifest *ARGS:
 test-lubm:
     PGRDF_RUNTIME={{RUN}} bash tests/perf/lubm-shape/run.sh
 
+# TF-12 LUBM test bed (containerised UBA generator). Docker-only via
+# Colima; never runs Java on the host. Output written to the docker
+# named volume `pgrdf-lubm-data`; image name `pgrdf-lubm-generator`.
+#
+# Build the generator image (one-time, ~270 MB; subsequent builds
+# hit the cargo / apt layer cache).
+lubm-build:
+    docker build -t pgrdf-lubm-generator:latest tests/perf/lubm/generator/
+
+# Generate LUBM-N (default N=10) into the docker named volume
+# `pgrdf-lubm-data`. The volume is created on first run; subsequent
+# runs overwrite the `lubm-<N>/` subdir. Data is discardable
+# (`docker volume rm pgrdf-lubm-data` to free).
+lubm-gen UNIV_COUNT="10":
+    docker volume inspect pgrdf-lubm-data >/dev/null 2>&1 || docker volume create pgrdf-lubm-data
+    docker run --rm \
+        -v pgrdf-lubm-data:/data \
+        pgrdf-lubm-generator:latest \
+        {{UNIV_COUNT}}
+
+# Free the LUBM data volume. Idempotent; safe to re-run.
+lubm-clean:
+    -docker volume rm pgrdf-lubm-data
+
 # pg_dump round-trip verification for `_pgrdf_graphs` (LLD v0.4 §3.1
 # acceptance criterion). Boots a clean state, seeds two IRI bindings,
 # pg_dumps, drops + restores, then re-queries to verify the mapping

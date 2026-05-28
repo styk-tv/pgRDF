@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/styk-tv/pgRDF/tests/perf/lubm/schema/baseline.schema.json",
+  "title": "pgRDF LUBM baseline (TF-12 schema lock)",
+  "description": "Per-fixture record of validate-mode behaviour + perf signals at LUBM-N. Correctness fields are exact-match in CI; timing fields are tolerance-compared per the per-fixture `comparison_tolerance` block. Schema locked at v0.6 cycle entry per TF-12 intake.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "produced_at",
+    "produced_by",
+    "univ_count",
+    "fixtures"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "v0.6",
+      "description": "Bump when fields are added/removed/renamed. Consumers refuse to parse unknown versions."
+    },
+    "produced_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp at the moment the runner emitted the report."
+    },
+    "produced_by": {
+      "type": "string",
+      "description": "Identifier of the runner that emitted the file (e.g. 'tests/perf/run-lubm.sh@host', 'ci.yml/regression', '<pg-major>'). Used for diff context when comparing baselines."
+    },
+    "univ_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "LUBM university count this baseline was generated at."
+    },
+    "pgrdf_version": {
+      "type": "string",
+      "description": "Semver of the pgRDF extension under test (e.g. '0.5.9')."
+    },
+    "postgres_major": {
+      "type": "integer",
+      "enum": [14, 15, 16, 17]
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/fixtureRecord" }
+    }
+  },
+  "$defs": {
+    "fixtureRecord": {
+      "type": "object",
+      "required": ["name", "modes", "comparison_tolerance"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Stable identifier (e.g. 'shacl-sparql-course-uniqueness', 'sparql-q1-class-membership')."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["shacl-validate", "sparql-select", "sparql-construct", "owl2rl-materialize"],
+          "description": "What this fixture exercises end-to-end."
+        },
+        "modes": {
+          "type": "object",
+          "description": "One sub-record per validate-mode (SHACL fixtures only) OR a single 'default' sub-record for non-SHACL fixtures.",
+          "patternProperties": {
+            "^(native|sparql|pgrdf|default)$": { "$ref": "#/$defs/modeRecord" }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        "comparison_tolerance": {
+          "type": "object",
+          "required": ["elapsed_ms_pct"],
+          "additionalProperties": false,
+          "properties": {
+            "elapsed_ms_pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 500,
+              "description": "Per-fixture tolerance percentage on elapsed_ms. CI runner noise floor is ~50% on small fixtures; tighter on substantial ones. Correctness fields (conforms, violations) are ALWAYS exact-match — this tolerance applies only to timing."
+            }
+          }
+        }
+      }
+    },
+    "modeRecord": {
+      "type": "object",
+      "required": ["elapsed_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "conforms": {
+          "type": ["boolean", "null"],
+          "description": "SHACL only. NULL on engine error (e.g. parse). EXACT-MATCH gate."
+        },
+        "violations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "SHACL only. EXACT-MATCH gate."
+        },
+        "elapsed_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "End-to-end validate / sparql / materialize time. Tolerance-compared per fixture."
+        },
+        "plan_cache_hits": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "From pgRDF's plan cache instrumentation. Diagnostic field; not a gate criterion (cache behaviour is environment-dependent)."
+        },
+        "dict_lookups": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Dictionary lookups during the run. Diagnostic field; not a gate criterion."
+        },
+        "error": {
+          "type": "string",
+          "description": "Engine error message if the run errored. When present, conforms is null and the entire mode row is informational only."
+        }
+      }
+    }
+  }
+}

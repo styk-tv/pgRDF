@@ -1,0 +1,6 @@
+# LUBM-generated data is reproducible from the tracked generator —
+# discardable, never committed. The actual fixture in the docker
+# volume `pgrdf-lubm-data` is not on the host filesystem; this entry
+# guards any accidental local copies that land here.
+data/*
+!data/.gitkeep

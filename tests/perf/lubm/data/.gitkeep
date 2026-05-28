@@ -1,0 +1,9 @@
+Placeholder so `tests/perf/lubm/data/` exists in fresh clones.
+
+The actual generated LUBM dataset lives in the docker named volume
+`pgrdf-lubm-data` (created by `just lubm-build` / `just lubm-gen N`),
+not on the host filesystem. This file keeps the directory present so
+local scripts can bind-mount through it if a teammate prefers a host
+path over a named volume.
+
+See `../README.md` for the full TF-12 intake.
