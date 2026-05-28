@@ -1682,6 +1682,7 @@ dependencies = [
  "oxttl",
  "pgrx",
  "pgrx-tests",
+ "prefixmap",
  "reasonable",
  "rudof_rdf",
  "serde_json",

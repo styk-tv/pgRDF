@@ -107,6 +107,11 @@ rudof_rdf = "0.3"
 
 [dev-dependencies]
 pgrx-tests = "0.16"
+# Needed only by TH-11's walk_schema_for_sparql unit test —
+# `shacl::ir::IRSchema::new(PrefixMap)` requires a `PrefixMap` and
+# `shacl` does not re-export it. Pinned to the same 0.3.x major as
+# `shacl` / `rudof_rdf` so the type identity is workspace-wide.
+prefixmap = "0.3"
 
 [profile.dev]
 panic = "unwind"
