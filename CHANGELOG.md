@@ -8,6 +8,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ### Added
 
+- **`guide/06-validation-recipes.md`** — Track H task TH-5: new user-facing guide page covering when to use `'native'` vs `'sparql'` vs `'pgrdf'` modes of `pgrdf.validate`. Includes the SSN-uniqueness SHACL-SPARQL worked example, decision matrix, pgRDF-native pipeline description, performance notes, and current Track A limitations (FILTER NOT EXISTS, `(expr AS ?var)`, `$PATH`). Cross-references ERRATA.v0.6 E-014 (rudof `SparqlEngine` upstream gap on common shape topologies; pgRDF-native is the recommended SHACL-SPARQL engine).
 - **`tests/w3c-shacl/fixtures/sparql/`** — Track H task TH-7 MVP:
   W3C SHACL-SPARQL manifest fixture vendoring. First fixture
   `node-sparql-001` (sh:sparql at node level, 3×sh:targetNode,
