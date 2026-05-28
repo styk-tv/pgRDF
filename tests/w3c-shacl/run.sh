@@ -34,19 +34,24 @@
 #                 The W3C SHACL **Core** suite. Must be FULL-PASS for
 #                 the v0.5 gate (§6.1 #1).
 #   --sparql    — validate via `pgrdf.validate(g, g, 'sparql')`.
-#                 Asserts the KNOWN state documented in
-#                 specs/ERRATA.v0.5.md E-012 (§6.1 #2). `shacl 0.3.1`'s
-#                 SparqlEngine is an upstream STUB (`unimplemented!()`
-#                 in every target-resolution method), so 'sparql' mode
-#                 in pgRDF returns a deterministic STRUCTURED REPORT
-#                 (`conforms:null` + an `error` naming the upstream
-#                 gap), never a panic and never a Core report. The
-#                 known set for EVERY vendored fixture is therefore
-#                 `{"conforms":null}`; this sub-run asserts exactly
-#                 that bounded state rather than a raw failure. A true
-#                 W3C SHACL-SPARQL manifest cannot pass with the
-#                 current upstream crate — fully scoped in E-012,
-#                 revisited when a rudof release ships the engine.
+#                 ERRATA.v0.5 E-012 was RESOLVED on 2026-05-28 by
+#                 `shacl 0.3.2` + pgRDF TH-14 (guard delete). The
+#                 pre-0.3.2 short-circuit returned `conforms:null`
+#                 for every fixture; with the guard gone, 'sparql'
+#                 mode dispatches into rudof's working SparqlEngine
+#                 and the per-fixture verdict depends on which Core
+#                 constraints rudof's `SparqlValidator` trait covers
+#                 upstream (Class / NodeKind / Pattern / MinLength /
+#                 MaxLength / value-range bounds are covered;
+#                 MinCount / MaxCount are NOT). This sub-run
+#                 therefore asserts ONLY the pgRDF-side contract:
+#                 `conforms` is a real Boolean (true or false, NOT
+#                 JSON null), the run completes without panic, and
+#                 mode-dispatch reaches the upstream engine. The
+#                 per-fixture conforms verdict is not bound to a
+#                 specific value here — uneven upstream coverage is
+#                 tracked via the W3C SHACL-SPARQL manifest fixtures
+#                 vendoring under tests/w3c-shacl/sparql/ (TH-7).
 #
 # Usage:
 #   bash tests/w3c-shacl/run.sh                      # Core, native
@@ -182,20 +187,34 @@ for name in "${tests[@]}"; do
   actual="{\"conforms\":${conforms}}"
 
   if [ "${SPARQL_MODE}" -eq 1 ]; then
-    # ERRATA.v0.5 E-012 — 'sparql' mode is an upstream stub; pgRDF
-    # returns a deterministic structured report (conforms:null) for
-    # EVERY fixture. The known set is exactly this bounded state.
-    # Asserted directly (no per-fixture expected file — the cause is
-    # one upstream gap, not N independent bugs).
-    want='{"conforms":null}'
-    got="$(printf '%s' "${actual}" | tr -d ' \n\t')"
-    if [ "${want}" = "${got}" ]; then
-      printf '  \033[32mPASS\033[0m     %s  %s (E-012 known state)\n' "${name}" "${got}"
+    # ERRATA.v0.5 E-012 RESOLVED 2026-05-28 by shacl 0.3.2 + pgRDF
+    # TH-14 guard delete. The pre-0.3.2 short-circuit returned
+    # `{"conforms":null}` for every fixture; with the guard gone,
+    # `'sparql'` mode dispatches into rudof's working `SparqlEngine`
+    # and the per-fixture verdict depends on which Core constraints
+    # rudof's `SparqlValidator` trait covers upstream. The
+    # cardinality-constraint carve-out (MinCount / MaxCount NOT yet
+    # covered) means some fixtures will report `conforms:true` even
+    # when `'native'` would report `conforms:false` — that's a
+    # rudof-side upstream gap, not a pgRDF regression.
+    #
+    # What this sub-run asserts now (the pgRDF-side contract):
+    # - `conforms` is a real Boolean ({"conforms":true} or
+    #   {"conforms":false}) — NOT JSON null (which would mean the
+    #   E-012 short-circuit guard is still firing somehow)
+    # - the run completes without panic
+    #
+    # When `tests/w3c-shacl/sparql/` vendors the W3C SHACL-SPARQL
+    # manifest (TH-7), this sub-run upgrades to per-fixture
+    # `expected.json` matching the W3C `mf:result` like the Core
+    # sub-run already does.
+    if [ "${conforms}" = "true" ] || [ "${conforms}" = "false" ]; then
+      printf '  \033[32mPASS\033[0m     %s  conforms=%s (sparql dispatch reached)\n' "${name}" "${conforms}"
       pass=$((pass + 1))
     else
-      printf '  \033[31mFAIL\033[0m     %s  (sparql sub-run drifted from E-012 known state)\n' "${name}"
-      printf '    expected: %s\n' "${want}"
-      printf '    actual:   %s (violations=%s)\n' "${got}" "${vcount}"
+      printf '  \033[31mFAIL\033[0m     %s  (sparql sub-run conforms is JSON null — E-012 guard still firing?)\n' "${name}"
+      printf '    expected: conforms is a Boolean (true|false)\n'
+      printf '    actual:   conforms=%s  raw=%s\n' "${conforms}" "${actual}"
       fail=$((fail + 1))
     fi
     continue
