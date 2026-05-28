@@ -79,3 +79,26 @@ jobs:
             artifacts/SHA256SUMS
           body_path: RELEASE_NOTES.md
           generate_release_notes: true
+      # Chain oci-publish.yml via repository_dispatch.
+      #
+      # The `release: [published]` event does NOT fire downstream
+      # workflows when the release is created by another workflow using
+      # the default GITHUB_TOKEN (a GitHub security boundary against
+      # workflow recursion). Without this dispatch, oci-publish.yml
+      # never runs automatically and the OCI bundle on
+      # ghcr.io/styk-tv/pgrdf-bundle silently stays stuck at whatever
+      # was last published by hand. The dispatch fires reliably even
+      # under GITHUB_TOKEN.
+      - name: Trigger oci-publish workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          echo "Dispatching oci-publish-release for ${TAG}"
+          gh api \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f event_type=oci-publish-release \
+            -F "client_payload[tag]=${TAG}"

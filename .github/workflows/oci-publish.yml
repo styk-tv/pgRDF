@@ -1,7 +1,20 @@
 name: oci-publish
 on:
+  # release.published fires for releases created by a human (or a PAT),
+  # but is BLOCKED by GitHub when the release is created by another
+  # workflow using the default GITHUB_TOKEN — a security boundary against
+  # workflow recursion. Releases authored by github-actions[bot] (the
+  # default `softprops/action-gh-release` flow) never trigger this
+  # workflow via the `release` event.
+  #
+  # `repository_dispatch` chained from release.yml is the standard
+  # workaround: release.yml's final step POSTs to the dispatches API
+  # with `event_type=oci-publish-release` and `client_payload.tag`.
+  # This event fires reliably under GITHUB_TOKEN.
   release:
     types: [published]
+  repository_dispatch:
+    types: [oci-publish-release]
   workflow_dispatch:
     inputs:
       tag:
@@ -21,7 +34,15 @@ jobs:
         id: v
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          # Three trigger paths, each carries the tag in a different shape:
+          # - release.published     → github.event.release.tag_name
+          # - repository_dispatch   → github.event.client_payload.tag
+          # - workflow_dispatch     → github.event.inputs.tag
+          TAG="${{ github.event.release.tag_name || github.event.client_payload.tag || github.event.inputs.tag }}"
+          case "$TAG" in
+            v*) ;;
+            *) echo "oci-publish: '$TAG' is not a release tag; aborting"; exit 1 ;;
+          esac
           echo "tag=$TAG"      >> "$GITHUB_OUTPUT"
           echo "ver=${TAG#v}"  >> "$GITHUB_OUTPUT"
       - name: Install ORAS
