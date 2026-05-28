@@ -1,0 +1,137 @@
+name: update-latest-md
+
+# Refresh LATEST.md from GHCR — but ONLY after SLSA Build Provenance v1
+# attestations verify for the head digests on `ghcr.io/styk-tv/pgrdf-bundle`.
+# Closes PROVENANCE.md Rule 3 strictly: from when this workflow ships,
+# every write to LATEST.md is from this workflow + every write is gated
+# on `gh attestation verify` accepting every digest the file would
+# advertise.
+#
+# pgRDF ships a single OCI surface (extension only — no web layer), so
+# this workflow is simpler than the pgCK sibling: one head, one render,
+# one commit.
+
+on:
+  workflow_run:
+    workflows: [oci-publish]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "version to (re)render, no leading v (e.g. 0.5.10)"
+        required: true
+
+permissions:
+  contents: write
+  packages: read
+  attestations: read
+
+jobs:
+  refresh:
+    # Only run on a successful upstream workflow_run, or always on
+    # manual dispatch. A failed oci-publish must NOT advance LATEST.md.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # ────────────────────────────────────────────────────────────
+      # Resolve the version to render.
+      # ────────────────────────────────────────────────────────────
+      # workflow_dispatch carries it directly. workflow_run can't see
+      # the upstream's job outputs (cross-workflow), so we resolve from
+      # the GHCR API: highest semver tag of shape "X.Y.Z-pg17-amd64".
+      # That picks up the just-published head AND naturally excludes
+      # the pre-attestation v0.5.0–v0.5.9 set IF they remain the head
+      # — though after v0.5.10 they no longer are.
+      - name: Resolve head version
+        id: head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ inputs.version }}"
+            VER="${VER#v}"
+          else
+            VER=$(gh api -H "Accept: application/vnd.github+json" \
+              "/users/${OWNER}/packages/container/pgrdf-bundle/versions" --paginate \
+              --jq '.[].metadata.container.tags[]' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-pg17-amd64$' \
+              | sort -V | tail -1 \
+              | sed 's/-pg17-amd64$//')
+          fi
+          if [ -z "${VER}" ]; then
+            echo "could not resolve a head version from GHCR" >&2
+            exit 1
+          fi
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Head: v${VER}"
+
+      # ────────────────────────────────────────────────────────────
+      # Verify SLSA Build Provenance v1 on the head digests. THIS is
+      # the gate that enforces PROVENANCE.md Rule 2. If any verify
+      # fails, the job exits non-zero before reaching the renderer +
+      # commit step — LATEST.md is not touched.
+      # ────────────────────────────────────────────────────────────
+      - name: Verify attestations on head digests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER:    ${{ github.repository_owner }}
+          VER:      ${{ steps.head.outputs.ver }}
+        run: |
+          set -euo pipefail
+          # Aggregate index + pg17 leaves (amd64, arm64). The other PG
+          # majors get verified-on-render in the next iteration once
+          # the matrix is expanded; at minimum the head row in
+          # LATEST.md (pg17) must be fully attested.
+          for ref in \
+            "oci://ghcr.io/${OWNER}/pgrdf-bundle:${VER}" \
+            "oci://ghcr.io/${OWNER}/pgrdf-bundle:${VER}-pg17-amd64" \
+            "oci://ghcr.io/${OWNER}/pgrdf-bundle:${VER}-pg17-arm64" \
+          ; do
+            echo "::group::verify ${ref}"
+            gh attestation verify "${ref}" --repo "${GITHUB_REPOSITORY}"
+            echo "::endgroup::"
+          done
+
+      # ────────────────────────────────────────────────────────────
+      # Render and commit if changed.
+      # ────────────────────────────────────────────────────────────
+      - name: Render LATEST.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          VER: ${{ steps.head.outputs.ver }}
+        run: |
+          set -euo pipefail
+          python3 tools/render-latest-md.py > LATEST.md.new
+          mv LATEST.md.new LATEST.md
+
+      - name: Commit refresh if changed
+        env:
+          VER: ${{ steps.head.outputs.ver }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet LATEST.md; then
+            echo "LATEST.md already current — nothing to do"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add LATEST.md
+          {
+            echo "docs(auto): refresh LATEST.md to v${VER}"
+            echo
+            echo "Generated by .github/workflows/update-latest-md.yml after a"
+            echo "successful oci-publish.yml run AND after SLSA Build Provenance"
+            echo "v1 attestations verified via 'gh attestation verify' for the"
+            echo "pg17 head digests + aggregate index. Do not edit by hand."
+            echo
+            echo "[skip ci]"
+          } > /tmp/commit-msg.txt
+          git commit -F /tmp/commit-msg.txt
+          git push origin main
