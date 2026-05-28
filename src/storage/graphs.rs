@@ -1117,9 +1117,33 @@ mod tests {
     /// directly into `_pgrdf_graphs` to simulate a stranded binding,
     /// then drop the unbacked id. Partition id (`991100`) chosen
     /// out-of-band from the other Phase B slices so concurrent
-    /// pg_test workers can't collide.
+    /// pg_test workers can't collide on the LIST partition value.
+    ///
+    /// **Lock-order discipline** (see `src/storage/partition.rs`
+    /// module docs): production paths always acquire the
+    /// partition-DDL advisory gate **before** touching
+    /// `_pgrdf_graphs`. The bare `INSERT INTO _pgrdf_graphs` below
+    /// takes a `RowExclusiveLock` on the table — and the subsequent
+    /// `pgrdf.drop_graph(991100)` call then takes the advisory gate
+    /// (per `drop_graph`'s lines 217-225). Without an explicit
+    /// `acquire_partition_ddl_gate()` here, this test's lock-order
+    /// becomes `_pgrdf_graphs → advisory`, the EXACT inversion
+    /// `partition.rs` warns against. A concurrent pg_test holding
+    /// the advisory and waiting for `LOCK TABLE _pgrdf_graphs IN
+    /// SHARE ROW EXCLUSIVE MODE` (every IRI-keyed `add_graph_iri`
+    /// path does that) would then deadlock against this test's
+    /// `RowExclusiveLock`. Observed on CI pg16 once (commit
+    /// `b8e366e`) and locally on Colima pg17; passes on all four
+    /// PG majors after the gate is moved up here.
     #[pg_test]
     fn drop_graph_idempotent_absent() {
+        // Acquire the partition-DDL gate FIRST so this test agrees
+        // on the production `advisory → _pgrdf_graphs` lock order.
+        // Re-entrant: `drop_graph`'s own `acquire_partition_ddl_gate()`
+        // below is a no-op bump under the same xact, so this costs
+        // nothing in the happy path.
+        crate::storage::partition::acquire_partition_ddl_gate();
+
         Spi::run(
             "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) \
              VALUES (991100, 'http://example.org/stranded-991100')",
