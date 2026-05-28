@@ -12,9 +12,17 @@ name: update-latest-md
 # one commit.
 
 on:
-  workflow_run:
-    workflows: [oci-publish]
-    types: [completed]
+  # `workflow_run` (the natural choice here) is blocked by GitHub's
+  # GITHUB_TOKEN cascade restriction: when a workflow is triggered via
+  # GITHUB_TOKEN (oci-publish.yml is, via the repository_dispatch from
+  # release.yml), its completion does NOT fire `workflow_run` events
+  # downstream. `repository_dispatch` IS allowed to cascade from
+  # GITHUB_TOKEN-triggered runs, so we chain via that — oci-publish.yml's
+  # final step POSTs an `oci-publish-completed` dispatch which we
+  # listen for here. Same pattern as dd55afb's
+  # release.yml → oci-publish.yml fix, extended one more hop.
+  repository_dispatch:
+    types: [latest-md-refresh]
   workflow_dispatch:
     inputs:
       version:
@@ -28,9 +36,6 @@ permissions:
 
 jobs:
   refresh:
-    # Only run on a successful upstream workflow_run, or always on
-    # manual dispatch. A failed oci-publish must NOT advance LATEST.md.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,12 +45,12 @@ jobs:
       # ────────────────────────────────────────────────────────────
       # Resolve the version to render.
       # ────────────────────────────────────────────────────────────
-      # workflow_dispatch carries it directly. workflow_run can't see
-      # the upstream's job outputs (cross-workflow), so we resolve from
-      # the GHCR API: highest semver tag of shape "X.Y.Z-pg17-amd64".
-      # That picks up the just-published head AND naturally excludes
-      # the pre-attestation v0.5.0–v0.5.9 set IF they remain the head
-      # — though after v0.5.10 they no longer are.
+      # Three trigger paths, each carries the version differently:
+      # - repository_dispatch  → github.event.client_payload.tag (with v)
+      # - workflow_dispatch    → inputs.version (no v expected; tolerate both)
+      # Belt-and-braces: if no version came in via the event, fall
+      # back to "highest X.Y.Z-pg17-amd64 tag on GHCR" so a stale
+      # dispatch still resolves the actual head correctly.
       - name: Resolve head version
         id: head
         env:
@@ -53,10 +58,20 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VER="${{ inputs.version }}"
-            VER="${VER#v}"
-          else
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              VER="${{ inputs.version }}"
+              ;;
+            repository_dispatch)
+              VER="${{ github.event.client_payload.tag }}"
+              ;;
+            *)
+              VER=""
+              ;;
+          esac
+          # Strip leading `v` if present.
+          VER="${VER#v}"
+          if [ -z "${VER}" ]; then
             VER=$(gh api -H "Accept: application/vnd.github+json" \
               "/users/${OWNER}/packages/container/pgrdf-bundle/versions" --paginate \
               --jq '.[].metadata.container.tags[]' \
@@ -65,7 +80,7 @@ jobs:
               | sed 's/-pg17-amd64$//')
           fi
           if [ -z "${VER}" ]; then
-            echo "could not resolve a head version from GHCR" >&2
+            echo "could not resolve a head version from event or GHCR" >&2
             exit 1
           fi
           echo "ver=${VER}" >> "$GITHUB_OUTPUT"

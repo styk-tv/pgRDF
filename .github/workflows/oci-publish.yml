@@ -190,3 +190,28 @@ jobs:
           subject-name: ${{ steps.index.outputs.repo }}
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
+
+      # Chain update-latest-md.yml via repository_dispatch.
+      #
+      # This workflow was itself triggered by GITHUB_TOKEN (via the
+      # repository_dispatch from release.yml), so its completion does
+      # NOT fire `workflow_run` events for downstream workflows — the
+      # same GitHub security boundary that blocks release.published
+      # from cascading. `repository_dispatch` IS allowed to fire from
+      # GITHUB_TOKEN-triggered runs (the boundary applies only to
+      # `workflow_run`), so we use the same pattern we used in dd55afb
+      # to bridge release.yml → oci-publish.yml and extend it one more
+      # hop: oci-publish.yml → update-latest-md.yml.
+      - name: Trigger update-latest-md workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.v.outputs.tag }}"
+          echo "Dispatching latest-md-refresh for ${TAG}"
+          gh api \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f event_type=latest-md-refresh \
+            -F "client_payload[tag]=${TAG}"
