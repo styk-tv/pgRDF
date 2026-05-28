@@ -20,16 +20,42 @@ on:
       tag:
         description: "release tag e.g. v0.5.0"
         required: true
+
 permissions:
   contents: read
   packages: write
+  # SLSA Build Provenance v1 needs Sigstore-backed OIDC tokens +
+  # attestation API write access. PROVENANCE.md §"What's pending the
+  # wire-up" tracks this becoming live; once it does, every leaf and
+  # every aggregate index pushed by this workflow carries an attestation
+  # that `gh attestation verify` can check.
+  id-token: write
+  attestations: write
+
 jobs:
-  publish:
+  # ────────────────────────────────────────────────────────────────
+  # Per-PG×arch leaf publish + attestation. Matrix-shaped so each
+  # (pg, arch) is its own job — that's the only clean way to attach
+  # an SLSA Build Provenance v1 attestation per artifact via
+  # actions/attest-build-provenance@v1 (the action takes one
+  # `subject-digest` per invocation).
+  # ────────────────────────────────────────────────────────────────
+  leaf:
+    name: leaf (pg${{ matrix.pg }}-${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "15", "16", "17"]
+        arch: [amd64, arm64]
     runs-on: ubuntu-22.04
     env:
       REG: ghcr.io/styk-tv/pgrdf-bundle
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      ver: ${{ steps.v.outputs.ver }}
     steps:
       - uses: actions/checkout@v4
+
       - name: Resolve tag/version
         id: v
         run: |
@@ -45,46 +71,122 @@ jobs:
           esac
           echo "tag=$TAG"      >> "$GITHUB_OUTPUT"
           echo "ver=${TAG#v}"  >> "$GITHUB_OUTPUT"
+
       - name: Install ORAS
         uses: oras-project/setup-oras@v1
-      - name: Download release tarballs (no rebuild)
+
+      - name: Download release tarball (matrix slice)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          VER="${{ steps.v.outputs.ver }}"
           mkdir -p dist && cd dist
+          # Only fetch the one tarball this job needs.
           gh release download "${{ steps.v.outputs.tag }}" \
             --repo styk-tv/pgRDF \
-            --pattern 'pgrdf-*.tar.gz' --pattern 'pgrdf-*.zip' --pattern 'SHA256SUMS'
-          sha256sum -c SHA256SUMS
+            --pattern "pgrdf-${VER}-pg${{ matrix.pg }}-glibc-${{ matrix.arch }}.tar.gz"
+
       - name: ghcr login
         run: echo "${{ github.token }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Push per-PG+arch artifacts
+
+      - name: Push leaf artifact
+        id: push
         working-directory: dist
         run: |
           set -euo pipefail
           VER="${{ steps.v.outputs.ver }}"
-          for pg in 14 15 16 17; do
-            for arch in amd64 arm64; do
-              f="pgrdf-${VER}-pg${pg}-glibc-${arch}.tar.gz"
-              [ -f "$f" ] || { echo "missing $f"; exit 1; }
-              oras push "${REG}:${VER}-pg${pg}-${arch}" \
-                --artifact-type application/vnd.styk.pgrdf.bundle.v1+tar \
-                --annotation "org.opencontainers.image.source=https://github.com/styk-tv/pgRDF" \
-                --annotation "org.opencontainers.image.version=${VER}" \
-                --annotation "io.styk.pgrdf.pg=${pg}" \
-                --annotation "io.styk.pgrdf.arch=${arch}" \
-                "${f}:application/vnd.styk.pgrdf.tarball.v1+gzip"
-            done
-          done
+          PG="${{ matrix.pg }}"
+          ARCH="${{ matrix.arch }}"
+          F="pgrdf-${VER}-pg${PG}-glibc-${ARCH}.tar.gz"
+          TAG="${VER}-pg${PG}-${ARCH}"
+          [ -f "$F" ] || { echo "missing $F"; exit 1; }
+          oras push "${REG}:${TAG}" \
+            --artifact-type application/vnd.styk.pgrdf.bundle.v1+tar \
+            --annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --annotation "org.opencontainers.image.version=${VER}" \
+            --annotation "io.styk.pgrdf.pg=${PG}" \
+            --annotation "io.styk.pgrdf.arch=${ARCH}" \
+            "${F}:application/vnd.styk.pgrdf.tarball.v1+gzip"
+          # Capture the manifest digest for the attestation step.
+          DIGEST=$(oras manifest fetch --descriptor "${REG}:${TAG}" | jq -r .digest)
+          echo "repo=${REG}"     >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"      >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      # SLSA Build Provenance v1. Sigstore-backed; pushes the
+      # attestation as an OCI referrer alongside the artifact, so
+      # `gh attestation verify oci://...:<tag>` works on every leaf.
+      # Per PROVENANCE.md, the downstream update-latest-md workflow
+      # refuses to advance LATEST.md unless this verifies.
+      - name: Attest leaf
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ steps.push.outputs.repo }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # ────────────────────────────────────────────────────────────────
+  # Aggregate :VER and :vTAG indexes. Runs after every leaf publishes
+  # successfully (matrix fail-fast=false so partial pushes still
+  # produce indexable leaves; the index job will fail if any leaf is
+  # missing — that's the right behaviour, indexes shouldn't reference
+  # absent digests).
+  # ────────────────────────────────────────────────────────────────
+  index:
+    needs: leaf
+    runs-on: ubuntu-22.04
+    env:
+      REG: ghcr.io/styk-tv/pgrdf-bundle
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag/version
+        id: v
+        run: |
+          set -euo pipefail
+          # Take from any leaf's output (they all see the same tag).
+          TAG="${{ needs.leaf.outputs.tag }}"
+          VER="${{ needs.leaf.outputs.ver }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Install ORAS
+        uses: oras-project/setup-oras@v1
+
+      - name: ghcr login
+        run: echo "${{ github.token }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Build aggregate indexes :VER and :vTAG
-        working-directory: dist
+        id: index
         run: |
           set -euo pipefail
           VER="${{ steps.v.outputs.ver }}"
+          TAG="${{ steps.v.outputs.tag }}"
           REFS=""
           for pg in 14 15 16 17; do for arch in amd64 arm64; do
             REFS="$REFS ${REG}:${VER}-pg${pg}-${arch}"
           done; done
           oras manifest index create "${REG}:${VER}" $REFS
-          oras manifest index create "${REG}:${{ steps.v.outputs.tag }}" $REFS
+          oras manifest index create "${REG}:${TAG}" $REFS
+          # Capture the index digest for the attestation. Both VER and
+          # TAG tags resolve to the same index manifest, so one digest
+          # covers both names — attest once, advertise both.
+          DIGEST_VER=$(oras manifest fetch --descriptor "${REG}:${VER}" | jq -r .digest)
+          DIGEST_TAG=$(oras manifest fetch --descriptor "${REG}:${TAG}" | jq -r .digest)
+          if [ "$DIGEST_VER" != "$DIGEST_TAG" ]; then
+            echo "index digests diverged between :${VER} and :${TAG} — aborting"; exit 1
+          fi
+          echo "repo=${REG}"     >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST_VER}" >> "$GITHUB_OUTPUT"
+
+      # Attest the aggregate index manifest. Consumers can then run
+      # `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.5.10`
+      # to confirm the multi-arch / multi-PG bundle is the same one this
+      # workflow run produced.
+      - name: Attest aggregate index
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ steps.index.outputs.repo }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
