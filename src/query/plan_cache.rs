@@ -259,3 +259,44 @@ mod tests {
         assert_eq!(after, 0);
     }
 }
+
+/// TG-6 regression: lazy-load (non-preloaded) backend doesn't panic on
+/// plan-cache stats updates.
+///
+/// Before TG-7's `is_ready()` guards, calling `record_hit()` /
+/// `record_miss()` / `insert()` outside the postmaster preload context
+/// panicked at the `HITS.get()` / `MISSES.get()` / `INSERTS.get()` call —
+/// the underlying `PgAtomic` was never registered via `pg_shmem_init!`,
+/// which only runs from `_PG_init` when
+/// `process_shared_preload_libraries_in_progress` is true (see
+/// `crate::storage::shmem_cache::init_in_postmaster`).
+///
+/// These are **plain Rust unit tests** (NOT `#[pg_test]`) precisely because
+/// pgrx's test harness always runs with `shared_preload_libraries='pgrdf'`
+/// per `crate::pg_test::postgresql_conf_options()` — which initializes the
+/// atomic, so a pgrx test cannot exercise the not-initialized path. Plain
+/// cargo-test execution skips the postmaster fixture entirely; `SHMEM_READY`
+/// stays at its `AtomicBool::new(false)` default; the guards short-circuit;
+/// the calls return without touching the unregistered atomics.
+#[cfg(test)]
+mod tg6_lazy_load_guards {
+    use super::{record_hit, record_miss};
+
+    #[test]
+    fn record_hit_lazy_load_no_panic() {
+        record_hit();
+    }
+
+    #[test]
+    fn record_miss_lazy_load_no_panic() {
+        record_miss();
+    }
+
+    // `insert()` is also guarded but it takes an `OwnedPreparedStatement`
+    // which is non-trivial to construct outside an SPI context. The pgrx
+    // test `plan_cache_repeats_hit` above exercises `insert()` under
+    // postmaster preload (the path counters increment normally); the
+    // guard for the lazy-load case is identical in structure to the
+    // two functions tested here. Belt-and-braces — when a way to mock
+    // OwnedPreparedStatement appears, add the third test.
+}
