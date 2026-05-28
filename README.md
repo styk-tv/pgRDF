@@ -181,6 +181,34 @@ pgrdf=# SELECT pgrdf.parse_turtle('@prefix ex: <http://e.com/> . ex:a ex:p ex:b 
         --  → 1
 ```
 
+### Required `postgresql.conf` changes
+
+pgRDF MUST be in `shared_preload_libraries` for `_PG_init()` to run in the
+postmaster context. Without it, the extension's shared-memory atomics (dict
+cache + plan-cache stats) are never registered, and the first call to any
+pgRDF function panics with `PgAtomic was not initialized`.
+
+```ini
+# postgresql.conf
+shared_preload_libraries = 'pgrdf'         # pgRDF alone
+# or:
+shared_preload_libraries = 'pgrdf,pgck'    # if pgCK is also installed
+                                           # — order matters: pgrdf first
+```
+
+A server restart (not just a reload) is required after editing this — preload
+happens at postmaster startup. Verify after restart:
+
+```sql
+SHOW shared_preload_libraries;             -- must contain 'pgrdf'
+SELECT pgrdf.parse_turtle(
+  'PREFIX ex: <http://example.org/> ex:t a ex:T .', 1::bigint, 'http://example.org/');
+                                           -- returns a row count, not a panic
+```
+
+The `just compose-up` Quickstart above bakes this into the bundled image;
+only own-Postgres installs need to edit `postgresql.conf` manually.
+
 Want to integrate from your application?
 
 - **Python** — [`guide/clients/python.md`](guide/clients/python.md)
