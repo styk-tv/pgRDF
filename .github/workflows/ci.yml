@@ -152,16 +152,28 @@ jobs:
         # same scoping the regression/w3c-sparql/LUBM steps in this
         # job already use).
         run: bash tests/w3c-shacl/run.sh
-      - name: Run W3C SHACL --sparql known-state assertion
+      - name: Run W3C SHACL --sparql pgRDF-side contract
         env:
           PGRDF_RUNTIME: docker
-        # ERRATA.v0.5 E-012 — shacl 0.3.1's SparqlEngine is an
-        # upstream stub (unimplemented!). 'sparql' mode returns a
-        # deterministic structured report; this asserts that bounded
-        # KNOWN STATE (conforms:null for every fixture) — NOT a raw
-        # failure, NOT continue-on-error. Promotes toward full-pass
-        # when a rudof release ships the engine (E-012 re-check).
+        # TH-7 (v0.5.8): runs the W3C SHACL-SPARQL vendored fixtures
+        # (under fixtures/sparql/) through rudof's SparqlEngine.
+        # Asserts only the pgRDF-side contract — conforms is a real
+        # Boolean and dispatch reaches the engine. Does NOT gate on
+        # the W3C `mf:result` because rudof's BasicSparqlValidator is
+        # upstream-incomplete on common shape topologies (ERRATA.v0.6
+        # E-014); pgRDF gates on the W3C result via `--pgrdf` (next
+        # step) which uses pgRDF-native dispatch (TH-9 + TH-8).
         run: bash tests/w3c-shacl/run.sh --sparql
+      - name: Run W3C SHACL --pgrdf real conformance gate
+        env:
+          PGRDF_RUNTIME: docker
+        # TH-7 (v0.5.8): runs the W3C SHACL-SPARQL vendored fixtures
+        # through pgRDF-native SHACL-SPARQL execution (mode='pgrdf').
+        # REAL conformance gate — compares `conforms` against the
+        # W3C `mf:result` (hand-derived expected.json per fixture).
+        # pgRDF-native is demonstrably more correct than rudof's
+        # SparqlEngine on the W3C suite as of shacl 0.3.2.
+        run: bash tests/w3c-shacl/run.sh --pgrdf
       - name: Run LUBM-shape correctness gate
         env:
           PGRDF_RUNTIME: docker

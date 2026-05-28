@@ -1061,6 +1061,122 @@ mod tests {
         );
     }
 
+    /// TH-7 — W3C SHACL-SPARQL `node-sparql-001` fixture, cross-mode
+    /// regression. The W3C `mf:result` says conforms=false (3
+    /// violations: InvalidResource1 + InvalidResource2 ×2 rdfs:label
+    /// triples). Asserts:
+    /// - `mode => 'sparql'` (rudof's SparqlEngine): conforms is a real
+    ///   Boolean — does NOT assert the W3C verdict because rudof's
+    ///   `BasicSparqlValidator` is upstream-incomplete on this shape
+    ///   topology and returns conforms=true / 0 violations (the IR
+    ///   does carry the BasicSparql constraint per the plain-Rust
+    ///   `w3c_node_sparql_001_ir_carries_basic_sparql` test). Tracked
+    ///   as ERRATA.v0.6 E-014; gate the upstream-side honest contract.
+    /// - `mode => 'pgrdf'` (pgRDF-native handler, TH-9 + TH-8):
+    ///   conforms=false matching the W3C `mf:result`. **pgRDF-native
+    ///   is demonstrably more correct than rudof's SparqlEngine on
+    ///   this fixture as of shacl 0.3.2.**
+    #[pg_test]
+    fn validate_w3c_node_sparql_001_cross_mode() {
+        let g_data: i64 = 8600;
+        let g_shapes: i64 = 8601;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        // Same Turtle as tests/w3c-shacl/fixtures/sparql/node-sparql-001.ttl
+        // (the `<>`-stripped split of the W3C source).
+        let fixture = r#"@prefix dash: <http://datashapes.org/dash#> .
+@prefix ex: <http://datashapes.org/sh/tests/sparql/node/sparql-001.test#> .
+@prefix mf: <http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix sht: <http://www.w3.org/ns/shacl-test#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:InvalidResource1
+  rdf:type rdfs:Resource ;
+  rdfs:label "Invalid resource 1" ;
+.
+ex:InvalidResource2
+  rdf:type rdfs:Resource ;
+  rdfs:label "Invalid label 1" ;
+  rdfs:label "Invalid label 2" ;
+.
+ex:TestShape
+  rdf:type sh:NodeShape ;
+  rdfs:label "Test shape" ;
+  sh:sparql ex:TestShape-sparql ;
+  sh:targetNode ex:InvalidResource1 ;
+  sh:targetNode ex:InvalidResource2 ;
+  sh:targetNode ex:ValidResource1 ;
+.
+ex:TestShape-sparql
+  sh:message "Cannot have a label" ;
+  sh:prefixes <http://datashapes.org/sh/tests/sparql/node/sparql-001.test> ;
+  sh:select """
+        SELECT $this ?path ?value
+        WHERE {
+                $this ?path ?value .
+                FILTER (?path = <http://www.w3.org/2000/01/rdf-schema#label>) .
+        }""" ;
+.
+ex:ValidResource1
+  rdf:type rdfs:Resource ;
+.
+"#;
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[fixture.into(), g_data.into()],
+        )
+        .unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[fixture.into(), g_shapes.into()],
+        )
+        .unwrap();
+
+        let sparql: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2, 'sparql')",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let sv = &sparql.0;
+        // Surface the full JSONB inside the assert so the diagnostic
+        // shows up in pgrx test output (which captures stderr).
+        let conforms = &sv["conforms"];
+        let results_len = sv["results"].as_array().map(|a| a.len()).unwrap_or(0);
+        let shapes_triples = &sv["shapes_triples"];
+        let error = sv.get("error");
+        // Loose: just verify dispatch reached and produced a JSONB.
+        // The actual conforms verdict here surfaces a rudof-side gap
+        // we're documenting (not asserting); for the pgRDF-side gate
+        // see the pgrdf-mode follow-up assert below.
+        assert!(conforms.is_boolean());
+        let _ = (results_len, shapes_triples, error); // silence unused
+
+        // pgrdf-mode comparison on the SAME fixture: does the
+        // pgRDF-native handler get the right answer?
+        let pgrdf: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.validate($1, $2, 'pgrdf')",
+            &[g_data.into(), g_shapes.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let pv = &pgrdf.0;
+        let p_conforms = &pv["conforms"];
+        let p_results_len = pv["results"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(
+            p_conforms,
+            &serde_json::json!(false),
+            "DIAGNOSTIC pgrdf.validate(g, g, 'pgrdf') on W3C node-sparql-001:\n\
+             conforms={p_conforms}  expected=false (W3C mf:result)\n\
+             results.len()={p_results_len}\n\
+             full JSONB:\n{pv:#}"
+        );
+    }
+
     /// TH-8 — `mode => 'pgrdf'` on a shape graph with no SPARQL
     /// constraints reports conforms = true (empty results), and the
     /// `elapsed_ms` meta-field is present. Locks the "no-op for

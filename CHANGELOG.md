@@ -158,6 +158,20 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   `specs/ERRATA.v0.5.md` close-out land as TH-2 in a follow-up
   commit (it's the first v0.6-era delta to ERRATA, so it opens
   `specs/ERRATA.v0.6.md` per TG-2 as a side-effect).
+- **E-014** — `shacl 0.3.2` SparqlEngine returns the wrong conforms
+  verdict on the W3C `tests/sparql/node/sparql-001.ttl` fixture
+  (returns `conforms=true / 0 violations` even though the IR carries
+  the BasicSparql constraint and the W3C `mf:result` asserts
+  `conforms=false / 3 violations`). **pgRDF-native handler (TH-9 +
+  TH-8) returns the correct W3C verdict** — promoted to the
+  authoritative SHACL-SPARQL gate (`tests/w3c-shacl/run.sh --pgrdf`).
+  The rudof `--sparql` sub-run is downgraded to a pgRDF-side
+  contract assertion (conforms is Boolean, dispatch reached) —
+  honest reflection of the upstream gap. New file
+  `specs/ERRATA.v0.6.md` opens with E-014 as the first v0.6-era
+  delta (closes Track G task TG-2 incidentally). pgrx test
+  `validate_w3c_node_sparql_001_cross_mode` locks the cross-mode
+  behaviour per PG major.
 
 ## [0.5.1] — 2026-05-23
 
