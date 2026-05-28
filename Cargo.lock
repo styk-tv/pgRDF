@@ -1352,9 +1352,9 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "mie"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31148162609ed4417256316dfd0b7f37f31bc22fda269a97b3ece9e5eed89470"
+checksum = "6c4a9f0ba0dd29c53a078f9f853e1d5ecd55bb5e5eca200aca9a7f1563fec125"
 dependencies = [
  "hashlink",
  "rudof_iri",
@@ -1906,9 +1906,9 @@ dependencies = [
 
 [[package]]
 name = "prefixmap"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "085ebf7bac86d0efa94f313e58f00a3f209136dd58d6306e7334bebdbf914d32"
+checksum = "5dbcd5cbf85c144cddc12f64e12b4c3096852195c02bfe542575ef4571b7eaba"
 dependencies = [
  "colored",
  "indexmap",
@@ -2373,9 +2373,9 @@ dependencies = [
 
 [[package]]
 name = "rudof_iri"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eaae9643ef5bfb7acf7ad6a7fa8e69ccf985c3c6b6322ddf880962c6c58ea832"
+checksum = "3f64d425d87940f8f07638c1e602841eabbf53c67b14b26d4c5d79086a20e17f"
 dependencies = [
  "getrandom 0.3.4",
  "indexmap",
@@ -2390,9 +2390,9 @@ dependencies = [
 
 [[package]]
 name = "rudof_rdf"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cd47f167e21954a8ec0ecf665019b0b65725dd5b12b2b84c158f4e8d9c7a4e0"
+checksum = "fd9fc4ae14ee7c61c9279dd6e5a273a4646f3e08755c1a203006b58d485ae19e"
 dependencies = [
  "colored",
  "const_format",
@@ -2746,9 +2746,9 @@ dependencies = [
 
 [[package]]
 name = "shacl"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a28dccfd003c17b7af309c3479e27c4b0ed7e0543b2be6235200eaa5a8a4efd"
+checksum = "8432bee29436e09456c7e2a61517d16aa9ad3d73d1ca46a791099a0a3b3df9fa"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -2889,9 +2889,9 @@ dependencies = [
 
 [[package]]
 name = "sparql_service"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07bc531b9b505ff0ebd90e408cc0cd754881f11dc5871882621986a63967c000"
+checksum = "84531d368f006616b20bcbc1f7d62d1401b0911c7b110b2c2320ba95d9827892"
 dependencies = [
  "colored",
  "const_format",

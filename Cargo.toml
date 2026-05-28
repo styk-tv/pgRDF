@@ -88,7 +88,16 @@ reasonable = { version = "0.4", features = ["rdf-12"] }
 # `iri_s` → `rudof_iri` migration half of ERRATA.v0.2 E-009. The
 # remaining `rdf-12` half is resolved by the fork patch on `reasonable`
 # above; see ERRATA.v0.4 E-011.
-shacl = "0.3"
+#
+# `0.3.2` (2026-05-26) — adds the SHACL-SPARQL constraint component
+# (`IRComponent::Sparql` + `sh:sparql`/`sh:select` parsing) and the
+# `SparqlEngine` target-resolution methods (target_node, target_class,
+# target_subject_of, target_object_of, implicit_target_class) that
+# `0.3.1` stubbed with `unimplemented!()`. Closes ERRATA.v0.5 E-012:
+# `mode => 'sparql'` is no longer an upstream-gated short-circuit and
+# the dual-path Track H roadmap (rudof + pgRDF-native) becomes
+# implementable. See ROADMAP.md §4 Track H.
+shacl = "0.3.2"
 # rudof's RDF abstraction layer. `shacl 0.3` exposes its API in terms
 # of `rudof_rdf::rdf_core::{RDFFormat, term::Object, ...}` and
 # `rudof_rdf::rdf_impl::InMemoryGraph` — none of which `shacl`
