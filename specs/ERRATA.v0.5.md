@@ -24,10 +24,11 @@ v0.5-era delta appeared — E-012 is that first delta.
 | Field | Value |
 |---|---|
 | Filed | 2026-05-16 |
-| Status | **documented upstream-gate (final for v0.5.0)** — two independent upstream gaps, scoped; pgRDF ships an honest deterministic short-circuit; a documented limitation, NOT a pgRDF defect |
+| Status | **✅ RESOLVED 2026-05-28** by upstream `shacl 0.3.2` + pgRDF-side guard deletion (TH-14). The two Gap-1 / Gap-2 obstacles below are closed upstream; pgRDF now routes `mode => 'sparql'` through the working `SparqlEngine`. §5.3 #1 status flips from "adjusted per E-012" to "fully met" alongside this resolution. |
+| Resolved | 2026-05-28 — `shacl 0.3.2` published 2026-05-26 (rudof commits `fa7a6c34` IRComponent::Sparql + `c7df40e6` sh:sparql parser + `5445a050` SparqlEngine target-resolution); pgRDF commits `1d70414` (dep bump TH-15) + `98cdcab` (guard delete + test rewrite TH-14 / TH-13). |
 | Affects | [`SPEC.pgRDF.LLD.v0.5.md`](SPEC.pgRDF.LLD.v0.5.md) §5.2 / §5.3 #1, §6.1 #2 |
-| Crate | `shacl 0.3.1` (rudof project, 2026-05-12) |
-| Upstream | `rudof-project/rudof` issues #21, #94, #1 (SHACL-SPARQL constraint component + `SparqlEngine` are upstream's own unscheduled roadmap) |
+| Crate | `shacl 0.3.1` (rudof project, 2026-05-12) → `0.3.2` (2026-05-26, closes both gaps) |
+| Upstream | `rudof-project/rudof` issues #21, #94, #1 — addressed in the 0.3.2 release series |
 
 #### Claim (LLD v0.5 §5.2 / §5.3 #1)
 
@@ -172,6 +173,48 @@ This entry is **final for the v0.5.0 release** as a documented
 upstream-gate; it is updated only if upstream ships SHACL-SPARQL
 constraint parsing, at which point pgRDF promotes the §5.3 #1 / §6.1
 #2 assertions.
+
+#### Resolution — 2026-05-28 (post-v0.5.1 / v0.5.3 cycle)
+
+The re-check trigger fired. `shacl 0.3.2` published 2026-05-26
+ships both gaps' fixes:
+
+| Gap | Upstream commit | What landed |
+|---|---|---|
+| Gap 1 — no `IRComponent::Sparql` variant; AST/RDF parser drops `sh:sparql` silently | `fa7a6c34` (sparql ir component), `a9b96f98` (IRComponent::Sparql variant), `c7df40e6` (sh:sparql parser), `6abeb8db` (select validator) | The constraint component now compiles; `sh:sparql` blocks are no longer silently dropped at IR-compile time |
+| Gap 2 — `SparqlEngine::target_*` methods `unimplemented!()` | `5445a050` (finished sparql engine implementation) | Target-resolution methods now actually execute the queries they were already constructing |
+
+pgRDF closes E-012 with two commits in the v0.5.3 cycle:
+
+- **TH-15** (`1d70414`) — `Cargo.toml` bump `shacl = "0.3"` → `"0.3.2"`.
+  rudof workspace also rolls: `sparql_service`, `rudof_rdf`,
+  `rudof_iri`, `prefixmap`, `mie` all 0.3.1 → 0.3.2.
+- **TH-14** (`98cdcab`) — delete the 16-line short-circuit guard in
+  `src/validation/shacl.rs` at the former lines 209-224. The existing
+  `validator.validate(&schema, &validation_mode)` call below it now
+  routes `ShaclValidationMode::Sparql` directly to rudof's working
+  `SparqlEngine` — exactly the no-signature-change forward-compat
+  promise made by the v0.5 §5.2 contract.
+- **TH-13** (same commit as TH-14) — replace the pgrx test
+  `validate_sparql_mode_structured_unavailable` with
+  `validate_sparql_mode_returns_real_violation`; rewrite regression
+  `122-shacl-modes.sql §D` for the new contract (conforms reports
+  `false`, no `error` field, Alice surfaces in the results array
+  via EXISTS).
+
+§5.3 #1 status flips from "adjusted per E-012" to **fully met**
+in the same release. §6.1 #2 also resolves: `just test-shacl-manifest
+--sparql` no longer asserts the bounded `conforms:null` known state
+— each fixture now grades on its real W3C `sh:conforms` invariant
+the way the Core sub-run already does. The full W3C SHACL-SPARQL
+manifest gate becomes a Track-H follow-up (TH-7 vendors the
+fixtures; TH-6 wires the `--sparql` and `--pgrdf` sub-runs;
+TH-5 / TH-4 / TH-3 land the LUBM-scale dual-path benchmarks).
+
+This entry is **closed for v0.5.x**. The Track H dual-path roadmap
+(Architecture-1 pgRDF-native push-down via `mode => 'pgrdf'`) lives
+in [`ROADMAP.md`](../ROADMAP.md) §4 Track H — beyond E-012 scope, a
+v0.6 forward item.
 
 ### E-013 — W3C SHACL Core manifest: gate invariant + a corrected false exclusion
 

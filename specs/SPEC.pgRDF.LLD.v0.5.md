@@ -32,10 +32,11 @@ and OWL 2 RL reasoning.**
 - **Carries forward:** [`SPEC.pgRDF.INSTALL.v0.2.md`](SPEC.pgRDF.INSTALL.v0.2.md)
   (no install-spec changes in v0.5) and
   [`ERRATA.v0.5.md`](ERRATA.v0.5.md) (authoritative for v0.5-era spec
-  deltas: **E-012** — `shacl 0.3.1` SHACL-SPARQL mode is a documented
-  upstream-gate, final for v0.5.0; **E-013** — W3C SHACL Core gate
-  invariant, corrected/resolved, §6 is a genuine 25/25 full-pass with
-  no exclusion). [`ERRATA.v0.4.md`](ERRATA.v0.4.md) remains live for
+  deltas: **E-012** — `shacl 0.3.1` SHACL-SPARQL mode was a documented
+  upstream-gate; **resolved 2026-05-28** by `shacl 0.3.2` + pgRDF TH-14
+  in the v0.5.3 cycle; **E-013** — W3C SHACL Core gate invariant,
+  corrected/resolved, §6 is a genuine 25/25 full-pass with no
+  exclusion). [`ERRATA.v0.4.md`](ERRATA.v0.4.md) remains live for
   v0.4-era items (E-011 — the upstream `reasonable` patch /
   crates.io-publish gate, carried forward through the v0.5 cycle).
   [`ERRATA.v0.2.md`](ERRATA.v0.2.md) remains live for
@@ -91,7 +92,7 @@ inside Postgres, with four engines:
 |---|---|---|---|
 | §3 | Reasoning profile selector on `pgrdf.materialize` | was v0.4-FUTURE §8 | ✅ shipped — Phase G group G1 (slices 21-18) |
 | §4 | TriG / N-Quads ingest (`pgrdf.parse_trig`, `pgrdf.parse_nquads`) | was v0.4-FUTURE §10 | ✅ shipped — Phase G group G2 (slices 17-16) |
-| §5 | SHACL-SPARQL constraint mode + validation-against-materialised-graph | was v0.4-FUTURE §9.5 | ✅ shipped — Phase G group G3 (slices 13-12); §5.2 mode arg + §5.3 #2 fully met; §5.3 #1 adjusted per ERRATA.v0.5 E-012 |
+| §5 | SHACL-SPARQL constraint mode + validation-against-materialised-graph | was v0.4-FUTURE §9.5 | ✅ shipped — Phase G group G3 (slices 13-12); §5.2 mode arg + §5.3 #1 + §5.3 #2 all fully met (E-012 closed 2026-05-28 by `shacl 0.3.2` + TH-14 guard delete) |
 | §6 | W3C SHACL manifest runner wired to CI | was v0.4-FUTURE §9.5 / §13 | ✅ shipped — Phase G group G3 (slices 13-12); Core genuine 25/25 full-pass (`conforms` invariant), no exclusion (ERRATA.v0.5 E-013 corrected — no upstream bug) |
 | §7 | IRI overloads for lifecycle UDFs (`drop_graph(iri)`, etc.) | was v0.4-FUTURE §5.1 forward note | ✅ shipped — Phase G group G1 (slices 21-18) |
 | §8 | Aggregates-over-UNION refinements not landed in v0.4 §11 | was v0.4-FUTURE §11 | ✅ shipped — Phase G group G2 (slices 15-14) |
@@ -99,11 +100,13 @@ inside Postgres, with four engines:
 
 > **v0.5-gate scope COMPLETE and SHIPPED in v0.5.0.** Every
 > v0.5-gate track §3–§8 is ✅ shipped on `main` and released as
-> v0.5.0. §5.3 #1 carries one documented honest caveat (ERRATA.v0.5
-> **E-012** — `shacl 0.3.1` SHACL-SPARQL is a documented
-> upstream-gate, upstream's own roadmap, final for v0.5.0; the
-> `'sparql'` mode-arg ships honest + forward-compatible, NOT a pgRDF
-> defect). §6.1 #1 is a **genuine 25/25 full-pass with no
+> v0.5.0. **As of 2026-05-28 (v0.5.3 cycle), §5.3 #1 is fully met
+> with no caveat** — ERRATA.v0.5 **E-012** closed in the v0.5.3
+> cycle (`shacl 0.3.2` shipped both upstream gaps' fixes; pgRDF
+> TH-14 deleted the short-circuit guard). The forward-compatibility
+> claim made in the original v0.5.0 LLD held — the `&validation_mode`
+> dispatch already routed correctly; only the guard was the
+> obstacle. §6.1 #1 is a **genuine 25/25 full-pass with no
 > exclusion**: E-013's earlier "one excluded W3C Core fixture for an
 > upstream `sh:nodeKind` bug" claim was a G3 unverified assumption
 > (corrected at v0.5.0-rc1 — no upstream bug, fixture restored to
@@ -269,21 +272,21 @@ pgrdf.parse_nquads(content TEXT, default_graph_id BIGINT DEFAULT 0, strict BOOLE
 
 ## 5. SHACL-SPARQL constraint mode + materialised-graph coverage
 
-> **Status: ✅ shipped — Phase G group G3 (slices 13-12).** The
-> `mode` argument ships fully: `pgrdf.validate(data, shapes, mode
-> TEXT DEFAULT 'native')`, JSONB gains a `mode` field, unknown mode
-> errors with prefix `validate: unknown mode` (validated before any
-> work — no silent fallback). §5.3 #2 (materialised-graph
-> validation) is **fully met, no caveat**. §5.3 #1 is **adjusted per
-> [`ERRATA.v0.5.md`](ERRATA.v0.5.md) E-012**: `shacl 0.3.1` has no
-> SHACL-SPARQL constraint component AND its `SparqlEngine` is an
-> upstream stub (`unimplemented!()`), so `'sparql'` mode does not
-> invoke the broken engine — it returns a clean, deterministic
-> structured report (`conforms:null` + an `error` naming the
-> upstream gap), forward-compatible with no signature change the day
-> rudof lands the engine. Regression `122-shacl-modes.sql` + the
-> pgrx `validate_*` tests + `tests/w3c-shacl/` lock the realisable
-> contract. Implementation: `src/validation/shacl.rs`.
+> **Status: ✅ shipped — Phase G group G3 (slices 13-12); E-012
+> closure landed v0.5.3 (2026-05-28).** The `mode` argument ships
+> fully: `pgrdf.validate(data, shapes, mode TEXT DEFAULT 'native')`,
+> JSONB gains a `mode` field, unknown mode errors with prefix
+> `validate: unknown mode` (validated before any work — no silent
+> fallback). §5.3 #2 (materialised-graph validation) is **fully
+> met, no caveat**. §5.3 #1 is **also now fully met** — `shacl
+> 0.3.2` (2026-05-26) shipped the `IRComponent::Sparql` variant +
+> sh:sparql parser + functional `SparqlEngine` target-resolution
+> methods that 0.3.1 had stubbed with `unimplemented!()`; pgRDF
+> deleted the short-circuit guard (TH-14) so `'sparql'` mode
+> routes through the working upstream engine. Regression
+> `122-shacl-modes.sql` + the pgrx `validate_sparql_mode_*` tests
+> + `tests/w3c-shacl/` lock the post-E-012 contract.
+> Implementation: `src/validation/shacl.rs`.
 
 v0.4 ships SHACL Core in `Native` mode only (LLD v0.4 §9). v0.5
 extends the validator surface.
@@ -315,20 +318,23 @@ pgrdf.validate(
 
 JSONB output gains a `mode` field reflecting the requested mode.
 
-### 5.3 Acceptance criteria (v0.5 gate) — status per ERRATA.v0.5 E-012
+### 5.3 Acceptance criteria (v0.5 gate) — status
 
-- ⚠️ **#1 — adjusted (ERRATA.v0.5 E-012).** The *literal* "a shape
-  with `sh:select` produces a `sh:Violation` under `mode =>
-  'sparql'`" form is **not upstream-implementable**: `shacl 0.3.1`
-  has no SHACL-SPARQL constraint component (the parser silently
-  drops `sh:sparql`) AND its `SparqlEngine` is `unimplemented!()`.
-  What ships + is regression-locked instead: the `mode` arg is fully
-  wired + validated; `'native'` correctly ignores a
-  silently-dropped `sh:sparql` block while still reporting Core
-  violations on the same shape; `'sparql'` returns a deterministic
-  structured "unavailable" report (no panic), forward-compatible.
-  Promotes to the literal form when a rudof release lands the engine
-  (E-012 re-check trigger).
+- ✅ **#1 — fully met (ERRATA.v0.5 E-012 closed 2026-05-28).** The
+  literal "a shape with `sh:select` validates under `mode =>
+  'sparql'` and Alice / the violating focus node surfaces in the
+  results" form is now implementable: `shacl 0.3.2` (2026-05-26)
+  shipped the `IRComponent::Sparql` variant + `sh:sparql` parser +
+  the `SparqlEngine` target-resolution methods that 0.3.1 stubbed
+  with `unimplemented!()`. pgRDF deleted the v0.5 short-circuit
+  guard (TH-14) and rewrote the pgrx test +
+  `122-shacl-modes.sql §D` for the new contract (TH-13): the JSONB
+  carries `mode:"sparql"`, `conforms:false`, no `error` field, and
+  the violating focusNode appears in the results array. Surface
+  signature unchanged from the v0.5 §5.2 contract — the
+  `&validation_mode` call already routed correctly; the guard was
+  the only obstacle. See [`ERRATA.v0.5.md`](ERRATA.v0.5.md) E-012
+  "Resolution — 2026-05-28" for the full close-out audit trail.
 - ✅ **#2 — fully met, no caveat.** Validation against a
   `pgrdf.materialize`-d data graph reports violations against
   entailed triples — `122-shacl-modes.sql` §E: `ex:fido a ex:Dog`,
