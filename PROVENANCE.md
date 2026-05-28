@@ -95,16 +95,16 @@ The repo's `.gitignore` keeps OCI credentials out of the tree, and the release J
 
 ## What's pending the wire-up
 
-The SLSA attestation half is live as of this commit. `oci-publish.yml` was refactored to a matrix shape (8 leaf jobs + 1 index job); every leaf push and the aggregate index get attested via `actions/attest-build-provenance@v1`. The first release to exercise the chain end-to-end is **v0.5.10**.
+The SLSA attestation half went live in `oci-publish.yml`'s matrix refactor (commit `8b7e01e`); v0.5.10 was the first release to exercise it end-to-end. Every per-PG×arch leaf and the aggregate index now carry verifiable provenance.
 
-The `LATEST.md` auto-rendering half is still pending:
+The `LATEST.md` auto-rendering half went in next:
 
-- **`update-latest-md.yml` workflow** — `workflow_run` chained from `oci-publish.yml`; verifies every digest; commits `LATEST.md` back to main.
-- **`tools/render-latest-md.py`** — renders the `LATEST.md` file from the verified digests + the pgCK-shape layout.
+- **`.github/workflows/update-latest-md.yml`** — committed at `c32c5b5`. Triggers on `workflow_run: oci-publish completed`; resolves the head version from the GHCR API; runs the attestation-verify gate against the aggregate + both pg17 leaf digests; renders + commits only on full-pass. Refuses to advance if any digest fails to verify.
+- **`tools/render-latest-md.py`** — committed at the same SHA. Reads the three head digests via `gh api` and emits the full `LATEST.md` content. Adapted from the pgCK sibling-repo renderer; trimmed because pgRDF ships a single OCI surface.
 
-Until both land, Rule 3 ("only `update-latest-md.yml` writes `LATEST.md`") is enforced by discipline, not tooling. The doc above describes the target state; the gap is tracked as Track G hygiene items in `_WIP/SPEC.ROADMAP.TRACK.TASKS.v1.0-devel.md` and gets closed in a follow-up batch.
+**Verification state: unproven by this point in the doc.** The workflow files exist on `main` but no tagged release has fired the `release.yml` → `oci-publish.yml` → `update-latest-md.yml` chain end-to-end yet. The first tagged release after `c32c5b5` is the verification gate. Until that run lands a bot-authored auto-rendered `LATEST.md` commit, Rule 3 ("only `update-latest-md.yml` writes `LATEST.md`") remains a discipline + scaffold rather than a tooling-enforced gate.
 
-Until then, the bootstrap window remains open: v0.5.0–v0.5.9 are the pre-attestation cycle; v0.5.10 is the first release whose digests verify under `gh attestation verify`. Once `update-latest-md.yml` lands, Rule 4 becomes strict — no tag pushed without the prior tag advertised in a workflow-rendered `LATEST.md`.
+The bootstrap window stays open across this transition: v0.5.0–v0.5.9 are the pre-attestation cycle and never appear in `LATEST.md`; v0.5.10 was attested but its `LATEST.md` entry is hand-written. The first auto-rendered entry will come from the next tagged release's chain. Once that lands successfully, Rule 4 becomes strict — no tag pushed without the prior tag advertised in a workflow-rendered `LATEST.md`.
 
 ## Why this matters
 
