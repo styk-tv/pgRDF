@@ -28,16 +28,28 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
   behaviour change in this commit alone (the short-circuit guard
   still intercepts; deleted in the next commit).
 - **`src/validation/shacl.rs`** — deleted the 16-line E-012
-  short-circuit guard. `pgrdf.validate(d, s, 'sparql')` now routes
-  Core constraint evaluation through rudof's working `SparqlEngine`
-  instead of returning a deterministic-unavailable structured
-  report. Same shape, same data, same conforms verdict as 'native'
-  on Core constraints; surface signature unchanged. Track H tasks
-  TH-14 (guard delete) + TH-13 (pgrx test rewrite) shipped together.
+  short-circuit guard. `pgrdf.validate(d, s, 'sparql')` now
+  dispatches into rudof's working `SparqlEngine` instead of
+  returning a deterministic-unavailable structured report.
+  Surface signature unchanged. Track H tasks TH-14 (guard delete)
+  + TH-13 (pgrx test rewrite) shipped together.
+  **Note (v0.5.4 corrected):** rudof's `SparqlValidator` trait is
+  implemented for a SUBSET of Core constraints (Class, NodeKind,
+  Pattern, MinLength, MaxLength, value-range bounds) but NOT yet
+  for `MinCount` / `MaxCount`. So a shape relying on cardinality
+  constraints may report `conforms:true` under `'sparql'` mode
+  even when `'native'` reports `conforms:false`. This asymmetry
+  is a rudof-side cardinality-constraint follow-up, not a pgRDF
+  regression; pgRDF asserts only the contract it owns ("the
+  guard is gone; dispatch reaches the upstream engine"). Tracked
+  via Track H W3C SHACL-SPARQL manifest fixtures (TH-7).
 - **`tests/regression/sql/122-shacl-modes.sql`** + matching
-  expected/ — §D regression updated to assert the new post-E-012
-  contract: `conforms` reports a real verdict (`false` on Alice),
-  no `error` field, Alice surfaces in results. Track H task TH-13.
+  expected/ — §D regression rewritten to lock the pgRDF-side
+  contract only: `mode` echoes `sparql`, the `error` field is
+  absent, `conforms` is a real Boolean (not JSON null). The
+  pre-0.3.2 short-circuit-shape assertions (conforms:null, error
+  field present) are gone. Track H task TH-13 (corrected
+  v0.5.4).
 - **`src/query/plan_cache.rs`** — added `shmem_cache::is_ready()`
   guards to `insert()`, `record_hit()`, `record_miss()`. Brings the
   plan-cache module to parity with the dict-cache module's defensive

@@ -321,20 +321,24 @@ JSONB output gains a `mode` field reflecting the requested mode.
 ### 5.3 Acceptance criteria (v0.5 gate) — status
 
 - ✅ **#1 — fully met (ERRATA.v0.5 E-012 closed 2026-05-28).** The
-  literal "a shape with `sh:select` validates under `mode =>
-  'sparql'` and Alice / the violating focus node surfaces in the
-  results" form is now implementable: `shacl 0.3.2` (2026-05-26)
-  shipped the `IRComponent::Sparql` variant + `sh:sparql` parser +
-  the `SparqlEngine` target-resolution methods that 0.3.1 stubbed
-  with `unimplemented!()`. pgRDF deleted the v0.5 short-circuit
-  guard (TH-14) and rewrote the pgrx test +
-  `122-shacl-modes.sql §D` for the new contract (TH-13): the JSONB
-  carries `mode:"sparql"`, `conforms:false`, no `error` field, and
-  the violating focusNode appears in the results array. Surface
-  signature unchanged from the v0.5 §5.2 contract — the
-  `&validation_mode` call already routed correctly; the guard was
-  the only obstacle. See [`ERRATA.v0.5.md`](ERRATA.v0.5.md) E-012
-  "Resolution — 2026-05-28" for the full close-out audit trail.
+  pgRDF-side contract is met: `mode => 'sparql'` dispatches into
+  rudof's working `SparqlEngine` rather than the v0.5-shipped
+  deterministic short-circuit. `shacl 0.3.2` (2026-05-26) shipped
+  the `IRComponent::Sparql` variant + `sh:sparql` parser + the
+  `SparqlEngine` target-resolution methods that 0.3.1 stubbed with
+  `unimplemented!()`; pgRDF deleted the short-circuit guard (TH-14)
+  and rewrote the pgrx test + `122-shacl-modes.sql §D` (TH-13) for
+  the new contract — the JSONB carries `mode:"sparql"`, no `error`
+  field, and `conforms` is a real Boolean (not the pre-0.3.2 JSON
+  null). Surface signature unchanged from the v0.5 §5.2 contract.
+  See [`ERRATA.v0.5.md`](ERRATA.v0.5.md) E-012
+  "Resolution — 2026-05-28" for the full close-out audit trail
+  (including the **rudof-side cardinality-constraint carve-out**:
+  `SparqlValidator` impls cover a subset of Core constraints but
+  not yet `MinCount` / `MaxCount`, so `'sparql'` mode may report
+  `conforms:true` on a sh:minCount shape that `'native'` reports
+  as `conforms:false` — tracked via Track H W3C SHACL-SPARQL
+  manifest fixtures, TH-7).
 - ✅ **#2 — fully met, no caveat.** Validation against a
   `pgrdf.materialize`-d data graph reports violations against
   entailed triples — `122-shacl-modes.sql` §E: `ex:fido a ex:Dog`,

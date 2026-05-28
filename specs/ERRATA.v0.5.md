@@ -216,6 +216,22 @@ This entry is **closed for v0.5.x**. The Track H dual-path roadmap
 in [`ROADMAP.md`](../ROADMAP.md) §4 Track H — beyond E-012 scope, a
 v0.6 forward item.
 
+**Carve-out — cardinality-constraint asymmetry (rudof-side
+follow-up, not pgRDF defect):** rudof's `SparqlValidator` trait is
+implemented for a subset of Core constraints (Class, NodeKind,
+Pattern, MinLength / MaxLength, value-range bounds) but **not yet
+for `MinCount` / `MaxCount`**. A shape relying on `sh:minCount` may
+therefore report `conforms:true` under `mode => 'sparql'` even when
+the same shape reports `conforms:false` under `mode => 'native'`.
+pgRDF surfaces this asymmetry honestly in the regression bar
+(`122-shacl-modes.sql §D` asserts only the pgRDF-side contract:
+mode echoed, no `error` field, `conforms` is a real Boolean — it
+does NOT assert a specific `conforms` verdict under sparql mode).
+The asymmetry tracks via the Track H W3C SHACL-SPARQL manifest gate
+once `tests/w3c-shacl/sparql/` is vendored (TH-7); when rudof ships
+`SparqlValidator` for the cardinality constraints, the §D
+assertions tighten accordingly.
+
 ### E-013 — W3C SHACL Core manifest: gate invariant + a corrected false exclusion
 
 | Field | Value |
