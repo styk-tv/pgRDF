@@ -142,17 +142,22 @@ jobs:
           VER:      ${{ steps.head.outputs.ver }}
         run: |
           set -euo pipefail
-          # Tag SHA — the 40-char commit ID `v${VER}` points to.
+          # Tag → commit SHA. The `/commits/v${VER}` endpoint
+          # auto-dereferences refs/tags/v${VER} to the underlying
+          # commit. Earlier code used `/git/ref/tags/v${VER}` with
+          # `.object.sha`, which for ANNOTATED tags returns the
+          # tag-object SHA (a different object — not a commit), and
+          # downstream consumers ended up linking to a non-commit.
           SHA=$(gh api -H "Accept: application/vnd.github+json" \
-            "repos/${OWNER}/${GITHUB_REPOSITORY#*/}/git/ref/tags/v${VER}" \
-            --jq '.object.sha' 2>/dev/null || true)
+            "repos/${OWNER}/${GITHUB_REPOSITORY#*/}/commits/v${VER}" \
+            --jq '.sha' 2>/dev/null || true)
           # Fallback parse — different `gh api` versions phrase the
           # `repos/<owner>/<repo>` segment differently; the workflow
           # already has `GITHUB_REPOSITORY` set to `<owner>/<repo>`.
           if [ -z "${SHA}" ]; then
             SHA=$(gh api -H "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VER}" \
-              --jq '.object.sha' 2>/dev/null || true)
+              "repos/${GITHUB_REPOSITORY}/commits/v${VER}" \
+              --jq '.sha' 2>/dev/null || true)
           fi
           echo "built_from_sha=${SHA}" >> "$GITHUB_OUTPUT"
           # Workflow-run URL — most-recent `release.yml` run at SHA.
