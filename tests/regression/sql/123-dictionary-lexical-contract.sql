@@ -104,7 +104,7 @@ BEGIN
     # N: blank-node OBJECT — verify _:label round-trips
     ex:sE ex:hasNote _:note0 .
     _:note0 ex:lex "blank-node anchored" .
-  $ttl$, 'urn:test/tf5/dict-lexical-contract');
+  $ttl$, pgrdf.graph_id('urn:test/tf5/dict-lexical-contract'));
 END $$;
 
 -- ─── A — http:// IRI object ─────────────────────────────────────
