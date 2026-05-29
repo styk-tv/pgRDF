@@ -21,10 +21,34 @@
 #   3. psql ... -c 'CREATE EXTENSION pgrdf;'
 
 services:
+  # TG-3 v2 — compose-startup parity gate.
+  #
+  # A one-shot init container that runs BEFORE postgres starts. Hashes
+  # the bind-mounted extension files and verifies internal consistency
+  # (.control's default_version matches the pgrdf--<ver>.sql filename;
+  # neither .so nor .sql is empty). Exits non-zero on any drift.
+  # postgres `depends_on` it with
+  # `condition: service_completed_successfully`, so a failed check
+  # blocks postgres from starting — the realistic drift case (release
+  # cut bumped pgrdf.control but compose.yml still mounts the previous
+  # SQL file) gets caught at compose-up rather than later at
+  # CREATE EXTENSION time.
+  pgrdf-parity:
+    image: docker.io/library/busybox:1.36
+    container_name: ${PGRDF_PARITY_CONTAINER:-pgrdf-parity}
+    restart: "no"
+    volumes:
+      - ./extensions:/extensions:ro,z
+      - ./parity-check.sh:/parity-check.sh:ro,z
+    command: ["sh", "/parity-check.sh"]
+
   postgres:
     image: docker.io/library/postgres:17.4-bookworm
     container_name: ${PGRDF_CONTAINER:-pgrdf-pgrdf-postgres}
     restart: unless-stopped
+    depends_on:
+      pgrdf-parity:
+        condition: service_completed_successfully
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-pgrdf}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgrdf}

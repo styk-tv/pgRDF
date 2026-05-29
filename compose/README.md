@@ -1,17 +1,29 @@
 # compose/ — local-dev runtime for pgRDF
 
 Stock `postgres:17.4-bookworm` image, no image rebuild, no entrypoint
-wrapper, no init script. The locally-built extension files are placed
-at the canonical Postgres paths via **per-file bind mounts**:
+wrapper. The locally-built extension files are placed at the
+canonical Postgres paths via **per-file bind mounts**:
 
     ./extensions/lib/pgrdf.so                       → /usr/lib/postgresql/17/lib/pgrdf.so
     ./extensions/share/extension/pgrdf.control      → /usr/share/postgresql/17/extension/pgrdf.control
     ./extensions/share/extension/pgrdf--<ver>.sql   → /usr/share/postgresql/17/extension/pgrdf--<ver>.sql
 
+A one-shot **`pgrdf-parity` init container** runs before postgres
+starts (TG-3 v2). It hashes the mounted files and verifies internal
+consistency — `.control`'s `default_version` matches the
+`pgrdf--<ver>.sql` filename; neither `.so` nor `.sql` is empty. If
+anything mismatches (the realistic case: a release cut bumped
+`pgrdf.control`'s `default_version` but `compose.yml` still mounts
+the previous SQL file), the parity check exits non-zero and postgres
+never starts — `docker compose up` fails at startup rather than
+later at `CREATE EXTENSION` time with a confusing
+"`pgrdf--<old>.sql` not found" error.
+
 ## Layout
 
     compose/
-    ├── compose.yml                 # services definition
+    ├── compose.yml                 # services definition (postgres + pgrdf-parity init)
+    ├── parity-check.sh             # TG-3 v2 compose-startup gate (runs inside pgrdf-parity)
     ├── builder.Containerfile       # linux/glibc-bookworm builder
     ├── .env.example
     ├── extensions/                 # built artifacts (gitignored, populated by `just build-ext`)
