@@ -4,7 +4,7 @@
   "description": "pgRDF is a Rust-native PostgreSQL extension for RDF storage, SPARQL 1.1 query and update, SHACL validation, and OWL 2 RL or RDFS materialization inside PostgreSQL.",
   "version": "0.5.1",
   "maintainer": [
-    "Peter Styk <peter@styk.tv>"
+    "Peter Styk"
   ],
   "license": "mit",
   "release_status": "stable",

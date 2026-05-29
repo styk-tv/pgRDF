@@ -298,8 +298,16 @@ This is the connective theme behind Tracks A/B/C. Concrete moves:
     tolerances.
   - Public release notes for v0.6 cite hard numbers, not "should scale".
 
-### Track G — Internal hardening
+### Track G — Internal hardening ✅
 
+- **Status:** closed v0.5.16 (TG-1). All five Track G items shipped through
+  the v0.5 cycle: G.1 plan-cache guards (v0.5.2), G.2 README preload section
+  (v0.5.2), G.3 end-to-end lexical rehydration regression (v0.5.3), G.4
+  artifact-parity v2 with compose-startup gate (v0.5.14), G.5 ERRATA.v0.6
+  opened (v0.5.8). Two infrastructure spillovers shipped alongside as bonus:
+  SLSA Build Provenance v1 attestation chain (v0.5.10) and the
+  `update-latest-md.yml` automation closing PROVENANCE.md Rule 3
+  (v0.5.13). Track G is the first column to fully close in the v0.6 cycle.
 - **Goal:** close the small, named gaps surfaced during the v0.5 cycle so the
   v0.6 surface is a clean baseline for the scale work above.
 - **Items:**

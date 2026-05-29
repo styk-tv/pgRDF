@@ -337,8 +337,6 @@ IRI in the source — see
 
 ## License
 
-Copyright 2026 Peter Styk &lt;peter@styk.tv&gt;.
-
-Licensed under the MIT License — see [LICENSE](LICENSE).
+Copyright 2026 Peter Styk. Licensed under the MIT License — see [LICENSE](LICENSE) for the canonical attribution.
 
 Project home: <https://github.com/styk-tv/pgRDF>.

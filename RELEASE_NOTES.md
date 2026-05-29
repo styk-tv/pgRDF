@@ -93,7 +93,7 @@ architecture plus the aggregate `:0.5.1` / `:v0.5.1` index manifests.
 
 ## License
 
-MIT. Copyright 2026 Peter Styk &lt;peter@styk.tv&gt;.
+MIT. Copyright 2026 Peter Styk — see [`LICENSE`](LICENSE) for the canonical attribution.
 
 Full changelog: [`CHANGELOG.md`](CHANGELOG.md). Spec:
 [`specs/SPEC.pgRDF.LLD.v0.5.md`](specs/SPEC.pgRDF.LLD.v0.5.md).

@@ -1118,14 +1118,15 @@ bump is a planned v0.4 work item).
 
 ### License + attribution
 
-Apache License 2.0. Copyright 2026 Peter Styk
-&lt;peter@styk.tv&gt;. The `LICENSE` file carries the resolved
-copyright notice (project URL in place of the upstream `[yyyy]
-[name of copyright owner]` placeholders) and a `NOTICE` file at
-the repo root carries the Apache convention header. Both files
-are distributed inside every per-arch tarball per Apache 2.0
-§4(d). `Cargo.toml` declares `authors = ["Peter Styk
-<peter@styk.tv>"]` and a `homepage` URL alongside `repository`.
+MIT (re-licensed from Apache 2.0 in v0.5.1). Copyright 2026
+Peter Styk. The `LICENSE` file is the canonical attribution
+source — see it for the maintainer email. v0.5.1+ ships only
+`LICENSE` (no `NOTICE`); the file is distributed inside every
+per-arch tarball. `Cargo.toml` declares `authors = ["Peter
+Styk"]` (no email — per the
+[email-in-license-and-commits-only](../PROVENANCE.md) discipline,
+the address is canonical in LICENSE and is not duplicated across
+release artifacts).
 
 ### MSRV
 

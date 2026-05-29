@@ -11,7 +11,7 @@ edition = "2021"
 # verifies. Bump together with the Containerfile when upgrading.
 rust-version = "1.91"
 license = "MIT"
-authors = ["Peter Styk <peter@styk.tv>"]
+authors = ["Peter Styk"]
 description = "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning"
 repository = "https://github.com/styk-tv/pgRDF"
 homepage = "https://github.com/styk-tv/pgRDF"
