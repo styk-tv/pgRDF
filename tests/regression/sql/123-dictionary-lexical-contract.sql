@@ -49,8 +49,12 @@
 --        re-emerges via `object.{type,datatype,language}`
 --   I-3  zero-padded integers ("0030") are NOT silently stripped
 --        to "30" — pgRDF preserves the AS-WRITTEN lexical
---   I-4  lang-tag subtags (`en`, `fr-CA`) round-trip with case
---        preserved AS-WRITTEN by the input Turtle
+--   I-4  lang-tag subtags are W3C-normalized to LOWERCASE per
+--        RDF 1.1 §3.3 ("the case of the original lexical form of
+--        the language tag is not preserved"). `@en` lands as `en`;
+--        `@fr-CA` lands as `fr-ca`. This is the W3C-mandated
+--        contract; an implementation that preserves as-written
+--        case would be SPEC-NON-CONFORMANT.
 --
 -- All expected values hand-computed; never ACCEPT=1 baselined.
 
@@ -216,7 +220,12 @@ FROM pgrdf.construct($q$
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sA ex:lex ?o } }
 $q$) AS j;
 
-SELECT (j->'object'->>'language') = 'fr-CA' AS j_region_tag
+-- W3C RDF 1.1 §3.3 mandates language-tag lowercase normalization
+-- ("the case of the original lexical form ... is not preserved").
+-- pgRDF/rio honour the spec — `fr-CA` in the Turtle input lands in
+-- the dictionary as `fr-ca`. The assertion locks the normalized
+-- form, NOT the as-written form (I-4 amended below).
+SELECT (j->'object'->>'language') = 'fr-ca' AS j_region_tag
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
   CONSTRUCT { ex:sA ex:lex ?o }
