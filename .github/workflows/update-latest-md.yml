@@ -114,6 +114,50 @@ jobs:
           done
 
       # ────────────────────────────────────────────────────────────
+      # Resolve SPEC.OCI.BUNDLE.v0.3 §2.2 metadata that the renderer
+      # surfaces in the metadata block: the tag SHA (`Built from
+      # commit`) and the workflow-run URL (`Built by`). Pre-resolving
+      # here avoids the renderer doing nested `gh api` calls and lets
+      # the workflow log the resolved values for the audit trail.
+      # Both values are passed to the renderer via env. If either
+      # resolves empty (e.g. `workflow_dispatch` against an unreleased
+      # version), the renderer falls back to its internal resolver and
+      # ultimately to a labelled degraded display.
+      # ────────────────────────────────────────────────────────────
+      - name: Resolve v0.3 §2.2 metadata
+        id: spec22
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER:    ${{ github.repository_owner }}
+          VER:      ${{ steps.head.outputs.ver }}
+        run: |
+          set -euo pipefail
+          # Tag SHA — the 40-char commit ID `v${VER}` points to.
+          SHA=$(gh api -H "Accept: application/vnd.github+json" \
+            "repos/${OWNER}/${GITHUB_REPOSITORY#*/}/git/ref/tags/v${VER}" \
+            --jq '.object.sha' 2>/dev/null || true)
+          # Fallback parse — different `gh api` versions phrase the
+          # `repos/<owner>/<repo>` segment differently; the workflow
+          # already has `GITHUB_REPOSITORY` set to `<owner>/<repo>`.
+          if [ -z "${SHA}" ]; then
+            SHA=$(gh api -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VER}" \
+              --jq '.object.sha' 2>/dev/null || true)
+          fi
+          echo "built_from_sha=${SHA}" >> "$GITHUB_OUTPUT"
+          # Workflow-run URL — most-recent `release.yml` run at SHA.
+          URL=""
+          if [ -n "${SHA}" ]; then
+            URL=$(gh api -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/actions/runs?event=push&head_sha=${SHA}" \
+              --jq '[.workflow_runs[] | select(.path == ".github/workflows/release.yml")] | sort_by(.created_at) | reverse | .[0].html_url // ""' \
+              2>/dev/null || true)
+          fi
+          echo "built_by_url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "v0.3 §2.2: built_from_sha=${SHA:-(unresolved)}"
+          echo "v0.3 §2.2: built_by_url=${URL:-(unresolved, renderer will fall back)}"
+
+      # ────────────────────────────────────────────────────────────
       # Render and commit if changed.
       # ────────────────────────────────────────────────────────────
       - name: Render LATEST.md
@@ -121,6 +165,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           VER: ${{ steps.head.outputs.ver }}
+          BUILT_FROM_SHA: ${{ steps.spec22.outputs.built_from_sha }}
+          BUILT_BY_URL:   ${{ steps.spec22.outputs.built_by_url }}
         run: |
           set -euo pipefail
           python3 tools/render-latest-md.py > LATEST.md.new
