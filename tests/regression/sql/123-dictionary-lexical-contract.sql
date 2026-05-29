@@ -123,7 +123,7 @@ END $$;
 SELECT (j->'object'->>'value') = 'http://example.org/alice' AS a_http_iri
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:eqIri ?o }
+  CONSTRUCT { ex:s1 ex:eqIri ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s1 ex:eqIri ?o } }
 $q$) AS j;
 
@@ -131,7 +131,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = 'urn:example:bob' AS b_urn_iri
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:eqIri ?o }
+  CONSTRUCT { ex:s2 ex:eqIri ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s2 ex:eqIri ?o } }
 $q$) AS j;
 
@@ -139,7 +139,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = 'ckp://Task#001' AS c_custom_scheme_iri
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:eqIri ?o }
+  CONSTRUCT { ex:s3 ex:eqIri ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s3 ex:eqIri ?o } }
 $q$) AS j;
 
@@ -147,7 +147,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = 'http://example.org/path%20with%20spaces' AS d_percent_encoded_iri
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:eqIri ?o }
+  CONSTRUCT { ex:s4 ex:eqIri ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s4 ex:eqIri ?o } }
 $q$) AS j;
 
@@ -155,7 +155,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = 'Alice' AS e_plain_literal
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:s5 ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s5 ex:lex ?o } }
 $q$) AS j;
 
@@ -164,7 +164,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = '0030' AS f_integer_no_zero_strip
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:s6 ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s6 ex:lex ?o } }
 $q$) AS j;
 
@@ -172,7 +172,7 @@ $q$) AS j;
 SELECT (j->'object'->>'datatype') = 'http://www.w3.org/2001/XMLSchema#integer' AS f_integer_datatype
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:s6 ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s6 ex:lex ?o } }
 $q$) AS j;
 
@@ -180,7 +180,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = 'true' AS g_boolean_value
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:s7 ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s7 ex:lex ?o } }
 $q$) AS j;
 
@@ -188,7 +188,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = '2026-05-29T12:00:00Z' AS h_datetime_tz_verbatim
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:s8 ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s8 ex:lex ?o } }
 $q$) AS j;
 
@@ -196,14 +196,14 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = 'Hello' AS i_lang_value
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:s9 ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s9 ex:lex ?o } }
 $q$) AS j;
 
 SELECT (j->'object'->>'language') = 'en' AS i_lang_tag
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:s9 ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s9 ex:lex ?o } }
 $q$) AS j;
 
@@ -212,14 +212,14 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = 'Salut' AS j_region_value
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:sA ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sA ex:lex ?o } }
 $q$) AS j;
 
 SELECT (j->'object'->>'language') = 'fr-CA' AS j_region_tag
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:sA ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sA ex:lex ?o } }
 $q$) AS j;
 
@@ -227,7 +227,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = 'say "hi"' AS k_embedded_quote
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:sB ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sB ex:lex ?o } }
 $q$) AS j;
 
@@ -235,7 +235,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = E'tab\there' AS l_embedded_tab
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:sC ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sC ex:lex ?o } }
 $q$) AS j;
 
@@ -243,7 +243,7 @@ $q$) AS j;
 SELECT (j->'object'->>'value') = 'üñîçødé' AS m_unicode
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:lex ?o }
+  CONSTRUCT { ex:sD ex:lex ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sD ex:lex ?o } }
 $q$) AS j;
 
@@ -257,7 +257,7 @@ $q$) AS j;
 SELECT (j->'object'->>'type') = 'bnode' AS n_bnode_type
 FROM pgrdf.construct($q$
   PREFIX ex: <http://example.org/>
-  CONSTRUCT { ?s ex:hasNote ?o }
+  CONSTRUCT { ex:sE ex:hasNote ?o }
   WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sE ex:hasNote ?o } }
 $q$) AS j;
 
