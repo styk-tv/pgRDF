@@ -22,7 +22,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: ["14", "15", "16", "17"]
+        # STABILIZATION WINDOW — matrix cut to pg17 only. See the
+        # release.yml block for context. Do NOT delete the previous
+        # full matrix below; it will be restored verbatim once the
+        # multi-PG bar is stable again.
+        # pg: ["14", "15", "16", "17"]
+        pg: ["17"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,7 +41,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: ["14", "15", "16", "17"]
+        # STABILIZATION WINDOW — matrix cut to pg17 only. See the
+        # release.yml block for context. Do NOT delete the previous
+        # full matrix below; it will be restored verbatim once the
+        # multi-PG bar is stable again.
+        # pg: ["14", "15", "16", "17"]
+        pg: ["17"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

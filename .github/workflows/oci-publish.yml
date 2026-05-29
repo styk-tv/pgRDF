@@ -52,7 +52,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: ["14", "15", "16", "17"]
+        # STABILIZATION WINDOW — matrix cut to pg17 only. See the
+        # release.yml block for context. Do NOT delete the previous
+        # full matrix below; it will be restored verbatim once the
+        # multi-PG bar is stable again.
+        # pg: ["14", "15", "16", "17"]
+        pg: ["17"]
         arch: [amd64, arm64]
     runs-on: ubuntu-22.04
     env:
@@ -171,7 +176,15 @@ jobs:
           VER="${{ steps.v.outputs.ver }}"
           TAG="${{ steps.v.outputs.tag }}"
           REFS=""
-          for pg in 14 15 16 17; do for arch in amd64 arm64; do
+          # STABILIZATION WINDOW — only pg17 leaves are produced by
+          # the matrix above. Aggregate index references the pg17 ×
+          # {amd64, arm64} pair only. Do NOT delete the full-matrix
+          # form below; it will be restored verbatim once pg14/15/16
+          # come back into the leaf matrix.
+          # for pg in 14 15 16 17; do for arch in amd64 arm64; do
+          #   REFS="$REFS ${REG}:${VER}-pg${pg}-${arch}"
+          # done; done
+          for pg in 17; do for arch in amd64 arm64; do
             REFS="$REFS ${REG}:${VER}-pg${pg}-${arch}"
           done; done
           oras manifest index create "${REG}:${VER}" $REFS
