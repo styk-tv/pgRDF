@@ -209,7 +209,7 @@ def render(owner: str, ver: str) -> str:
 
 # pgRDF — latest published artifacts
 
-One publishable surface ships from this repo: the PostgreSQL **extension** (oras-pulled OCI artifact). This file tracks the head on **PostgreSQL 17**. Older PG majors (14, 15, 16) are still built per release — see [Repo packages view](https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle) for the full matrix.
+One publishable surface ships from this repo: the PostgreSQL **extension** (oras-pulled OCI artifact). This file tracks the head on **PostgreSQL 17**. Builds for pg14 / pg15 / pg16 are PAUSED during a stabilization window (see [CHANGELOG.md "Changed (stabilization window)"](./CHANGELOG.md) for context) — they will resume once the multi-PG matrix is stable again. The [Repo packages view](https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle) shows everything currently published.
 
 ## pgRDF extension — `v{ver}` (PostgreSQL 17)
 
@@ -234,7 +234,7 @@ Every digest below carries a verifiable SLSA Build Provenance v1 attestation per
 | Release notes         | https://github.com/styk-tv/pgRDF/releases/tag/v{ver}                                          |
 | Tarball mirror        | https://github.com/styk-tv/pgRDF/releases/tag/v{ver}                                          |
 | Repo packages view    | https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle                                   |
-| Older PG majors       | `{ver}-pg{{14,15,16}}-{{amd64,arm64}}` published alongside; same v{ver} tag; each individually attested |
+| Older PG majors       | PAUSED during the stabilization window — pg14 / pg15 / pg16 leaves are NOT published for v{ver}. Resumes per CHANGELOG.md once matrix is stable.   |
 
 ## Verifying any artifact above
 
