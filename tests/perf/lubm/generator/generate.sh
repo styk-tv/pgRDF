@@ -35,20 +35,48 @@ mkdir -p "${RAW_DIR}" "${NT_DIR}" "${TTL_DIR}"
 
 echo "[pgrdf-lubm-generator] generating LUBM-${UNIV_COUNT} into ${OUT_DIR}"
 
-cd /opt/lubm/uba1.7
+# UBA 1.7's zip extracts straight to /opt/lubm/ (no top-level subdir).
+# UBA emits filenames as `<cwd>\University<i>_<j>.owl` — the path
+# separator is a *literal* backslash hardcoded into UBA's Java source
+# (it does not honour os.file.separator on Linux). So we cd into the
+# raw output dir and let the backslashed names land there; a post-rename
+# strips the `_uba-work\` prefix so files are accessible as plain
+# `University<i>_<j>.owl` for rapper.
+WORK_DIR="${OUT_DIR}/_uba-work"
+mkdir -p "${WORK_DIR}"
+cd "${WORK_DIR}"
 
 # The UBA generator wants `classes/` on the classpath and the
-# Univ-Bench ontology as a file:// URI for the -onto argument.
-java -cp classes \
+# Univ-Bench ontology as a file:// URI for the -onto argument. The
+# ontology was fetched into /opt/lubm/univ-bench.owl by the Dockerfile.
+# UBA 1.7 has no `-timestamp` flag (per /opt/lubm/readme.txt); -seed 0
+# gives deterministic output.
+java -cp /opt/lubm/classes \
   edu.lehigh.swat.bench.uba.Generator \
   -univ "${UNIV_COUNT}" \
-  -onto "file:///opt/lubm/uba1.7/univ-bench.daml" \
-  -timestamp 0 \
+  -onto "file:///opt/lubm/univ-bench.owl" \
   -seed 0
 
-# UBA writes outputs to its working directory; move them into the
-# volume's raw subdir.
-mv University*_*.owl "${RAW_DIR}/"
+# UBA actually writes into the *parent* of cwd with a `<cwdname>\`
+# filename prefix — so the files land at `${OUT_DIR}/_uba-work\<file>`,
+# i.e. siblings of the work dir at OUT_DIR root. Move + rename strip
+# that prefix and land them in raw/.
+cd "${OUT_DIR}"
+shopt -s nullglob
+moved=0
+for f in '_uba-work\University'*.owl; do
+  bare="${f#_uba-work\\}"
+  mv -- "${f}" "${RAW_DIR}/${bare}"
+  moved=$((moved + 1))
+done
+if [ "${moved}" -eq 0 ]; then
+  echo "[pgrdf-lubm-generator] FATAL: UBA produced no output files; aborting" >&2
+  exit 1
+fi
+# UBA also drops a `_uba-work\log.txt` next to the .owl files; tidy.
+rm -f -- '_uba-work\log.txt' 2>/dev/null || true
+# Clean up the work scratch (UBA never wrote inside it).
+rmdir "${WORK_DIR}" 2>/dev/null || true
 
 # Convert OWL → N-Triples via raptor (rapper).
 echo "[pgrdf-lubm-generator] converting to N-Triples"

@@ -34,12 +34,22 @@ WORKDIR /opt/lubm
 ENV UBA_URL="https://swat.cse.lehigh.edu/projects/lubm/uba1.7.zip"
 ENV UBA_SHA256="80c9dc8ffd9cc2ef7d1fefda3f86dec27c66c2e2c63edd0d2bb1d3a48ab2c7c3"
 
+# Univ-Bench ontology — UBA's `-onto` argument needs this file (or a
+# URL); we vendor it locally so the generator can run offline. The
+# Lehigh SWAT page serves it at `http://swat.cse.lehigh.edu/onto/`.
+ENV ONTO_URL="http://swat.cse.lehigh.edu/onto/univ-bench.owl"
+
 # The SHA256 above is a placeholder; on first real build, the
 # generate.sh entrypoint logs `sha256sum uba1.7.zip` to stderr
 # before extraction so the Dockerfile gets updated forward.
+#
+# UBA 1.7's zip extracts straight to /opt/lubm/{classes,src,readme.txt}
+# (no top-level uba1.7/ subdir). The `classes/` tree carries the
+# precompiled `edu.lehigh.swat.bench.uba.Generator` entrypoint.
 RUN curl -fsSL -o uba1.7.zip "${UBA_URL}" \
  && unzip -q uba1.7.zip \
- && rm uba1.7.zip
+ && rm uba1.7.zip \
+ && curl -fsSL -o /opt/lubm/univ-bench.owl "${ONTO_URL}"
 
 COPY generate.sh /usr/local/bin/generate
 RUN chmod +x /usr/local/bin/generate

@@ -1,6 +1,30 @@
 # LUBM-generated data is reproducible from the tracked generator —
 # discardable, never committed. The actual fixture in the docker
-# volume `pgrdf-lubm-data` is not on the host filesystem; this entry
-# guards any accidental local copies that land here.
-data/*
+# volume `pgrdf-lubm-data` is not on the host filesystem; these
+# rules guard against any accidental local copies leaking in.
+#
+# Layout we DO want tracked:
+#   data/.gitkeep                       — TF-12 anchor
+#   data/lubm-10/.gitkeep               — TF-11 layout anchor
+#   data/lubm-100/.gitkeep              — (future) TF-6 release-gate anchor
+#   data/lubm-1000/.gitkeep             — (future) TF-3 baseline anchor
+#
+# Everything ELSE under data/ is fair game for the generator to
+# dump; the runner reads from the docker volume so nothing has to
+# leak here.
+data/**
 !data/.gitkeep
+!data/lubm-*/
+!data/lubm-*/.gitkeep
+
+# Runner outputs land under <repo>/target/perf-report.json per
+# TF-12 §"Harness shape"; nothing should appear here.
+*.tmp
+*.bak
+
+# Native UBA artefacts (only present if a teammate ran the
+# generator with a host bind-mount instead of the named volume —
+# not our preferred flow but possible).
+*.owl
+*.nt
+*.ttl

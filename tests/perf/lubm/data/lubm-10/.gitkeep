@@ -1,0 +1,29 @@
+Placeholder so `tests/perf/lubm/data/lubm-10/` exists in fresh clones.
+
+The actual LUBM-10 dataset is **NOT** here — it lives in the docker
+named volume `pgrdf-lubm-data`, at the in-volume path:
+
+    /data/lubm-10/
+      ├── raw/             (UBA OWL/RDF-XML, 189 files, ~101 MB)
+      ├── nt/lubm-10.nt    (concatenated N-Triples, ~195 MB,
+      │                    1,316,700 triples at -seed 0)
+      └── ttl/lubm-10.ttl  (compact Turtle, ~106 MB)
+
+To (re)materialise:
+
+    just lubm-build              # one-time, ~30s, image ~295 MB
+    just lubm-gen 10             # ~10s, populates the volume
+
+To inspect:
+
+    docker run --rm -v pgrdf-lubm-data:/data alpine:3.20 \
+        sh -c "wc -l /data/lubm-10/nt/lubm-10.nt"
+
+To free:
+
+    just lubm-clean              # removes the volume
+
+The TF-10 runner (`tests/perf/lubm/run-lubm.sh`) mounts the volume
+into a one-shot postgres+pgrdf sidecar for ingest; nothing on the
+host filesystem needs to live under this directory. See
+`../README.md` for the broader TF-12 intake design.
