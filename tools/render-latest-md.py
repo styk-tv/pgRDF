@@ -125,8 +125,13 @@ def resolve_built_from_sha(owner: str, repo: str, ver: str) -> str:
             return sha
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
+    # API fallback: ask GitHub to dereference the ref to a commit. The
+    # /git/ref/tags/<v> form returns the tag OBJECT's sha for annotated
+    # tags (the tag itself is an object that points at the commit). The
+    # /commits/<v> form auto-follows refs/tags to the underlying commit,
+    # which is what every other site here expects.
     sha = gh_api_one(
-        f"repos/{owner}/{repo}/git/ref/tags/v{ver}", jq=".object.sha"
+        f"repos/{owner}/{repo}/commits/v{ver}", jq=".sha"
     )
     return sha
 
@@ -239,7 +244,7 @@ Every digest below carries a verifiable SLSA Build Provenance v1 attestation per
 ## Verifying any artifact above
 
 ```sh
-# Aggregate index (multi-arch, multi-PG-major)
+# Aggregate index (multi-arch; pg17 only during stabilization window)
 gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:{ver} \\
   --repo styk-tv/pgRDF
 
