@@ -1,0 +1,89 @@
+name: perf-nightly
+
+# TF-8 — nightly LUBM-10 performance regression gate.
+#
+# Builds the pgRDF extension from source, builds the UBA generator
+# container, generates LUBM-10 into the pgrdf-lubm-data volume, runs
+# the TF-10 perf runner, and compares against the committed
+# tests/perf/lubm/baseline.lubm-10.json (TF-9). Fails if correctness
+# drifts OR if timing exceeds the per-fixture
+# comparison_tolerance.elapsed_ms_pct (default ±50%).
+#
+# Scope locked to LUBM-10 localhost per [[lubm-localhost-only]]: no
+# LUBM-100, no Azure, no hosted-runner-class expansion. The cron
+# fires nightly on the standard `ubuntu-latest` runner; runtime is
+# bounded (build ~5 min, ingest ~30s, query negligible).
+
+on:
+  schedule:
+    # 03:00 UTC daily. Pick a quiet hour so the artifact builds don't
+    # contend with the human-cycle ci.yml runs that happen during the
+    # day. Adjust if telemetry shows actions-runner queue pressure at
+    # this hour.
+    - cron: "0 3 * * *"
+  # On-demand: lets a maintainer fire the gate after a perf-suspect
+  # change without waiting for the cron tick.
+  workflow_dispatch: {}
+
+# Read-only — nothing this workflow does writes back to the repo.
+# Regression is surfaced as workflow-failure + the action logs; the
+# baseline.lubm-10.json file is updated by a human commit after
+# investigation, never by this workflow auto-blessing drift.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.16"
+
+jobs:
+  lubm-10:
+    name: LUBM-10 dev-gate (TF-7 + TF-8)
+    runs-on: ubuntu-22.04
+    # Hard ceiling so a hung generator/runner doesn't burn an
+    # actions-runner indefinitely. Typical end-to-end is ~6-8 min.
+    timeout-minutes: 25
+    env:
+      PGRDF_RUNTIME: docker
+      PGRDF_BUILD_RUNTIME: docker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-pgrx
+        with:
+          pg: "17"
+
+      # Build the extension artifacts into compose/extensions/ — same
+      # path the regression job in ci.yml uses; the TF-10 runner
+      # bind-mounts these into the postgres sidecar.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build extension artifacts
+        run: just build-ext
+
+      # Build the UBA generator + generate LUBM-10 into the
+      # pgrdf-lubm-data named volume the runner expects.
+      - name: Build LUBM generator
+        run: just lubm-build
+
+      - name: Generate LUBM-10
+        run: just lubm-gen 10
+
+      # The dev-gate itself. test-lubm-10 runs the TF-10 runner +
+      # compare-to-baseline.py against the committed TF-9 baseline.
+      # Non-zero exit = regression; the workflow goes red.
+      - name: Run LUBM-10 dev-gate
+        run: just test-lubm-10
+
+      # On failure, surface the runner output for triage.
+      - name: Upload perf-report.json (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-report-lubm-10-${{ github.run_id }}
+          path: target/perf-report.json
+          if-no-files-found: warn
+          retention-days: 30

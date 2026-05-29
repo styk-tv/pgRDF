@@ -119,6 +119,22 @@ lubm-gen UNIV_COUNT="10":
 lubm-clean:
     -docker volume rm pgrdf-lubm-data
 
+# TF-7 — LUBM-10 dev-gate. Runs the TF-10 perf runner against the
+# `pgrdf-lubm-data` docker volume (`just lubm-build` + `just lubm-gen 10`
+# must have populated it), then compare-to-baseline.py fails the recipe
+# if any fixture's correctness fields drift OR if elapsed_ms is outside
+# the per-fixture comparison_tolerance.elapsed_ms_pct. Fast-failing on
+# regression is the contract here — output goes to
+# target/perf-report.json (gitignored under target/).
+test-lubm-10:
+    mkdir -p target
+    OUTFILE=target/perf-report.json \
+    JSON_SCHEMA_VALIDATE=0 \
+        bash tests/perf/lubm/run-lubm.sh 10
+    python3 tests/perf/lubm/compare-to-baseline.py \
+        --actual target/perf-report.json \
+        --baseline tests/perf/lubm/baseline.lubm-10.json
+
 # pg_dump round-trip verification for `_pgrdf_graphs` (LLD v0.4 §3.1
 # acceptance criterion). Boots a clean state, seeds two IRI bindings,
 # pg_dumps, drops + restores, then re-queries to verify the mapping
