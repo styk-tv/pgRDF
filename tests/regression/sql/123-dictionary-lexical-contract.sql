@@ -5,7 +5,7 @@
 -- surface** against lexical drift: every term shape pgRDF stores
 -- (URI / blank node / plain literal / typed literal / lang-tagged
 -- literal) must round-trip EXACT lexical bytes through parse_turtle
--- → dictionary → pgrdf.sparql, including the pathological cases
+-- → dictionary → pgrdf.construct, including the pathological cases
 -- that cheap "trim whitespace" or "uppercase scheme" implementations
 -- would silently mangle.
 --
@@ -13,6 +13,17 @@
 -- full **pipeline** (parse_turtle → CONSTRUCT → materialize → ...);
 -- this file is the narrower **dictionary contract** — does a single
 -- ingest + read-back preserve every byte we promised to preserve?
+--
+-- Read-back shape: `pgrdf.construct(q)` returns SETOF jsonb with one
+-- row per (solution, template-triple) pair; each row carries
+-- `{subject:{type,value}, predicate:{type,value},
+--   object:{type,value,datatype?,language?}}` per the contract in
+-- src/query/executor.rs:280-286. The SELECT-mode `pgrdf.sparql(q)`
+-- only exposes `{varname → scalar-string}` (executor.rs:6453-6459),
+-- so it carries the lexical value but NOT the (term_type, datatype,
+-- language) metadata the dictionary contract requires asserting.
+-- We use `pgrdf.construct(...)` throughout to get the full term shape
+-- via `object.{type,value,datatype,language}` in one call.
 --
 -- Term-shape coverage (positive assertions):
 --   A. IRI http://     — http://example.org/alice
@@ -32,9 +43,10 @@
 --
 -- Invariants:
 --   I-1  every shape is recoverable by EXACT lexical bytes via
---        `pgrdf.sparql(SELECT ?o ...)`
---   I-2  the (term_type, datatype, lang) tuple stored in the
---        dictionary matches the input form (no normalization)
+--        `pgrdf.construct(... ?o ...)` → `object.value`
+--   I-2  the (term_type, datatype, language) tuple stored in the
+--        dictionary matches the input form (no normalization) and
+--        re-emerges via `object.{type,datatype,language}`
 --   I-3  zero-padded integers ("0030") are NOT silently stripped
 --        to "30" — pgRDF preserves the AS-WRITTEN lexical
 --   I-4  lang-tag subtags (`en`, `fr-CA`) round-trip with case
@@ -108,178 +120,152 @@ BEGIN
 END $$;
 
 -- ─── A — http:// IRI object ─────────────────────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s1 ex:eqIri ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'http://example.org/alice'
-  AS a_http_iri;
+SELECT (j->'object'->>'value') = 'http://example.org/alice' AS a_http_iri
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:eqIri ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s1 ex:eqIri ?o } }
+$q$) AS j;
 
 -- ─── B — urn: IRI object ───────────────────────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s2 ex:eqIri ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'urn:example:bob'
-  AS b_urn_iri;
+SELECT (j->'object'->>'value') = 'urn:example:bob' AS b_urn_iri
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:eqIri ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s2 ex:eqIri ?o } }
+$q$) AS j;
 
 -- ─── C — custom-scheme IRI with fragment ───────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s3 ex:eqIri ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'ckp://Task#001'
-  AS c_custom_scheme_iri;
+SELECT (j->'object'->>'value') = 'ckp://Task#001' AS c_custom_scheme_iri
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:eqIri ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s3 ex:eqIri ?o } }
+$q$) AS j;
 
 -- ─── D — percent-encoded IRI ───────────────────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s4 ex:eqIri ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'http://example.org/path%20with%20spaces'
-  AS d_percent_encoded_iri;
+SELECT (j->'object'->>'value') = 'http://example.org/path%20with%20spaces' AS d_percent_encoded_iri
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:eqIri ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s4 ex:eqIri ?o } }
+$q$) AS j;
 
--- ─── E — plain literal (no datatype tag in the input) ──────────
--- Turtle promotes a bare "..." to xsd:string per W3C §2.5.
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s5 ex:lex ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'Alice'
-  AS e_plain_literal;
+-- ─── E — plain literal (Turtle promotes "..." to xsd:string per §2.5)
+SELECT (j->'object'->>'value') = 'Alice' AS e_plain_literal
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s5 ex:lex ?o } }
+$q$) AS j;
 
 -- ─── F — typed literal "0030"^^xsd:integer (NO zero-strip) ─────
 -- Invariant I-3: pgRDF preserves the AS-WRITTEN lexical.
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s6 ex:lex ?o } }
-  $q$) -> 'o' ->> 'value')
-  = '0030'
-  AS f_integer_no_zero_strip;
+SELECT (j->'object'->>'value') = '0030' AS f_integer_no_zero_strip
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s6 ex:lex ?o } }
+$q$) AS j;
 
 -- Datatype IRI on the same term must be exactly xsd:integer.
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s6 ex:lex ?o } }
-  $q$) -> 'o' ->> 'datatype')
-  = 'http://www.w3.org/2001/XMLSchema#integer'
-  AS f_integer_datatype;
+SELECT (j->'object'->>'datatype') = 'http://www.w3.org/2001/XMLSchema#integer' AS f_integer_datatype
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s6 ex:lex ?o } }
+$q$) AS j;
 
 -- ─── G — typed literal boolean ─────────────────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s7 ex:lex ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'true'
-  AS g_boolean_value;
+SELECT (j->'object'->>'value') = 'true' AS g_boolean_value
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s7 ex:lex ?o } }
+$q$) AS j;
 
 -- ─── H — dateTime with timezone (verbatim) ─────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s8 ex:lex ?o } }
-  $q$) -> 'o' ->> 'value')
-  = '2026-05-29T12:00:00Z'
-  AS h_datetime_tz_verbatim;
+SELECT (j->'object'->>'value') = '2026-05-29T12:00:00Z' AS h_datetime_tz_verbatim
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s8 ex:lex ?o } }
+$q$) AS j;
 
 -- ─── I — lang-tagged literal, single subtag ────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s9 ex:lex ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'Hello'
-  AS i_lang_value;
+SELECT (j->'object'->>'value') = 'Hello' AS i_lang_value
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s9 ex:lex ?o } }
+$q$) AS j;
 
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s9 ex:lex ?o } }
-  $q$) -> 'o' ->> 'language')
-  = 'en'
-  AS i_lang_tag;
+SELECT (j->'object'->>'language') = 'en' AS i_lang_tag
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:s9 ex:lex ?o } }
+$q$) AS j;
 
 -- ─── J — lang-tagged literal, region subtag ────────────────────
 -- Invariant I-4: subtag case-as-written should round-trip.
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sA ex:lex ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'Salut'
-  AS j_region_value;
+SELECT (j->'object'->>'value') = 'Salut' AS j_region_value
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sA ex:lex ?o } }
+$q$) AS j;
 
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sA ex:lex ?o } }
-  $q$) -> 'o' ->> 'language')
-  = 'fr-CA'
-  AS j_region_tag;
+SELECT (j->'object'->>'language') = 'fr-CA' AS j_region_tag
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sA ex:lex ?o } }
+$q$) AS j;
 
 -- ─── K — literal with embedded quote ───────────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sB ex:lex ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'say "hi"'
-  AS k_embedded_quote;
+SELECT (j->'object'->>'value') = 'say "hi"' AS k_embedded_quote
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sB ex:lex ?o } }
+$q$) AS j;
 
 -- ─── L — literal with embedded tab ─────────────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sC ex:lex ?o } }
-  $q$) -> 'o' ->> 'value')
-  = E'tab\there'
-  AS l_embedded_tab;
+SELECT (j->'object'->>'value') = E'tab\there' AS l_embedded_tab
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sC ex:lex ?o } }
+$q$) AS j;
 
 -- ─── M — Unicode literal ───────────────────────────────────────
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sD ex:lex ?o } }
-  $q$) -> 'o' ->> 'value')
-  = 'üñîçødé'
-  AS m_unicode;
+SELECT (j->'object'->>'value') = 'üñîçødé' AS m_unicode
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:lex ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sD ex:lex ?o } }
+$q$) AS j;
 
--- ─── N — blank-node object lexical round-trip ──────────────────
--- The blank-node label that pgRDF stores will NOT be the input
+-- ─── N — blank-node object: type sentinel + followthrough ──────
+-- The blank-node label that pgRDF emits will NOT be the input
 -- `note0` (Turtle scopes blanks to the file; the parser is free to
--- relabel). We assert the type is "bnode" and that the value is a
--- valid blank-node-shaped string (starts with `_:`-stripped form is
--- not what we expose; we just require any non-empty string and a
--- known type sentinel — see pgrdf.sparql contract for the {"type":
--- "bnode"} shape).
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?o WHERE { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sE ex:hasNote ?o } }
-  $q$) -> 'o' ->> 'type')
-  = 'bnode'
-  AS n_bnode_type;
+-- relabel, and CONSTRUCT may also rename). We assert the type is
+-- "bnode" — the dictionary recorded the term shape — and that the
+-- followthrough literal anchored to the bnode survives the round
+-- trip.
+SELECT (j->'object'->>'type') = 'bnode' AS n_bnode_type
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?s ex:hasNote ?o }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sE ex:hasNote ?o } }
+$q$) AS j;
 
--- The blank node carries its annotation; locking the followthrough
--- lexical guarantees the blank survived dict + roundtrip.
-SELECT
-  (pgrdf.sparql($q$
-    PREFIX ex: <http://example.org/>
-    SELECT ?lex WHERE {
-      GRAPH <urn:test/tf5/dict-lexical-contract> {
-        ex:sE ex:hasNote ?b . ?b ex:lex ?lex
-      }
-    }
-  $q$) -> 'lex' ->> 'value')
-  = 'blank-node anchored'
-  AS n_bnode_followthrough;
+SELECT (j->'object'->>'value') = 'blank-node anchored' AS n_bnode_followthrough
+FROM pgrdf.construct($q$
+  PREFIX ex: <http://example.org/>
+  CONSTRUCT { ?b ex:lex ?lex }
+  WHERE    { GRAPH <urn:test/tf5/dict-lexical-contract> { ex:sE ex:hasNote ?b . ?b ex:lex ?lex } }
+$q$) AS j;
 
 ROLLBACK;
