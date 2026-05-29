@@ -1,3 +1,20 @@
+# PostgreSQL extension control file.
+#
+# TE-7 (v0.5.15) — `requires =` declaration.
+#
+# pgRDF has NO external extension dependencies. Everything it ships
+# (the hexastore tables, the dictionary, SPARQL/SHACL/OWL surfaces) is
+# provided in-tree by this extension. The PostgreSQL extension manager
+# treats an absent `requires =` line as "no dependencies", which is
+# the truthful state — we explicitly do NOT add `requires = ''` because
+# that's an empty-list declaration, distinct from absence, and some
+# parsers warn on it. If a future release introduces a dep
+# (e.g. `pg_prewarm` becomes mandatory rather than recipe-optional —
+# see docs/11-recipes.md), add the line then.
+#
+# Sister projects that DO depend on pgRDF declare it explicitly:
+# pgCK's pgck.control carries `requires = 'pgrdf, pgcrypto'`.
+
 comment = 'Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning'
 default_version = '0.5.1'
 module_pathname = '$libdir/pgrdf'
