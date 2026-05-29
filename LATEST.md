@@ -3,7 +3,7 @@
   successful oci-publish.yml run AND after SLSA Build Provenance v1
   attestations have been verified against every GHCR digest below. Do NOT edit
   by hand — the next workflow run will overwrite your changes. Last refresh:
-  2026-05-29 13:54:38Z (version: v0.5.21).
+  2026-05-29 13:57:48Z (version: v0.5.21).
 -->
 
 # pgRDF — latest published artifacts
@@ -38,7 +38,7 @@ Every digest below carries a verifiable SLSA Build Provenance v1 attestation per
 ## Verifying any artifact above
 
 ```sh
-# Aggregate index (multi-arch, multi-PG-major)
+# Aggregate index (multi-arch; pg17 only during stabilization window)
 gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.5.21 \
   --repo styk-tv/pgRDF
 
