@@ -16,13 +16,11 @@
 
 Everything else in this document explains how those rules are enforced.
 
-### One-time bootstrap (Rule 4 transition)
+### One-time bootstrap (Rule 4 transition — closed)
 
-Rule 4 takes effect from the **first attested release** onward. Releases that predate the attestation wiring on `main` (`v0.5.0` through `v0.5.9`, the entire v0.5 cycle to date) do not appear in `LATEST.md` once the attestation gate is live, and never will — re-publishing them with attestations would change their digests and break the immutability promise. The next tag (`v0.5.10`) is the bootstrap: that workflow run will issue an attestation for the first time, `update-latest-md.yml` will verify and populate `LATEST.md`, and from that point Rule 4 holds for every successor.
+Rule 4 takes effect from the **first attested release** onward. Releases that predate the attestation wiring on `main` (`v0.5.0` through `v0.5.9`, the entire pre-attestation portion of the v0.5 cycle) do not appear in `LATEST.md` once the attestation gate is live, and never will — re-publishing them with attestations would change their digests and break the immutability promise. **v0.5.10** was the bootstrap: that workflow run issued an attestation for the first time and `LATEST.md` was hand-seeded to point at it; the first workflow-rendered `LATEST.md` commit came from the **v0.5.13** chain. From v0.5.14 onward, Rule 4 is strict — no tag pushed without the prior tag advertised in a workflow-rendered `LATEST.md`.
 
-Bootstrap exception is one-time. Once the gate has fired once, "previous tag must be in `LATEST.md`" is strict.
-
-Until then — and explicitly in the current state of this repository — the `LATEST.md` you see is a **hand-maintained** snapshot of the pre-attestation v0.5 cycle. Rules 2 and 3 are aspirational while we cross over; the workflow tooling that enforces them is tracked as Track G hygiene items (`TG-3.attestation`, `TG-3.update-latest-md`).
+Bootstrap exception is one-time and now closed. Rules 2 and 3 are tooling-enforced from v0.5.13 onward.
 
 ---
 
@@ -30,14 +28,16 @@ Every artifact this repo publishes — the pgRDF extension OCI artifacts and the
 
 ## What's enforced
 
-| Surface | Build / push performed by | Provenance (target state) |
-|---|---|---|
-| `ghcr.io/styk-tv/pgrdf-bundle:<ver>-pg<PG>-<arch>` (per-PG×arch leaf, 8 per release) | `oci-publish` workflow on `repository_dispatch: oci-publish-release` (chained from `release` workflow) | [SLSA Build Provenance v1](https://slsa.dev/spec/v1.0/provenance) via [`actions/attest-build-provenance@v1`](https://github.com/actions/attest-build-provenance), pushed as an OCI referrer **— pending wire-up** |
-| `ghcr.io/styk-tv/pgrdf-bundle:<ver>` + `:v<ver>` (aggregate index manifests) | Same `oci-publish` workflow's `oras manifest index create` step | Attestation covers the leaf digests the index references — pending wire-up |
-| `https://github.com/styk-tv/pgRDF/releases/tag/v<ver>` (tarballs + PGXN source archive) | `release` workflow on `v*` tag push (uses `softprops/action-gh-release@v2`) | Tarballs come from the same workflow run as the OCI artifacts; the OCI attestation covers the binary bytes that landed in both surfaces |
-| `LATEST.md` at the repo root | `update-latest-md` workflow on successful `workflow_run` of `oci-publish` — pending wire-up | Refuses to advance unless `gh attestation verify` accepts every digest it's about to publish |
+Aligned with fleet-wide spec SPEC.OCI.BUNDLE.v0.3 §2.3 (LATEST.md attestation gate).
 
-If `gh attestation verify` rejects an artifact (post-wire-up), `LATEST.md` stays where it was. That's how a workstation push gets caught — it can't produce a valid GitHub-issued OIDC attestation.
+| Surface | Build / push performed by | Provenance |
+|---|---|---|
+| `ghcr.io/styk-tv/pgrdf-bundle:<ver>-pg<PG>-<arch>` (per-PG×arch leaf, 8 per release) | `oci-publish` workflow on `repository_dispatch: oci-publish-release` (chained from `release` workflow) | [SLSA Build Provenance v1](https://slsa.dev/spec/v1.0/provenance) via [`actions/attest-build-provenance@v1`](https://github.com/actions/attest-build-provenance), pushed as an OCI referrer |
+| `ghcr.io/styk-tv/pgrdf-bundle:<ver>` + `:v<ver>` (aggregate index manifests) | Same `oci-publish` workflow's `oras manifest index create` step | Attestation covers the leaf digests the index references |
+| `https://github.com/styk-tv/pgRDF/releases/tag/v<ver>` (tarballs + PGXN source archive) | `release` workflow on `v*` tag push (uses `softprops/action-gh-release@v2`) | Tarballs come from the same workflow run as the OCI artifacts; the OCI attestation covers the binary bytes that landed in both surfaces |
+| `LATEST.md` at the repo root | `update-latest-md` workflow on successful `workflow_run` of `oci-publish` | Refuses to advance unless `gh attestation verify` accepts every digest it's about to publish |
+
+If `gh attestation verify` rejects an artifact, `LATEST.md` stays where it was. That's how a workstation push gets caught — it can't produce a valid GitHub-issued OIDC attestation.
 
 ## Verifying a release locally (post-attestation)
 
@@ -62,7 +62,7 @@ A successful verify means:
 
 The release-cutting flow is simpler than pgCK's because pgRDF's version source is the git tag — there's no per-release file bump.
 
-1. Confirm the previous release shows up in `LATEST.md` (Rule 4 — once Rule 4 is live; ignored during the bootstrap window).
+1. Confirm the previous release shows up in `LATEST.md` (Rule 4 — strict from v0.5.14 onward).
 2. Update `CHANGELOG.md` with the per-task entries that close the release.
 3. Commit.
 4. Tag: `git tag -a v<new> -F <annotated-message-file>`.
@@ -71,10 +71,29 @@ The release-cutting flow is simpler than pgCK's because pgRDF's version source i
 GitHub Actions takes over:
 
 - `release.yml` triggers on `push: tags: v*`. Builds 8 per-PG×arch tarballs, generates the PGXN source archive, computes aggregate SHA256SUMS, creates the GitHub release via `softprops/action-gh-release@v2`, and POSTs `repository_dispatch: oci-publish-release` carrying the tag in `client_payload.tag`.
-- `oci-publish.yml` fires on the dispatch. Downloads the release tarballs, pushes 8 per-PG×arch OCI artifacts to `ghcr.io/styk-tv/pgrdf-bundle`, builds the `:<ver>` and `:v<ver>` aggregate index manifests, **and (pending wire-up) generates SLSA Build Provenance v1 attestations for every digest pushed**.
-- `update-latest-md.yml` (pending wire-up) fires on successful completion of `oci-publish.yml`. Pulls the just-published digests, runs `gh attestation verify` on every one, and — only on full-pass — renders the new `LATEST.md` and commits it back to `main`.
+- `oci-publish.yml` fires on the dispatch. Downloads the release tarballs, pushes 8 per-PG×arch OCI artifacts to `ghcr.io/styk-tv/pgrdf-bundle`, builds the `:<ver>` and `:v<ver>` aggregate index manifests, **and generates SLSA Build Provenance v1 attestations for every digest pushed**.
+- `update-latest-md.yml` fires on the `repository_dispatch: latest-md-refresh` POSTed by `oci-publish.yml`. Pulls the just-published digests, runs `gh attestation verify` on every one, and — only on full-pass — renders the new `LATEST.md` and commits it back to `main`.
 
 There is no step in this flow that requires `oras push`, `docker push`, `gh release create`, or any local-token credential.
+
+## When is a release "in"?
+
+A release is "in" only when `LATEST.md` advertises the new digest (Rule 2). The full chain after `git push origin <tag>` is:
+
+1. `release.yml` (on `v*` tag push) — builds 8 per-PG×arch tarballs, generates the PGXN source archive, creates the GitHub release, and POSTs `repository_dispatch: oci-publish-release` carrying the tag in `client_payload.tag`.
+2. `oci-publish.yml` (on the dispatch) — pushes the 8 leaves to GHCR, builds the `:<ver>` + `:v<ver>` aggregate index manifests, attests every digest, and POSTs `repository_dispatch: latest-md-refresh` carrying the tag forward one more hop.
+3. `update-latest-md.yml` (on the second dispatch) — verifies the attestations with `gh attestation verify` against the aggregate index + the pg17 leaves, then renders + commits `LATEST.md` on full-pass.
+
+Wait for the `docs(auto): refresh LATEST.md to v<ver>` commit to appear on `main`, or use the helper:
+
+```sh
+scripts/gh-watch.sh watch v0.5.10        # specific tag
+scripts/gh-watch.sh watch                # most recent local tag (git describe)
+```
+
+The helper is **SHA-keyed on the entry hop**: it resolves `git rev-list -n1 <tag>` and filters `gh run list` by `headSha` for `release.yml`, so two simultaneous pushes from different shells never race onto the same `--limit 1` lookup. The two downstream hops (`oci-publish.yml`, `update-latest-md.yml`) are correlated forward by anchor-timestamp + `event == repository_dispatch` because `repository_dispatch` runs carry the default-branch `headSha`, not the tag SHA. The helper exits zero only after all three workflow runs report success — non-zero surfaces any chain failure so a CI script, shell watcher, or agent can act on it. Per-tag log at `/tmp/gh-watch-<safe-tag>.log`.
+
+The helper can also be auto-fired after every tag push by wiring a `PostToolUse` hook in a Claude Code session's `.claude/settings.json`. That wiring is Claude-Code-specific; the watcher script itself is the same one used here, called as `scripts/gh-watch.sh watch <tag>`. SPEC.OCI.BUNDLE.v0.3 §2.3 binds `LATEST.md` to the same attestation-verify gate `update-latest-md.yml` runs, so the helper's "in" answer matches the spec's "advertised" answer — by construction.
 
 ## Why `repository_dispatch` not `release.published`
 
@@ -88,23 +107,21 @@ The repo's `.gitignore` keeps OCI credentials out of the tree, and the release J
 
 ## Audit trail
 
-- Workflow source: `.github/workflows/{release,oci-publish,ci}.yml`. Pending: `update-latest-md.yml`.
-- Attestation generator (target): `actions/attest-build-provenance@v1` (Sigstore-backed).
+- Workflow source: `.github/workflows/{release,oci-publish,update-latest-md,ci}.yml`.
+- Release-chain watcher: `scripts/gh-watch.sh` — SHA-keyed on `release.yml`, dispatch-correlated through `oci-publish.yml` and `update-latest-md.yml`. Used by both the shell and any Claude Code `PostToolUse` hook.
+- Attestation generator: `actions/attest-build-provenance@v1` (Sigstore-backed).
 - Verifier: `gh attestation verify` (built into `gh` 2.49+).
-- Renderer (target): `tools/render-latest-md.py` or equivalent.
+- Renderer: `tools/render-latest-md.py`.
 
 ## What's pending the wire-up
 
-The SLSA attestation half went live in `oci-publish.yml`'s matrix refactor (commit `8b7e01e`); v0.5.10 was the first release to exercise it end-to-end. Every per-PG×arch leaf and the aggregate index now carry verifiable provenance.
+The chain is live and proven. SLSA attestations landed in `oci-publish.yml` (commit `8b7e01e`); v0.5.10 was the first release to exercise them end-to-end. `update-latest-md.yml` + `tools/render-latest-md.py` landed at `c32c5b5`, and the chain has produced bot-authored `docs(auto): refresh LATEST.md to v<ver>` commits for v0.5.13, v0.5.14, v0.5.15, and v0.5.16. Rule 3 is tooling-enforced from v0.5.13 onward; Rule 4 (previous tag must be advertised in `LATEST.md` before the next tag is pushed) is strict from v0.5.14 onward.
 
-The `LATEST.md` auto-rendering half went in next:
+What remains open is the **renderer's §2.2 surface coverage**:
 
-- **`.github/workflows/update-latest-md.yml`** — committed at `c32c5b5`. Triggers on `workflow_run: oci-publish completed`; resolves the head version from the GHCR API; runs the attestation-verify gate against the aggregate + both pg17 leaf digests; renders + commits only on full-pass. Refuses to advance if any digest fails to verify.
-- **`tools/render-latest-md.py`** — committed at the same SHA. Reads the three head digests via `gh api` and emits the full `LATEST.md` content. Adapted from the pgCK sibling-repo renderer; trimmed because pgRDF ships a single OCI surface.
+- `tools/render-latest-md.py` does not yet emit the optional SPEC.OCI.BUNDLE.v0.3 §2.2 fields **Also tagged**, **Built by**, **Built from commit**, and **Release notes** in the `LATEST.md` table. The current output is correct and verifiable but does not yet advertise the additional provenance breadcrumbs the spec calls for. This is a renderer extension — no workflow / attestation change needed — and is tracked as a follow-up against pgRDF Track G hygiene.
 
-**Verification state: unproven by this point in the doc.** The workflow files exist on `main` but no tagged release has fired the `release.yml` → `oci-publish.yml` → `update-latest-md.yml` chain end-to-end yet. The first tagged release after `c32c5b5` is the verification gate. Until that run lands a bot-authored auto-rendered `LATEST.md` commit, Rule 3 ("only `update-latest-md.yml` writes `LATEST.md`") remains a discipline + scaffold rather than a tooling-enforced gate.
-
-The bootstrap window stays open across this transition: v0.5.0–v0.5.9 are the pre-attestation cycle and never appear in `LATEST.md`; v0.5.10 was attested but its `LATEST.md` entry is hand-written. The first auto-rendered entry will come from the next tagged release's chain. Once that lands successfully, Rule 4 becomes strict — no tag pushed without the prior tag advertised in a workflow-rendered `LATEST.md`.
+The bootstrap window stays closed: v0.5.0–v0.5.9 are the pre-attestation cycle and never appear in `LATEST.md`; every release from v0.5.10 onward is attested, and every release from v0.5.13 onward has its `LATEST.md` entry workflow-rendered.
 
 ## Why this matters
 
