@@ -3,7 +3,7 @@
   successful oci-publish.yml run AND after SLSA Build Provenance v1
   attestations have been verified against every GHCR digest below. Do NOT edit
   by hand — the next workflow run will overwrite your changes. Last refresh:
-  2026-05-29 13:57:48Z (version: v0.5.21).
+  2026-05-29 13:59:44Z (version: v0.5.21).
 -->
 
 # pgRDF — latest published artifacts
@@ -27,8 +27,8 @@ Every digest below carries a verifiable SLSA Build Provenance v1 attestation per
 | Aggregate index       | `ghcr.io/styk-tv/pgrdf-bundle:0.5.21` (also tagged `v0.5.21`)                                  |
 | Aggregate digest      | `sha256:a578b25a6330bdee46c547425507fe7c522f0438c4d88404c7d5a3eacb7f4914` |
 | Provenance            | SLSA Build Provenance v1, Sigstore-backed, pushed as OCI referrer                              |
-| Built by              | [Actions](https://github.com/styk-tv/pgRDF/actions) <!-- fallback: could not resolve specific release.yml run -->                                                                                |
-| Built from commit     | [`7fb8e8a712b4`](https://github.com/styk-tv/pgRDF/commit/7fb8e8a712b4d9a4c11f1560080a97e52d1be144)                                                                              |
+| Built by              | [Workflow run](https://github.com/styk-tv/pgRDF/actions/runs/26640007279)                                                                                |
+| Built from commit     | [`7e258ae4eefc`](https://github.com/styk-tv/pgRDF/commit/7e258ae4eefcd2b94b83f85badfead7903ba708c)                                                                              |
 | Verify (CLI)          | `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.5.21 --repo styk-tv/pgRDF`         |
 | Release notes         | https://github.com/styk-tv/pgRDF/releases/tag/v0.5.21                                          |
 | Tarball mirror        | https://github.com/styk-tv/pgRDF/releases/tag/v0.5.21                                          |
