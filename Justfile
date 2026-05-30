@@ -135,6 +135,19 @@ test-lubm-10:
         --actual target/perf-report.json \
         --baseline tests/perf/lubm/baseline.lubm-10.json
 
+# LUBM-1 dev-iteration recipe (TA-12). Smaller, faster-iterating
+# baseline for Track A's ingest-path spikes (TA-11 heap_multi_insert,
+# TA-10 CopyBinary, TA-9 decision). ~1.5s end-to-end vs LUBM-10's
+# ~22s; useful for prototyping where the cycle time matters.
+test-lubm-1:
+    mkdir -p target
+    OUTFILE=target/perf-report.json \
+    JSON_SCHEMA_VALIDATE=0 \
+        bash tests/perf/lubm/run-lubm.sh 1
+    python3 tests/perf/lubm/compare-to-baseline.py \
+        --actual target/perf-report.json \
+        --baseline tests/perf/lubm/baseline.lubm-1.json
+
 # pg_dump round-trip verification for `_pgrdf_graphs` (LLD v0.4 §3.1
 # acceptance criterion). Boots a clean state, seeds two IRI bindings,
 # pg_dumps, drops + restores, then re-queries to verify the mapping

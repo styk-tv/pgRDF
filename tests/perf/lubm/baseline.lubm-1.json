@@ -1,0 +1,31 @@
+{
+  "schema_version": "v0.6",
+  "produced_at": "2026-05-30T13:00:15Z",
+  "produced_by": "run-lubm.sh@mac9-2",
+  "univ_count": 1,
+  "pgrdf_version": "0.5.1",
+  "postgres_major": 17,
+  "fixtures": [
+    {
+      "name": "lubm-1-ingest-nt",
+      "kind": "sparql-select",
+      "modes": {
+        "default": {
+          "elapsed_ms": 1489.3604579999999,
+          "dict_lookups": 342391
+        }
+      },
+      "comparison_tolerance": { "elapsed_ms_pct": 50 }
+    },
+    {
+      "name": "lubm-1-q14-graduate-students",
+      "kind": "sparql-select",
+      "modes": {
+        "default": {
+          "elapsed_ms": 1.796
+        }
+      },
+      "comparison_tolerance": { "elapsed_ms_pct": 50 }
+    }
+  ]
+}
