@@ -61,6 +61,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # The Justfile recipes below need `just` itself. ubuntu-22.04
+      # doesn't ship it; taiki-e/install-action pulls a precompiled
+      # binary in <1s. Caught on the 04:22 UTC 2026-05-30 cron run
+      # (`just: command not found`, exit 127) — the workflow was
+      # added in v0.5.20 without this step.
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
       - name: Build extension artifacts
         run: just build-ext
 
