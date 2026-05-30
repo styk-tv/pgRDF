@@ -57,6 +57,7 @@ pub extern "C-unwind" fn _PG_init() {
 /// Returns the extension version. Smoke surface used by the install
 /// verification: `SELECT pgrdf.version();` should return the version
 /// declared in `Cargo.toml`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

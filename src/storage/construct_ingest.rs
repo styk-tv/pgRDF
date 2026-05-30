@@ -198,6 +198,7 @@ fn ingest_one(row: &Value, graph_id: i64, bnode_map: &mut HashMap<String, i64>) 
 ///
 /// SQL surface:
 /// `pgrdf.put_construct_row(row JSONB, graph_id BIGINT DEFAULT 0) → BIGINT`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn put_construct_row(row: pgrx::JsonB, graph_id: default!(i64, 0)) -> i64 {
     if graph_id < 0 {
@@ -227,6 +228,7 @@ fn put_construct_row(row: pgrx::JsonB, graph_id: default!(i64, 0)) -> i64 {
 ///
 /// SQL surface:
 /// `pgrdf.put_construct_rows(rows JSONB[], graph_id BIGINT DEFAULT 0) → BIGINT`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn put_construct_rows(rows: Option<Vec<Option<pgrx::JsonB>>>, graph_id: default!(i64, 0)) -> i64 {
     if graph_id < 0 {

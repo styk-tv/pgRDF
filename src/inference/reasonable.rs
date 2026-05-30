@@ -108,6 +108,7 @@ const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
 /// Any other string (including the reserved-but-not-yet-supported
 /// `'owl-rl-ext'`) panics with the stable prefix
 /// `materialize: unknown profile` — never a silent fallback.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::JsonB {
     let start = Instant::now();

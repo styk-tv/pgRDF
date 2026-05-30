@@ -13,6 +13,7 @@ use pgrx::prelude::*;
 ///
 /// SQL surface:
 /// `pgrdf.put_quad(s BIGINT, p BIGINT, o BIGINT, g BIGINT DEFAULT 0)`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn put_quad(s: i64, p: i64, o: i64, g: default!(i64, 0)) {
     Spi::run_with_args(
@@ -27,6 +28,7 @@ fn put_quad(s: i64, p: i64, o: i64, g: default!(i64, 0)) {
 ///
 /// SQL surface:
 /// `pgrdf.count_quads(g BIGINT DEFAULT 0) → BIGINT`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn count_quads(g: default!(i64, 0)) -> i64 {
     // `SELECT count(*)` always returns exactly one row, so we don't
@@ -54,6 +56,7 @@ fn count_quads(g: default!(i64, 0)) -> i64 {
 /// the seed row from slice 120 and the LLD v0.4 §3.1 contract.
 ///
 /// SQL surface: `pgrdf.add_graph(g BIGINT) → BOOLEAN`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn add_graph(g: i64) -> bool {
     if g < 0 {
@@ -142,6 +145,7 @@ fn add_graph(g: i64) -> bool {
 /// surfaces both Rust functions under the same SQL name via the
 /// `name = "add_graph"` attribute, and Postgres dispatches on the
 /// argument types).
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern(name = "add_graph")]
 fn add_graph_iri(iri: &str) -> i64 {
     if iri.trim().is_empty() {
@@ -245,6 +249,7 @@ fn add_graph_iri(iri: &str) -> i64 {
 /// Rust functions under the same SQL name via the
 /// `name = "add_graph"` attribute, and Postgres dispatches on the
 /// argument types).
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern(name = "add_graph")]
 fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
     if id < 0 {

@@ -500,6 +500,7 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
 /// relative IRIs; pass NULL or '' for absolute-IRI-only files.
 ///
 /// SQL: `pgrdf.load_turtle(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) -> BIGINT`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn load_turtle(path: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL")) -> i64 {
     let file =
@@ -514,6 +515,7 @@ fn load_turtle(path: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL
 /// paths are firing.
 ///
 /// SQL: `pgrdf.load_turtle_verbose(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn load_turtle_verbose(
     path: &str,
@@ -531,6 +533,7 @@ fn load_turtle_verbose(
 /// dict caching and batched inserts, just with an in-memory source.
 ///
 /// SQL: `pgrdf.parse_turtle(content TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) -> BIGINT`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn parse_turtle(content: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL")) -> i64 {
     let base = base_iri.filter(|s| !s.is_empty());
@@ -538,6 +541,7 @@ fn parse_turtle(content: &str, graph_id: i64, base_iri: default!(Option<&str>, "
 }
 
 /// Verbose variant of `parse_turtle` returning JSONB stats.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn parse_turtle_verbose(
     content: &str,
@@ -566,6 +570,7 @@ fn parse_turtle_verbose(
 /// destination graph ids in first-seen order).
 ///
 /// SQL: `pgrdf.parse_trig(content TEXT, default_graph_id BIGINT DEFAULT 0, strict BOOLEAN DEFAULT FALSE) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn parse_trig(
     content: &str,
@@ -591,6 +596,7 @@ fn parse_trig(
 /// destination graph ids in first-seen order).
 ///
 /// SQL: `pgrdf.parse_nquads(content TEXT, default_graph_id BIGINT DEFAULT 0, strict BOOLEAN DEFAULT FALSE) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn parse_nquads(
     content: &str,

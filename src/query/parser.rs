@@ -67,6 +67,7 @@ use crate::query::executor::detect_construct_where_shorthand;
 /// behaviour) and only retries as `parse_update` on query-side
 /// failure — keeps the SELECT/ASK code path untouched while widening
 /// the surface to UPDATE introspection.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn sparql_parse(query: &str) -> pgrx::JsonB {
     match SparqlParser::new().parse_query(query) {

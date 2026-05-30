@@ -135,6 +135,7 @@ use pgrx::prelude::*;
 ///
 /// SQL surface: `pgrdf.graph_id(iri TEXT) → BIGINT`. Per LLD v0.4
 /// §3.2.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern(strict)]
 fn graph_id(iri: &str) -> Option<i64> {
     Spi::get_one_with_args(
@@ -156,6 +157,7 @@ fn graph_id(iri: &str) -> Option<i64> {
 ///
 /// SQL surface: `pgrdf.graph_iri(id BIGINT) → TEXT`. Per LLD v0.4
 /// §3.2. Symmetric inverse of [`graph_id`].
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern(strict)]
 fn graph_iri(id: i64) -> Option<String> {
     Spi::get_one_with_args(
@@ -205,6 +207,7 @@ fn graph_iri(id: i64) -> Option<String> {
 ///
 /// SQL surface: `pgrdf.drop_graph(id BIGINT, cascade BOOLEAN DEFAULT
 /// TRUE) → BIGINT`. Per LLD v0.4 §5.1.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
     if id < 0 {
@@ -351,6 +354,7 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
 ///
 /// SQL surface: `pgrdf.move_graph(src BIGINT, dst BIGINT) → BIGINT`.
 /// Per LLD v0.4 §5.1.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn move_graph(src: i64, dst: i64) -> i64 {
     if src < 0 || dst < 0 {
@@ -477,6 +481,7 @@ fn move_graph(src: i64, dst: i64) -> i64 {
 ///
 /// SQL surface: `pgrdf.clear_graph(id BIGINT) → BIGINT`. Per
 /// LLD v0.4 §5.1.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn clear_graph(id: i64) -> i64 {
     if id < 0 {
@@ -580,6 +585,7 @@ fn clear_graph(id: i64) -> i64 {
 /// Per LLD v0.4 §5.1. Sibling slice-96 `move_graph` provides the
 /// constant-time metadata-only association swap; `copy_graph` is the
 /// row-touching counterpart that leaves `src` intact.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn copy_graph(src: i64, dst: i64) -> i64 {
     if src < 0 || dst < 0 {
@@ -714,6 +720,7 @@ fn resolve_iri_or_panic(fn_name: &str, iri: &str) -> i64 {
 ///
 /// SQL surface: `pgrdf.drop_graph(iri TEXT, cascade BOOLEAN DEFAULT
 /// TRUE) → BIGINT`. Per v0.5-FUTURE §7.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern(name = "drop_graph")]
 fn drop_graph_iri(iri: &str, cascade: default!(bool, "true")) -> i64 {
     let id = resolve_iri_or_panic("drop_graph", iri);
@@ -736,6 +743,7 @@ fn drop_graph_iri(iri: &str, cascade: default!(bool, "true")) -> i64 {
 ///
 /// SQL surface: `pgrdf.clear_graph(iri TEXT) → BIGINT`. Per
 /// v0.5-FUTURE §7.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern(name = "clear_graph")]
 fn clear_graph_iri(iri: &str) -> i64 {
     let id = resolve_iri_or_panic("clear_graph", iri);
@@ -758,6 +766,7 @@ fn clear_graph_iri(iri: &str) -> i64 {
 ///
 /// SQL surface: `pgrdf.copy_graph(src_iri TEXT, dst_iri TEXT) →
 /// BIGINT`. Per v0.5-FUTURE §7.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern(name = "copy_graph")]
 fn copy_graph_iri(src_iri: &str, dst_iri: &str) -> i64 {
     let src = resolve_iri_or_panic("copy_graph", src_iri);
@@ -781,6 +790,7 @@ fn copy_graph_iri(src_iri: &str, dst_iri: &str) -> i64 {
 ///
 /// SQL surface: `pgrdf.move_graph(src_iri TEXT, dst_iri TEXT) →
 /// BIGINT`. Per v0.5-FUTURE §7.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern(name = "move_graph")]
 fn move_graph_iri(src_iri: &str, dst_iri: &str) -> i64 {
     let src = resolve_iri_or_panic("move_graph", src_iri);

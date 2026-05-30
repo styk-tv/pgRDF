@@ -165,6 +165,7 @@ use std::time::Instant;
 /// re-parsed into rudof's `InMemoryGraph` before validation.
 /// Validation is in-process; no SPARQL endpoint or external store is
 /// contacted.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn validate(
     data_graph_id: i64,

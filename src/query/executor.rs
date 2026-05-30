@@ -205,6 +205,7 @@ fn derived_col(k: usize) -> &'static str {
 /// algebra). If both fail, propagate the *query* parser error message
 /// via the stable `sparql: parse error:` prefix (slice #63 contract).
 /// This ordering keeps current SELECT/ASK behaviour untouched.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     let parser = SparqlParser::new();
@@ -250,6 +251,7 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
 /// surface — a translator-introspection hook only.
 ///
 /// SQL: `pgrdf.sparql_sql(q TEXT) → TEXT`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn sparql_sql(query: &str) -> String {
     let parser = SparqlParser::new();
@@ -341,6 +343,7 @@ fn sparql_sql(query: &str) -> String {
 /// differ). Empty templates `{ }` reject with `empty template`.
 ///
 /// SQL: `pgrdf.construct(q TEXT) → SETOF JSONB`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // Slice 54 — recognise the W3C SPARQL 1.1 §16.2.4 shorthand form
@@ -1492,6 +1495,7 @@ fn expand_template_per_solution(template_rows: &[Value], n_solutions: usize) -> 
 /// the whole result (a resource described twice emits once).
 ///
 /// SQL: `pgrdf.describe(q TEXT) → SETOF JSONB`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     let parsed = SparqlParser::new()

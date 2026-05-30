@@ -86,6 +86,7 @@ pub(crate) fn put_term_full(
 /// datatype + language, returns the existing ID without inserting.
 ///
 /// SQL surface: `pgrdf.put_term(value TEXT, term_type SMALLINT) → BIGINT`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn put_term(value: &str, term_type: i16) -> i64 {
     put_term_full(value, term_type, None, None)
@@ -95,6 +96,7 @@ fn put_term(value: &str, term_type: i16) -> i64 {
 /// present in the dictionary.
 ///
 /// SQL surface: `pgrdf.get_term(id BIGINT) → TEXT`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn get_term(id: i64) -> Option<String> {
     Spi::get_one_with_args(

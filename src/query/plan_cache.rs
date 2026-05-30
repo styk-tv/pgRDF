@@ -119,6 +119,7 @@ pub fn with_plan<R>(sql: &str, f: impl FnOnce(Option<&OwnedPreparedStatement>) -
 ///
 /// SQL: `pgrdf.plan_cache_clear() -> BIGINT` (returns the number of
 /// plans dropped).
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn plan_cache_clear() -> i64 {
     let dropped = PLANS.with(|c| {

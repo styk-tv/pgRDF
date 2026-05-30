@@ -44,6 +44,7 @@ use serde_json::json;
 /// are cumulative across all backends in shmem.
 ///
 /// SQL: `pgrdf.stats() -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn stats() -> pgrx::JsonB {
     let s = shmem_cache::snapshot();
@@ -77,6 +78,7 @@ fn stats() -> pgrx::JsonB {
 /// never drop the extension never need to call this.
 ///
 /// SQL: `pgrdf.shmem_reset() -> void`.
+#[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn shmem_reset() {
     shmem_cache::reset();
