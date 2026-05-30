@@ -44,7 +44,7 @@ From the repo root:
     just compose-up       # boots Postgres
     just psql             # connects as pgrdf/pgrdf to the pgrdf database
     pgrdf=# CREATE EXTENSION pgrdf;
-    pgrdf=# SELECT pgrdf.version();    -- → "0.5.24"
+    pgrdf=# SELECT pgrdf.version();    -- → "0.5.25"
     just test-artifact-parity          # prove mounted bytes match a fresh build
 
 By default the compose container is named `pgrdf-pgrdf-postgres`.

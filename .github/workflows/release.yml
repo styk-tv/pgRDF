@@ -50,15 +50,22 @@ jobs:
       # Failure aborts the build before any artifact gets cut. A
       # tag mismatch never reaches GHCR. See PROVENANCE.md Rule 7
       # + _WIP/NOTIFIES.oci-germination.0.5.23.* for context.
-      - name: Pre-build — assert Cargo.toml + pgrdf.control match tag
+      - name: Pre-build — assert Cargo.toml + pgrdf.control + META.json match tag
         run: |
           set -euo pipefail
           TAG_VER="${GITHUB_REF_NAME#v}"
           CARGO_VER=$(grep -E '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
           CTL_VER=$(sed -n "s/^default_version = '\\(.*\\)'/\\1/p" pgrdf.control)
+          # META.json check matches the Makefile check-meta target
+          # (Makefile line 5). Both top-level "version" and the
+          # provides.pgrdf.version field are checked.
+          META_TOP=$(python3 -c "import json; print(json.load(open('META.json'))['version'])")
+          META_PROV=$(python3 -c "import json; print(json.load(open('META.json'))['provides']['pgrdf']['version'])")
           echo "tag (stripped):                ${TAG_VER}"
           echo "Cargo.toml version:            ${CARGO_VER}"
           echo "pgrdf.control default_version: ${CTL_VER}"
+          echo "META.json version (top):       ${META_TOP}"
+          echo "META.json provides.pgrdf.version: ${META_PROV}"
           MISMATCH=0
           if [ "${TAG_VER}" != "${CARGO_VER}" ]; then
             echo "::error::Cargo.toml version (${CARGO_VER}) does not match tag (${TAG_VER})."
@@ -68,8 +75,17 @@ jobs:
             echo "::error::pgrdf.control default_version (${CTL_VER}) does not match tag (${TAG_VER})."
             MISMATCH=1
           fi
+          if [ "${TAG_VER}" != "${META_TOP}" ]; then
+            echo "::error::META.json top-level version (${META_TOP}) does not match tag (${TAG_VER})."
+            MISMATCH=1
+          fi
+          if [ "${TAG_VER}" != "${META_PROV}" ]; then
+            echo "::error::META.json provides.pgrdf.version (${META_PROV}) does not match tag (${TAG_VER})."
+            MISMATCH=1
+          fi
           if [ "${MISMATCH}" -eq 1 ]; then
-            echo "::error::Bump BOTH Cargo.toml version + pgrdf.control default_version to ${TAG_VER} before re-tagging."
+            echo "::error::Bump ALL of Cargo.toml + pgrdf.control + META.json (both fields) to ${TAG_VER} before re-tagging."
+            echo "::error::See PROVENANCE.md Rule 7 + v0.5.24 OCI-GERMINATION NOTIFIES for context."
             exit 1
           fi
 
