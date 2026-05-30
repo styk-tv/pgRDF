@@ -34,29 +34,42 @@ jobs:
 
       # Pre-build version-coherence gate (PROVENANCE.md Rule 7).
       #
-      # The published OCI artifact's INSTALL layout names the SQL
-      # file `pgrdf--<ver>.sql` and writes `default_version = '<ver>'`
-      # into pgrdf.control. Both names derive from `Cargo.toml`'s
-      # `version` field — `cargo pgrx package` reads it. If
-      # Cargo.toml drifts from the tag, the artifact's internal
-      # version label is wrong AND `CREATE EXTENSION pgrdf VERSION
-      # '<tag>'` fails for consumers (the v0.5.1-stuck bug surfaced
-      # by OCI-GERMINATION 2026-05-30, fixed v0.5.24).
+      # There are TWO sources of truth pgrx packages into the
+      # consumer-facing tarball:
+      #   (a) `Cargo.toml`'s `version` field — drives the SQL
+      #       install filename, `pgrdf--<ver>.sql`.
+      #   (b) repo-root `pgrdf.control`'s `default_version` field —
+      #       pgrx copies this file verbatim into the install dir;
+      #       PostgreSQL reads it to decide which install script
+      #       to run when a consumer says `CREATE EXTENSION pgrdf`.
+      # Both MUST equal the tag (with leading `v` stripped). If
+      # either drifts, `CREATE EXTENSION pgrdf VERSION '<tag>'`
+      # fails — exactly the v0.5.1-stuck bug surfaced by
+      # OCI-GERMINATION 2026-05-30.
       #
-      # Assertion: Cargo.toml's version == GITHUB_REF_NAME without
-      # the leading `v`. Failure aborts the build before any
-      # artifact gets cut — a tag mismatch never reaches GHCR.
-      - name: Pre-build — assert Cargo.toml version matches tag
+      # Failure aborts the build before any artifact gets cut. A
+      # tag mismatch never reaches GHCR. See PROVENANCE.md Rule 7
+      # + _WIP/NOTIFIES.oci-germination.0.5.23.* for context.
+      - name: Pre-build — assert Cargo.toml + pgrdf.control match tag
         run: |
           set -euo pipefail
           TAG_VER="${GITHUB_REF_NAME#v}"
           CARGO_VER=$(grep -E '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
-          echo "tag (stripped):    ${TAG_VER}"
-          echo "Cargo.toml version: ${CARGO_VER}"
+          CTL_VER=$(sed -n "s/^default_version = '\\(.*\\)'/\\1/p" pgrdf.control)
+          echo "tag (stripped):                ${TAG_VER}"
+          echo "Cargo.toml version:            ${CARGO_VER}"
+          echo "pgrdf.control default_version: ${CTL_VER}"
+          MISMATCH=0
           if [ "${TAG_VER}" != "${CARGO_VER}" ]; then
             echo "::error::Cargo.toml version (${CARGO_VER}) does not match tag (${TAG_VER})."
-            echo "::error::Bump Cargo.toml's version field to ${TAG_VER} before re-tagging."
-            echo "::error::See PROVENANCE.md Rule 7 + the v0.5.24 OCI-GERMINATION NOTIFIES for context."
+            MISMATCH=1
+          fi
+          if [ "${TAG_VER}" != "${CTL_VER}" ]; then
+            echo "::error::pgrdf.control default_version (${CTL_VER}) does not match tag (${TAG_VER})."
+            MISMATCH=1
+          fi
+          if [ "${MISMATCH}" -eq 1 ]; then
+            echo "::error::Bump BOTH Cargo.toml version + pgrdf.control default_version to ${TAG_VER} before re-tagging."
             exit 1
           fi
 
