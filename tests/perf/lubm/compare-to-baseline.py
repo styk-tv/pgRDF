@@ -23,9 +23,19 @@ Usage:
         --actual target/perf-report.json \\
         --baseline tests/perf/lubm/baseline.lubm-10.json
 
+    # Correctness-only mode (CI runners — see GH Actions tolerance
+    # gap, perf-nightly.yml). Timing drifts still PRINT but don't
+    # fail the script; correctness exact-match fields still strict.
+    python3 tests/perf/lubm/compare-to-baseline.py \\
+        --actual target/perf-report.json \\
+        --baseline tests/perf/lubm/baseline.lubm-10.json \\
+        --no-timing-gate
+
 Honest-reporting discipline: every regression prints
 ``REGRESS: <name> <field> baseline=… actual=… tolerance=…`` to
-stderr so CI logs surface the specific drift.
+stderr so CI logs surface the specific drift. With
+``--no-timing-gate``, timing drifts become ``TIMING: …`` info
+lines instead — visible but not gating.
 """
 
 from __future__ import annotations
@@ -64,8 +74,14 @@ def index_fixtures(report: dict) -> dict[str, dict]:
     return out
 
 
-def compare_mode(name: str, mode: str, b: dict, a: dict, tol_pct: float) -> list[str]:
-    """Return a list of regression messages for one (fixture, mode) pair."""
+def compare_mode(name: str, mode: str, b: dict, a: dict, tol_pct: float, time_gate: bool) -> list[str]:
+    """Return a list of regression messages for one (fixture, mode) pair.
+
+    Correctness fields (EXACT_FIELDS) are always strict. Timing drifts
+    are gated by ``time_gate``: when False, drifts print as ``TIMING:``
+    info lines instead of feeding the regression list (used by CI
+    runs that can't share a localhost baseline's timing tolerance).
+    """
     regress: list[str] = []
     for field in EXACT_FIELDS:
         if field in b and field in a:
@@ -91,16 +107,31 @@ def compare_mode(name: str, mode: str, b: dict, a: dict, tol_pct: float) -> list
             if ams == 0:
                 pass
             else:
-                regress.append(
-                    f"REGRESS: {name}/{mode} elapsed_ms baseline=0 actual={ams} (zero baseline)"
-                )
+                msg = f"{name}/{mode} elapsed_ms baseline=0 actual={ams} (zero baseline)"
+                if time_gate:
+                    regress.append(f"REGRESS: {msg}")
+                else:
+                    print(f"TIMING: {msg}", file=sys.stderr)
         else:
             drift_pct = abs(ams - bms) / bms * 100.0
+            direction = "slower" if ams > bms else "faster"
             if drift_pct > tol_pct:
-                direction = "slower" if ams > bms else "faster"
-                regress.append(
-                    f"REGRESS: {name}/{mode} elapsed_ms baseline={bms:.3f} actual={ams:.3f} "
+                msg = (
+                    f"{name}/{mode} elapsed_ms baseline={bms:.3f} actual={ams:.3f} "
                     f"drift={drift_pct:.1f}% (>{tol_pct:.1f}% tolerance, {direction})"
+                )
+                if time_gate:
+                    regress.append(f"REGRESS: {msg}")
+                else:
+                    print(f"TIMING: {msg}", file=sys.stderr)
+            else:
+                # Always print the in-tolerance number for trend
+                # visibility — CI logs become a poor-man's history
+                # without a separate emit/commit step.
+                print(
+                    f"TIMING: {name}/{mode} elapsed_ms baseline={bms:.3f} actual={ams:.3f} "
+                    f"drift={drift_pct:.1f}% (within {tol_pct:.1f}%, {direction})",
+                    file=sys.stderr,
                 )
     elif "elapsed_ms" in b and "elapsed_ms" not in a:
         regress.append(
@@ -113,7 +144,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--actual", required=True, type=Path)
     ap.add_argument("--baseline", required=True, type=Path)
+    ap.add_argument(
+        "--no-timing-gate",
+        action="store_true",
+        help=(
+            "Don't fail on elapsed_ms drift outside tolerance — "
+            "print as TIMING: info instead. Correctness exact-match "
+            "fields are still strict. Use on CI runners where the "
+            "localhost-derived timing tolerance doesn't apply."
+        ),
+    )
     args = ap.parse_args()
+    time_gate = not args.no_timing_gate
 
     baseline = load(args.baseline)
     actual = load(args.actual)
@@ -144,7 +186,7 @@ def main() -> int:
         b_modes = b_fx.get("modes", {})
         a_modes = a_fx.get("modes", {})
         for mode in sorted(set(b_modes.keys()) & set(a_modes.keys())):
-            regressions.extend(compare_mode(name, mode, b_modes[mode], a_modes[mode], tol_pct))
+            regressions.extend(compare_mode(name, mode, b_modes[mode], a_modes[mode], tol_pct, time_gate))
 
     if regressions:
         print("compare-to-baseline: FAIL", file=sys.stderr)

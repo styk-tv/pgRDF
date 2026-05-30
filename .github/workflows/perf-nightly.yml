@@ -74,26 +74,64 @@ jobs:
       - name: Build extension artifacts
         run: just build-ext
 
-      # Build the UBA generator + generate LUBM-10 into the
-      # pgrdf-lubm-data named volume the runner expects.
+      # Build the UBA generator + generate BOTH LUBM-1 and LUBM-10
+      # into the pgrdf-lubm-data named volume. LUBM-1 (~103k triples,
+      # ~5s ingest on the CI runner) is the smaller-tier reference
+      # for Track A's ingest-path spikes; LUBM-10 is the dev-gate.
+      # Generating both costs ~10s.
       - name: Build LUBM generator
         run: just lubm-build
+
+      - name: Generate LUBM-1
+        run: just lubm-gen 1
 
       - name: Generate LUBM-10
         run: just lubm-gen 10
 
-      # The dev-gate itself. test-lubm-10 runs the TF-10 runner +
-      # compare-to-baseline.py against the committed TF-9 baseline.
-      # Non-zero exit = regression; the workflow goes red.
-      - name: Run LUBM-10 dev-gate
-        run: just test-lubm-10
+      # Run the runner + compare against the committed baseline for
+      # each tier. `--no-timing-gate`: correctness fields stay strict
+      # (Q14 count, dict_lookups, triple count must match exactly);
+      # timing diffs print as `TIMING:` info but don't fail the job.
+      # Rationale: GH Actions runner is ~2.5× slower than the
+      # localhost machine where the baselines were captured, so a
+      # localhost-tight tolerance is unreachable here. The CI run is
+      # then a *trend snapshot* — numbers visible in workflow logs +
+      # uploaded artifacts — and a *correctness gate* — Q14 count
+      # diverging means a real bug.
+      #
+      # `target/perf-report.json` is overwritten between tiers, so
+      # capture each tier's report to a distinct path for the artifact.
+      - name: Run LUBM-1 perf snapshot
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          OUTFILE=target/perf-report.lubm-1.json \
+          JSON_SCHEMA_VALIDATE=0 \
+              bash tests/perf/lubm/run-lubm.sh 1
+          python3 tests/perf/lubm/compare-to-baseline.py \
+              --actual target/perf-report.lubm-1.json \
+              --baseline tests/perf/lubm/baseline.lubm-1.json \
+              --no-timing-gate
 
-      # On failure, surface the runner output for triage.
-      - name: Upload perf-report.json (on failure)
-        if: failure()
+      - name: Run LUBM-10 perf snapshot
+        run: |
+          set -euo pipefail
+          OUTFILE=target/perf-report.lubm-10.json \
+          JSON_SCHEMA_VALIDATE=0 \
+              bash tests/perf/lubm/run-lubm.sh 10
+          python3 tests/perf/lubm/compare-to-baseline.py \
+              --actual target/perf-report.lubm-10.json \
+              --baseline tests/perf/lubm/baseline.lubm-10.json \
+              --no-timing-gate
+
+      # Always upload — the trend value is in collecting numbers
+      # across nightly runs, not just failure triage. 90-day
+      # retention default; bump if we ever want longer history.
+      - name: Upload perf snapshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: perf-report-lubm-10-${{ github.run_id }}
-          path: target/perf-report.json
+          name: perf-snapshots-${{ github.run_id }}
+          path: target/perf-report.lubm-*.json
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90
