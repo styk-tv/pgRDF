@@ -14,6 +14,14 @@
 
    Source of truth: `_WIP/SPEC.ROADMAP.TRACK.TASKS.v1.0-devel.md`. Counts are sanity-checked against the per-track tables; the user should never have to open the roadmap to see where things stand.
 
+7. **Internal version label MUST match the tag.** The artifact's `Cargo.toml` `version` field, the `pgrdf.control` `default_version` field, and the `pgrdf--<ver>.sql` filename must all read the same value as the git tag (with `v` stripped). A consumer running `CREATE EXTENSION pgrdf VERSION '<tag>'` MUST succeed; `SELECT extversion FROM pg_extension WHERE extname='pgrdf'` MUST return that tag. Enforced at three layers:
+
+   - **Pre-build assertion in `release.yml`** — fails the build job if `Cargo.toml`'s version field doesn't equal `${GITHUB_REF_NAME#v}` before `cargo pgrx package` runs.
+   - **Post-build assertion in `release.yml`** — after the Repack step, verifies the tarball contains `share/extension/pgrdf--<TAG>.sql` and that `pgrdf.control`'s `default_version` equals `<TAG>`. Aborts the upload otherwise.
+   - **Post-publish consumer-style smoke verify in `oci-publish.yml`** (between Attest aggregate index and Trigger update-latest-md) — pulls the just-published artifact via ORAS exactly as a consumer would, boots a clean `postgres:17.4-bookworm`, runs `CREATE EXTENSION pgrdf VERSION '<TAG>'`, asserts `pg_extension.extversion == TAG` and `pgrdf.version() == TAG`. Fail-fast: if the smoke verify fails, `update-latest-md.yml` never fires and `LATEST.md` stays at the prior version. The wrong-labeled tag exists as an orphan GHCR digest but never gets advertised.
+
+   **Rule 7 takes effect from v0.5.24 onward.** Releases v0.5.1 through v0.5.23 all shipped with `Cargo.toml`'s version field stuck at `0.5.1` (the field was never bumped after the initial declaration). Their internal label reads `0.5.1` regardless of the GHCR tag — a consumer pinning `CREATE EXTENSION pgrdf VERSION '0.5.X'` for any `X != 1` would have failed at install. The .so itself was current per-release; the bug was label-only. v0.5.24 introduces the bump + the three enforcement layers above. We do NOT retroactively re-cut v0.5.2..v0.5.23 (per `[[only-forward-never-revert]]`); the no-op upgrade script `sql/pgrdf--0.5.1--0.5.24.sql` ships with v0.5.24 so anyone with a 0.5.1-labeled install can `ALTER EXTENSION pgrdf UPDATE TO '0.5.24'` cleanly. OCI-GERMINATION surfaced the bug at v0.5.23 — fleet feedback that should have come from CI, not from a downstream consumer. The three enforcement layers above are the rule.
+
 Everything else in this document explains how those rules are enforced.
 
 ### One-time bootstrap (Rule 4 transition — closed)

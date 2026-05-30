@@ -211,6 +211,89 @@ jobs:
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
 
+      # Post-publish consumer-style smoke verify (PROVENANCE.md
+      # Rule 7). Pulls the just-published artifact via ORAS exactly
+      # as a downstream consumer would, drops the files into a clean
+      # `postgres:17.4-bookworm` container, and runs
+      # `CREATE EXTENSION pgrdf VERSION '<TAG>'` — the precise call
+      # OCI-GERMINATION's report 2026-05-30 showed was failing on
+      # every v0.5.2..v0.5.23 release because of the Cargo.toml-stuck-
+      # at-0.5.1 bug. Fail-fast here means update-latest-md.yml never
+      # fires, LATEST.md stays at the prior version, and consumers
+      # never see a broken tag advertised. We verify amd64 only —
+      # arm64 has the same bytes structure; if amd64 is well-formed,
+      # arm64 is too. (Adding arm64 would need a self-hosted arm
+      # runner; deferred.)
+      - name: Post-publish — consumer-style smoke verify (amd64)
+        run: |
+          set -euo pipefail
+          VER="${{ steps.v.outputs.ver }}"
+          REG="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pgrdf-bundle"
+
+          # Pull the published artifact and extract the tarball.
+          mkdir -p smoke-verify/dl
+          oras pull "${REG}:${VER}-pg17-amd64" -o smoke-verify/dl
+          tar -xzf smoke-verify/dl/*.tar.gz -C smoke-verify/
+
+          # The extracted dir is `pgrdf-<ver>-pg17-glibc-amd64/`.
+          EXTRACT="smoke-verify/pgrdf-${VER}-pg17-glibc-amd64"
+          if [ ! -d "${EXTRACT}" ]; then
+            echo "::error::extracted dir ${EXTRACT} missing — tarball layout drift?"
+            ls -la smoke-verify/ || true
+            exit 1
+          fi
+
+          # Boot a clean postgres + copy in the files exactly as the
+          # SPEC.pgRDF.INSTALL.v0.2 §3 layout instructs.
+          docker run --rm -d --name smoke-pg \
+            -e POSTGRES_PASSWORD=v -e POSTGRES_USER=v -e POSTGRES_DB=v \
+            postgres:17.4-bookworm
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            docker exec smoke-pg pg_isready -U v >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          docker cp "${EXTRACT}/lib/pgrdf.so"            smoke-pg:/usr/lib/postgresql/17/lib/pgrdf.so
+          docker cp "${EXTRACT}/share/extension/pgrdf.control" smoke-pg:/usr/share/postgresql/17/extension/pgrdf.control
+          # Copy every SQL file (the install script + any upgrade
+          # paths shipped alongside).
+          for f in "${EXTRACT}"/share/extension/*.sql; do
+            docker cp "${f}" "smoke-pg:/usr/share/postgresql/17/extension/$(basename ${f})"
+          done
+
+          # The actual gate: install with the TAG version pinned.
+          # Any drift (Cargo.toml stuck, SQL renamed, control wrong)
+          # makes this exact statement fail.
+          set +e
+          docker exec smoke-pg psql -U v -d v -v ON_ERROR_STOP=1 -c \
+            "CREATE EXTENSION pgrdf VERSION '${VER}';" 2>&1 | tee smoke-create.log
+          CREATE_RC=$?
+          set -e
+
+          # Read back to confirm.
+          EXT_VER=$(docker exec smoke-pg psql -U v -d v -A -t -c \
+            "SELECT extversion FROM pg_extension WHERE extname='pgrdf';" 2>&1 || true)
+          FN_VER=$(docker exec smoke-pg psql -U v -d v -A -t -c \
+            "SELECT pgrdf.version();" 2>&1 || true)
+
+          docker rm -f smoke-pg >/dev/null 2>&1 || true
+
+          if [ "${CREATE_RC}" -ne 0 ]; then
+            echo "::error::CREATE EXTENSION pgrdf VERSION '${VER}' FAILED"
+            echo "::error::This is the OCI-GERMINATION-class failure from v0.5.1-stuck."
+            echo "::error::Aborting BEFORE update-latest-md.yml fires. LATEST.md stays at prior version."
+            exit 1
+          fi
+          if [ "${EXT_VER}" != "${VER}" ]; then
+            echo "::error::pg_extension.extversion='${EXT_VER}' but expected '${VER}'"
+            exit 1
+          fi
+          if [ "${FN_VER}" != "${VER}" ]; then
+            echo "::error::pgrdf.version()='${FN_VER}' but expected '${VER}'"
+            exit 1
+          fi
+          echo "✓ Consumer-style install OK: extversion=${EXT_VER}, pgrdf.version()=${FN_VER}"
+
       # Chain update-latest-md.yml via repository_dispatch.
       #
       # This workflow was itself triggered by GITHUB_TOKEN (via the

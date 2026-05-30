@@ -1,0 +1,30 @@
+-- pgrdf--0.5.1--0.5.24.sql
+--
+-- No-op upgrade script from v0.5.1 (the only previously-installable
+-- version, due to the Cargo.toml-stuck-at-0.5.1 bug surfaced by
+-- OCI-GERMINATION on 2026-05-30) to v0.5.24 (the first release that
+-- bumps the internal version label to match the tag).
+--
+-- The pgrdf SCHEMA is byte-identical between 0.5.1 and 0.5.24 — every
+-- intermediate release (v0.5.2 through v0.5.23) built from the same
+-- Cargo.toml version field, so they all shipped the same SQL filename
+-- (`pgrdf--0.5.1.sql`) with the same content. The only changes that
+-- accrued across those tags were in the .so (TE-5 search_path,
+-- TF-* perf measurements, TG-* hygiene, etc.) — none of which alter
+-- the SQL surface the dictionary / quads / graphs tables ship.
+--
+-- This script must exist for PostgreSQL to consider the
+-- ``ALTER EXTENSION pgrdf UPDATE TO '0.5.24'`` path valid. Its body
+-- intentionally has no DDL — declaring the path is sufficient.
+--
+-- Existing 0.5.1-labeled installs will pick up the new .so (with
+-- search_path discipline, etc.) when the operator drops the new
+-- ``lib/pgrdf.so`` into ``$libdir`` and re-runs
+-- ``ALTER EXTENSION pgrdf UPDATE``. The SQL surface is unchanged; the
+-- runtime surface gains the v0.5.2..v0.5.23 fixes.
+--
+-- If a future release introduces a schema delta (TE-10 / TE-9), a
+-- proper upgrade script lands then; this one stays as the historical
+-- bridge from the 0.5.1-stuck era.
+
+-- (no DDL by design)

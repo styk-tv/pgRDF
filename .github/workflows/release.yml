@@ -32,6 +32,34 @@ jobs:
       - uses: ./.github/actions/setup-pgrx
         with: { pg: "${{ matrix.pg }}" }
 
+      # Pre-build version-coherence gate (PROVENANCE.md Rule 7).
+      #
+      # The published OCI artifact's INSTALL layout names the SQL
+      # file `pgrdf--<ver>.sql` and writes `default_version = '<ver>'`
+      # into pgrdf.control. Both names derive from `Cargo.toml`'s
+      # `version` field — `cargo pgrx package` reads it. If
+      # Cargo.toml drifts from the tag, the artifact's internal
+      # version label is wrong AND `CREATE EXTENSION pgrdf VERSION
+      # '<tag>'` fails for consumers (the v0.5.1-stuck bug surfaced
+      # by OCI-GERMINATION 2026-05-30, fixed v0.5.24).
+      #
+      # Assertion: Cargo.toml's version == GITHUB_REF_NAME without
+      # the leading `v`. Failure aborts the build before any
+      # artifact gets cut — a tag mismatch never reaches GHCR.
+      - name: Pre-build — assert Cargo.toml version matches tag
+        run: |
+          set -euo pipefail
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          CARGO_VER=$(grep -E '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "tag (stripped):    ${TAG_VER}"
+          echo "Cargo.toml version: ${CARGO_VER}"
+          if [ "${TAG_VER}" != "${CARGO_VER}" ]; then
+            echo "::error::Cargo.toml version (${CARGO_VER}) does not match tag (${TAG_VER})."
+            echo "::error::Bump Cargo.toml's version field to ${TAG_VER} before re-tagging."
+            echo "::error::See PROVENANCE.md Rule 7 + the v0.5.24 OCI-GERMINATION NOTIFIES for context."
+            exit 1
+          fi
+
       - name: Build extension package
         run: cargo pgrx package --pg-config /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
@@ -53,10 +81,50 @@ jobs:
           cp "${PKG}/usr/lib/postgresql/${{ matrix.pg }}/lib/pgrdf.so"            "${OUT}/lib/"
           cp "${PKG}/usr/share/postgresql/${{ matrix.pg }}/extension/"*.control   "${OUT}/share/extension/"
           cp "${PKG}/usr/share/postgresql/${{ matrix.pg }}/extension/"*.sql       "${OUT}/share/extension/"
+          # Ship upgrade-path SQL files from the source tree (the
+          # 0.5.1 -> 0.5.24 bridge added in v0.5.24, plus any future
+          # `pgrdf--X--Y.sql` upgrade scripts). `cargo pgrx package`
+          # does not auto-discover these; they live in `sql/` and we
+          # opt them into the INSTALL layout explicitly. The glob is
+          # safe-guarded so an empty source tree doesn't fail.
+          if compgen -G "sql/pgrdf--*--*.sql" > /dev/null; then
+            cp sql/pgrdf--*--*.sql "${OUT}/share/extension/"
+          fi
           cp LICENSE "${OUT}/"
           ( cd "${OUT}" && find . -type f ! -name SHA256SUMS -print0 | xargs -0 sha256sum > SHA256SUMS )
           tar czf "${OUT}.tar.gz" "${OUT}"
           echo "tarball=${OUT}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # Post-build version-coherence gate (PROVENANCE.md Rule 7).
+      #
+      # The bug v0.5.24 fixes (OCI-GERMINATION report 2026-05-30) is
+      # that `pgrdf--<wrong-ver>.sql` and `default_version='<wrong>'`
+      # silently shipped because Cargo.toml's version had been stuck.
+      # Independent of the pre-build assertion, verify the actual
+      # output: the filename present in `share/extension/` must
+      # include `pgrdf--${VER}.sql`, and the control file's
+      # `default_version` must equal `${VER}`. Failure aborts the
+      # upload — a wrong-labeled tarball never reaches release-time.
+      - name: Post-build — assert layout labels match tag
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          OUT="pgrdf-${VER}-pg${{ matrix.pg }}-glibc-${{ matrix.arch }}"
+          SQL_FILE="${OUT}/share/extension/pgrdf--${VER}.sql"
+          CONTROL="${OUT}/share/extension/pgrdf.control"
+          if [ ! -f "${SQL_FILE}" ]; then
+            echo "::error::Expected ${SQL_FILE} missing from tarball layout."
+            echo "::error::Files actually present:"
+            ls -la "${OUT}/share/extension/" || true
+            exit 1
+          fi
+          DEFAULT_VER=$(grep -E '^default_version' "${CONTROL}" | head -1 | cut -d"'" -f2)
+          if [ "${DEFAULT_VER}" != "${VER}" ]; then
+            echo "::error::pgrdf.control default_version is ${DEFAULT_VER}, expected ${VER}."
+            exit 1
+          fi
+          echo "✓ SQL file: ${SQL_FILE}"
+          echo "✓ default_version: ${DEFAULT_VER}"
 
       - uses: actions/upload-artifact@v4
         with:
