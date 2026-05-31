@@ -1,0 +1,58 @@
+{
+  "schema_version": "v0.6",
+  "spike_id": "TA-D3",
+  "spike_name": "batched dict resolution (2-pass, dict_batch_size=500)",
+  "produced_at": "2026-05-31T03:50:00Z",
+  "produced_by": "manual side-by-side measurement against compose-built pgrdf 0.5.26",
+  "univ_count": 1,
+  "pgrdf_version": "0.5.26",
+  "postgres_major": 17,
+  "fixtures": [
+    {
+      "name": "lubm-1-ingest-nt-baseline",
+      "kind": "sparql-select",
+      "path": "single-pass (load_turtle_verbose) — Phase-0 baseline",
+      "modes": {
+        "default": {
+          "elapsed_ms": 1452.358821,
+          "dict_ms": 1059.267434,
+          "parse_ms": 73.687366,
+          "insert_ms": 311.608886,
+          "dict_db_calls": 26473,
+          "dict_cache_hits": 308325,
+          "shmem_cache_hits": 0,
+          "quad_batches": 101,
+          "triples": 100573
+        }
+      }
+    },
+    {
+      "name": "lubm-1-ingest-nt-spike-ta-d3",
+      "kind": "sparql-select",
+      "path": "2-pass (load_turtle_dict_batched, dict_batch_size=500)",
+      "modes": {
+        "default": {
+          "elapsed_ms": 1200.044489,
+          "dict_ms": 738.542027,
+          "parse_ms": 85.480438,
+          "insert_ms": 376.021399,
+          "dict_db_calls": 106,
+          "dict_cache_hits": 275247,
+          "shmem_cache_hits": 0,
+          "quad_batches": 101,
+          "triples": 100573,
+          "dict_batch_size": 500
+        }
+      }
+    }
+  ],
+  "comparison": {
+    "elapsed_ms_pct": -17.4,
+    "dict_ms_pct": -30.2,
+    "insert_ms_pct": 20.5,
+    "parse_ms_pct": 16.0,
+    "dict_db_calls_factor": "26473 -> 106 (250x reduction)",
+    "triples_match": true,
+    "verdict": "spike-validates-theory; production-grade variant should remove 2-pass overhead (one-pass with periodic dict-flush)"
+  }
+}

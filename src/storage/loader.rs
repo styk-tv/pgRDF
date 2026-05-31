@@ -340,6 +340,293 @@ fn ingest_turtle_with_stats<R: Read>(
     stats
 }
 
+/// TA-D3 spike: 2-pass ingest with batched dict resolution.
+///
+/// Phase-0 baseline (LUBM-1): dict_ms is 73% of total ingest time
+/// (1,114 ms of 1,518 ms), driven by 26,473 individual SPI calls
+/// from `put_term_full`. This spike replaces those N independent
+/// calls with **2 SPI calls per dict-batch** via `put_terms_batch`
+/// (insert-with-ON-CONFLICT + bulk-join lookup).
+///
+/// Algorithm:
+///
+/// 1. **Parse pass**: iterate the parser once, materializing every
+///    Triple into an owned `Vec<oxrdf::Triple>` and noting each
+///    unique `(term_type, lexical, datatype_id, language)` tuple in
+///    a HashSet so we can resolve them in batch.
+/// 2. **Bulk resolve**: chunk the unique terms by `dict_batch_size`
+///    and call `put_terms_batch` per chunk; fill a HashMap with the
+///    resulting (key → id) bindings.
+/// 3. **Insert pass**: walk the materialized triples again, looking
+///    up s / p / o ids from the HashMap (every term now guaranteed
+///    present), build the s/p/o arrays, and `flush_batch` per
+///    QUAD_BATCH_SIZE chunk — same prepared INSERT plan as the
+///    baseline path. (TA-11/TA-10 spikes target THIS insert phase
+///    separately.)
+///
+/// Memory cost: O(triples) for the materialized Vec — LUBM-1 is
+/// ~100k triples × ~3 strings each ≈ ~10MB. Acceptable for the
+/// LUBM-1/10 tiers; LUBM-100 (~13M triples, ~1GB owned) would need
+/// a streaming variant. The SPIKE is LUBM-1-scope only.
+fn ingest_turtle_dict_batched<R: Read>(
+    reader: R,
+    graph_id: i64,
+    base_iri: Option<&str>,
+    dict_batch_size: usize,
+) -> LoaderStats {
+    use std::collections::HashSet;
+    let mut parser = TurtleParser::new();
+    if let Some(base) = base_iri {
+        parser = parser
+            .with_base_iri(base)
+            .unwrap_or_else(|e| panic!("load_turtle_dict_batched: invalid base IRI {base:?}: {e}"));
+    }
+    let iter = parser.for_reader(reader);
+
+    let start = Instant::now();
+    let mut stats = LoaderStats::default();
+    let mut parse_ns: u128 = 0;
+    let mut dict_ns: u128 = 0;
+    let mut insert_ns: u128 = 0;
+
+    // ── Phase 1: parse + collect ─────────────────────────────────
+    let t_parse = Instant::now();
+    let mut triples: Vec<oxrdf::Triple> = Vec::new();
+    let mut unique_terms: HashSet<DictKey> = HashSet::new();
+    let term_key = |tt: i16, v: &str, dt: Option<i64>, lang: Option<&str>| -> DictKey {
+        (tt, v.to_string(), dt, lang.map(str::to_string))
+    };
+    for triple_result in iter {
+        let triple = triple_result.expect("load_turtle_dict_batched: turtle parse error");
+        // Collect unique term tuples for s, p, o into the set.
+        match &triple.subject {
+            NamedOrBlankNode::NamedNode(n) => {
+                unique_terms.insert(term_key(term_type::URI, n.as_str(), None, None));
+            }
+            NamedOrBlankNode::BlankNode(b) => {
+                unique_terms.insert(term_key(term_type::BLANK_NODE, b.as_str(), None, None));
+            }
+        }
+        unique_terms.insert(term_key(
+            term_type::URI,
+            triple.predicate.as_str(),
+            None,
+            None,
+        ));
+        match &triple.object {
+            Term::NamedNode(n) => {
+                unique_terms.insert(term_key(term_type::URI, n.as_str(), None, None));
+            }
+            Term::BlankNode(b) => {
+                unique_terms.insert(term_key(term_type::BLANK_NODE, b.as_str(), None, None));
+            }
+            Term::Literal(lit) => {
+                let lang = lit.language();
+                let datatype_iri = lit.datatype().as_str();
+                let datatype_id = if datatype_iri == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+                    && lang.is_some()
+                {
+                    None
+                } else if datatype_iri == "http://www.w3.org/2001/XMLSchema#string" {
+                    None
+                } else {
+                    // Datatype IRIs are themselves URIs in the dict.
+                    // The spike resolves them in the SAME batch as the
+                    // literal — but the literal's `datatype_id` field
+                    // must reference an already-known id. For the
+                    // spike, defer datatype-IRI resolution to a second
+                    // mini-pass: gather datatype IRIs first, resolve
+                    // them, THEN add literal keys with proper
+                    // datatype_id. Implemented below by collecting all
+                    // datatype IRIs first and resolving them as
+                    // term-type URI in a pre-pass.
+                    //
+                    // To keep this Phase-1 step linear, we record None
+                    // here and re-key in Phase-1.5 after the datatype
+                    // IRIs are known.
+                    None
+                };
+                unique_terms.insert(term_key(
+                    term_type::LITERAL,
+                    lit.value(),
+                    datatype_id,
+                    lang,
+                ));
+            }
+            #[allow(unreachable_patterns)]
+            _ => {}
+        }
+        triples.push(triple);
+    }
+    parse_ns += t_parse.elapsed().as_nanos();
+    stats.triples = triples.len() as i64;
+
+    // ── Phase 1.5: resolve datatype IRIs first ──────────────────
+    // Literals with custom datatypes need an `datatype_iri_id` that
+    // references a dict row. Gather all unique datatype IRIs into a
+    // separate batch + resolve THEM first, then we know the ids
+    // when keying the literals.
+    let t_dict = Instant::now();
+    let mut datatype_iris: HashSet<String> = HashSet::new();
+    for tr in &triples {
+        if let Term::Literal(lit) = &tr.object {
+            let dt = lit.datatype().as_str();
+            if dt != "http://www.w3.org/2001/XMLSchema#string"
+                && dt != "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+            {
+                datatype_iris.insert(dt.to_string());
+            }
+        }
+    }
+    let mut dt_iri_id: HashMap<String, i64> = HashMap::new();
+    let dt_terms: Vec<(i16, String, Option<i64>, Option<String>)> = datatype_iris
+        .iter()
+        .map(|iri| (term_type::URI, iri.clone(), None, None))
+        .collect();
+    for chunk in dt_terms.chunks(dict_batch_size) {
+        let ids = crate::storage::dict::put_terms_batch(chunk);
+        for (term, id) in chunk.iter().zip(ids.iter()) {
+            dt_iri_id.insert(term.1.clone(), *id);
+        }
+    }
+
+    // ── Phase 2: re-key triples with proper datatype_ids + collect
+    //               the full set of unique non-datatype-IRI terms ──
+    let mut full_terms: HashSet<DictKey> = HashSet::new();
+    // Re-add subject/predicate URIs (these are subset of unique_terms).
+    full_terms.extend(unique_terms.iter().filter(|k| {
+        // Drop literals from the partially-built set; they'll be
+        // re-added with proper datatype_id below.
+        k.0 != term_type::LITERAL
+    }).cloned());
+    // Datatype IRIs are also URI terms — already in unique_terms via
+    // the predicate-position scan; but datatypes that appear ONLY as
+    // literal datatypes also need to be in the dict. Re-include.
+    for iri in &datatype_iris {
+        full_terms.insert((term_type::URI, iri.clone(), None, None));
+    }
+    // Walk triples, build the proper literal keys, add to full set.
+    for tr in &triples {
+        if let Term::Literal(lit) = &tr.object {
+            let lang = lit.language();
+            let dt = lit.datatype().as_str();
+            let datatype_id = if dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+                && lang.is_some()
+            {
+                None
+            } else if dt == "http://www.w3.org/2001/XMLSchema#string" {
+                None
+            } else {
+                dt_iri_id.get(dt).copied()
+            };
+            full_terms.insert((
+                term_type::LITERAL,
+                lit.value().to_string(),
+                datatype_id,
+                lang.map(str::to_string),
+            ));
+        }
+    }
+
+    // Bulk resolve the rest in batches.
+    let mut cache: HashMap<DictKey, i64> = HashMap::new();
+    // Pre-seed cache with datatype IRI ids (already resolved).
+    for (iri, id) in &dt_iri_id {
+        cache.insert((term_type::URI, iri.clone(), None, None), *id);
+    }
+    let pending: Vec<DictKey> = full_terms
+        .iter()
+        .filter(|k| !cache.contains_key(*k))
+        .cloned()
+        .collect();
+    let mut total_calls = 0i64;
+    for chunk in pending.chunks(dict_batch_size) {
+        let chunk_v: Vec<(i16, String, Option<i64>, Option<String>)> =
+            chunk.iter().map(|k| (k.0, k.1.clone(), k.2, k.3.clone())).collect();
+        let ids = crate::storage::dict::put_terms_batch(&chunk_v);
+        for (k, id) in chunk.iter().zip(ids.iter()) {
+            cache.insert(k.clone(), *id);
+        }
+        total_calls += 2; // insert + lookup
+    }
+    stats.dict_db_calls = total_calls; // repurposed: SPI call count
+    stats.dict_cache_hits = (stats.triples * 3) - pending.len() as i64;
+    dict_ns += t_dict.elapsed().as_nanos();
+
+    // ── Phase 3: build s/p/o arrays and flush_batch as usual ────
+    let t_insert = Instant::now();
+    let mut batch_s: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    let mut batch_p: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    let mut batch_o: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    let lookup = |k: &DictKey, cache: &HashMap<DictKey, i64>| -> i64 {
+        *cache
+            .get(k)
+            .unwrap_or_else(|| panic!("load_turtle_dict_batched: cache miss for {:?}", k))
+    };
+    for triple in triples {
+        let s_key = match &triple.subject {
+            NamedOrBlankNode::NamedNode(n) => {
+                (term_type::URI, n.as_str().to_string(), None, None)
+            }
+            NamedOrBlankNode::BlankNode(b) => {
+                (term_type::BLANK_NODE, b.as_str().to_string(), None, None)
+            }
+        };
+        let p_key = (term_type::URI, triple.predicate.as_str().to_string(), None, None);
+        let o_key = match &triple.object {
+            Term::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
+            Term::BlankNode(b) => (term_type::BLANK_NODE, b.as_str().to_string(), None, None),
+            Term::Literal(lit) => {
+                let lang = lit.language();
+                let dt = lit.datatype().as_str();
+                let datatype_id = if dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+                    && lang.is_some()
+                {
+                    None
+                } else if dt == "http://www.w3.org/2001/XMLSchema#string" {
+                    None
+                } else {
+                    dt_iri_id.get(dt).copied()
+                };
+                (
+                    term_type::LITERAL,
+                    lit.value().to_string(),
+                    datatype_id,
+                    lang.map(str::to_string),
+                )
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("load_turtle_dict_batched: unexpected term shape"),
+        };
+        batch_s.push(lookup(&s_key, &cache));
+        batch_p.push(lookup(&p_key, &cache));
+        batch_o.push(lookup(&o_key, &cache));
+        if batch_s.len() >= BATCH_SIZE {
+            flush_batch(
+                &mut batch_s,
+                &mut batch_p,
+                &mut batch_o,
+                graph_id,
+                &mut stats,
+            );
+        }
+    }
+    flush_batch(
+        &mut batch_s,
+        &mut batch_p,
+        &mut batch_o,
+        graph_id,
+        &mut stats,
+    );
+    insert_ns += t_insert.elapsed().as_nanos();
+
+    stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    stats.parse_ms = parse_ns as f64 / 1_000_000.0;
+    stats.dict_ms = dict_ns as f64 / 1_000_000.0;
+    stats.insert_ms = insert_ns as f64 / 1_000_000.0;
+    stats
+}
+
 fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
     pgrx::JsonB(json!({
         "triples":          stats.triples,
@@ -616,6 +903,85 @@ fn parse_turtle_verbose(
     let base = base_iri.filter(|s| !s.is_empty());
     let stats = ingest_turtle_with_stats(content.as_bytes(), graph_id, base);
     stats_to_jsonb(&stats)
+}
+
+/// TA-D3 spike — 2-pass ingest with batched dict resolution.
+///
+/// Same JSONB output shape as `parse_turtle_verbose`; an extra
+/// `path` discriminator field is added so consumers can confirm
+/// which path the measurement came from.
+///
+/// Defaults: `dict_batch_size = 500` (heuristic — chunks ≥ ~200
+/// amortize SPI roundtrip cost; ≤ 2000 stays under PG's stack-
+/// alloc'd unnest sizing).
+///
+/// SQL: `pgrdf.parse_turtle_dict_batched(content TEXT, graph_id BIGINT,
+///       base_iri TEXT DEFAULT NULL, dict_batch_size INT DEFAULT 500) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn parse_turtle_dict_batched(
+    content: &str,
+    graph_id: i64,
+    base_iri: default!(Option<&str>, "NULL"),
+    dict_batch_size: default!(i32, 500),
+) -> pgrx::JsonB {
+    let base = base_iri.filter(|s| !s.is_empty());
+    let stats = ingest_turtle_dict_batched(
+        content.as_bytes(),
+        graph_id,
+        base,
+        dict_batch_size.max(1) as usize,
+    );
+    let mut j = stats_to_jsonb(&stats);
+    if let serde_json::Value::Object(ref mut m) = j.0 {
+        m.insert(
+            "path".to_string(),
+            serde_json::Value::String("dict_batched".to_string()),
+        );
+        m.insert(
+            "dict_batch_size".to_string(),
+            serde_json::Value::Number(dict_batch_size.into()),
+        );
+    }
+    j
+}
+
+/// File-source variant of `parse_turtle_dict_batched`. Useful when
+/// the LUBM-N data is on a server-side path rather than passed in as
+/// a TEXT literal.
+///
+/// SQL: `pgrdf.load_turtle_dict_batched(path TEXT, graph_id BIGINT,
+///       base_iri TEXT DEFAULT NULL, dict_batch_size INT DEFAULT 500) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn load_turtle_dict_batched(
+    path: &str,
+    graph_id: i64,
+    base_iri: default!(Option<&str>, "NULL"),
+    dict_batch_size: default!(i32, 500),
+) -> pgrx::JsonB {
+    let file = File::open(path).unwrap_or_else(|e| {
+        panic!("load_turtle_dict_batched: failed to open {path:?}: {e}")
+    });
+    let base = base_iri.filter(|s| !s.is_empty());
+    let stats = ingest_turtle_dict_batched(
+        BufReader::new(file),
+        graph_id,
+        base,
+        dict_batch_size.max(1) as usize,
+    );
+    let mut j = stats_to_jsonb(&stats);
+    if let serde_json::Value::Object(ref mut m) = j.0 {
+        m.insert(
+            "path".to_string(),
+            serde_json::Value::String("dict_batched".to_string()),
+        );
+        m.insert(
+            "dict_batch_size".to_string(),
+            serde_json::Value::Number(dict_batch_size.into()),
+        );
+    }
+    j
 }
 
 /// Parse a TriG document from a string and ingest it into pgRDF,
