@@ -165,6 +165,12 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        # Need full history + tags so `git for-each-ref refs/tags/<v>`
+        # below returns the tag annotation message body (the per-release
+        # body the maintainer wrote when running `git tag -a -F`).
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/download-artifact@v4
         with: { path: artifacts, merge-multiple: true }
       - name: Build PGXN source archive
@@ -176,13 +182,65 @@ jobs:
           cd artifacts
           sha256sum pgrdf-*.tar.gz pgrdf-*.zip > SHA256SUMS
           cat SHA256SUMS
+
+      # Build the GitHub Release body from the TAG ANNOTATION the
+      # maintainer wrote at `git tag -a -F`. The prior pipeline used
+      # `body_path: RELEASE_NOTES.md`, a checked-in file that hadn't
+      # been touched since v0.5.1 — so every release v0.5.10..v0.5.28
+      # surfaced stale v0.5.1 marketing text on github.com. The tag
+      # annotation is always per-release-current by construction
+      # (it's what `tag -a` captured at tag time).
+      #
+      # Falls back to the CHANGELOG.md [Unreleased] section if the
+      # tag has no annotation body (defensive — every release this
+      # pipeline cuts SHOULD have an annotation; the fallback exists
+      # so a stale tag doesn't ship an empty body).
+      - name: Render Release body from tag annotation
+        id: body
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          ANNO=$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)' || true)
+          # `git for-each-ref %(contents)` includes the GPG signature
+          # block (if any) — strip it.
+          ANNO=$(printf '%s' "${ANNO}" | sed '/^-----BEGIN PGP SIGNATURE-----/,$d')
+          if [ -z "${ANNO//[[:space:]]/}" ]; then
+            echo "::warning::tag ${TAG} has no annotation body; falling back to CHANGELOG.md [Unreleased] section"
+            # Pull the [Unreleased] block (between the [Unreleased] heading
+            # and the next ## heading). Better than nothing.
+            ANNO=$(awk '/^## \[Unreleased\]/{flag=1; next} /^## /{flag=0} flag' CHANGELOG.md)
+          fi
+          printf '%s\n' "${ANNO}" > /tmp/release_body.md
+          echo "------ Release body ------"
+          head -40 /tmp/release_body.md
+          echo "------"
+
+      # Gate: assert the rendered body actually mentions the current
+      # tag string. Prevents the v0.5.1-stuck-RELEASE_NOTES.md class
+      # of stale-content leak from recurring under any future
+      # template/file-pointer change.
+      - name: Pre-publish — assert Release body mentions tag
+        run: |
+          set -euo pipefail
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          if ! grep -q "${TAG_VER}" /tmp/release_body.md; then
+            echo "::error::Rendered Release body does NOT contain '${TAG_VER}'."
+            echo "::error::This guard catches stale RELEASE_NOTES.md / empty annotation."
+            echo "::error::Either (a) re-tag with an annotation that names the version, or"
+            echo "::error::        (b) update CHANGELOG.md [Unreleased] to mention v${TAG_VER}."
+            echo "------ Rendered body that failed the check ------"
+            cat /tmp/release_body.md
+            exit 1
+          fi
+          echo "✓ Release body mentions ${TAG_VER}"
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/pgrdf-*.tar.gz
             artifacts/pgrdf-*.zip
             artifacts/SHA256SUMS
-          body_path: RELEASE_NOTES.md
+          body_path: /tmp/release_body.md
           generate_release_notes: true
       # Chain oci-publish.yml via repository_dispatch.
       #
