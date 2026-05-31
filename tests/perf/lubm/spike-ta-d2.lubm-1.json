@@ -1,0 +1,59 @@
+{
+  "schema_version": "v0.6",
+  "spike_id": "TA-D2",
+  "spike_name": "shmem cache pre-warm from _pgrdf_dictionary",
+  "produced_at": "2026-05-31T04:35:00Z",
+  "produced_by": "manual 3-way measurement against compose-built pgrdf 0.5.27",
+  "univ_count": 1,
+  "pgrdf_version": "0.5.27",
+  "postgres_major": 17,
+  "fixtures": [
+    {
+      "name": "lubm-1-ingest-nt-cold",
+      "kind": "sparql-select",
+      "path": "load_turtle_verbose with cold shmem cache (just-booted backend)",
+      "modes": {
+        "default": {
+          "elapsed_ms": 1517.817180,
+          "dict_ms": 1114.997833,
+          "parse_ms": 70.753522,
+          "insert_ms": 324.142993,
+          "dict_db_calls": 26473,
+          "dict_cache_hits": 308325,
+          "shmem_cache_hits": 0,
+          "quad_batches": 101,
+          "triples": 100573
+        }
+      }
+    },
+    {
+      "name": "lubm-1-ingest-nt-warm-after-prewarm",
+      "kind": "sparql-select",
+      "path": "load_turtle_verbose after shmem_reset() + shmem_cache_prewarm(100000)",
+      "modes": {
+        "default": {
+          "elapsed_ms": 697.863510,
+          "dict_ms": 304.451203,
+          "parse_ms": 63.823590,
+          "insert_ms": 322.140325,
+          "dict_db_calls": 10178,
+          "dict_cache_hits": 308325,
+          "shmem_cache_hits": 16295,
+          "quad_batches": 101,
+          "triples": 100573,
+          "prewarmed_rows": 26473
+        }
+      }
+    }
+  ],
+  "comparison": {
+    "elapsed_ms_pct": -54.0,
+    "dict_ms_pct": -72.7,
+    "insert_ms_pct": -0.6,
+    "parse_ms_pct": -9.8,
+    "dict_db_calls_factor": "26473 -> 10178 (-61.6%)",
+    "shmem_cache_absorption": "16295 of 26473 = 61.5% (size-bounded; SLOTS=16384 + probe_depth=8 evicts the rest)",
+    "triples_match": true,
+    "verdict": "spike strongly validates; -54% e2e exceeds TA-D3's -17%; combined TA-D3+TA-D2 likely approaches -70%"
+  }
+}

@@ -84,6 +84,75 @@ fn shmem_reset() {
     shmem_cache::reset();
 }
 
+/// TA-D2 spike — pre-warm the shmem dict cache from
+/// `_pgrdf_dictionary` so a fresh backend's first ingest can hit
+/// the cache for any term already known to the dictionary.
+///
+/// Walks `_pgrdf_dictionary` ordered by `id` (oldest first — most-
+/// likely-shared, e.g. core RDF/RDFS/OWL predicates) and calls
+/// `shmem_cache::insert_committed` for each row, up to `limit` rows.
+///
+/// Returns the number of rows pre-warmed (clipped to actual rows in
+/// the dictionary if smaller than `limit`).
+///
+/// **Use cases:**
+///
+/// - Boot a fresh backend connecting to a database that already has
+///   `_pgrdf_dictionary` populated by prior sessions. Without
+///   pre-warm, the new backend's per-ingest path hits SPI for every
+///   term despite the dict already knowing them.
+/// - After `pgrdf.shmem_reset()` (e.g. post `DROP/CREATE EXTENSION`),
+///   re-establish cache contents in one call instead of bleeding
+///   through ingest-by-ingest.
+///
+/// **Measurement scope (TA-D2 spike):**
+///
+/// 1. Cold ingest LUBM-1 (records baseline shmem_cache_hits).
+/// 2. `shmem_reset()` to drop cache contents (dict survives).
+/// 3. `shmem_cache_prewarm(100000)` to refill from
+///    `_pgrdf_dictionary` (now populated).
+/// 4. Ingest LUBM-1 into a different graph — expect
+///    shmem_cache_hits dominant, dict_db_calls → near-zero.
+///
+/// The spike measurement informs the TA-D1 decision (combine with
+/// TA-D3 batch path; pre-warm complements but does not replace).
+///
+/// SQL: `pgrdf.shmem_cache_prewarm(limit BIGINT DEFAULT 100000) -> BIGINT`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn shmem_cache_prewarm(limit: default!(i64, 100000)) -> i64 {
+    use pgrx::Spi;
+    let mut count: i64 = 0;
+    Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT id, term_type, lexical_value, datatype_iri_id, language_tag
+                 FROM pgrdf._pgrdf_dictionary
+                 ORDER BY id
+                 LIMIT $1",
+                None,
+                &[limit.into()],
+            )
+            .expect("shmem_cache_prewarm: select failed");
+        for row in table {
+            let id: i64 = row.get(1).expect("id").expect("id NULL");
+            let term_type: i16 = row.get(2).expect("term_type").expect("term_type NULL");
+            let value: String = row.get(3).expect("value").expect("value NULL");
+            let datatype_id: Option<i64> = row.get(4).expect("datatype");
+            let language: Option<String> = row.get(5).expect("language");
+            shmem_cache::insert_committed(
+                term_type,
+                &value,
+                datatype_id,
+                language.as_deref(),
+                id,
+            );
+            count += 1;
+        }
+    });
+    count
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {

@@ -6,6 +6,12 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added (Track A spike — TA-D2 shmem cache pre-warm)
+
+- **`src/storage/stats.rs`** `pgrdf.shmem_cache_prewarm(limit BIGINT DEFAULT 100000) → BIGINT` — walks `_pgrdf_dictionary` ordered by `id` (oldest first; core RDF/RDFS/OWL predicates absorbed first) and calls existing `shmem_cache::insert_committed` for each row. Returns count of rows pre-warmed. Use cases: boot a fresh backend connecting to a database with an existing populated dictionary; post-`DROP/CREATE EXTENSION` re-establishment; explicit warm-up before a measured ingest run.
+- **`tests/perf/lubm/spike-ta-d2.lubm-1.json`** + **`tests/perf/lubm/spike-ta-d2.lubm-1.md`** — 3-way side-by-side measurement: cold ingest → `shmem_reset` + `shmem_cache_prewarm(100000)` → warm ingest into a different graph. **Result: -54.0% e2e ingest time, -72.7% dict_ms, 16,295 of 26,473 would-have-been-SPI calls absorbed by the cache** (61.5% absorption rate; the remaining 10,178 hit DB because SLOTS=16,384 + PROBE_DEPTH=8 evicts the rest under collision pressure — a SLOTS bump is a future tunable). Triples count identical (correctness preserved). Larger win than TA-D3's -17% e2e.
+- **`tests/regression/sql/129-shmem-cache-prewarm.sql`** + matching `expected/129-*.out` — correctness gate: 3 boolean assertions covering prewarm on empty dict (returns ≥ 0), prewarm count equals dict row count, and prewarm respects the `limit` arg. All evaluate to `t`.
+
 ### Added (Track A spike — TA-D3 batched dict resolution)
 
 - **`src/storage/dict.rs`** `put_terms_batch(terms) → Vec<i64>` — new internal entry point that resolves N dict terms in **2 SPI calls** (bulk INSERT ON CONFLICT DO NOTHING + bulk JOIN-back lookup with `WITH ORDINALITY` for input-order preservation) instead of the per-term `put_term_full` (which is 1-2 SPI calls each). Skips shmem cache integration for the spike — TA-D2 covers warming separately.
