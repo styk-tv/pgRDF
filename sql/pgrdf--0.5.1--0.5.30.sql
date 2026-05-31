@@ -1,11 +1,11 @@
--- pgrdf--0.5.1--0.5.29.sql
+-- pgrdf--0.5.1--0.5.30.sql
 --
 -- No-op upgrade script from v0.5.1 (the only previously-installable
 -- version, due to the Cargo.toml-stuck-at-0.5.1 bug surfaced by
--- OCI-GERMINATION on 2026-05-30) to v0.5.29 (the first release that
+-- OCI-GERMINATION on 2026-05-30) to v0.5.30 (the first release that
 -- bumps the internal version label to match the tag).
 --
--- The pgrdf SCHEMA is byte-identical between 0.5.1 and 0.5.29 — every
+-- The pgrdf SCHEMA is byte-identical between 0.5.1 and 0.5.30 — every
 -- intermediate release (v0.5.2 through v0.5.23) built from the same
 -- Cargo.toml version field, so they all shipped the same SQL filename
 -- (`pgrdf--0.5.1.sql`) with the same content. The only changes that
@@ -14,7 +14,7 @@
 -- the SQL surface the dictionary / quads / graphs tables ship.
 --
 -- This script must exist for PostgreSQL to consider the
--- ``ALTER EXTENSION pgrdf UPDATE TO '0.5.29'`` path valid. Its body
+-- ``ALTER EXTENSION pgrdf UPDATE TO '0.5.30'`` path valid. Its body
 -- intentionally has no DDL — declaring the path is sufficient.
 --
 -- Existing 0.5.1-labeled installs will pick up the new .so (with

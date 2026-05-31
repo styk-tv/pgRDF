@@ -171,6 +171,26 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+
+      # `actions/checkout@v4 fetch-tags: true` fetches tag REFS but
+      # NOT the annotated tag OBJECTS. So `git for-each-ref
+      # refs/tags/<v> --format='%(contents)'` falls through to the
+      # COMMIT's message (the merge commit at the tag's ref) instead
+      # of the tag annotation. Caught on v0.5.29 release.yml run
+      # 26705375440 — the pre-publish gate fired exactly as designed
+      # ("body does not contain 0.5.29") because the rendered body
+      # was the commit's "Merge branch 'main' of …" auto-message.
+      #
+      # Explicit `git fetch --tags --force origin` here replaces
+      # the shallow tag refs with full annotated tag objects, so
+      # the message becomes available to `for-each-ref` in the next
+      # step.
+      - name: Refetch annotated tag objects (actions/checkout #1467)
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          echo "tag type for ${GITHUB_REF_NAME}: $(git cat-file -t ${GITHUB_REF_NAME} 2>&1 || echo missing)"
+
       - uses: actions/download-artifact@v4
         with: { path: artifacts, merge-multiple: true }
       - name: Build PGXN source archive
