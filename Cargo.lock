@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "pgrdf"
-version = "0.5.25"
+version = "0.5.26"
 dependencies = [
  "oxrdf",
  "oxttl",

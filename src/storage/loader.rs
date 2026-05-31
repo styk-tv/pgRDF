@@ -76,15 +76,15 @@ struct LoaderStats {
     /// plus the loop bookkeeping). Each measures the cumulative
     /// time spent in its phase across the entire ingest call:
     ///
-    /// - `parse_ms`  — rio parser `next()` calls (Turtle/TriG/N-Quads
-    ///                 lexer + grammar; the time to read the next
-    ///                 triple from the input stream).
-    /// - `dict_ms`   — every `intern_term` call: HashMap lookup +
-    ///                 `put_term_full` cross-shmem-cache check +
-    ///                 dictionary SPI when the term wasn't cached.
+    /// - `parse_ms` — rio parser `next()` calls (Turtle/TriG/N-Quads
+    ///   lexer + grammar; the time to read the next triple from the
+    ///   input stream).
+    /// - `dict_ms` — every `intern_term` call: HashMap lookup +
+    ///   `put_term_full` cross-shmem-cache check + dictionary SPI when
+    ///   the term wasn't cached.
     /// - `insert_ms` — every `flush_batch` call: the prepared
-    ///                 `INSERT ... unnest($1,$2,$3)` plan execution
-    ///                 against `_pgrdf_quads`.
+    ///   `INSERT ... unnest($1,$2,$3)` plan execution against
+    ///   `_pgrdf_quads`.
     ///
     /// If `insert_ms` is a small fraction of `elapsed_ms`, replacing
     /// the unnest path with `heap_multi_insert` or `COPY BINARY`
