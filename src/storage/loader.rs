@@ -421,37 +421,13 @@ fn ingest_turtle_dict_batched<R: Read>(
                 unique_terms.insert(term_key(term_type::BLANK_NODE, b.as_str(), None, None));
             }
             Term::Literal(lit) => {
+                // Phase 1 places literals with placeholder None
+                // datatype_id. Custom-datatype literals need the
+                // datatype IRI's own dict id; Phase 1.5 + Phase 2
+                // resolve datatype IRIs first then re-key the
+                // literal with the proper datatype_id.
                 let lang = lit.language();
-                let datatype_iri = lit.datatype().as_str();
-                let datatype_id = if datatype_iri == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
-                    && lang.is_some()
-                {
-                    None
-                } else if datatype_iri == "http://www.w3.org/2001/XMLSchema#string" {
-                    None
-                } else {
-                    // Datatype IRIs are themselves URIs in the dict.
-                    // The spike resolves them in the SAME batch as the
-                    // literal — but the literal's `datatype_id` field
-                    // must reference an already-known id. For the
-                    // spike, defer datatype-IRI resolution to a second
-                    // mini-pass: gather datatype IRIs first, resolve
-                    // them, THEN add literal keys with proper
-                    // datatype_id. Implemented below by collecting all
-                    // datatype IRIs first and resolving them as
-                    // term-type URI in a pre-pass.
-                    //
-                    // To keep this Phase-1 step linear, we record None
-                    // here and re-key in Phase-1.5 after the datatype
-                    // IRIs are known.
-                    None
-                };
-                unique_terms.insert(term_key(
-                    term_type::LITERAL,
-                    lit.value(),
-                    datatype_id,
-                    lang,
-                ));
+                unique_terms.insert(term_key(term_type::LITERAL, lit.value(), None, lang));
             }
             #[allow(unreachable_patterns)]
             _ => {}
@@ -494,11 +470,16 @@ fn ingest_turtle_dict_batched<R: Read>(
     //               the full set of unique non-datatype-IRI terms ──
     let mut full_terms: HashSet<DictKey> = HashSet::new();
     // Re-add subject/predicate URIs (these are subset of unique_terms).
-    full_terms.extend(unique_terms.iter().filter(|k| {
-        // Drop literals from the partially-built set; they'll be
-        // re-added with proper datatype_id below.
-        k.0 != term_type::LITERAL
-    }).cloned());
+    full_terms.extend(
+        unique_terms
+            .iter()
+            .filter(|k| {
+                // Drop literals from the partially-built set; they'll be
+                // re-added with proper datatype_id below.
+                k.0 != term_type::LITERAL
+            })
+            .cloned(),
+    );
     // Datatype IRIs are also URI terms — already in unique_terms via
     // the predicate-position scan; but datatypes that appear ONLY as
     // literal datatypes also need to be in the dict. Re-include.
@@ -510,11 +491,13 @@ fn ingest_turtle_dict_batched<R: Read>(
         if let Term::Literal(lit) = &tr.object {
             let lang = lit.language();
             let dt = lit.datatype().as_str();
-            let datatype_id = if dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
-                && lang.is_some()
+            // Plain `xsd:string` and lang-tagged `rdf:langString`
+            // literals have None datatype_id per pgRDF convention;
+            // all other typed literals reference the resolved dict
+            // id for their datatype IRI (from Phase 1.5).
+            let datatype_id = if dt == "http://www.w3.org/2001/XMLSchema#string"
+                || (dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" && lang.is_some())
             {
-                None
-            } else if dt == "http://www.w3.org/2001/XMLSchema#string" {
                 None
             } else {
                 dt_iri_id.get(dt).copied()
@@ -541,8 +524,10 @@ fn ingest_turtle_dict_batched<R: Read>(
         .collect();
     let mut total_calls = 0i64;
     for chunk in pending.chunks(dict_batch_size) {
-        let chunk_v: Vec<(i16, String, Option<i64>, Option<String>)> =
-            chunk.iter().map(|k| (k.0, k.1.clone(), k.2, k.3.clone())).collect();
+        let chunk_v: Vec<(i16, String, Option<i64>, Option<String>)> = chunk
+            .iter()
+            .map(|k| (k.0, k.1.clone(), k.2, k.3.clone()))
+            .collect();
         let ids = crate::storage::dict::put_terms_batch(&chunk_v);
         for (k, id) in chunk.iter().zip(ids.iter()) {
             cache.insert(k.clone(), *id);
@@ -565,25 +550,27 @@ fn ingest_turtle_dict_batched<R: Read>(
     };
     for triple in triples {
         let s_key = match &triple.subject {
-            NamedOrBlankNode::NamedNode(n) => {
-                (term_type::URI, n.as_str().to_string(), None, None)
-            }
+            NamedOrBlankNode::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
             NamedOrBlankNode::BlankNode(b) => {
                 (term_type::BLANK_NODE, b.as_str().to_string(), None, None)
             }
         };
-        let p_key = (term_type::URI, triple.predicate.as_str().to_string(), None, None);
+        let p_key = (
+            term_type::URI,
+            triple.predicate.as_str().to_string(),
+            None,
+            None,
+        );
         let o_key = match &triple.object {
             Term::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
             Term::BlankNode(b) => (term_type::BLANK_NODE, b.as_str().to_string(), None, None),
             Term::Literal(lit) => {
                 let lang = lit.language();
                 let dt = lit.datatype().as_str();
-                let datatype_id = if dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
-                    && lang.is_some()
+                let datatype_id = if dt == "http://www.w3.org/2001/XMLSchema#string"
+                    || (dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+                        && lang.is_some())
                 {
-                    None
-                } else if dt == "http://www.w3.org/2001/XMLSchema#string" {
                     None
                 } else {
                     dt_iri_id.get(dt).copied()
@@ -960,9 +947,8 @@ fn load_turtle_dict_batched(
     base_iri: default!(Option<&str>, "NULL"),
     dict_batch_size: default!(i32, 500),
 ) -> pgrx::JsonB {
-    let file = File::open(path).unwrap_or_else(|e| {
-        panic!("load_turtle_dict_batched: failed to open {path:?}: {e}")
-    });
+    let file = File::open(path)
+        .unwrap_or_else(|e| panic!("load_turtle_dict_batched: failed to open {path:?}: {e}"));
     let base = base_iri.filter(|s| !s.is_empty());
     let stats = ingest_turtle_dict_batched(
         BufReader::new(file),

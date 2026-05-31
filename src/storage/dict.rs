@@ -129,9 +129,7 @@ fn put_term(value: &str, term_type: i16) -> i64 {
 /// `terms[i]`. Panics on SPI failure or on missing post-insert
 /// lookup (which would indicate a UNIQUE constraint mismatch — a
 /// bug, not user-recoverable).
-pub(crate) fn put_terms_batch(
-    terms: &[(i16, String, Option<i64>, Option<String>)],
-) -> Vec<i64> {
+pub(crate) fn put_terms_batch(terms: &[(i16, String, Option<i64>, Option<String>)]) -> Vec<i64> {
     if terms.is_empty() {
         return Vec::new();
     }

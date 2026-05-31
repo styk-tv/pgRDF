@@ -104,7 +104,7 @@ spike_triples AS (
 )
 SELECT (
   NOT EXISTS (
-    SELECT 1 FROM baseline_triples
+    SELECT * FROM baseline_triples
     EXCEPT
     SELECT * FROM spike_triples
   )
@@ -139,7 +139,7 @@ spike_triples AS (
 )
 SELECT (
   NOT EXISTS (
-    SELECT 1 FROM spike_triples
+    SELECT * FROM spike_triples
     EXCEPT
     SELECT * FROM baseline_triples
   )
