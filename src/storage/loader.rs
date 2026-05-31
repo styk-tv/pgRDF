@@ -69,6 +69,30 @@ struct LoaderStats {
     dict_db_calls: i64,
     quad_batches: i64,
     elapsed_ms: f64,
+    /// Phase-0 instrumentation supporting the TA-11 (heap_multi_insert)
+    /// + TA-10 (COPY BINARY) spike scope decision. The three phase
+    /// timers below sum to roughly `elapsed_ms` (small per-iteration
+    /// overhead lives outside any phase — Instant calls themselves
+    /// plus the loop bookkeeping). Each measures the cumulative
+    /// time spent in its phase across the entire ingest call:
+    ///
+    /// - `parse_ms`  — rio parser `next()` calls (Turtle/TriG/N-Quads
+    ///                 lexer + grammar; the time to read the next
+    ///                 triple from the input stream).
+    /// - `dict_ms`   — every `intern_term` call: HashMap lookup +
+    ///                 `put_term_full` cross-shmem-cache check +
+    ///                 dictionary SPI when the term wasn't cached.
+    /// - `insert_ms` — every `flush_batch` call: the prepared
+    ///                 `INSERT ... unnest($1,$2,$3)` plan execution
+    ///                 against `_pgrdf_quads`.
+    ///
+    /// If `insert_ms` is a small fraction of `elapsed_ms`, replacing
+    /// the unnest path with `heap_multi_insert` or `COPY BINARY`
+    /// (TA-11 / TA-10) has low ROI and the spikes get re-scoped to
+    /// whichever phase IS dominant.
+    parse_ms: f64,
+    dict_ms: f64,
+    insert_ms: f64,
 }
 
 /// Resolve a term to its dictionary id, caching the result for the
@@ -252,9 +276,25 @@ fn ingest_turtle_with_stats<R: Read>(
     let mut batch_s: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
     let mut batch_p: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
     let mut batch_o: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    // Phase-0 timers: nanosecond accumulators converted to ms at
+    // the end. Per-iteration Instant::now() pairs add ~1ns each on
+    // modern CPUs; across 100k triples that's well under a ms of
+    // overhead, dwarfed by the work being measured.
+    let mut parse_ns: u128 = 0;
+    let mut dict_ns: u128 = 0;
+    let mut insert_ns: u128 = 0;
 
-    for triple_result in parser {
-        let triple = triple_result.expect("load_turtle: turtle parse error");
+    let mut iter = parser;
+    loop {
+        let t0 = Instant::now();
+        let next = iter.next();
+        parse_ns += t0.elapsed().as_nanos();
+        let triple = match next {
+            Some(r) => r.expect("load_turtle: turtle parse error"),
+            None => break,
+        };
+
+        let t1 = Instant::now();
         let s = subject_to_id(&triple.subject, &mut cache, &mut stats);
         let p = intern_term(
             &mut cache,
@@ -265,11 +305,14 @@ fn ingest_turtle_with_stats<R: Read>(
             None,
         );
         let o = object_to_id(&triple.object, &mut cache, &mut stats);
+        dict_ns += t1.elapsed().as_nanos();
+
         batch_s.push(s);
         batch_p.push(p);
         batch_o.push(o);
         stats.triples += 1;
         if batch_s.len() >= BATCH_SIZE {
+            let t2 = Instant::now();
             flush_batch(
                 &mut batch_s,
                 &mut batch_p,
@@ -277,8 +320,10 @@ fn ingest_turtle_with_stats<R: Read>(
                 graph_id,
                 &mut stats,
             );
+            insert_ns += t2.elapsed().as_nanos();
         }
     }
+    let t3 = Instant::now();
     flush_batch(
         &mut batch_s,
         &mut batch_p,
@@ -286,7 +331,12 @@ fn ingest_turtle_with_stats<R: Read>(
         graph_id,
         &mut stats,
     );
+    insert_ns += t3.elapsed().as_nanos();
+
     stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    stats.parse_ms = parse_ns as f64 / 1_000_000.0;
+    stats.dict_ms = dict_ns as f64 / 1_000_000.0;
+    stats.insert_ms = insert_ns as f64 / 1_000_000.0;
     stats
 }
 
@@ -298,6 +348,13 @@ fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
         "dict_db_calls":    stats.dict_db_calls,
         "quad_batches":     stats.quad_batches,
         "elapsed_ms":       stats.elapsed_ms,
+        // Phase-0 breakdown (TA-11 / TA-10 scope decision). Sum
+        // approximates `elapsed_ms` minus a small per-iteration
+        // overhead. See `LoaderStats` doc-comment for what each
+        // measures.
+        "parse_ms":         stats.parse_ms,
+        "dict_ms":          stats.dict_ms,
+        "insert_ms":        stats.insert_ms,
     }))
 }
 
@@ -488,6 +545,14 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
         "quad_batches":     stats.quad_batches,
         "graphs":           graphs,
         "elapsed_ms":       stats.elapsed_ms,
+        // Phase-0 breakdown (TA-11 / TA-10 scope decision); zero on
+        // the quad path until `ingest_quads_with_stats` gets its own
+        // phase timers (Phase-0 first focused on the Turtle path —
+        // LUBM-1 baseline is Turtle). The fields stay present in the
+        // JSON shape so downstream consumers see a stable schema.
+        "parse_ms":         stats.parse_ms,
+        "dict_ms":          stats.dict_ms,
+        "insert_ms":        stats.insert_ms,
     }))
 }
 

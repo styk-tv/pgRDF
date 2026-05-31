@@ -59,7 +59,7 @@ Once the files are in place and Postgres is running:
 
 ```sql
 CREATE EXTENSION pgrdf;
-SELECT pgrdf.version();   -- → '0.5.25'
+SELECT pgrdf.version();   -- → '0.5.26'
 ```
 
 The extension declares `superuser = true` because we manipulate

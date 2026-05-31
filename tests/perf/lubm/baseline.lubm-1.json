@@ -1,9 +1,9 @@
 {
   "schema_version": "v0.6",
-  "produced_at": "2026-05-30T13:00:15Z",
+  "produced_at": "2026-05-31T02:48:26Z",
   "produced_by": "run-lubm.sh@mac9-2",
   "univ_count": 1,
-  "pgrdf_version": "0.5.1",
+  "pgrdf_version": "0.5.25",
   "postgres_major": 17,
   "fixtures": [
     {
@@ -11,8 +11,11 @@
       "kind": "sparql-select",
       "modes": {
         "default": {
-          "elapsed_ms": 1489.3604579999999,
-          "dict_lookups": 342391
+          "elapsed_ms": 1517.646787,
+          "dict_lookups": 342391,
+          "parse_ms": 102.643671,
+          "dict_ms": 1113.646637,
+          "insert_ms": 291.818857
         }
       },
       "comparison_tolerance": { "elapsed_ms_pct": 50 }
@@ -22,7 +25,7 @@
       "kind": "sparql-select",
       "modes": {
         "default": {
-          "elapsed_ms": 1.796
+          "elapsed_ms": 1.909
         }
       },
       "comparison_tolerance": { "elapsed_ms_pct": 50 }

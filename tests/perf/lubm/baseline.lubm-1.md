@@ -43,18 +43,36 @@ clean postgres+pgrdf sidecar.
 - **modes.default.dict_lookups** — sum of `dict_cache_hits` +
   `shmem_cache_hits` + `dict_db_calls` (diagnostic only).
 
-Baseline numbers at v0.5.1 / pg17 / Apple-Silicon laptop / Colima
+Baseline numbers at v0.5.25 / pg17 / Apple-Silicon laptop / Colima
 docker:
 
 | metric             | value     | per-triple |
 |--------------------|-----------|------------|
 | triples            | 103,104   |            |
-| elapsed_ms         | 1,489     | 14.4 μs    |
+| elapsed_ms         | 1,518     | 14.7 μs    |
 | dict_lookups       | 342,391   | 3.32       |
-| effective throughput |         | ~69,000 triples/sec |
+| effective throughput |         | ~68,000 triples/sec |
 
 (elapsed_ms_pct tolerance is the default ±50% — CI runner noise
 floor; tighten when multiple consecutive localhost runs hold.)
+
+### Phase-0 breakdown (added v0.5.26)
+
+Per-phase timers in `LoaderStats` (loader.rs) split the ingest
+elapsed_ms into three accumulators. Total ≈ elapsed_ms minus
+a small per-iteration overhead from the Instant calls
+themselves.
+
+| phase       | ms    | % of total | what it measures |
+|-------------|-------|------------|------------------|
+| parse_ms    | 103   | 7%         | rio Turtle `next()` calls — lexer + grammar |
+| dict_ms     | 1,114 | **73%**    | every `intern_term` call: HashMap lookup for cached repeat terms + cross-shmem-cache check + `put_term_full` SPI for unique terms (26,473 calls × ~42 µs each) |
+| insert_ms   | 292   | 19%       | 101 batches × `INSERT … unnest(s,p,o)` prepared plan against `_pgrdf_quads` |
+
+Why this matters for Track A: TA-11 (`heap_multi_insert`) and
+TA-10 (`COPY BINARY`) target the 19%. The 73% lever is dict
+resolution. See `_WIP/SPIKE.TRACK-A.phase0-findings.md` for the
+spike re-scope recommendation.
 
 ## Fixture: `lubm-1-q14-graduate-students`
 

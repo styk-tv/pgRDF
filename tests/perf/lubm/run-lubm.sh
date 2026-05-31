@@ -161,6 +161,13 @@ INGEST_ELAPSED=$(extract_num "${INGEST_JSON}" "elapsed_ms")
 INGEST_DICT_HITS=$(extract_num "${INGEST_JSON}" "dict_cache_hits")
 INGEST_SHMEM_HITS=$(extract_num "${INGEST_JSON}" "shmem_cache_hits")
 INGEST_DB_CALLS=$(extract_num "${INGEST_JSON}" "dict_db_calls")
+# Phase-0 timers (loader.rs LoaderStats — added pre-v0.5.26 to
+# inform the TA-11 / TA-10 / TA-9 spike scope decision). Default
+# to 0 if the loader being measured predates Phase-0 (forward-
+# compat for diffing against historical baselines).
+INGEST_PARSE_MS=$(extract_num "${INGEST_JSON}" "parse_ms")
+INGEST_DICT_MS=$(extract_num "${INGEST_JSON}" "dict_ms")
+INGEST_INSERT_MS=$(extract_num "${INGEST_JSON}" "insert_ms")
 [ -n "${INGEST_TRIPLES}" ] || fail "ingest report missing triples: ${INGEST_JSON}" 3
 
 # Total dict_lookups = cache hits + db calls (a useful diagnostic).
@@ -168,6 +175,8 @@ INGEST_LOOKUPS=$(( ${INGEST_DICT_HITS:-0} + ${INGEST_SHMEM_HITS:-0} + ${INGEST_D
 
 printf '[run-lubm]   triples=%s  elapsed_ms=%s  dict_db_calls=%s\n' \
   "${INGEST_TRIPLES}" "${INGEST_ELAPSED}" "${INGEST_DB_CALLS}"
+printf '[run-lubm]   phase: parse_ms=%s  dict_ms=%s  insert_ms=%s\n' \
+  "${INGEST_PARSE_MS:-0}" "${INGEST_DICT_MS:-0}" "${INGEST_INSERT_MS:-0}"
 
 # ── query ───────────────────────────────────────────────────────────
 printf '[run-lubm] running Q14 (count GraduateStudent instances)\n'
@@ -239,7 +248,10 @@ cat > "${OUTFILE}" <<JSON
       "modes": {
         "default": {
           "elapsed_ms": ${INGEST_ELAPSED:-0},
-          "dict_lookups": ${INGEST_LOOKUPS:-0}
+          "dict_lookups": ${INGEST_LOOKUPS:-0},
+          "parse_ms": ${INGEST_PARSE_MS:-0},
+          "dict_ms": ${INGEST_DICT_MS:-0},
+          "insert_ms": ${INGEST_INSERT_MS:-0}
         }
       },
       "comparison_tolerance": { "elapsed_ms_pct": 50 }
