@@ -140,13 +140,7 @@ fn shmem_cache_prewarm(limit: default!(i64, 100000)) -> i64 {
             let value: String = row.get(3).expect("value").expect("value NULL");
             let datatype_id: Option<i64> = row.get(4).expect("datatype");
             let language: Option<String> = row.get(5).expect("language");
-            shmem_cache::insert_committed(
-                term_type,
-                &value,
-                datatype_id,
-                language.as_deref(),
-                id,
-            );
+            shmem_cache::insert_committed(term_type, &value, datatype_id, language.as_deref(), id);
             count += 1;
         }
     });
