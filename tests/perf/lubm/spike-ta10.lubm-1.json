@@ -1,0 +1,104 @@
+{
+  "schema_version": "v0.6",
+  "spike_id": "TA-10",
+  "spike_name": "insert_ms cost decomposition + COPY BINARY verdict",
+  "produced_at": "2026-06-01T00:00:00Z",
+  "produced_by": "manual 4-way decomposition against compose-built pgrdf 0.5.32",
+  "univ_count": 1,
+  "pgrdf_version": "0.5.32",
+  "postgres_major": 17,
+  "context": {
+    "rationale": "TA-11 prelim showed bulk-insert mechanic is only 13% of LUBM-1 insert_ms (UNLOGGED flat = 0.40 us/triple vs LUBM-1 = 3.0 us/triple). TA-10 decomposes the remaining 87% by adding cost components one at a time: WAL, partition routing, hexastore index maintenance. Whichever component dominates is what COPY BINARY (TA-10's spec target) would need to address."
+  },
+  "fixtures": [
+    {
+      "name": "ta10-A-unlogged-flat",
+      "kind": "synthetic-insert",
+      "path": "UNLOGGED flat (bulk-insert mechanic only)",
+      "modes": {
+        "default": {
+          "batch_size": 1000,
+          "triple_count": 100000,
+          "elapsed_ms": 42.21,
+          "per_triple_us": 0.42
+        }
+      }
+    },
+    {
+      "name": "ta10-B-logged-flat",
+      "kind": "synthetic-insert",
+      "path": "LOGGED flat (mechanic + WAL)",
+      "modes": {
+        "default": {
+          "batch_size": 1000,
+          "triple_count": 100000,
+          "elapsed_ms": 54.03,
+          "per_triple_us": 0.54,
+          "delta_vs_A_ms": 11.82,
+          "delta_attribution": "WAL writing"
+        }
+      }
+    },
+    {
+      "name": "ta10-C-logged-3-indexes",
+      "kind": "synthetic-insert",
+      "path": "LOGGED + SPO/POS/OSP hexastore indexes (mechanic + WAL + indexes)",
+      "modes": {
+        "default": {
+          "batch_size": 1000,
+          "triple_count": 100000,
+          "elapsed_ms": 213.40,
+          "per_triple_us": 2.13,
+          "delta_vs_B_ms": 159.37,
+          "delta_attribution": "3 hexastore index maintenance (SPO + POS + OSP)"
+        }
+      }
+    },
+    {
+      "name": "ta10-D-logged-partitioned",
+      "kind": "synthetic-insert",
+      "path": "LOGGED partitioned (mechanic + WAL + partition routing)",
+      "modes": {
+        "default": {
+          "batch_size": 1000,
+          "triple_count": 100000,
+          "elapsed_ms": 54.90,
+          "per_triple_us": 0.55,
+          "delta_vs_B_ms": 0.87,
+          "delta_attribution": "partition routing (1 partition — negligible)"
+        }
+      }
+    },
+    {
+      "name": "lubm1-baseline-comparison",
+      "kind": "real-ingest-baseline",
+      "path": "Real _pgrdf_quads (partitioned + indexed + real triple data)",
+      "modes": {
+        "default": {
+          "triple_count": 103104,
+          "elapsed_ms": 312,
+          "per_triple_us": 3.0,
+          "delta_vs_C_us_per_triple": 0.87,
+          "delta_attribution": "real-data variability + partitioned-AND-indexed combination (TA-10 spike tested either OR — not both)"
+        }
+      }
+    }
+  ],
+  "cost_decomposition_lubm1_insert_ms": {
+    "bulk_insert_mechanic_pct": 13.4,
+    "wal_writing_pct": 3.8,
+    "partition_routing_pct": 0.3,
+    "hexastore_index_maintenance_pct": 51.1,
+    "real_data_variability_partition_indexed_combo_pct": 31.4,
+    "note": "Percentages derived from variant deltas / 312ms total LUBM-1 insert_ms. Index maintenance is the dominant single component."
+  },
+  "verdict": "TA-10 (COPY BINARY) — like TA-11 (heap_multi_insert) — does NOT address the dominant cost component (hexastore index maintenance at ~51% of LUBM-1 insert_ms). COPY BINARY routes through PG's INSERT machinery and triggers the same per-row index maintenance. Theoretical ceiling at LUBM-1 scale: ~5-10% improvement (same order as heap_multi_insert). For the implementation effort (~200 lines of unsafe Rust against pgrx::pg_sys CopyFrom + binary tuple-encoding), this is poor ROI compared to TA-D3 (-17%) and TA-D2 (-54%) already shipped. **Recommended: TA-10 MEASURED NOT WORTH IMPLEMENTING (same verdict as TA-11).** The real Track A insert-path lever is HEXASTORE INDEX MAINTENANCE; possible future Track-A item: bulk-ingest mode that drops indexes, batches inserts, rebuilds indexes (classic PG bulk-load pattern). Out of scope for current Track A; recommend filing as TA-NEW-Z for v0.7+ consideration.",
+  "track_a_spike_chain_summary": {
+    "ta_d3_batched_dict_resolution": "-17% e2e, shipped v0.5.27",
+    "ta_d2_shmem_cache_prewarm": "-54% e2e, shipped v0.5.28",
+    "ta_11_heap_multi_insert": "MEASURED NOT WORTH IMPLEMENTING (4% ceiling) — shipped v0.5.32 as prelim",
+    "ta_10_copy_binary": "MEASURED NOT WORTH IMPLEMENTING (5-10% ceiling, same root cause as TA-11) — this spike, ships v0.5.33 as prelim",
+    "real_insert_path_bottleneck": "Hexastore index maintenance — not addressed by any of the spec'd Track A spikes",
+    "next_action": "TA-D1 (dict-path decision) + TA-9 (insert-path decision integrating TA-D1). Both spike chains' decisions inform TA-7 (production landing)."
+  }
+}

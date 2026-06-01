@@ -146,3 +146,207 @@ fn flush_one(s: &mut Vec<i64>, p: &mut Vec<i64>, o: &mut Vec<i64>) {
     )
     .expect("spike_ta11_batch_sweep: insert failed");
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// TA-10 prelim — isolate the WAL + partition-routing contributions
+// ─────────────────────────────────────────────────────────────────────
+//
+// TA-11 prelim (above) measured the bulk-insert mechanic alone:
+// 0.40 us/triple at BATCH_SIZE=1000 against an UNLOGGED flat target.
+// The LUBM-1 baseline is 3.0 us/triple — a 7.5x gap. TA-10 asks: of
+// that 7.5x gap, how much is WAL writing (durability) vs partition
+// routing (PG's INSERT machinery routing rows to LIST partitions)?
+//
+// Two more variants of the same prepared INSERT...unnest path:
+//
+//   spike_ta10_logged_flat(...)           LOGGED flat target
+//   spike_ta10_logged_partitioned(...)    LOGGED partitioned target
+//
+// Combined with TA-11's UNLOGGED-flat number we can split the 7.5x
+// gap by component. COPY BINARY (the TA-10 spec's spike target) would
+// only address what the bulk-insert mechanic accounts for; WAL +
+// partition routing are infrastructure costs COPY also pays.
+
+const TA10_SETUP_LOGGED_FLAT_SQL: &str = "
+    DROP TABLE IF EXISTS pgrdf_ta10_logged_target;
+    CREATE TABLE pgrdf_ta10_logged_target (
+        subject_id   bigint NOT NULL,
+        predicate_id bigint NOT NULL,
+        object_id    bigint NOT NULL,
+        graph_id     bigint NOT NULL
+    );
+";
+
+const TA10_INSERT_LOGGED_SQL: &str = "INSERT INTO pgrdf_ta10_logged_target \
+    (subject_id, predicate_id, object_id, graph_id) \
+    SELECT s, p, o, $4 \
+      FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS t(s, p, o)";
+
+const TA10_SETUP_LOGGED_PART_SQL: &str = "
+    DROP TABLE IF EXISTS pgrdf_ta10_partitioned_target;
+    CREATE TABLE pgrdf_ta10_partitioned_target (
+        subject_id   bigint NOT NULL,
+        predicate_id bigint NOT NULL,
+        object_id    bigint NOT NULL,
+        graph_id     bigint NOT NULL
+    ) PARTITION BY LIST (graph_id);
+    CREATE TABLE pgrdf_ta10_partitioned_target_p1 PARTITION OF pgrdf_ta10_partitioned_target
+        FOR VALUES IN (1);
+";
+
+const TA10_INSERT_PART_SQL: &str = "INSERT INTO pgrdf_ta10_partitioned_target \
+    (subject_id, predicate_id, object_id, graph_id) \
+    SELECT s, p, o, $4 \
+      FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS t(s, p, o)";
+
+const TA10_SETUP_LOGGED_INDEXED_SQL: &str = "
+    DROP TABLE IF EXISTS pgrdf_ta10_indexed_target;
+    CREATE TABLE pgrdf_ta10_indexed_target (
+        subject_id   bigint NOT NULL,
+        predicate_id bigint NOT NULL,
+        object_id    bigint NOT NULL,
+        graph_id     bigint NOT NULL
+    );
+    -- Mirror _pgrdf_quads' SPO/POS/OSP hexastore indexes.
+    CREATE INDEX pgrdf_ta10_idx_spo ON pgrdf_ta10_indexed_target
+        (subject_id, predicate_id, object_id);
+    CREATE INDEX pgrdf_ta10_idx_pos ON pgrdf_ta10_indexed_target
+        (predicate_id, object_id, subject_id);
+    CREATE INDEX pgrdf_ta10_idx_osp ON pgrdf_ta10_indexed_target
+        (object_id, subject_id, predicate_id);
+";
+
+const TA10_INSERT_INDEXED_SQL: &str = "INSERT INTO pgrdf_ta10_indexed_target \
+    (subject_id, predicate_id, object_id, graph_id) \
+    SELECT s, p, o, $4 \
+      FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS t(s, p, o)";
+
+/// TA-10 prelim variant A — LOGGED flat target (adds WAL cost vs
+/// TA-11's UNLOGGED flat target; same prepared INSERT...unnest path).
+///
+/// SQL: `pgrdf.spike_ta10_logged_flat(triple_count INT DEFAULT 100000,
+///       batch_size INT DEFAULT 1000) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn spike_ta10_logged_flat(
+    triple_count: default!(i32, 100000),
+    batch_size: default!(i32, 1000),
+) -> pgrx::JsonB {
+    ta10_run(
+        triple_count,
+        batch_size,
+        TA10_SETUP_LOGGED_FLAT_SQL,
+        TA10_INSERT_LOGGED_SQL,
+        "logged_flat_target",
+    )
+}
+
+/// TA-10 prelim variant C — LOGGED + SPO/POS/OSP indexed flat target.
+/// Adds the three hexastore index maintenance costs on top of variant
+/// A (LOGGED flat). Mirrors `_pgrdf_quads`' actual index shape so the
+/// gap to LUBM-1 baseline shrinks.
+///
+/// SQL: `pgrdf.spike_ta10_logged_indexed(triple_count INT DEFAULT 100000,
+///       batch_size INT DEFAULT 1000) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn spike_ta10_logged_indexed(
+    triple_count: default!(i32, 100000),
+    batch_size: default!(i32, 1000),
+) -> pgrx::JsonB {
+    ta10_run(
+        triple_count,
+        batch_size,
+        TA10_SETUP_LOGGED_INDEXED_SQL,
+        TA10_INSERT_INDEXED_SQL,
+        "logged_indexed_flat_target",
+    )
+}
+
+/// TA-10 prelim variant B — LOGGED partitioned target (adds partition
+/// routing cost on top of variant A).
+///
+/// SQL: `pgrdf.spike_ta10_logged_partitioned(triple_count INT DEFAULT 100000,
+///       batch_size INT DEFAULT 1000) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn spike_ta10_logged_partitioned(
+    triple_count: default!(i32, 100000),
+    batch_size: default!(i32, 1000),
+) -> pgrx::JsonB {
+    ta10_run(
+        triple_count,
+        batch_size,
+        TA10_SETUP_LOGGED_PART_SQL,
+        TA10_INSERT_PART_SQL,
+        "logged_partitioned_target",
+    )
+}
+
+fn ta10_run(
+    triple_count: i32,
+    batch_size: i32,
+    setup_sql: &str,
+    insert_sql: &str,
+    path_label: &'static str,
+) -> pgrx::JsonB {
+    let triple_count = triple_count.max(0) as usize;
+    let batch_size = batch_size.max(1) as usize;
+
+    Spi::run(setup_sql).expect("ta10_run: setup failed");
+
+    let mut batch_s: Vec<i64> = Vec::with_capacity(batch_size);
+    let mut batch_p: Vec<i64> = Vec::with_capacity(batch_size);
+    let mut batch_o: Vec<i64> = Vec::with_capacity(batch_size);
+
+    let start = Instant::now();
+    let mut batches_flushed: i64 = 0;
+    let mut spi_ns: u128 = 0;
+
+    let flush = |s: &mut Vec<i64>, p: &mut Vec<i64>, o: &mut Vec<i64>| {
+        let s_arr: Vec<i64> = std::mem::take(s);
+        let p_arr: Vec<i64> = std::mem::take(p);
+        let o_arr: Vec<i64> = std::mem::take(o);
+        let g: i64 = 1;
+        Spi::run_with_args(
+            insert_sql,
+            &[s_arr.into(), p_arr.into(), o_arr.into(), g.into()],
+        )
+        .expect("ta10_run: insert failed");
+    };
+
+    for i in 0..triple_count {
+        batch_s.push(i as i64);
+        batch_p.push((i + 1) as i64);
+        batch_o.push((i + 2) as i64);
+        if batch_s.len() >= batch_size {
+            let t = Instant::now();
+            flush(&mut batch_s, &mut batch_p, &mut batch_o);
+            spi_ns += t.elapsed().as_nanos();
+            batches_flushed += 1;
+        }
+    }
+    if !batch_s.is_empty() {
+        let t = Instant::now();
+        flush(&mut batch_s, &mut batch_p, &mut batch_o);
+        spi_ns += t.elapsed().as_nanos();
+        batches_flushed += 1;
+    }
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let spi_ms = spi_ns as f64 / 1_000_000.0;
+
+    pgrx::JsonB(json!({
+        "path":             path_label,
+        "triple_count":     triple_count as i64,
+        "batch_size":       batch_size as i64,
+        "batches_flushed":  batches_flushed,
+        "elapsed_ms":       elapsed_ms,
+        "spi_ms":           spi_ms,
+        "per_triple_us":    (elapsed_ms * 1000.0) / (triple_count.max(1) as f64),
+        "per_batch_us":     if batches_flushed > 0 {
+            (spi_ms * 1000.0) / (batches_flushed as f64)
+        } else {
+            0.0
+        },
+    }))
+}

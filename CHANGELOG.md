@@ -6,6 +6,11 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added (Track A spike — TA-10 COPY BINARY prelim → measured-not-worth-implementing)
+
+- **`src/storage/loader_ta11.rs`** gains 3 new spike UDFs: `pgrdf.spike_ta10_logged_flat`, `pgrdf.spike_ta10_logged_partitioned`, `pgrdf.spike_ta10_logged_indexed`. Each runs the same prepared `INSERT ... unnest($1,$2,$3)` SQL against a target table with one cost component added (WAL, partition routing, or 3 hexastore indexes mirroring `_pgrdf_quads`' SPO/POS/OSP shape). The 4-way decomposition (combined with TA-11's UNLOGGED-flat baseline) isolates which component dominates LUBM-1's 3.0 µs/triple insert_ms.
+- **`tests/perf/lubm/spike-ta10.lubm-1.json`** + **`tests/perf/lubm/spike-ta10.lubm-1.md`** — 4-way cost decomposition. **Result: hexastore index maintenance is 51% of LUBM-1 insert_ms (159 ms of 312 ms). WAL is 3.8%, partition routing 0.3%, bulk-insert mechanic 13.4%, real-data + partitioned×indexed combination ~31%.** COPY BINARY routes through PG's INSERT machinery and triggers the same per-row index maintenance — it does NOT address the dominant cost. Theoretical ceiling at LUBM-1 scale: 5-10% improvement, for ~200 lines of unsafe Rust against `pgrx::pg_sys` CopyFrom + binary tuple encoding. **Recommended verdict: NOT WORTH IMPLEMENTING (same class as TA-11).** Surfaces a possible future TA-NEW-Z item (drop-indexes / bulk-insert / rebuild-indexes pattern — classic PG bulk-load technique) that addresses the actual 51% lever — out of current Track A scope, suggested for v0.7+ consideration. With TA-D3 (-17% e2e) and TA-D2 (-54% e2e) already shipped via the dict path, TA-9 decision (next) writes up the insert-path findings + closes the Track A spike chain.
+
 ### Added (Track A spike — TA-11 heap_multi_insert prelim → measured-not-worth-implementing)
 
 - **`src/storage/loader_ta11.rs`** + `src/storage/mod.rs` registration — new spike entry `pgrdf.spike_ta11_batch_sweep(triple_count INT DEFAULT 100000, batch_size INT DEFAULT 1000) → JSONB` that runs the production prepared `INSERT ... unnest($1,$2,$3)` SQL against an UNLOGGED flat target table. UNLOGGED + flat (un-partitioned) strips WAL writing and partition routing from the measurement so the bulk-insert mechanic alone is visible. Returns timing breakdown.
