@@ -2,7 +2,7 @@
   "name": "pgrdf",
   "abstract": "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning",
   "description": "pgRDF is a Rust-native PostgreSQL extension for RDF storage, SPARQL 1.1 query and update, SHACL validation, and OWL 2 RL or RDFS materialization inside PostgreSQL.",
-  "version": "0.5.33",
+  "version": "0.5.34",
   "maintainer": [
     "Peter Styk"
   ],
@@ -13,7 +13,7 @@
       "abstract": "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning",
       "file": "pgrdf.control",
       "docfile": "README.pgxn.md",
-      "version": "0.5.33"
+      "version": "0.5.34"
     }
   },
   "prereqs": {
