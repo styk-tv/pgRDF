@@ -124,6 +124,28 @@ jobs:
               --baseline tests/perf/lubm/baseline.lubm-10.json \
               --no-timing-gate
 
+      # ── Benchmark harness: ingest + RDFS + OWL-RL + Q14 ─────────
+      #
+      # Persistent per-run history accumulates in
+      # `target/perf-history/runs.jsonl` (gitignored) + a
+      # self-contained HTML report at
+      # `target/perf-history/index.html`. CI uploads BOTH the
+      # JSONL and the HTML as artifacts so a reviewer can grab
+      # the HTML, open it locally, and see the chart of all runs
+      # captured in that JSONL.
+      #
+      # The HTML is generated from the SINGLE jsonl line this
+      # run appends — CI doesn't see prior runs because the
+      # workspace is fresh each invocation. To see drift across
+      # CI runs, a follow-up could either (a) commit the JSONL
+      # to a tracked branch, or (b) accumulate via a cache
+      # action / external store. Out of scope for the MVP; the
+      # local dev path (`just benchmark`) accumulates locally.
+      - name: Run benchmark harness (LUBM-10 + RDFS + OWL-RL + Q14)
+        run: |
+          set -euo pipefail
+          bash tests/perf/benchmark-runner.sh 10
+
       # Always upload — the trend value is in collecting numbers
       # across nightly runs, not just failure triage. 90-day
       # retention default; bump if we ever want longer history.
@@ -135,3 +157,47 @@ jobs:
           path: target/perf-report.lubm-*.json
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Upload benchmark history + HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-history-${{ github.run_id }}
+          path: target/perf-history/
+          if-no-files-found: warn
+          retention-days: 90
+
+      # Surface the latest numbers in the workflow's Job Summary
+      # so a reviewer doesn't have to download the artifact to
+      # see what changed. GITHUB_STEP_SUMMARY accepts markdown.
+      - name: Job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f target/perf-history/last-run.json ]; then
+            python3 - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json, pathlib
+          d = json.loads(pathlib.Path("target/perf-history/last-run.json").read_text())
+          ing = d.get("ingest", {}) or {}
+          mat = d.get("materialize", {}) or {}
+          rdfs = (mat.get("rdfs") or {})
+          owl = (mat.get("owl_rl") or {})
+          q14 = d.get("q14", {}) or {}
+          def fm(x):
+              if x is None: return "—"
+              try: return f"{float(x):.1f}"
+              except Exception: return str(x)
+          def fi(x):
+              if x is None: return "—"
+              try: return f"{int(x):,}"
+              except Exception: return str(x)
+          print(f"## pgRDF benchmark · {d.get('ts','')}\n")
+          print(f"- **pgRDF**: `{d.get('pgrdf_version','?')}` ({d.get('git_sha','')[:8]})")
+          print(f"- **LUBM size**: {d.get('lubm_size','?')} ({fi(d.get('triples'))} triples)")
+          print(f"- **Ingest**: {fm(ing.get('elapsed_ms'))} ms (parse {fm(ing.get('parse_ms'))} · dict {fm(ing.get('dict_ms'))} · insert {fm(ing.get('insert_ms'))})")
+          print(f"- **Materialize RDFS**: {fm(rdfs.get('elapsed_ms'))} ms · {fi(rdfs.get('triples_inferred'))} inferred")
+          print(f"- **Materialize OWL-RL**: {fm(owl.get('elapsed_ms'))} ms · {fi(owl.get('triples_inferred'))} inferred")
+          print(f"- **Q14 (median of 3 warm)**: {fm(q14.get('elapsed_ms_median'))} ms · {fi(q14.get('result_count'))} rows")
+          print("\nFull HTML report: download the `perf-history-<run_id>` artifact below + open `index.html`.")
+          PY
+          fi

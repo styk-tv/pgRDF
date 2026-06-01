@@ -148,6 +148,24 @@ test-lubm-1:
         --actual target/perf-report.json \
         --baseline tests/perf/lubm/baseline.lubm-1.json
 
+# Benchmark harness — runs LUBM-N ingest + RDFS + OWL-RL materialize
+# + Q14, appends per-run JSON to `target/perf-history/runs.jsonl`,
+# and re-renders the HTML report. The history dir is gitignored;
+# accumulates locally so you can see drift run-to-run. CI uploads
+# the dir as an artifact (perf-nightly.yml). Default LUBM-10.
+benchmark LUBM_N="10":
+    mkdir -p target
+    bash tests/perf/benchmark-runner.sh {{LUBM_N}}
+    @echo
+    @echo "Open target/perf-history/index.html in a browser to see the report."
+
+# Just re-render the HTML report from existing runs.jsonl (no new
+# benchmark run). Useful after editing render-history.py.
+benchmark-report:
+    python3 tests/perf/render-history.py \
+        --history target/perf-history/runs.jsonl \
+        --out     target/perf-history/index.html
+
 # pg_dump round-trip verification for `_pgrdf_graphs` (LLD v0.4 §3.1
 # acceptance criterion). Boots a clean state, seeds two IRI bindings,
 # pg_dumps, drops + restores, then re-queries to verify the mapping
