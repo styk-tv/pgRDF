@@ -1,0 +1,89 @@
+{
+  "schema_version": "v0.6",
+  "spike_id": "TA-11",
+  "spike_name": "batch-size sweep against the unnest path (TA-11 prelim — informs whether heap_multi_insert is worth implementing)",
+  "produced_at": "2026-05-31T21:05:00Z",
+  "produced_by": "manual sweep against compose-built pgrdf 0.5.31",
+  "univ_count": 1,
+  "pgrdf_version": "0.5.31",
+  "postgres_major": 17,
+  "context": {
+    "target_table": "UNLOGGED flat (un-partitioned, no WAL)",
+    "rationale": "Isolates the bulk-insert mechanic from WAL writing + partition routing so we can tell which dominates total insert_ms. If the dominant cost was the prepared INSERT itself, this number would be close to LUBM-1's insert_ms; the gap reveals what heap_multi_insert can vs cannot address."
+  },
+  "fixtures": [
+    {
+      "name": "ta11-batch-100",
+      "kind": "synthetic-insert",
+      "modes": {
+        "default": {
+          "batch_size": 100,
+          "batches_flushed": 1000,
+          "triple_count": 100000,
+          "elapsed_ms": 55.796143,
+          "spi_ms": 55.053239,
+          "per_triple_us": 0.558,
+          "per_batch_us": 55.05
+        }
+      }
+    },
+    {
+      "name": "ta11-batch-1000-default",
+      "kind": "synthetic-insert",
+      "modes": {
+        "default": {
+          "batch_size": 1000,
+          "batches_flushed": 100,
+          "triple_count": 100000,
+          "elapsed_ms": 40.254933,
+          "spi_ms": 39.951807,
+          "per_triple_us": 0.403,
+          "per_batch_us": 399.52,
+          "note": "current loader.rs BATCH_SIZE constant — SWEET SPOT"
+        }
+      }
+    },
+    {
+      "name": "ta11-batch-10000",
+      "kind": "synthetic-insert",
+      "modes": {
+        "default": {
+          "batch_size": 10000,
+          "batches_flushed": 10,
+          "triple_count": 100000,
+          "elapsed_ms": 40.820837,
+          "spi_ms": 40.549095,
+          "per_triple_us": 0.408,
+          "per_batch_us": 4054.91
+        }
+      }
+    },
+    {
+      "name": "ta11-batch-100000-single",
+      "kind": "synthetic-insert",
+      "modes": {
+        "default": {
+          "batch_size": 100000,
+          "batches_flushed": 1,
+          "triple_count": 100000,
+          "elapsed_ms": 46.991872,
+          "spi_ms": 46.510049,
+          "per_triple_us": 0.470,
+          "per_batch_us": 46510.05
+        }
+      }
+    }
+  ],
+  "comparison_vs_lubm1_baseline": {
+    "baseline_insert_ms_real_lubm1": 312,
+    "baseline_per_triple_us": 3.0,
+    "sweet_spot_unlogged_flat_per_triple_us": 0.40,
+    "gap_factor": "7.5x",
+    "gap_components_likely": [
+      "WAL writing (UNLOGGED skips it entirely; dominant in the real path)",
+      "partition routing (real _pgrdf_quads is LIST-partitioned by graph_id; flat target is not)",
+      "real triple values vs sequential synthetic ids (negligible at this scale)"
+    ]
+  },
+  "verdict": "TA-11 (heap_multi_insert) addresses neither dominant cost component at LUBM-1 scale. Sweet spot of BATCH_SIZE=1000 is already at ~0.40 us/triple in the bulk-insert mechanic — going to 1-shot 100k batch only saves 6.7 ms vs 100 batches of 1000. SPI per-batch overhead is well-amortized at BATCH_SIZE>=1000 (per_batch_us = 400 us at default, of which the actual INSERT row work is the bulk; SPI dispatch itself is single-digit us). heap_multi_insert's prospective wins (skipping planner/executor, ~few us/batch) are dwarfed by WAL+partition routing costs that it cannot address. **Recommendation for TA-9**: TA-11 LOW priority. The Track A perf wins land via TA-D3 (-17% e2e dict batching) + TA-D2 (-54% e2e shmem prewarm). Insert path is already near-optimal modulo deployment-level GUCs (synchronous_commit, wal_level) which are not extension code. Document TA-11 as MEASURED NOT WORTH IMPLEMENTING and proceed to TA-10 (COPY BINARY — different mechanism, separately measure)."
+}
