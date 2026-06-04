@@ -128,6 +128,32 @@ fn shmem_cache_prewarm(limit: default!(i64, 100000)) -> i64 {
 /// lazy-prewarm latch (gated by `pgrdf.shmem_prewarm_on_init` or
 /// `pgrdf.ingest_dict_path = 'shmem_warm'`) can call it without
 /// round-tripping through the UDF dispatcher.
+///
+/// **Why `stage_for_commit` not `insert_committed`** — when run
+/// inside a transaction that has UNCOMMITTED `_pgrdf_dictionary`
+/// rows (e.g. an earlier `parse_turtle` call in the same outer
+/// transaction whose path was `baseline` or `batched` and then a
+/// later call switched to `shmem_warm` and triggered the auto-
+/// prewarm), the `SELECT * FROM _pgrdf_dictionary` here sees those
+/// uncommitted rows via MVCC. If we published them to shmem
+/// IMMEDIATELY via `insert_committed`, a subsequent ABORT of the
+/// outer transaction would leave shmem holding (fingerprint, id)
+/// entries pointing to dict rows that no longer exist — a future
+/// backend's `shmem_cache::lookup` then returns those stale ids,
+/// the per-call cache binds them, the quad gets written with a
+/// dict_id whose row was rolled back, and downstream `SELECT FROM
+/// _pgrdf_dictionary WHERE lexical_value = ...` returns 0 rows
+/// because the dict row never made it past commit. Symptom: tests
+/// 20-load-turtle, 21-typed-literals, 22-lang-tags, 130-ingest-
+/// dict-paths-parity, every SPARQL-FILTER-LITERAL test below the
+/// 130 sequence in the regression suite turns red.
+///
+/// `stage_for_commit` ties the publish to the same commit/abort
+/// callback set the loader uses elsewhere, so the prewarm becomes
+/// transactional: on COMMIT the entries land in shmem, on ABORT
+/// they're discarded along with the dict rows they reference. The
+/// direct-publish form (`insert_committed`) survives only as the
+/// commit-callback's drain path, which is correct by construction.
 pub(crate) fn shmem_cache_prewarm_impl(limit: i64) -> i64 {
     use pgrx::Spi;
     let mut count: i64 = 0;
@@ -148,7 +174,7 @@ pub(crate) fn shmem_cache_prewarm_impl(limit: i64) -> i64 {
             let value: String = row.get(3).expect("value").expect("value NULL");
             let datatype_id: Option<i64> = row.get(4).expect("datatype");
             let language: Option<String> = row.get(5).expect("language");
-            shmem_cache::insert_committed(term_type, &value, datatype_id, language.as_deref(), id);
+            shmem_cache::stage_for_commit(term_type, &value, datatype_id, language.as_deref(), id);
             count += 1;
         }
     });

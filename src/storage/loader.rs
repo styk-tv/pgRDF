@@ -438,19 +438,21 @@ fn ingest_turtle_dict_batched<R: Read>(
     stats.triples = triples.len() as i64;
 
     // ── Phase 1.5: resolve datatype IRIs first ──────────────────
-    // Literals with custom datatypes need an `datatype_iri_id` that
-    // references a dict row. Gather all unique datatype IRIs into a
-    // separate batch + resolve THEM first, then we know the ids
-    // when keying the literals.
+    // Literals with explicit datatype carry a `datatype_iri_id`
+    // pointing at the datatype IRI's dict row. Lang-tagged literals
+    // have None (the datatype is implicitly rdf:langString and not
+    // stored). Per the baseline `intern_term` rule (and the v0.5.37
+    // fix mirrored from the combined path), EVERY non-lang literal
+    // — including plain `xsd:string` — keeps an explicit datatype
+    // IRI so dict rows round-trip through the SPARQL executor's
+    // term equality. Gather all such datatype IRIs into a single
+    // batch and resolve them first.
     let t_dict = Instant::now();
     let mut datatype_iris: HashSet<String> = HashSet::new();
     for tr in &triples {
         if let Term::Literal(lit) = &tr.object {
-            let dt = lit.datatype().as_str();
-            if dt != "http://www.w3.org/2001/XMLSchema#string"
-                && dt != "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
-            {
-                datatype_iris.insert(dt.to_string());
+            if lit.language().is_none() {
+                datatype_iris.insert(lit.datatype().as_str().to_string());
             }
         }
     }
@@ -487,20 +489,15 @@ fn ingest_turtle_dict_batched<R: Read>(
         full_terms.insert((term_type::URI, iri.clone(), None, None));
     }
     // Walk triples, build the proper literal keys, add to full set.
+    // Match baseline / combined: lang-tagged → datatype_id = None;
+    // every other literal → Some(<dict id of the datatype IRI>).
     for tr in &triples {
         if let Term::Literal(lit) = &tr.object {
             let lang = lit.language();
-            let dt = lit.datatype().as_str();
-            // Plain `xsd:string` and lang-tagged `rdf:langString`
-            // literals have None datatype_id per pgRDF convention;
-            // all other typed literals reference the resolved dict
-            // id for their datatype IRI (from Phase 1.5).
-            let datatype_id = if dt == "http://www.w3.org/2001/XMLSchema#string"
-                || (dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString" && lang.is_some())
-            {
+            let datatype_id = if lang.is_some() {
                 None
             } else {
-                dt_iri_id.get(dt).copied()
+                dt_iri_id.get(lit.datatype().as_str()).copied()
             };
             full_terms.insert((
                 term_type::LITERAL,
@@ -566,14 +563,10 @@ fn ingest_turtle_dict_batched<R: Read>(
             Term::BlankNode(b) => (term_type::BLANK_NODE, b.as_str().to_string(), None, None),
             Term::Literal(lit) => {
                 let lang = lit.language();
-                let dt = lit.datatype().as_str();
-                let datatype_id = if dt == "http://www.w3.org/2001/XMLSchema#string"
-                    || (dt == "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
-                        && lang.is_some())
-                {
+                let datatype_id = if lang.is_some() {
                     None
                 } else {
-                    dt_iri_id.get(dt).copied()
+                    dt_iri_id.get(lit.datatype().as_str()).copied()
                 };
                 (
                     term_type::LITERAL,
@@ -654,9 +647,12 @@ fn ingest_turtle_combined<R: Read>(
 ) -> LoaderStats {
     let mut parser = TurtleParser::new();
     if let Some(base) = base_iri {
+        // Panic prefix `load_turtle:` matches `ingest_turtle_with_stats`'s
+        // baseline error contract — downstream tooling routes on this
+        // substring (see `tests/regression/sql/81-error-paths.sql`).
         parser = parser
             .with_base_iri(base)
-            .unwrap_or_else(|e| panic!("ingest_turtle_combined: invalid base IRI {base:?}: {e}"));
+            .unwrap_or_else(|e| panic!("load_turtle: invalid base IRI {base:?}: {e}"));
     }
     let iter = parser.for_reader(reader);
 
@@ -676,7 +672,8 @@ fn ingest_turtle_combined<R: Read>(
 
     for triple_result in iter {
         let t_parse = Instant::now();
-        let triple = triple_result.expect("ingest_turtle_combined: turtle parse error");
+        // Panic prefix `load_turtle:` matches baseline contract.
+        let triple = triple_result.expect("load_turtle: turtle parse error");
         parse_ns += t_parse.elapsed().as_nanos();
 
         let t_dict = Instant::now();
