@@ -1,0 +1,12 @@
+# LUBM Q7 — Students taking courses taught by a specific associate professor.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x ?y
+WHERE {
+  ?x rdf:type ub:Student .
+  ?y rdf:type ub:Course .
+  ?x ub:takesCourse ?y .
+  <http://www.Department0.University0.edu/AssociateProfessor0> ub:teacherOf ?y .
+}

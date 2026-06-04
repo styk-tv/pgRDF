@@ -1,0 +1,15 @@
+# LUBM Q9 — Students whose advisor teaches the same course they're taking.
+# Triangle pattern (x, y, z).
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x ?y ?z
+WHERE {
+  ?x rdf:type ub:Student .
+  ?y rdf:type ub:Faculty .
+  ?z rdf:type ub:Course .
+  ?x ub:advisor ?y .
+  ?y ub:teacherOf ?z .
+  ?x ub:takesCourse ?z .
+}

@@ -1,0 +1,11 @@
+# LUBM Q10 — Students taking a specific graduate course (any student type).
+# Same structure as Q1 but Student supertype.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x
+WHERE {
+  ?x rdf:type ub:Student .
+  ?x ub:takesCourse <http://www.Department0.University0.edu/GraduateCourse0> .
+}

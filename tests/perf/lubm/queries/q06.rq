@@ -1,0 +1,12 @@
+# LUBM Q6 — All Students.
+# Profile-sensitive: GraduateStudent, UndergraduateStudent rdfs:subClassOf
+# Student. Under reasoning -> all students. Without reasoning -> only those
+# directly typed as Student.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x
+WHERE {
+  ?x rdf:type ub:Student .
+}

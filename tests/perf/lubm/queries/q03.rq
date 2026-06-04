@@ -1,0 +1,10 @@
+# LUBM Q3 — Publications of a specific assistant professor.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x
+WHERE {
+  ?x rdf:type ub:Publication .
+  ?x ub:publicationAuthor <http://www.Department0.University0.edu/AssistantProfessor0> .
+}

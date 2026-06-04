@@ -1,0 +1,103 @@
+{
+  "_comment": "LUBM Q1-Q14 expected result-row counts. Each entry is keyed by (query, scale, profile). Profile values: 'none' (no inference; ABox+Tbox only), 'rdfs' (RDFS materialize), 'owl-rl' (OWL 2 RL materialize). The benchmark-runner.sh loads BOTH the LUBM ABox (.nt file from the pgrdf-lubm-data volume) AND the rewritten LUBM Tbox (tests/perf/lubm/fixtures/univ-bench.ttl) into the same graph BEFORE materializing, so reasoning has the subClassOf / subPropertyOf chains to fire on. UBA generator -seed 0 is the deterministic anchor. Initial counts are TBD until first measured run; the runner writes back the observed counts when the manifest value is null.",
+  "lubm-1": {
+    "none": {
+      "q01": 4,
+      "q02": 0,
+      "q03": 6,
+      "q04": 0,
+      "q05": 0,
+      "q06": 0,
+      "q07": 0,
+      "q08": 0,
+      "q09": 0,
+      "q10": 0,
+      "q11": 0,
+      "q12": 0,
+      "q13": 0,
+      "q14": 5916
+    },
+    "rdfs": {
+      "q01": 4,
+      "q02": 0,
+      "q03": 6,
+      "q04": 34,
+      "q05": 719,
+      "q06": 5916,
+      "q07": 59,
+      "q08": 5916,
+      "q09": 103,
+      "q10": 0,
+      "q11": 0,
+      "q12": 0,
+      "q13": 0,
+      "q14": 5916
+    },
+    "owl-rl": {
+      "q01": 4,
+      "q02": 0,
+      "q03": 6,
+      "q04": 34,
+      "q05": 719,
+      "q06": 7790,
+      "q07": 67,
+      "q08": 7790,
+      "q09": 208,
+      "q10": 4,
+      "q11": 224,
+      "q12": 15,
+      "q13": 1,
+      "q14": 5916
+    }
+  },
+  "lubm-10": {
+    "none": {
+      "q01": 4,
+      "q02": 1721,
+      "q03": 6,
+      "q04": 0,
+      "q05": 0,
+      "q06": 0,
+      "q07": 0,
+      "q08": 0,
+      "q09": 0,
+      "q10": 0,
+      "q11": 0,
+      "q12": 0,
+      "q13": 0,
+      "q14": 75547
+    },
+    "rdfs": {
+      "q01": 4,
+      "q02": 1721,
+      "q03": 6,
+      "q04": 34,
+      "q05": 719,
+      "q06": 75547,
+      "q07": 59,
+      "q08": 5916,
+      "q09": 1233,
+      "q10": 0,
+      "q11": 0,
+      "q12": 0,
+      "q13": 0,
+      "q14": 75547
+    },
+    "owl-rl": {
+      "q01": 4,
+      "q02": 1721,
+      "q03": 6,
+      "q04": 34,
+      "q05": 719,
+      "q06": 99566,
+      "q07": 67,
+      "q08": 7790,
+      "q09": 2540,
+      "q10": 4,
+      "q11": 224,
+      "q12": 15,
+      "q13": 33,
+      "q14": 75547
+    }
+  }
+}

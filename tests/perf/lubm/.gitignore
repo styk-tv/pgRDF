@@ -28,3 +28,12 @@ data/**
 *.owl
 *.nt
 *.ttl
+
+# Exception: the canonical LUBM Tbox files are small (~15 KB),
+# checked in under fixtures/, and required so reasoning closures
+# have subClassOf / subPropertyOf chains to fire on. The .ttl is
+# the rewritten form whose namespace matches UBA-generated ABox
+# (file:///opt/lubm/univ-bench.owl# instead of the original swat
+# URI), so it joins the same graph.
+!fixtures/univ-bench.owl
+!fixtures/univ-bench.ttl

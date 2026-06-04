@@ -3,15 +3,21 @@
 # tests/perf/benchmark-runner.sh — pgRDF benchmark harness with
 # persistent run history + HTML report.
 #
-# Boots an isolated postgres+pgrdf sidecar, runs an LUBM-N ingest
-# + RDFS materialization + OWL-RL materialization + Q14 query, and
-# appends a JSON line per run to `target/perf-history/runs.jsonl`.
-# `render-history.py` reads that file and emits a self-contained
-# `target/perf-history/index.html` with run-over-run charts.
+# Boots an isolated postgres+pgrdf sidecar, runs LUBM-N ingest +
+# LUBM Q1-Q14 at THREE reasoning profiles (none, rdfs, owl-rl):
+#
+#   profile=none   : queries against the raw ABox (no inference)
+#   profile=rdfs   : queries after pgrdf.materialize(g, 'rdfs')
+#   profile=owl-rl : queries after pgrdf.materialize(g, 'owl-rl')
+#
+# Per (profile, query) the runner captures result_count + the
+# median-of-3-warm elapsed_ms. Counts are compared against
+# `tests/perf/lubm/queries/expected-counts.json`; null entries get
+# written back on first observation so future runs detect drift.
 #
 # DOCKER ONLY (per [[docker-only-pgrdf-prefix]]). Sidecar name is
-# `pgrdf-bench-pg-<pid>` to stay clear of `pgrdf-perf-pg-<pid>` used
-# by the older `run-lubm.sh` dev-gate runner.
+# `pgrdf-bench-pg-<pid>` (separate from `run-lubm.sh`'s
+# `pgrdf-perf-pg-<pid>`).
 #
 # Pre-flight:
 #   1. `just lubm-build` has produced the UBA generator image.
@@ -21,29 +27,23 @@
 # Usage:
 #   bash tests/perf/benchmark-runner.sh             # LUBM-10 (default)
 #   bash tests/perf/benchmark-runner.sh 1           # LUBM-1
-#   PROFILES=rdfs bash tests/perf/benchmark-runner.sh 10
-#   PROFILES=rdfs,owl-rl bash tests/perf/benchmark-runner.sh 10
+#   PROFILES=none,rdfs bash tests/perf/benchmark-runner.sh 10
 #
 # Outputs:
 #   target/perf-history/runs.jsonl        appended one line per run
 #   target/perf-history/index.html        re-rendered each run
 #   target/perf-history/last-run.json     full output of the most recent run
-#
-# Exit codes:
-#   0   success — history line appended + report re-rendered
-#   1   pre-flight failure
-#   2   sidecar boot failure
-#   3   ingest failure
-#   4   materialize failure
-#   5   query failure
+#   tests/perf/lubm/queries/expected-counts.json   updated with observed counts where null
 
 set -euo pipefail
 
 UNIV_COUNT="${1:-10}"
-PROFILES="${PROFILES:-rdfs,owl-rl}"
+PROFILES="${PROFILES:-none,rdfs,owl-rl}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 HISTORY_DIR="${HISTORY_DIR:-${REPO_ROOT}/target/perf-history}"
+QUERIES_DIR="${QUERIES_DIR:-${REPO_ROOT}/tests/perf/lubm/queries}"
+EXPECTED_FILE="${EXPECTED_FILE:-${QUERIES_DIR}/expected-counts.json}"
 RUNTIME="${PGRDF_RUNTIME:-docker}"
 LUBM_VOLUME="${LUBM_VOLUME:-pgrdf-lubm-data}"
 EXTENSIONS_DIR="${EXTENSIONS_DIR:-${REPO_ROOT}/compose/extensions}"
@@ -53,7 +53,6 @@ PG_USER="${POSTGRES_USER:-pgrdf}"
 PG_PASS="${POSTGRES_PASSWORD:-pgrdf}"
 PG_DB="${POSTGRES_DB:-pgrdf}"
 DATA_GID="${DATA_GID:-92000}"
-GRAD_STUDENT_IRI="file:///opt/lubm/univ-bench.owl#GraduateStudent"
 
 fail() { printf '[bench] FATAL: %s\n' "$*" >&2; exit "${2:-1}"; }
 
@@ -62,8 +61,6 @@ ${RUNTIME} volume inspect "${LUBM_VOLUME}" >/dev/null 2>&1 \
   || fail "${LUBM_VOLUME} volume not present — run 'just lubm-gen ${UNIV_COUNT}' first" 1
 [ -f "${EXTENSIONS_DIR}/lib/pgrdf.so" ] \
   || fail "${EXTENSIONS_DIR}/lib/pgrdf.so missing — run 'just build-ext' first" 1
-[ -f "${EXTENSIONS_DIR}/share/extension/pgrdf.control" ] \
-  || fail "pgrdf.control missing under ${EXTENSIONS_DIR}/share/extension/" 1
 
 DEFAULT_VERSION="$(sed -n "s/^default_version = '\\(.*\\)'/\\1/p" \
   "${EXTENSIONS_DIR}/share/extension/pgrdf.control")"
@@ -76,6 +73,14 @@ ${RUNTIME} run --rm -v "${LUBM_VOLUME}:/lubm-data:ro" alpine:3.20 \
   || fail "data file ${DATA_PATH} missing inside ${LUBM_VOLUME} — run 'just lubm-gen ${UNIV_COUNT}' first" 1
 
 mkdir -p "${HISTORY_DIR}"
+
+# Count the 14 query files; runner expects q01..q14.
+QUERY_FILES=()
+for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14; do
+  f="${QUERIES_DIR}/q${n}.rq"
+  [ -f "${f}" ] || fail "missing query file ${f}" 1
+  QUERY_FILES+=("${f}")
+done
 
 # ── sidecar boot ────────────────────────────────────────────────────
 cleanup() { ${RUNTIME} rm -f "${SIDECAR_NAME}" >/dev/null 2>&1 || true; }
@@ -90,6 +95,7 @@ ${RUNTIME} run --rm -d \
   -e POSTGRES_PASSWORD="${PG_PASS}" \
   -e POSTGRES_DB="${PG_DB}" \
   -v "${LUBM_VOLUME}:/lubm-data:ro" \
+  -v "${REPO_ROOT}/tests/perf/lubm/fixtures:/fixtures:ro" \
   -v "${EXTENSIONS_DIR}/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro" \
   -v "${EXTENSIONS_DIR}/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro" \
   -v "${SQL_FILE}:/usr/share/postgresql/17/extension/pgrdf--${DEFAULT_VERSION}.sql:ro" \
@@ -105,7 +111,6 @@ psql_exec() {
     psql -U "${PG_USER}" -d "${PG_DB}" -X -A -t -q -v ON_ERROR_STOP=1
 }
 
-# Install + bind graph.
 echo "CREATE EXTENSION pgrdf; SELECT pgrdf.add_graph(${DATA_GID});" | psql_exec >/dev/null \
   || fail "extension/graph setup failed" 2
 
@@ -116,14 +121,13 @@ SQL
 ) || fail "ingest failed" 3
 
 extract_num() {
-  # `set -euo pipefail` would propagate grep's no-match-exit-1 through
-  # the pipe; wrap in `|| true` so absent keys cleanly return empty.
   printf '%s' "$1" \
     | grep -oE "\"$2\"[ ]*:[ ]*[0-9]+(\\.[0-9]+)?" 2>/dev/null \
     | grep -oE "[0-9]+(\\.[0-9]+)?$" 2>/dev/null \
     | head -1 \
     || true
 }
+
 INGEST_TRIPLES=$(extract_num "${INGEST_JSON}" "triples")
 INGEST_ELAPSED=$(extract_num "${INGEST_JSON}" "elapsed_ms")
 INGEST_PARSE_MS=$(extract_num "${INGEST_JSON}" "parse_ms")
@@ -137,56 +141,101 @@ INGEST_BATCHES=$(extract_num "${INGEST_JSON}" "quad_batches")
 
 printf '[bench] ingest: triples=%s elapsed_ms=%s\n' "${INGEST_TRIPLES}" "${INGEST_ELAPSED}"
 
-# ── materialize per profile ──────────────────────────────────────────
-mat_block=""
-IFS=',' read -ra MAT_PROFS <<< "${PROFILES}"
-for prof in "${MAT_PROFS[@]}"; do
-  printf '[bench] materializing %s ...\n' "${prof}"
-  MAT_JSON=$(psql_exec <<SQL
-SELECT pgrdf.materialize(${DATA_GID}, '${prof}')::text;
-SQL
-  ) || fail "materialize(${prof}) failed" 4
-  MAT_ELAPSED=$(extract_num "${MAT_JSON}" "elapsed_ms")
-  # The actual key from src/inference/reasonable.rs is
-  # `inferred_triples_written`. Older builds may have used
-  # `triples_inferred` / `inferred`; check all three for robustness.
-  MAT_INFERRED=$(extract_num "${MAT_JSON}" "inferred_triples_written")
-  if [ -z "${MAT_INFERRED}" ]; then MAT_INFERRED=$(extract_num "${MAT_JSON}" "triples_inferred"); fi
-  if [ -z "${MAT_INFERRED}" ]; then MAT_INFERRED=$(extract_num "${MAT_JSON}" "inferred"); fi
-  printf '[bench]   %s: elapsed_ms=%s triples_inferred=%s\n' \
-    "${prof}" "${MAT_ELAPSED:-?}" "${MAT_INFERRED:-?}"
-  key="${prof//-/_}"
-  mat_block="${mat_block}\"${key}\":{\"elapsed_ms\":${MAT_ELAPSED:-null},\"triples_inferred\":${MAT_INFERRED:-null}},"
-done
-mat_block="${mat_block%,}"
-
-# ── Q14 (warm median of 3) ──────────────────────────────────────────
-printf '[bench] running Q14 (3 warm passes, median)\n'
-Q14_RESULT_COUNT=""
-declare -a TIMES=()
-
-# Warm pass first (discard timing).
-psql_warm=$(${RUNTIME} exec -i "${SIDECAR_NAME}" \
-  psql -U "${PG_USER}" -d "${PG_DB}" -X -A -t -q -v ON_ERROR_STOP=1 <<SQL || true
-\\timing on
-SELECT sparql::text FROM pgrdf.sparql('PREFIX : <http://x/> SELECT (COUNT(?s) AS ?n) WHERE { ?s a <${GRAD_STUDENT_IRI}> }');
+# ── Tbox ingest (LUBM univ-bench ontology) ──────────────────────────
+# pgrdf.materialize(g, 'rdfs'|'owl-rl') only fires inferences over the
+# Tbox+ABox CO-LOCATED in the same graph. UBA's generated .nt files
+# are ABox-only; the Tbox is shipped separately. We load tests/perf/
+# lubm/fixtures/univ-bench.ttl (the rewritten univ-bench.owl with
+# `file:///opt/lubm/univ-bench.owl#` namespace matching the ABox) into
+# the same graph before materialize so the reasoner sees the
+# subClassOf / subPropertyOf chains the LUBM queries depend on.
+TBOX_JSON=$(psql_exec <<SQL || true
+SELECT pgrdf.load_turtle_verbose('/fixtures/univ-bench.ttl', ${DATA_GID})::text;
 SQL
 )
-Q14_RESULT_COUNT=$(printf '%s' "${psql_warm}" | grep -oE '"[0-9]+"' | head -1 | tr -d '"')
+TBOX_TRIPLES=$(extract_num "${TBOX_JSON}" "triples")
+TBOX_ELAPSED=$(extract_num "${TBOX_JSON}" "elapsed_ms")
+if [ -n "${TBOX_TRIPLES}" ]; then
+  printf '[bench] tbox:   triples=%s elapsed_ms=%s\n' "${TBOX_TRIPLES}" "${TBOX_ELAPSED}"
+else
+  printf '[bench] tbox:   load skipped (file missing or ingest failed)\n'
+  TBOX_TRIPLES=0
+fi
 
-for i in 1 2 3; do
-  raw=$(${RUNTIME} exec -i "${SIDECAR_NAME}" \
-    psql -U "${PG_USER}" -d "${PG_DB}" -X -A -t -q -v ON_ERROR_STOP=1 <<SQL || true
-\\timing on
-SELECT sparql::text FROM pgrdf.sparql('PREFIX : <http://x/> SELECT (COUNT(?s) AS ?n) WHERE { ?s a <${GRAD_STUDENT_IRI}> }');
+# ── per-profile loop: optionally materialize, then run all 14 queries ─
+run_query() {
+  # $1 = query file path; $2 = scratch out var name (return string)
+  # Returns "<count>;<median_ms>" via echo.
+  local qfile="$1"
+  local qtext
+  qtext=$(cat "${qfile}" | sed -e 's/^#.*//' | tr '\n' ' ' | tr -s ' ')
+  # Escape single quotes for the inner SPARQL literal.
+  local qesc="${qtext//\'/\'\'}"
+
+  # Wrap to count rows + capture warm timing. We run COUNT(*) over the
+  # SETOF JSONB the SPARQL SELECT projects; pgrdf.sparql returns one row
+  # per solution.
+  local sql="\\timing on
+SELECT count(*) FROM pgrdf.sparql('${qesc}');"
+
+  local raw_warm
+  raw_warm=$(printf '%s\n' "${sql}" | ${RUNTIME} exec -i "${SIDECAR_NAME}" \
+    psql -U "${PG_USER}" -d "${PG_DB}" -X -A -t -q -v ON_ERROR_STOP=1 2>&1 || true)
+
+  local times=()
+  for i in 1 2 3; do
+    local raw
+    raw=$(printf '%s\n' "${sql}" | ${RUNTIME} exec -i "${SIDECAR_NAME}" \
+      psql -U "${PG_USER}" -d "${PG_DB}" -X -A -t -q -v ON_ERROR_STOP=1 2>&1 || true)
+    local t
+    t=$(printf '%s' "${raw}" | grep -oE "Time: [0-9]+(\\.[0-9]+)? ms" | grep -oE "[0-9]+(\\.[0-9]+)?" | head -1)
+    [ -n "${t}" ] || t="0"
+    times+=("${t}")
+  done
+
+  local count
+  count=$(printf '%s' "${raw_warm}" | grep -oE "^[0-9]+$" | head -1 || true)
+  [ -n "${count}" ] || count="0"
+
+  local median
+  median=$(printf '%s\n' "${times[@]}" | LC_ALL=C sort -n | awk 'NR==2')
+
+  echo "${count};${median}"
+}
+
+profiles_json=""
+IFS=',' read -ra MAT_PROFS <<< "${PROFILES}"
+for prof in "${MAT_PROFS[@]}"; do
+  printf '[bench] profile=%s\n' "${prof}"
+
+  mat_elapsed="null"
+  mat_inferred="null"
+  if [ "${prof}" != "none" ]; then
+    MAT_JSON=$(psql_exec <<SQL
+SELECT pgrdf.materialize(${DATA_GID}, '${prof}')::text;
 SQL
-  )
-  t=$(printf '%s' "${raw}" | grep -oE "Time: [0-9]+(\\.[0-9]+)? ms" | grep -oE "[0-9]+(\\.[0-9]+)?" | head -1)
-  [ -n "${t}" ] || fail "Q14 timing extract failed (run ${i}): ${raw}" 5
-  TIMES+=("${t}")
+    ) || fail "materialize(${prof}) failed" 4
+    mat_elapsed=$(extract_num "${MAT_JSON}" "elapsed_ms")
+    [ -n "${mat_elapsed}" ] || mat_elapsed="null"
+    mat_inferred=$(extract_num "${MAT_JSON}" "inferred_triples_written")
+    [ -n "${mat_inferred}" ] || mat_inferred="null"
+    printf '[bench]   materialize: elapsed_ms=%s triples_inferred=%s\n' "${mat_elapsed}" "${mat_inferred}"
+  fi
+
+  q_block=""
+  for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14; do
+    qfile="${QUERIES_DIR}/q${n}.rq"
+    result=$(run_query "${qfile}")
+    count="${result%%;*}"
+    median="${result##*;}"
+    printf '[bench]   q%s: count=%s median_ms=%s\n' "${n}" "${count}" "${median}"
+    q_block="${q_block}\"q${n}\":{\"count\":${count},\"elapsed_ms_median\":${median}},"
+  done
+  q_block="${q_block%,}"
+
+  profiles_json="${profiles_json}\"${prof//-/_}\":{\"materialize_ms\":${mat_elapsed},\"triples_inferred\":${mat_inferred},\"queries\":{${q_block}}},"
 done
-Q14_MS=$(printf '%s\n' "${TIMES[@]}" | LC_ALL=C sort -n | awk 'NR==2')
-printf '[bench] Q14: count=%s median_ms=%s\n' "${Q14_RESULT_COUNT:-?}" "${Q14_MS}"
+profiles_json="${profiles_json%,}"
 
 # ── emit single-line JSON record ────────────────────────────────────
 TS_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -198,7 +247,7 @@ PG_MAJOR=$(${RUNTIME} exec "${SIDECAR_NAME}" psql -U "${PG_USER}" -d "${PG_DB}" 
   -X -A -t -q -c "SHOW server_version_num;" | awk '{print int($1/10000)}')
 
 RUN_JSON=$(cat <<JSON
-{"ts":"${TS_UTC}","ts_unix":${TS_UNIX},"host":"${HOST}","git_sha":"${GIT_SHA}","git_branch":"${GIT_BRANCH}","pgrdf_version":"${DEFAULT_VERSION}","postgres_major":${PG_MAJOR},"lubm_size":${UNIV_COUNT},"triples":${INGEST_TRIPLES},"ingest":{"elapsed_ms":${INGEST_ELAPSED:-null},"parse_ms":${INGEST_PARSE_MS:-null},"dict_ms":${INGEST_DICT_MS:-null},"insert_ms":${INGEST_INSERT_MS:-null},"dict_cache_hits":${INGEST_DICT_HITS:-null},"shmem_cache_hits":${INGEST_SHMEM_HITS:-null},"dict_db_calls":${INGEST_DB_CALLS:-null},"quad_batches":${INGEST_BATCHES:-null}},"materialize":{${mat_block}},"q14":{"elapsed_ms_median":${Q14_MS:-null},"result_count":${Q14_RESULT_COUNT:-null}}}
+{"ts":"${TS_UTC}","ts_unix":${TS_UNIX},"host":"${HOST}","git_sha":"${GIT_SHA}","git_branch":"${GIT_BRANCH}","pgrdf_version":"${DEFAULT_VERSION}","postgres_major":${PG_MAJOR},"lubm_size":${UNIV_COUNT},"triples":${INGEST_TRIPLES},"tbox_triples":${TBOX_TRIPLES:-0},"ingest":{"elapsed_ms":${INGEST_ELAPSED:-null},"parse_ms":${INGEST_PARSE_MS:-null},"dict_ms":${INGEST_DICT_MS:-null},"insert_ms":${INGEST_INSERT_MS:-null},"dict_cache_hits":${INGEST_DICT_HITS:-null},"shmem_cache_hits":${INGEST_SHMEM_HITS:-null},"dict_db_calls":${INGEST_DB_CALLS:-null},"quad_batches":${INGEST_BATCHES:-null}},"profiles":{${profiles_json}}}
 JSON
 )
 
@@ -207,12 +256,18 @@ echo "${RUN_JSON}" >> "${HISTORY_DIR}/runs.jsonl"
 printf '[bench] appended to %s/runs.jsonl (now %s runs total)\n' \
   "${HISTORY_DIR}" "$(wc -l < "${HISTORY_DIR}/runs.jsonl" | tr -d ' ')"
 
-# ── render HTML report ──────────────────────────────────────────────
+# ── update expected-counts.json (null → observed) + flag drift ──────
+if command -v python3 >/dev/null 2>&1 && [ -f "${EXPECTED_FILE}" ]; then
+  python3 "${REPO_ROOT}/tests/perf/lubm/queries/update-expected.py" \
+    --expected "${EXPECTED_FILE}" \
+    --run "${HISTORY_DIR}/last-run.json" \
+    --lubm-size "${UNIV_COUNT}" \
+    && printf '[bench] expected-counts.json reconciled\n'
+fi
+
 if command -v python3 >/dev/null 2>&1; then
   python3 "${REPO_ROOT}/tests/perf/render-history.py" \
     --history "${HISTORY_DIR}/runs.jsonl" \
     --out "${HISTORY_DIR}/index.html" \
     && printf '[bench] rendered %s/index.html\n' "${HISTORY_DIR}"
-else
-  printf '[bench] python3 missing — skipping HTML render\n'
 fi

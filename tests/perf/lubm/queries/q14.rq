@@ -1,0 +1,10 @@
+# LUBM Q14 — All undergraduate students (no joins).
+# Lowest-selectivity LUBM query; useful as a query-engine throughput baseline.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x
+WHERE {
+  ?x rdf:type ub:UndergraduateStudent .
+}

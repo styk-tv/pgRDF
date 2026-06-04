@@ -1,0 +1,13 @@
+# LUBM Q12 — Department chairs at a specific university.
+# Profile-sensitive: Chair rdfs:subClassOf Person; under reasoning more matches.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x ?y
+WHERE {
+  ?x rdf:type ub:Chair .
+  ?y rdf:type ub:Department .
+  ?x ub:worksFor ?y .
+  ?y ub:subOrganizationOf <http://www.University0.edu> .
+}

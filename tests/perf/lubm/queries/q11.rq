@@ -1,0 +1,10 @@
+# LUBM Q11 — Research groups that are sub-organizations of a specific university.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x
+WHERE {
+  ?x rdf:type ub:ResearchGroup .
+  ?x ub:subOrganizationOf <http://www.University0.edu> .
+}

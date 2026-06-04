@@ -1,0 +1,14 @@
+# LUBM Q8 — Students in any department of a specific university, with email.
+# Joins three patterns.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x ?y ?z
+WHERE {
+  ?x rdf:type ub:Student .
+  ?y rdf:type ub:Department .
+  ?x ub:memberOf ?y .
+  ?y ub:subOrganizationOf <http://www.University0.edu> .
+  ?x ub:emailAddress ?z .
+}

@@ -1,0 +1,14 @@
+# LUBM Q4 — Professors in a specific department with profile facets.
+# Multi-property projection: name, email, phone.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x ?y1 ?y2 ?y3
+WHERE {
+  ?x rdf:type ub:Professor .
+  ?x ub:worksFor <http://www.Department0.University0.edu> .
+  ?x ub:name ?y1 .
+  ?x ub:emailAddress ?y2 .
+  ?x ub:telephone ?y3 .
+}

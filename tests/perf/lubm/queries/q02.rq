@@ -1,0 +1,17 @@
+# LUBM Q2 — Graduate students who got their undergrad degree from a university
+# whose department they're now a member of. Multi-pattern BGP across three
+# variables. Returns very few rows at LUBM-1 (the data UBA generates is sparse
+# on cross-university degrees).
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x ?y ?z
+WHERE {
+  ?x rdf:type ub:GraduateStudent .
+  ?y rdf:type ub:University .
+  ?z rdf:type ub:Department .
+  ?x ub:memberOf ?z .
+  ?z ub:subOrganizationOf ?y .
+  ?x ub:undergraduateDegreeFrom ?y .
+}

@@ -1,0 +1,12 @@
+# LUBM Q5 — Members of a department who are Person.
+# Profile-sensitive: RDFS subClassOf {Faculty, Student, ...} -> Person expands
+# the result set substantially under reasoning vs no-reasoning.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x
+WHERE {
+  ?x rdf:type ub:Person .
+  ?x ub:memberOf <http://www.Department0.University0.edu> .
+}

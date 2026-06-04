@@ -1,0 +1,11 @@
+# LUBM Q13 — Alumni of a specific university.
+# Tests inverse-of / hasAlumnus traversal — sparse at LUBM-1.
+
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX ub:  <file:///opt/lubm/univ-bench.owl#>
+
+SELECT ?x
+WHERE {
+  ?x rdf:type ub:Person .
+  <http://www.University0.edu> ub:hasAlumnus ?x .
+}
