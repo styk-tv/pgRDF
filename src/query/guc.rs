@@ -19,6 +19,7 @@
 //! `GucRegistry::define_int_guc` is the safe wrapper.
 
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
+use std::ffi::CString;
 
 /// Default property-path recursion depth bound (LLD v0.4 §7.2:
 /// "`$MAX_DEPTH` defaults to 64").
@@ -33,6 +34,85 @@ pub(crate) const MAX_PATH_MAX_DEPTH: i32 = 1024;
 /// `Userset` context: any role may `SET` it per-session (it only
 /// affects that session's query plans, never another backend).
 pub(crate) static PATH_MAX_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_PATH_MAX_DEPTH);
+
+// ─────────────────────────────────────────────────────────────────────
+// TA-7 — dict-path GUCs
+// ─────────────────────────────────────────────────────────────────────
+//
+// TA-D1's USER APPROVED decision: combine TA-D3 (batched dict
+// resolution) + TA-D2 (shmem cache prewarm) into the default
+// `parse_turtle` ingest path. These three GUCs gate the rollout so
+// the legacy single-term SPI path stays callable for parity testing.
+
+/// Default dict batch size — terms per `put_terms_batch` chunk in
+/// the `combined` / `batched` paths. 500 balances per-SPI roundtrip
+/// amortisation against the deferred latency between parsing a term
+/// and seeing it in the quad buffer.
+pub(crate) const DEFAULT_DICT_BATCH_SIZE: i32 = 500;
+/// Minimum `dict_batch_size`. `0` is reserved as an alias for the
+/// legacy single-term path; the int-range minimum stays at 1.
+pub(crate) const MIN_DICT_BATCH_SIZE: i32 = 0;
+/// Maximum `dict_batch_size`. Beyond ~10k the memory footprint of
+/// the defer queue starts to matter on small-RAM hosts.
+pub(crate) const MAX_DICT_BATCH_SIZE: i32 = 10_000;
+
+/// `pgrdf.ingest_dict_path` — selects which dict-resolution path
+/// `parse_turtle` + `load_turtle` (and verbose variants) dispatch
+/// through. Valid values:
+///
+/// * `baseline` — legacy single-term `put_term_full` SPI per term.
+///   What v0.5.36 and earlier defaulted to. Kept for parity tests.
+/// * `batched`  — TA-D3 path: 2-pass (materialise all triples, then
+///   bulk resolve via `put_terms_batch`). Validated as the v0.5.27
+///   spike (-17% e2e at LUBM-1).
+/// * `shmem_warm` — TA-D2 path: hot-cache check first, fallback to
+///   per-term SPI on miss. No batching. Validated as the v0.5.28
+///   spike (-54% e2e at LUBM-1 with prewarm).
+/// * `combined` — production target: single-pass streaming with
+///   hot-cache check first, defer queue for misses, bulk-resolve at
+///   `dict_batch_size` or quad-flush boundary. The TA-7 production
+///   landing. Default since v0.5.37.
+///
+/// `Userset` context (per-session override is safe — the path is
+/// idempotent w.r.t. the resulting `_pgrdf_quads` rows; only the
+/// per-term SPI shape differs).
+pub(crate) static INGEST_DICT_PATH: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"combined"));
+
+/// `pgrdf.dict_batch_size` — terms per `put_terms_batch` chunk in
+/// the `combined` / `batched` paths. `0` is interpreted as "fall
+/// back to single-term SPI" (equivalent to selecting `baseline`).
+pub(crate) static DICT_BATCH_SIZE: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_DICT_BATCH_SIZE);
+
+/// `pgrdf.shmem_prewarm_on_init` — when on, the shmem dict cache
+/// is auto-prewarmed from `_pgrdf_dictionary` once per backend
+/// before the first ingest call observes it. Default off because
+/// the prewarm cost (~one SPI scan of the full dict) is paid
+/// up-front and rarely amortises in short-lived workloads.
+pub(crate) static SHMEM_PREWARM_ON_INIT: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// `pgrdf.ingest_dict_path` parsed into a Rust enum so callers
+/// don't keep matching the raw string. `parse_turtle` / `load_turtle`
+/// dispatch on this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IngestDictPath {
+    Baseline,
+    Batched,
+    ShmemWarm,
+    Combined,
+}
+
+impl IngestDictPath {
+    fn from_guc_string(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).unwrap_or("combined") {
+            "baseline" => Self::Baseline,
+            "batched" => Self::Batched,
+            "shmem_warm" => Self::ShmemWarm,
+            _ => Self::Combined,
+        }
+    }
+}
 
 /// Register every pgRDF custom GUC. Called once from `_PG_init`.
 pub fn register() {
@@ -51,6 +131,47 @@ pub fn register() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    GucRegistry::define_string_guc(
+        c"pgrdf.ingest_dict_path",
+        c"Dict-resolution path used by parse_turtle / load_turtle.",
+        c"One of 'baseline' | 'batched' | 'shmem_warm' | 'combined'. \
+          'baseline' is the pre-v0.5.37 single-term SPI path; \
+          'batched' is the TA-D3 2-pass path; 'shmem_warm' is the \
+          TA-D2 hot-cache-then-SPI path; 'combined' is the v0.5.37+ \
+          production default that streams the parser with a defer \
+          queue, falling back to put_terms_batch at \
+          pgrdf.dict_batch_size or at quad-flush boundaries. An \
+          unrecognised value silently falls back to 'combined'.",
+        &INGEST_DICT_PATH,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pgrdf.dict_batch_size",
+        c"Terms per put_terms_batch flush in the batched / combined paths.",
+        c"500 by default. Higher values amortise the per-SPI cost \
+          over more terms at the price of per-batch memory + latency \
+          between parsing a term and writing the quad it appears in. \
+          0 = fall back to single-term SPI (equivalent to selecting \
+          ingest_dict_path = 'baseline').",
+        &DICT_BATCH_SIZE,
+        MIN_DICT_BATCH_SIZE,
+        MAX_DICT_BATCH_SIZE,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"pgrdf.shmem_prewarm_on_init",
+        c"Auto-prewarm the shmem dict cache before the first ingest.",
+        c"When on, the first parse_turtle / load_turtle call in a \
+          backend will run pgrdf.shmem_cache_prewarm() once before \
+          its main work. Default off: the prewarm is one full SPI \
+          scan of _pgrdf_dictionary and rarely amortises in \
+          short-lived workloads.",
+        &SHMEM_PREWARM_ON_INIT,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 /// The currently-effective `pgrdf.path_max_depth` for this session.
@@ -63,4 +184,33 @@ pub fn register() {
 #[allow(dead_code)]
 pub(crate) fn path_max_depth() -> i32 {
     PATH_MAX_DEPTH.get()
+}
+
+/// Resolved `pgrdf.ingest_dict_path` for this call. Reads the GUC,
+/// parses it into the enum, applies the `dict_batch_size = 0` →
+/// baseline override so the two GUCs combine in the obvious way.
+pub(crate) fn ingest_dict_path() -> IngestDictPath {
+    if DICT_BATCH_SIZE.get() == 0 {
+        return IngestDictPath::Baseline;
+    }
+    let raw = INGEST_DICT_PATH.get();
+    let s = raw.as_ref().and_then(|c| c.to_str().ok());
+    IngestDictPath::from_guc_string(s)
+}
+
+/// Resolved `pgrdf.dict_batch_size` for this call. Returns at least
+/// 1 (a 0 GUC routes to the baseline path before this is consulted).
+pub(crate) fn dict_batch_size() -> usize {
+    let n = DICT_BATCH_SIZE.get();
+    if n <= 0 {
+        DEFAULT_DICT_BATCH_SIZE as usize
+    } else {
+        n as usize
+    }
+}
+
+/// Resolved `pgrdf.shmem_prewarm_on_init`. The lazy-prewarm latch in
+/// `loader::ingest_dispatch` consults this on every ingest call.
+pub(crate) fn shmem_prewarm_on_init() -> bool {
+    SHMEM_PREWARM_ON_INIT.get()
 }

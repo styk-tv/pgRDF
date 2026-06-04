@@ -141,19 +141,51 @@ pub(crate) fn put_terms_batch(terms: &[(i16, String, Option<i64>, Option<String>
     let datatypes: Vec<Option<i64>> = terms.iter().map(|t| t.2).collect();
     let languages: Vec<Option<String>> = terms.iter().map(|t| t.3.clone()).collect();
 
-    // Step 1: bulk insert (ON CONFLICT DO NOTHING is silent on
-    // duplicates). The unnest expansion produces a row per input
-    // tuple. PostgreSQL deduplicates within the input itself via
-    // the UNIQUE constraint, so identical terms in the same call
-    // collapse to one row.
+    // Step 1: bulk insert MISSING rows only.
+    //
+    // CAREFUL — the natural form
+    //   `... ON CONFLICT (...) DO NOTHING`
+    // does NOT work here. PostgreSQL's UNIQUE constraint defaults to
+    // `NULLS DISTINCT` semantics: a row with `(URI, 'ex:p', NULL,
+    // NULL)` does NOT conflict with another `(URI, 'ex:p', NULL,
+    // NULL)` because the NULLs aren't equal. That makes ON CONFLICT
+    // silently INSERT duplicate URI / blank-node rows whose
+    // `datatype_iri_id` and `language_tag` are both NULL. The
+    // subsequent JOIN-back (which uses `IS NOT DISTINCT FROM`) then
+    // matches multiple dict rows for one input position and the
+    // result Vec's per-position slot races between them — caller
+    // sees an unstable id, breaks every downstream query against
+    // the affected predicates.
+    //
+    // (TA-D3 spike v0.5.27 shipped with the ON CONFLICT form. Its
+    // own parity gate didn't catch this — that test compares
+    // BASELINE vs SPIKE in adjacent graphs but the duplicate rows
+    // only show up when a SECOND batched ingest call reuses a term
+    // from a prior batched call in the same backend. TA-7's
+    // multi-graph regression 130 catches it.)
+    //
+    // Workaround at the SQL level: replace the ON CONFLICT clause
+    // with a `WHERE NOT EXISTS` anti-join that uses `IS NOT DISTINCT
+    // FROM` for the NULL columns. This matches `put_term_full`'s
+    // pre-INSERT SELECT exactly. Concurrent backends could still
+    // race (two parallel ingests of the same NULL-containing term
+    // would each pass NOT EXISTS and each INSERT) — that's filed as
+    // a TA-NEW-W follow-up: a schema migration to
+    // `UNIQUE NULLS NOT DISTINCT` (PG 15+), which lets ON CONFLICT
+    // resume working and is race-safe.
     Spi::run_with_args(
         "INSERT INTO pgrdf._pgrdf_dictionary
              (term_type, lexical_value, datatype_iri_id, language_tag)
          SELECT t.tt, t.lv, t.di, t.lt
          FROM unnest($1::int2[], $2::text[], $3::int8[], $4::text[])
               AS t(tt, lv, di, lt)
-         ON CONFLICT (term_type, lexical_value, datatype_iri_id, language_tag)
-             DO NOTHING",
+         WHERE NOT EXISTS (
+             SELECT 1 FROM pgrdf._pgrdf_dictionary d
+              WHERE d.term_type = t.tt
+                AND d.lexical_value = t.lv
+                AND d.datatype_iri_id IS NOT DISTINCT FROM t.di
+                AND d.language_tag    IS NOT DISTINCT FROM t.lt
+         )",
         &[
             term_types.clone().into(),
             lexicals.clone().into(),

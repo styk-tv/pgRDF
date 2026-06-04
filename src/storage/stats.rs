@@ -121,6 +121,14 @@ fn shmem_reset() {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn shmem_cache_prewarm(limit: default!(i64, 100000)) -> i64 {
+    shmem_cache_prewarm_impl(limit)
+}
+
+/// Inner SPI body of `shmem_cache_prewarm`, exposed so the loader's
+/// lazy-prewarm latch (gated by `pgrdf.shmem_prewarm_on_init` or
+/// `pgrdf.ingest_dict_path = 'shmem_warm'`) can call it without
+/// round-tripping through the UDF dispatcher.
+pub(crate) fn shmem_cache_prewarm_impl(limit: i64) -> i64 {
     use pgrx::Spi;
     let mut count: i64 = 0;
     Spi::connect(|client| {

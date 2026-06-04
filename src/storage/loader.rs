@@ -614,6 +614,374 @@ fn ingest_turtle_dict_batched<R: Read>(
     stats
 }
 
+/// TA-7 production landing — single-pass streaming ingest combining
+/// TA-D3 (batched dict resolution) and TA-D2 (cross-backend shmem
+/// dict cache hot-path). USER APPROVED via
+/// `_WIP/DECISION.TRACK-A.dict-path-and-insert-path.md` (2026-06-01).
+///
+/// Differences from `ingest_turtle_dict_batched`:
+///
+/// * **Single pass** over the parser stream. The spike materialised
+///   every parsed Triple into `Vec<oxrdf::Triple>` then re-walked
+///   it. Here triples land in a bounded `pending` buffer (drained at
+///   `BATCH_SIZE` boundaries) so peak memory is O(BATCH_SIZE) instead
+///   of O(triples).
+/// * **Shmem hot-cache check FIRST** for every term. Hits skip the
+///   defer queue entirely; only misses queue. The TA-D2 spike's
+///   −54% e2e win was driven by this layer; the spike measured it
+///   against the BASELINE path, this lands it in the production path.
+/// * **`put_terms_batch` flush** happens when either the defer queue
+///   hits `dict_batch_size` OR the pending-triple buffer is about to
+///   flush its quads. The latter is the safety net that guarantees
+///   every key in a draining pending-triple has a resolved id by the
+///   time we look it up.
+/// * **`stage_for_commit` after each batch flush** — newly-resolved
+///   terms get published into shmem on commit, so subsequent ingests
+///   in the same backend see them as hot-cache hits. The spike
+///   bypassed shmem on the write side.
+///
+/// Datatype IRIs are resolved synchronously (cache → shmem →
+/// `put_term_full`) because the literal's key depends on the
+/// datatype's dict_id. RDF/RDFS/XSD/OWL URIs warm up in the first
+/// few SPI roundtrips of any non-trivial ingest and stay hot for the
+/// rest of the backend's lifetime, so the synchronous resolve cost
+/// is bounded.
+fn ingest_turtle_combined<R: Read>(
+    reader: R,
+    graph_id: i64,
+    base_iri: Option<&str>,
+    dict_batch_size: usize,
+) -> LoaderStats {
+    let mut parser = TurtleParser::new();
+    if let Some(base) = base_iri {
+        parser = parser
+            .with_base_iri(base)
+            .unwrap_or_else(|e| panic!("ingest_turtle_combined: invalid base IRI {base:?}: {e}"));
+    }
+    let iter = parser.for_reader(reader);
+
+    let start = Instant::now();
+    let mut stats = LoaderStats::default();
+    let mut parse_ns: u128 = 0;
+    let mut dict_ns: u128 = 0;
+    let mut insert_ns: u128 = 0;
+
+    let mut cache: HashMap<DictKey, i64> = HashMap::new();
+    let mut defer_queue: Vec<DictKey> = Vec::with_capacity(dict_batch_size);
+    let mut defer_set: HashSet<DictKey> = HashSet::with_capacity(dict_batch_size);
+    let mut pending_triples: Vec<(DictKey, DictKey, DictKey)> = Vec::with_capacity(BATCH_SIZE);
+    let mut batch_s: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    let mut batch_p: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    let mut batch_o: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+
+    for triple_result in iter {
+        let t_parse = Instant::now();
+        let triple = triple_result.expect("ingest_turtle_combined: turtle parse error");
+        parse_ns += t_parse.elapsed().as_nanos();
+
+        let t_dict = Instant::now();
+
+        let s_key: DictKey = match &triple.subject {
+            NamedOrBlankNode::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
+            NamedOrBlankNode::BlankNode(b) => {
+                (term_type::BLANK_NODE, b.as_str().to_string(), None, None)
+            }
+        };
+        let p_key: DictKey = (
+            term_type::URI,
+            triple.predicate.as_str().to_string(),
+            None,
+            None,
+        );
+        let o_key: DictKey = match &triple.object {
+            Term::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
+            Term::BlankNode(b) => (term_type::BLANK_NODE, b.as_str().to_string(), None, None),
+            Term::Literal(lit) => {
+                let lang = lit.language();
+                // Match baseline `intern_term` semantics: lang-tagged
+                // literals carry datatype_id = None (the datatype is
+                // implicitly rdf:langString and not stored), every
+                // other literal carries an explicit datatype IRI
+                // dict id — INCLUDING plain `xsd:string`. The dict
+                // row shape must round-trip via the SPARQL executor's
+                // term equality (which keys on the explicit dict id),
+                // so an `xsd:string` plain literal goes in with the
+                // xsd:string IRI's dict id, not NULL.
+                let datatype_id = if lang.is_some() {
+                    None
+                } else {
+                    Some(resolve_datatype_iri_sync(
+                        lit.datatype().as_str(),
+                        &mut cache,
+                        &mut stats,
+                    ))
+                };
+                (
+                    term_type::LITERAL,
+                    lit.value().to_string(),
+                    datatype_id,
+                    lang.map(str::to_string),
+                )
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("ingest_turtle_combined: unsupported object term"),
+        };
+
+        // Try-resolve each of s/p/o: cache → shmem → defer queue.
+        for key in [&s_key, &p_key, &o_key] {
+            try_resolve_or_defer(
+                key,
+                &mut cache,
+                &mut defer_queue,
+                &mut defer_set,
+                &mut stats,
+            );
+        }
+
+        pending_triples.push((s_key, p_key, o_key));
+        stats.triples += 1;
+        dict_ns += t_dict.elapsed().as_nanos();
+
+        if defer_queue.len() >= dict_batch_size {
+            let t = Instant::now();
+            flush_defer(&mut defer_queue, &mut defer_set, &mut cache, &mut stats);
+            dict_ns += t.elapsed().as_nanos();
+        }
+
+        if pending_triples.len() >= BATCH_SIZE {
+            // Defer queue MUST be empty before draining pending — every
+            // s/p/o key has to be in `cache` for the lookup below.
+            if !defer_queue.is_empty() {
+                let t = Instant::now();
+                flush_defer(&mut defer_queue, &mut defer_set, &mut cache, &mut stats);
+                dict_ns += t.elapsed().as_nanos();
+            }
+            let t = Instant::now();
+            drain_pending_into_batch(
+                &mut pending_triples,
+                &cache,
+                &mut batch_s,
+                &mut batch_p,
+                &mut batch_o,
+            );
+            flush_batch(
+                &mut batch_s,
+                &mut batch_p,
+                &mut batch_o,
+                graph_id,
+                &mut stats,
+            );
+            insert_ns += t.elapsed().as_nanos();
+        }
+    }
+
+    if !defer_queue.is_empty() {
+        let t = Instant::now();
+        flush_defer(&mut defer_queue, &mut defer_set, &mut cache, &mut stats);
+        dict_ns += t.elapsed().as_nanos();
+    }
+    if !pending_triples.is_empty() {
+        let t = Instant::now();
+        drain_pending_into_batch(
+            &mut pending_triples,
+            &cache,
+            &mut batch_s,
+            &mut batch_p,
+            &mut batch_o,
+        );
+        flush_batch(
+            &mut batch_s,
+            &mut batch_p,
+            &mut batch_o,
+            graph_id,
+            &mut stats,
+        );
+        insert_ns += t.elapsed().as_nanos();
+    }
+
+    stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    stats.parse_ms = parse_ns as f64 / 1_000_000.0;
+    stats.dict_ms = dict_ns as f64 / 1_000_000.0;
+    stats.insert_ms = insert_ns as f64 / 1_000_000.0;
+    stats
+}
+
+/// Try cache → shmem; on miss, queue the key for bulk resolve.
+/// Used by the combined ingest path's per-term hot path.
+///
+/// Accounting note: `dict_cache_hits` counts terms whose resolution
+/// is satisfied in-call without re-hitting any layer below it. This
+/// includes both terms already resolved into `cache` AND terms
+/// queued earlier in this call (i.e. `defer_set.contains`). Treating
+/// the defer_set hit as a cache hit keeps the per-term invariant
+/// `dict_cache_hits + shmem_cache_hits + dict_db_calls = 3 ×
+/// triples` consistent across the baseline / batched / shmem_warm /
+/// combined paths — the SPI shape differs but the counter is a
+/// term-reference taxonomy that holds for all four.
+fn try_resolve_or_defer(
+    key: &DictKey,
+    cache: &mut HashMap<DictKey, i64>,
+    defer_queue: &mut Vec<DictKey>,
+    defer_set: &mut HashSet<DictKey>,
+    stats: &mut LoaderStats,
+) {
+    if cache.contains_key(key) || defer_set.contains(key) {
+        stats.dict_cache_hits += 1;
+        return;
+    }
+    if let Some(id) = shmem_cache::lookup(key.0, &key.1, key.2, key.3.as_deref()) {
+        cache.insert(key.clone(), id);
+        stats.shmem_cache_hits += 1;
+        return;
+    }
+    defer_set.insert(key.clone());
+    defer_queue.push(key.clone());
+}
+
+/// Resolve a literal's datatype IRI to its dict id synchronously
+/// (cache → shmem → `put_term_full`). Datatype IRIs are
+/// short-tailed (XSD + RDFS + OWL + a handful of user types) and
+/// warm up fast; the synchronous cost is bounded by the unique
+/// datatype count, not the literal count.
+fn resolve_datatype_iri_sync(
+    iri: &str,
+    cache: &mut HashMap<DictKey, i64>,
+    stats: &mut LoaderStats,
+) -> i64 {
+    let key: DictKey = (term_type::URI, iri.to_string(), None, None);
+    if let Some(&id) = cache.get(&key) {
+        stats.dict_cache_hits += 1;
+        return id;
+    }
+    if let Some(id) = shmem_cache::lookup(term_type::URI, iri, None, None) {
+        cache.insert(key, id);
+        stats.shmem_cache_hits += 1;
+        return id;
+    }
+    let hits_before = if shmem_cache::is_ready() {
+        shmem_cache::HITS.get().load(Ordering::Relaxed)
+    } else {
+        0
+    };
+    let id = put_term_full(iri, term_type::URI, None, None);
+    let hits_after = if shmem_cache::is_ready() {
+        shmem_cache::HITS.get().load(Ordering::Relaxed)
+    } else {
+        0
+    };
+    if hits_after > hits_before {
+        stats.shmem_cache_hits += 1;
+    } else {
+        stats.dict_db_calls += 1;
+    }
+    cache.insert(key, id);
+    id
+}
+
+/// Bulk-resolve the defer queue via `put_terms_batch` (2 SPI calls
+/// regardless of size), publish each fresh (key, id) to shmem on
+/// commit so future ingests in this backend see hot-cache hits.
+fn flush_defer(
+    defer_queue: &mut Vec<DictKey>,
+    defer_set: &mut HashSet<DictKey>,
+    cache: &mut HashMap<DictKey, i64>,
+    stats: &mut LoaderStats,
+) {
+    if defer_queue.is_empty() {
+        return;
+    }
+    let batch: Vec<(i16, String, Option<i64>, Option<String>)> = defer_queue
+        .iter()
+        .map(|k| (k.0, k.1.clone(), k.2, k.3.clone()))
+        .collect();
+    let resolved_count = batch.len() as i64;
+    let ids = crate::storage::dict::put_terms_batch(&batch);
+    for (k, id) in defer_queue.iter().zip(ids.iter()) {
+        cache.insert(k.clone(), *id);
+        shmem_cache::stage_for_commit(k.0, &k.1, k.2, k.3.as_deref(), *id);
+    }
+    // `dict_db_calls` is counted per-term (not per-batch) so the
+    // taxonomy matches the baseline / batched / shmem_warm paths.
+    // The PHYSICAL SPI shape is 2 calls per flush (INSERT ON
+    // CONFLICT DO NOTHING + JOIN-back lookup with WITH ORDINALITY);
+    // the SHAPE difference shows up in elapsed_ms, not the counter.
+    stats.dict_db_calls += resolved_count;
+    defer_queue.clear();
+    defer_set.clear();
+}
+
+/// Walk drained pending triples, lookup s/p/o ids from `cache`
+/// (every key was resolved by a prior `flush_defer`), push into the
+/// flush_batch input vectors. Used only by the combined path; the
+/// baseline + batched paths already drive `batch_*` themselves.
+fn drain_pending_into_batch(
+    pending: &mut Vec<(DictKey, DictKey, DictKey)>,
+    cache: &HashMap<DictKey, i64>,
+    batch_s: &mut Vec<i64>,
+    batch_p: &mut Vec<i64>,
+    batch_o: &mut Vec<i64>,
+) {
+    for (s, p, o) in pending.drain(..) {
+        batch_s.push(
+            *cache
+                .get(&s)
+                .unwrap_or_else(|| panic!("ingest_turtle_combined: cache miss for subject {s:?}")),
+        );
+        batch_p.push(
+            *cache.get(&p).unwrap_or_else(|| {
+                panic!("ingest_turtle_combined: cache miss for predicate {p:?}")
+            }),
+        );
+        batch_o.push(
+            *cache
+                .get(&o)
+                .unwrap_or_else(|| panic!("ingest_turtle_combined: cache miss for object {o:?}")),
+        );
+    }
+}
+
+/// TA-7 dispatch — read `pgrdf.ingest_dict_path` + apply
+/// `pgrdf.shmem_prewarm_on_init` (with a per-backend latch), then
+/// route to one of: baseline (legacy single-term SPI), batched
+/// (TA-D3 spike path), shmem_warm (baseline after a forced prewarm),
+/// combined (TA-7 production path). All four produce identical
+/// `_pgrdf_quads` rows by construction; only the SPI shape differs.
+fn ingest_dispatch<R: Read>(reader: R, graph_id: i64, base_iri: Option<&str>) -> LoaderStats {
+    use crate::query::guc::{
+        dict_batch_size, ingest_dict_path, shmem_prewarm_on_init, IngestDictPath,
+    };
+    let path = ingest_dict_path();
+    if shmem_prewarm_on_init() || path == IngestDictPath::ShmemWarm {
+        maybe_prewarm_once();
+    }
+    match path {
+        IngestDictPath::Baseline | IngestDictPath::ShmemWarm => {
+            ingest_turtle_with_stats(reader, graph_id, base_iri)
+        }
+        IngestDictPath::Batched => {
+            ingest_turtle_dict_batched(reader, graph_id, base_iri, dict_batch_size())
+        }
+        IngestDictPath::Combined => {
+            ingest_turtle_combined(reader, graph_id, base_iri, dict_batch_size())
+        }
+    }
+}
+
+thread_local! {
+    static PREWARM_DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run the shmem dict-cache prewarm exactly once per backend.
+/// Idempotent across the per-backend lifetime; cheap on repeat
+/// invocations (just an atomic-cell check).
+fn maybe_prewarm_once() {
+    if PREWARM_DONE.with(|c| c.get()) {
+        return;
+    }
+    let _ = crate::storage::stats::shmem_cache_prewarm_impl(100_000);
+    PREWARM_DONE.with(|c| c.set(true));
+}
+
 fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
     pgrx::JsonB(json!({
         "triples":          stats.triples,
@@ -845,7 +1213,7 @@ fn load_turtle(path: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL
     let file =
         File::open(path).unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
     let base = base_iri.filter(|s| !s.is_empty());
-    ingest_turtle_with_stats(BufReader::new(file), graph_id, base).triples
+    ingest_dispatch(BufReader::new(file), graph_id, base).triples
 }
 
 /// Same as `load_turtle` but returns JSONB stats: triples,
@@ -864,7 +1232,7 @@ fn load_turtle_verbose(
     let file = File::open(path)
         .unwrap_or_else(|e| panic!("load_turtle_verbose: failed to open {path:?}: {e}"));
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = ingest_turtle_with_stats(BufReader::new(file), graph_id, base);
+    let stats = ingest_dispatch(BufReader::new(file), graph_id, base);
     stats_to_jsonb(&stats)
 }
 
@@ -876,7 +1244,7 @@ fn load_turtle_verbose(
 #[pg_extern]
 fn parse_turtle(content: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL")) -> i64 {
     let base = base_iri.filter(|s| !s.is_empty());
-    ingest_turtle_with_stats(content.as_bytes(), graph_id, base).triples
+    ingest_dispatch(content.as_bytes(), graph_id, base).triples
 }
 
 /// Verbose variant of `parse_turtle` returning JSONB stats.
@@ -888,7 +1256,7 @@ fn parse_turtle_verbose(
     base_iri: default!(Option<&str>, "NULL"),
 ) -> pgrx::JsonB {
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = ingest_turtle_with_stats(content.as_bytes(), graph_id, base);
+    let stats = ingest_dispatch(content.as_bytes(), graph_id, base);
     stats_to_jsonb(&stats)
 }
 
