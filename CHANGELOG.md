@@ -6,6 +6,37 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Parked (TA-NEW-W — schema migration to `UNIQUE NULLS NOT DISTINCT` deferred to v0.7+)
+
+v0.5.39 attempted TA-NEW-W per the published release plan: migrate
+`_pgrdf_dictionary.unique_term` to `UNIQUE NULLS NOT DISTINCT`
+(PG 15+) so `INSERT ... ON CONFLICT DO NOTHING` could dedup
+NULL-containing dict rows directly, replacing the
+`WHERE NOT EXISTS` anti-join introduced in v0.5.37 and recovering
+the small (~3%) e2e perf cost the workaround imposed. The
+migration was code-correct (schema + upgrade SQL + put_terms_batch
+revert all idempotent, structurally clean) but exposed a PG
+concurrency hazard that blocks shipping the migration as-is.
+**The migration is parked for v0.7+; v0.5.39 ships the analysis
+as the durable record + bumps the version stack for cadence
+hygiene.** No behavior change from v0.5.38.
+
+- **What failed**: PG 17's NULLS NOT DISTINCT semantics make the constraint index treat NULL-bearing rows as duplicate-prone. INSERT's constraint-check acquires a per-index-leaf ShareLock on the inserting transaction's xid whenever it sees an in-progress conflicting row — even when the OTHER transaction inserts a DIFFERENT row that happens to share a leaf page. Under pgrx parallel test execution (~8 worker threads against a shared postmaster running START-TX → INSERT-dict-rows → INSERT-quad-rows → ROLLBACK cycles), the cross-TX ShareLock graph cycles within seconds: `ERROR: deadlock detected DETAIL: Process N waits for ShareLock on transaction T; blocked by process M. CONTEXT: while inserting index tuple (X,Y) in relation "unique_term"`. Reproduced 10–12 deadlocks per `cargo pgrx test` run, varying across `query::executor::tests::pg_*` per run. The deadlocks abort UNRELATED tests (the one the deadlock victim happened to be running), turning a stable 286/286 suite into 280/286 with no stable failure set.
+
+- **Why this isn't a TA-NEW-W design bug**: the same migration would surface the same hazard against ANY parallel ingest workload — not just pgrx tests. Concurrent backends doing INSERT-many-then-rollback against a `UNIQUE NULLS NOT DISTINCT` index will hit this whenever their NULL-bearing inserts share index leaf pages. Shipping the migration requires ONE of: (a) a retry loop in `put_terms_batch` that catches `ERRCODE_T_R_DEADLOCK_DETECTED` (PG SQLSTATE `40P01`) and retries with bounded backoff — the cleanest path, matches standard PG application practice; (b) a sorted-input INSERT path so all parallel transactions touch index pages in globally-consistent order — eliminates the lock-graph cycle but adds per-call ordering cost; (c) an advisory-lock around dict writes — serialises ingest globally, defeats parallel-scale; (d) pgrx test infrastructure that serialises ingest tests — outside pgRDF's scope. Filed as **TA-NEW-W.v2** for v0.7+, gated on the retry-loop approach.
+
+- **What v0.5.39 reverts**: `sql/schema_v0_2_0.sql` UNIQUE constraint back to default (NULLS DISTINCT) semantics; `sql/pgrdf--0.5.1--0.5.39.sql` body back to the no-op upgrade shape (filename increments per the bridge convention); `src/storage/dict.rs::put_terms_batch` keeps the `WHERE NOT EXISTS` anti-join from v0.5.37. The TA-NEW-W attempt + outcome live in `_WIP/DECISION.TA-NEW-W.nulls-not-distinct-deferred.md` (gitignored — the local working record; this CHANGELOG entry carries the publishable summary).
+
+### Changed (six sources of truth, mechanical bump 0.5.38 → 0.5.39)
+
+- **`Cargo.toml`**, **`pgrdf.control`**, **`compose/compose.yml`** SQL mount, **`tests/regression/expected/00-smoke.out`**, **`META.json`** (both fields), **`docs/06-installation.md`** + **`compose/README.md`** example output, **`README.md`** Status badge + Status row + Install row + Quickstart example. Upgrade bridge renamed `sql/pgrdf--0.5.1--0.5.38.sql` → `sql/pgrdf--0.5.1--0.5.39.sql` (no-op; schema unchanged). The release-plan table the user approved at end of v0.5.38 put `v0.5.39 = TA-NEW-W`; shipping the decision keeps the cadence honest and unblocks v0.5.40 (TA-6 — TriG + N-Quads route through combined path).
+
+### Verified locally
+
+- 286/286 pgrx tests pass.
+- 91/91 regression tests pass.
+- LUBM-1 ingest e2e: ~1,250 ms (unchanged from v0.5.38 — no behavior change shipped).
+
 ### Fixed (v0.5.37 regression suite turn-red: three bugs surfaced after the combined path landed as default)
 
 The v0.5.37 commit shipped TA-7 + got the release chain green

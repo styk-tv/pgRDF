@@ -172,7 +172,14 @@ pub(crate) fn put_terms_batch(terms: &[(i16, String, Option<i64>, Option<String>
     // would each pass NOT EXISTS and each INSERT) — that's filed as
     // a TA-NEW-W follow-up: a schema migration to
     // `UNIQUE NULLS NOT DISTINCT` (PG 15+), which lets ON CONFLICT
-    // resume working and is race-safe.
+    // resume working and is race-safe. **v0.5.39 ATTEMPTED THE
+    // MIGRATION** but found the NULLS NOT DISTINCT form introduces
+    // PG-level deadlocks under pgrx parallel test execution (see
+    // `_WIP/DECISION.TA-NEW-W.nulls-not-distinct-deferred.md` for
+    // the incident analysis); shipping it requires a retry-loop on
+    // `ERRCODE_T_R_DEADLOCK_DETECTED` (SQLSTATE 40P01) which is
+    // designed for v0.7+. Until then the `WHERE NOT EXISTS` form
+    // stays.
     Spi::run_with_args(
         "INSERT INTO pgrdf._pgrdf_dictionary
              (term_type, lexical_value, datatype_iri_id, language_tag)
