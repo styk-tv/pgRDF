@@ -1,0 +1,19 @@
+-- pgrdf--0.5.1--0.5.40.sql
+--
+-- No-op upgrade script from v0.5.1 (the only previously-installable
+-- version, due to the Cargo.toml-stuck-at-0.5.1 bug surfaced by
+-- OCI-GERMINATION on 2026-05-30) to v0.5.40.
+--
+-- The pgrdf SCHEMA is byte-identical between 0.5.1 and 0.5.40 — every
+-- intermediate release built from the same dictionary / quads /
+-- graphs table definitions. v0.5.40 (TA-6) routes the TriG + N-Quads
+-- ingest UDFs (`parse_trig` / `parse_nquads`) through the combined
+-- dict path under `pgrdf.ingest_dict_path`, a runtime change in the
+-- .so only — the SQL surface (function signatures, tables, indexes)
+-- is unchanged.
+--
+-- This script must exist for PostgreSQL to consider the
+-- ``ALTER EXTENSION pgrdf UPDATE TO '0.5.40'`` path valid. Its body
+-- intentionally has no DDL — declaring the path is sufficient.
+
+-- (no DDL by design)

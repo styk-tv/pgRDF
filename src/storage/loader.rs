@@ -678,51 +678,19 @@ fn ingest_turtle_combined<R: Read>(
 
         let t_dict = Instant::now();
 
-        let s_key: DictKey = match &triple.subject {
-            NamedOrBlankNode::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
-            NamedOrBlankNode::BlankNode(b) => {
-                (term_type::BLANK_NODE, b.as_str().to_string(), None, None)
-            }
-        };
+        let s_key: DictKey = subject_key(&triple.subject);
         let p_key: DictKey = (
             term_type::URI,
             triple.predicate.as_str().to_string(),
             None,
             None,
         );
-        let o_key: DictKey = match &triple.object {
-            Term::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
-            Term::BlankNode(b) => (term_type::BLANK_NODE, b.as_str().to_string(), None, None),
-            Term::Literal(lit) => {
-                let lang = lit.language();
-                // Match baseline `intern_term` semantics: lang-tagged
-                // literals carry datatype_id = None (the datatype is
-                // implicitly rdf:langString and not stored), every
-                // other literal carries an explicit datatype IRI
-                // dict id — INCLUDING plain `xsd:string`. The dict
-                // row shape must round-trip via the SPARQL executor's
-                // term equality (which keys on the explicit dict id),
-                // so an `xsd:string` plain literal goes in with the
-                // xsd:string IRI's dict id, not NULL.
-                let datatype_id = if lang.is_some() {
-                    None
-                } else {
-                    Some(resolve_datatype_iri_sync(
-                        lit.datatype().as_str(),
-                        &mut cache,
-                        &mut stats,
-                    ))
-                };
-                (
-                    term_type::LITERAL,
-                    lit.value().to_string(),
-                    datatype_id,
-                    lang.map(str::to_string),
-                )
-            }
-            #[allow(unreachable_patterns)]
-            _ => panic!("ingest_turtle_combined: unsupported object term"),
-        };
+        let o_key: DictKey = object_key(
+            &triple.object,
+            &mut cache,
+            &mut stats,
+            "ingest_turtle_combined",
+        );
 
         // Try-resolve each of s/p/o: cache → shmem → defer queue.
         for key in [&s_key, &p_key, &o_key] {
@@ -801,6 +769,58 @@ fn ingest_turtle_combined<R: Read>(
     stats.dict_ms = dict_ns as f64 / 1_000_000.0;
     stats.insert_ms = insert_ns as f64 / 1_000_000.0;
     stats
+}
+
+/// Build the `DictKey` for a subject term (URI or blank node).
+/// Shared by the Turtle and quad combined ingest paths so both
+/// produce byte-identical dict rows.
+fn subject_key(s: &NamedOrBlankNode) -> DictKey {
+    match s {
+        NamedOrBlankNode::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
+        NamedOrBlankNode::BlankNode(b) => {
+            (term_type::BLANK_NODE, b.as_str().to_string(), None, None)
+        }
+    }
+}
+
+/// Build the `DictKey` for an object term (URI, blank node, or
+/// literal). Literals follow the baseline `intern_term` rule:
+/// lang-tagged literals carry `datatype_id = None` (rdf:langString
+/// is implicit + not stored); every other literal — INCLUDING plain
+/// `xsd:string` — carries an explicit datatype IRI dict id resolved
+/// synchronously via `resolve_datatype_iri_sync`. Shared by the
+/// Turtle and quad combined paths. `prefix` selects the stable
+/// panic prefix for the unreachable RDF-star arm.
+fn object_key(
+    o: &Term,
+    cache: &mut HashMap<DictKey, i64>,
+    stats: &mut LoaderStats,
+    prefix: &str,
+) -> DictKey {
+    match o {
+        Term::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
+        Term::BlankNode(b) => (term_type::BLANK_NODE, b.as_str().to_string(), None, None),
+        Term::Literal(lit) => {
+            let lang = lit.language();
+            let datatype_id = if lang.is_some() {
+                None
+            } else {
+                Some(resolve_datatype_iri_sync(
+                    lit.datatype().as_str(),
+                    cache,
+                    stats,
+                ))
+            };
+            (
+                term_type::LITERAL,
+                lit.value().to_string(),
+                datatype_id,
+                lang.map(str::to_string),
+            )
+        }
+        #[allow(unreachable_patterns)]
+        _ => panic!("{prefix}: unsupported object term"),
+    }
 }
 
 /// Try cache → shmem; on miss, queue the key for bulk resolve.
@@ -1171,6 +1191,165 @@ where
     (stats, graphs_order)
 }
 
+/// TA-6 — combined dict path for the quad stream (TriG / N-Quads).
+///
+/// Mirrors `ingest_turtle_combined`'s single-pass design (shmem
+/// hot-cache check first, defer queue for misses, bulk-resolve via
+/// `put_terms_batch` at `dict_batch_size` or before draining the
+/// pending buffer) but routes each resolved quad into its
+/// destination graph's `GraphBatches` partition instead of a single
+/// flat batch. The dictionary is global so the defer queue is shared
+/// across graphs; only the quad routing is per-graph.
+///
+/// Strict-mode semantics are preserved: `resolve_graph_id` resolves
+/// (and under `strict` may reject) the destination graph BEFORE the
+/// quad's terms are queued, and a rejection panics — aborting the
+/// surrounding statement and rolling back every flushed dict row +
+/// quad batch, so no partial ingest survives.
+fn ingest_quads_combined<P, E>(
+    parser: P,
+    default_graph_id: i64,
+    strict: bool,
+    prefix: &'static str,
+    dict_batch_size: usize,
+) -> (LoaderStats, Vec<i64>)
+where
+    P: Iterator<Item = Result<oxrdf::Quad, E>>,
+    E: std::fmt::Display,
+{
+    let start = Instant::now();
+    let mut stats = LoaderStats::default();
+    let mut cache: HashMap<DictKey, i64> = HashMap::new();
+    let mut graph_id_cache: HashMap<String, i64> = HashMap::new();
+    let mut defer_queue: Vec<DictKey> = Vec::with_capacity(dict_batch_size);
+    let mut defer_set: HashSet<DictKey> = HashSet::with_capacity(dict_batch_size);
+    // Pending quads carry their resolved destination graph_id so the
+    // drain step can route each into the right `GraphBatches`
+    // partition once all its term keys are resolved.
+    let mut pending: Vec<(i64, DictKey, DictKey, DictKey)> = Vec::with_capacity(BATCH_SIZE);
+    let mut batches = GraphBatches::default();
+    let mut graphs_order: Vec<i64> = Vec::new();
+    let mut graphs_seen: HashSet<i64> = HashSet::new();
+
+    for quad_result in parser {
+        let quad = quad_result.unwrap_or_else(|e| panic!("{prefix}: quad parse error: {e}"));
+        let gid = resolve_graph_id(
+            &quad.graph_name,
+            default_graph_id,
+            strict,
+            prefix,
+            &mut graph_id_cache,
+        );
+        if graphs_seen.insert(gid) {
+            graphs_order.push(gid);
+        }
+
+        let s_key = subject_key(&quad.subject);
+        let p_key: DictKey = (
+            term_type::URI,
+            quad.predicate.as_str().to_string(),
+            None,
+            None,
+        );
+        let o_key = object_key(&quad.object, &mut cache, &mut stats, prefix);
+
+        for key in [&s_key, &p_key, &o_key] {
+            try_resolve_or_defer(
+                key,
+                &mut cache,
+                &mut defer_queue,
+                &mut defer_set,
+                &mut stats,
+            );
+        }
+
+        pending.push((gid, s_key, p_key, o_key));
+        stats.triples += 1;
+
+        if defer_queue.len() >= dict_batch_size {
+            flush_defer(&mut defer_queue, &mut defer_set, &mut cache, &mut stats);
+        }
+
+        if pending.len() >= BATCH_SIZE {
+            // Defer queue MUST be empty before draining — every s/p/o
+            // key has to be resolved into `cache` for the lookup.
+            if !defer_queue.is_empty() {
+                flush_defer(&mut defer_queue, &mut defer_set, &mut cache, &mut stats);
+            }
+            drain_pending_quads_into_batches(&mut pending, &cache, &mut batches, &mut stats);
+        }
+    }
+
+    if !defer_queue.is_empty() {
+        flush_defer(&mut defer_queue, &mut defer_set, &mut cache, &mut stats);
+    }
+    drain_pending_quads_into_batches(&mut pending, &cache, &mut batches, &mut stats);
+    batches.flush_all(&mut stats);
+
+    stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    (stats, graphs_order)
+}
+
+/// Walk drained pending quads, lookup s/p/o ids from `cache` (every
+/// key was resolved by a prior `flush_defer`), route each into its
+/// destination graph's batch partition via `GraphBatches::push`
+/// (which auto-flushes a partition once it reaches `BATCH_SIZE`).
+fn drain_pending_quads_into_batches(
+    pending: &mut Vec<(i64, DictKey, DictKey, DictKey)>,
+    cache: &HashMap<DictKey, i64>,
+    batches: &mut GraphBatches,
+    stats: &mut LoaderStats,
+) {
+    for (gid, s, p, o) in pending.drain(..) {
+        let s_id = *cache
+            .get(&s)
+            .unwrap_or_else(|| panic!("ingest_quads_combined: cache miss for subject {s:?}"));
+        let p_id = *cache
+            .get(&p)
+            .unwrap_or_else(|| panic!("ingest_quads_combined: cache miss for predicate {p:?}"));
+        let o_id = *cache
+            .get(&o)
+            .unwrap_or_else(|| panic!("ingest_quads_combined: cache miss for object {o:?}"));
+        batches.push(gid, s_id, p_id, o_id, stats);
+    }
+}
+
+/// TA-6 dispatch for the quad stream — read `pgrdf.ingest_dict_path`
+/// + apply `pgrdf.shmem_prewarm_on_init`, then route to baseline
+/// (`ingest_quads_with_stats`, the per-term SPI path) or combined
+/// (`ingest_quads_combined`). `batched` and `shmem_warm` map to the
+/// same two physical paths the Turtle dispatch uses: `batched`
+/// shares the combined defer-queue mechanism (there is no separate
+/// 2-pass quad spike — the quad path was added after TA-D3), and
+/// `shmem_warm` is the baseline path after a forced prewarm. All
+/// routes produce byte-identical `_pgrdf_quads` + dict rows.
+fn ingest_quads_dispatch<P, E>(
+    parser: P,
+    default_graph_id: i64,
+    strict: bool,
+    prefix: &'static str,
+) -> (LoaderStats, Vec<i64>)
+where
+    P: Iterator<Item = Result<oxrdf::Quad, E>>,
+    E: std::fmt::Display,
+{
+    use crate::query::guc::{
+        dict_batch_size, ingest_dict_path, shmem_prewarm_on_init, IngestDictPath,
+    };
+    let path = ingest_dict_path();
+    if shmem_prewarm_on_init() || path == IngestDictPath::ShmemWarm {
+        maybe_prewarm_once();
+    }
+    match path {
+        IngestDictPath::Baseline | IngestDictPath::ShmemWarm => {
+            ingest_quads_with_stats(parser, default_graph_id, strict, prefix)
+        }
+        IngestDictPath::Batched | IngestDictPath::Combined => {
+            ingest_quads_combined(parser, default_graph_id, strict, prefix, dict_batch_size())
+        }
+    }
+}
+
 /// JSONB stats for the quad-ingest UDFs. Mirrors `stats_to_jsonb`
 /// (same verbose-stats keys + conventions as `parse_turtle_verbose`)
 /// and extends it with a `graphs` array of the resolved destination
@@ -1360,7 +1539,7 @@ fn parse_trig(
     strict: default!(bool, false),
 ) -> pgrx::JsonB {
     let parser = TriGParser::new().for_slice(content.as_bytes());
-    let (stats, graphs) = ingest_quads_with_stats(parser, default_graph_id, strict, "parse_trig");
+    let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_trig");
     quad_stats_to_jsonb(&stats, &graphs)
 }
 
@@ -1386,7 +1565,7 @@ fn parse_nquads(
     strict: default!(bool, false),
 ) -> pgrx::JsonB {
     let parser = NQuadsParser::new().for_slice(content.as_bytes());
-    let (stats, graphs) = ingest_quads_with_stats(parser, default_graph_id, strict, "parse_nquads");
+    let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_nquads");
     quad_stats_to_jsonb(&stats, &graphs)
 }
 

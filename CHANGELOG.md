@@ -6,6 +6,33 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added (TA-6 — TriG + N-Quads ingest routes through the combined dict path)
+
+v0.5.40 extends TA-7's `pgrdf.ingest_dict_path` dispatch from
+`parse_turtle` / `load_turtle` to the quad-stream UDFs
+`pgrdf.parse_trig` + `pgrdf.parse_nquads`. Before this, the quad
+path always used the legacy per-term `put_term_full` SPI path
+(it was written before the TA-D3/TA-D2/TA-7 dict-path work
+landed); now it honours the same four-way GUC switch
+(`baseline` / `batched` / `shmem_warm` / `combined`, default
+`combined`) the Turtle path uses.
+
+- **`src/storage/loader.rs`** — three new internal pieces:
+  - **`ingest_quads_combined`** — combined dict path for the quad stream. Mirrors `ingest_turtle_combined`'s single-pass design (shmem hot-cache check first → defer queue for misses → bulk-resolve via `put_terms_batch` at `dict_batch_size` or before draining the pending buffer) but routes each resolved quad into its destination graph's `GraphBatches` partition instead of a single flat batch. The dictionary is global, so the defer queue is shared across graphs; only the quad routing is per-graph. Strict-mode semantics preserved: `resolve_graph_id` resolves (and under `strict` may reject) the destination graph BEFORE a quad's terms are queued, and a rejection panics — aborting the surrounding statement and rolling back every flushed dict row + quad batch, so no partial ingest survives.
+  - **`drain_pending_quads_into_batches`** — quad analogue of `drain_pending_into_batch`: walks drained pending quads, looks up s/p/o ids from the resolved cache, routes each into its destination graph's batch partition via `GraphBatches::push`.
+  - **`ingest_quads_dispatch`** — reads `pgrdf.ingest_dict_path` + applies the `shmem_prewarm_on_init` latch, then routes to `ingest_quads_with_stats` (baseline / shmem_warm) or `ingest_quads_combined` (batched / combined). `parse_trig` + `parse_nquads` now call this instead of `ingest_quads_with_stats` directly. There is no separate 2-pass quad spike (the quad path post-dates TA-D3), so `batched` maps to the same single-pass combined mechanism — both produce byte-identical dict + quad rows.
+- **`src/storage/loader.rs`** — extracted **`subject_key`** + **`object_key`** `DictKey` builders shared by the Turtle and quad combined paths so both produce byte-identical dict rows (lang-tagged literals → `datatype_id = None`; every other literal including plain `xsd:string` → explicit datatype IRI dict id). `ingest_turtle_combined` refactored to use them (no behavior change — the inline logic was identical).
+- **`tests/regression/sql/132-quad-dict-paths-parity.sql`** + **`tests/regression/expected/132-quad-dict-paths-parity.out`** — TA-6 correctness gate. Ingests the same N-Quads blob (3-position lines + one per-run-distinct named-graph line) under each of the four `ingest_dict_path` values into per-path-distinct graphs, then asserts: quad-count parity across all four runs; decoded-lexical quad equivalence (s,p,o,o_type,o_has_dt,o_lang) between `combined` and each of `baseline` / `batched` / `shmem_warm`; and that `parse_trig` also routes through the combined path (2 named-graph quads + 1 default-graph quad land correctly). 5 boolean assertions all `t`.
+
+### Verified locally
+
+- 286/286 pgrx tests pass (existing `parse_trig` / `parse_nquads` coverage unchanged + green through the new dispatch).
+- 92/92 regression tests pass (was 91 — the new 132 quad-parity gate included).
+
+### Changed (six sources of truth, mechanical bump 0.5.39 → 0.5.40)
+
+- **`Cargo.toml`**, **`pgrdf.control`**, **`compose/compose.yml`** SQL mount, **`tests/regression/expected/00-smoke.out`**, **`META.json`** (both fields), **`docs/06-installation.md`** + **`compose/README.md`** example output, **`README.md`** Status badge + Status row + Install row + Quickstart example. Upgrade bridge renamed `sql/pgrdf--0.5.1--0.5.39.sql` → `sql/pgrdf--0.5.1--0.5.40.sql` (no-op; SQL surface unchanged — TA-6 is a runtime-only change in the `.so`).
+
 ### Parked (TA-NEW-W — schema migration to `UNIQUE NULLS NOT DISTINCT` deferred to v0.7+)
 
 v0.5.39 attempted TA-NEW-W per the published release plan: migrate
