@@ -18,11 +18,14 @@
 --   A: quad counts equal across all four runs.
 --   B-D: decoded-lexical quads (s,p,o,o_type,o_has_dt,o_lang) for
 --        `combined` ≡ each of baseline / batched / shmem_warm.
---   E: parse_trig also routes through the combined path without
---      error and lands the expected quad count.
+--   E: (TA-4 matrix completeness) parse_trig ingested under ALL
+--      FOUR paths yields identical decoded-lexical triple sets.
+--   F: parse_trig named-graph routing still works through combined.
 --
 -- Blank-node subjects/objects are excluded from lexical parity
 -- per the precedent in 130-ingest-dict-paths-parity.sql.
+--
+-- Expected output: 6 boolean assertions all evaluating to `t`.
 --
 -- Expected output: 5 boolean assertions all evaluating to `t`.
 
@@ -125,8 +128,50 @@ SELECT (
   )
 ) AS d_combined_eq_shmem_warm;
 
--- E: parse_trig routes through the combined path too. Two graphs in
--- one TriG document; expect 3 quads total (2 in g1 + 1 default).
+-- E: TA-4 matrix completeness — parse_trig across ALL FOUR paths.
+-- The same default-graph TriG content is ingested under each
+-- ingest_dict_path value into a per-path-distinct default graph;
+-- assert the decoded-lexical triple set is identical across all
+-- four (count(DISTINCT (s,p,o,...)) over the four graphs equals the
+-- per-graph count). Exercises the TriG parser through every dict
+-- path, not just combined.
+DO $$
+DECLARE
+  trig text := $trig$
+    @prefix ex:  <http://ex/trig/> .
+    @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+    ex:s1 ex:name  "Alice" .
+    ex:s2 ex:age   "30"^^xsd:integer .
+    ex:s3 ex:greet "Hello"@en .
+    ex:s4 ex:ref   ex:target .
+  $trig$;
+  paths text[] := ARRAY['baseline','batched','shmem_warm','combined'];
+  pth text;
+BEGIN
+  FOREACH pth IN ARRAY paths LOOP
+    EXECUTE format('SET LOCAL pgrdf.ingest_dict_path = %L', pth);
+    PERFORM pgrdf.parse_trig(trig, pgrdf.add_graph('urn:test/ta-4/trig/' || pth));
+  END LOOP;
+END $$;
+WITH trig_lex AS (
+  SELECT q.graph_id,
+         s.lexical_value sl, p.lexical_value pl, o.lexical_value ol,
+         o.term_type ot, (o.datatype_iri_id IS NOT NULL) od, o.language_tag og
+    FROM pgrdf._pgrdf_quads q
+    JOIN pgrdf._pgrdf_graphs g     ON g.graph_id = q.graph_id
+    JOIN pgrdf._pgrdf_dictionary s ON s.id = q.subject_id
+    JOIN pgrdf._pgrdf_dictionary p ON p.id = q.predicate_id
+    JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id
+   WHERE g.iri LIKE 'urn:test/ta-4/trig/%'
+)
+SELECT (
+  (SELECT count(DISTINCT (sl,pl,ol,ot,od,og)) FROM trig_lex) = 4
+  AND (SELECT count(DISTINCT graph_id) FROM trig_lex) = 4
+  AND (SELECT bool_and(c = 4) FROM (SELECT count(*) c FROM trig_lex GROUP BY graph_id) z)
+) AS e_trig_all_paths_parity;
+
+-- F: parse_trig named-graph routing still works through the combined
+-- path. Two graphs in one TriG document; 2 in g1 + 1 default.
 SET LOCAL pgrdf.ingest_dict_path = 'combined';
 DO $$
 BEGIN
@@ -146,6 +191,6 @@ SELECT (
   AND
   (SELECT count(*) FROM pgrdf._pgrdf_quads
     WHERE graph_id = pgrdf.graph_id('http://ex/trig/g1')) = 2
-) AS e_trig_combined_routes;
+) AS f_trig_combined_named_routes;
 
 ROLLBACK;

@@ -16,7 +16,7 @@
 # pgCK's pgck.control carries `requires = 'pgrdf, pgcrypto'`.
 
 comment = 'Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning'
-default_version = '0.5.41'
+default_version = '0.5.42'
 module_pathname = '$libdir/pgrdf'
 relocatable = false
 superuser = true

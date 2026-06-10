@@ -1833,4 +1833,131 @@ mod tests {
         let trig = "GRAPH <http://example.com/unbound> { <http://ex/s> <http://ex/p> \"v\" }";
         Spi::run_with_args("SELECT pgrdf.parse_trig($1, 0, TRUE)", &[trig.into()]).unwrap();
     }
+
+    // ─── TA-4: dict-path matrix parity (pgrx level) ────────────────
+    //
+    // The SQL regression gates 130 (Turtle) + 132 (N-Quads/TriG)
+    // already lock dict-path parity against the compose Postgres.
+    // These pgrx tests lock the SAME invariant against the freshly
+    // built `.so` inside CI's `test (17)` job — a distinct execution
+    // path from the pg_regress-style runner — so a path divergence
+    // is caught at the unit level too. The fixture deliberately
+    // carries no blank nodes (whose labels are parser-assigned and
+    // need not byte-match across two parser invocations), so every
+    // triple can be compared by decoded lexical value with no caveat.
+
+    /// Assert that the same content ingested under all four
+    /// `pgrdf.ingest_dict_path` values into `gids` produced
+    /// byte-identical decoded-lexical triple sets — i.e. exactly
+    /// `expected_triples` distinct (s,p,o,o_type,o_has_dt,o_lang)
+    /// rows shared across all four graphs, and each graph holds
+    /// exactly that many quads.
+    fn assert_path_matrix_parity(gids: [i64; 4], expected_triples: i64) {
+        let glist = format!("{},{},{},{}", gids[0], gids[1], gids[2], gids[3]);
+        let sql = format!(
+            "WITH lex AS (
+               SELECT q.graph_id,
+                      s.lexical_value sl, p.lexical_value pl, o.lexical_value ol,
+                      o.term_type ot, (o.datatype_iri_id IS NOT NULL) od,
+                      o.language_tag og
+                 FROM pgrdf._pgrdf_quads q
+                 JOIN pgrdf._pgrdf_dictionary s ON s.id = q.subject_id
+                 JOIN pgrdf._pgrdf_dictionary p ON p.id = q.predicate_id
+                 JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id
+                WHERE q.graph_id IN ({glist})
+             )
+             SELECT
+               -- all four paths agree on the exact lexical-triple set:
+               (SELECT count(DISTINCT (sl,pl,ol,ot,od,og)) FROM lex) = {expected_triples}
+               -- all four graphs are present:
+               AND (SELECT count(DISTINCT graph_id) FROM lex) = 4
+               -- each graph holds exactly the expected quad count:
+               AND (SELECT bool_and(c = {expected_triples})
+                      FROM (SELECT count(*) c FROM lex GROUP BY graph_id) z)"
+        );
+        let ok: bool = Spi::get_one(&sql).unwrap().unwrap_or(false);
+        assert!(
+            ok,
+            "dict-path matrix parity failed for graphs {glist} (expected {expected_triples} shared triples)"
+        );
+    }
+
+    /// Turtle ingested under baseline / batched / shmem_warm /
+    /// combined yields identical decoded-lexical triple sets.
+    #[pg_test]
+    fn dict_path_matrix_turtle() {
+        let ttl = r#"
+            @prefix ex:  <http://example.com/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:s1 ex:name  "Alice" .
+            ex:s2 ex:age   "30"^^xsd:integer .
+            ex:s3 ex:greet "Hello"@en .
+            ex:s4 ex:ref   ex:target .
+            ex:s5 ex:zero  "0030"^^xsd:integer .
+        "#;
+        let paths = ["baseline", "batched", "shmem_warm", "combined"];
+        let gids = [7_400i64, 7_401, 7_402, 7_403];
+        for (p, gid) in paths.iter().zip(gids.iter()) {
+            Spi::run(&format!("SET pgrdf.ingest_dict_path = '{p}'")).unwrap();
+            Spi::run_with_args(
+                "SELECT pgrdf.parse_turtle($1, $2)",
+                &[ttl.into(), (*gid).into()],
+            )
+            .unwrap();
+        }
+        Spi::run("SET pgrdf.ingest_dict_path = 'combined'").unwrap();
+        assert_path_matrix_parity(gids, 5);
+    }
+
+    /// N-Quads (all 3-position → default graph) ingested under all
+    /// four paths into per-path default graphs yields identical sets.
+    #[pg_test]
+    fn dict_path_matrix_nquads() {
+        let nq = concat!(
+            "<http://example.com/s1> <http://example.com/name> \"Alice\" .\n",
+            "<http://example.com/s2> <http://example.com/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://example.com/s3> <http://example.com/greet> \"Hello\"@en .\n",
+            "<http://example.com/s4> <http://example.com/ref> <http://example.com/target> .\n",
+            "<http://example.com/s5> <http://example.com/zero> \"0030\"^^<http://www.w3.org/2001/XMLSchema#integer> ."
+        );
+        let paths = ["baseline", "batched", "shmem_warm", "combined"];
+        let gids = [7_410i64, 7_411, 7_412, 7_413];
+        for (p, gid) in paths.iter().zip(gids.iter()) {
+            Spi::run(&format!("SET pgrdf.ingest_dict_path = '{p}'")).unwrap();
+            Spi::run_with_args(
+                "SELECT pgrdf.parse_nquads($1, $2)",
+                &[nq.into(), (*gid).into()],
+            )
+            .unwrap();
+        }
+        Spi::run("SET pgrdf.ingest_dict_path = 'combined'").unwrap();
+        assert_path_matrix_parity(gids, 5);
+    }
+
+    /// TriG (default-graph triples → per-path default graph) ingested
+    /// under all four paths yields identical decoded-lexical sets.
+    #[pg_test]
+    fn dict_path_matrix_trig() {
+        let trig = r#"
+            @prefix ex:  <http://example.com/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:s1 ex:name  "Alice" .
+            ex:s2 ex:age   "30"^^xsd:integer .
+            ex:s3 ex:greet "Hello"@en .
+            ex:s4 ex:ref   ex:target .
+            ex:s5 ex:zero  "0030"^^xsd:integer .
+        "#;
+        let paths = ["baseline", "batched", "shmem_warm", "combined"];
+        let gids = [7_420i64, 7_421, 7_422, 7_423];
+        for (p, gid) in paths.iter().zip(gids.iter()) {
+            Spi::run(&format!("SET pgrdf.ingest_dict_path = '{p}'")).unwrap();
+            Spi::run_with_args(
+                "SELECT pgrdf.parse_trig($1, $2)",
+                &[trig.into(), (*gid).into()],
+            )
+            .unwrap();
+        }
+        Spi::run("SET pgrdf.ingest_dict_path = 'combined'").unwrap();
+        assert_path_matrix_parity(gids, 5);
+    }
 }

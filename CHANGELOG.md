@@ -6,6 +6,29 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added (TA-4 — dict-path parity matrix completed across formats × routes)
+
+v0.5.42 is a **test-only** release closing the dict-path correctness
+invariant before the Track A ship-it. The SQL regression gates 130
+(Turtle) + 132 (N-Quads/TriG) already locked dict-path parity against
+the compose Postgres; v0.5.42 adds the same invariant at the **pgrx
+unit level** (CI's `test (17)` job, which runs against the freshly
+built `.so` — a distinct execution path from the pg_regress-style
+runner) and completes the TriG × 4-paths coverage that 132 previously
+only spot-checked in `combined` mode.
+
+- **`src/storage/loader.rs`** — three new `#[pg_test]` matrix tests + a shared `assert_path_matrix_parity` helper. `dict_path_matrix_turtle` / `dict_path_matrix_nquads` / `dict_path_matrix_trig` each ingest the same blank-node-free fixture (URI / typed-literal / lang-literal / plain-string / IRI-object term shapes) under all four `pgrdf.ingest_dict_path` values (`baseline` / `batched` / `shmem_warm` / `combined`) into four distinct graphs, then assert via a single aggregate query that all four graphs hold the exact same decoded-lexical triple set (`count(DISTINCT (s,p,o,o_type,o_has_dt,o_lang))` over the four graphs equals the per-graph count, all four graphs present, each holding exactly the expected quad count). The fixture deliberately carries no blank nodes so every triple compares by decoded lexical value with no parser-assigned-label caveat.
+- **`tests/regression/sql/132-quad-dict-paths-parity.sql`** — assertion `E` upgraded from a single `combined`-only TriG smoke to a full TriG × 4-paths parity check (same fixture ingested under each `ingest_dict_path` value into per-path-distinct default graphs; decoded-lexical triple sets asserted identical across all four). The former TriG named-graph routing check is retained as assertion `F`. Gate grows from 5 → 6 assertions.
+
+### Verified locally
+
+- 289/289 pgrx tests pass (was 286 — the 3 new matrix tests included).
+- 93/93 regression tests pass (132 now exercises 6 assertions; total test count unchanged).
+
+### Changed (six sources of truth, mechanical bump 0.5.41 → 0.5.42)
+
+- **`Cargo.toml`**, **`pgrdf.control`**, **`compose/compose.yml`** SQL mount, **`tests/regression/expected/00-smoke.out`**, **`META.json`** (both fields), **`docs/06-installation.md`** + **`compose/README.md`** example output, **`README.md`** Status badge + Status row + Install row + Quickstart example. Upgrade bridge renamed `sql/pgrdf--0.5.1--0.5.41.sql` → `sql/pgrdf--0.5.1--0.5.42.sql` (no-op; SQL surface + runtime both unchanged — TA-4 is test-only).
+
 ### Added (TA-5 — verbose-ingest JSONB reports the dispatched `path`)
 
 v0.5.41 adds a `path` field to the verbose-ingest JSONB output of
