@@ -1,0 +1,19 @@
+-- pgrdf--0.5.1--0.5.41.sql
+--
+-- No-op upgrade script from v0.5.1 (the only previously-installable
+-- version, due to the Cargo.toml-stuck-at-0.5.1 bug surfaced by
+-- OCI-GERMINATION on 2026-05-30) to v0.5.41.
+--
+-- The pgrdf SCHEMA is byte-identical between 0.5.1 and 0.5.41. v0.5.41
+-- (TA-5) adds a `path` field to the verbose-ingest JSONB output of
+-- `parse_turtle_verbose` / `load_turtle_verbose` / `parse_trig` /
+-- `parse_nquads`, reflecting which `pgrdf.ingest_dict_path` route the
+-- dispatcher selected — a change in the .so's JSONB serialization
+-- only. The SQL surface (function signatures, tables, indexes) is
+-- unchanged.
+--
+-- This script must exist for PostgreSQL to consider the
+-- ``ALTER EXTENSION pgrdf UPDATE TO '0.5.41'`` path valid. Its body
+-- intentionally has no DDL — declaring the path is sufficient.
+
+-- (no DDL by design)

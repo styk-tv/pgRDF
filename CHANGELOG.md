@@ -6,6 +6,31 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added (TA-5 — verbose-ingest JSONB reports the dispatched `path`)
+
+v0.5.41 adds a `path` field to the verbose-ingest JSONB output of
+the dispatched ingest UDFs (`parse_turtle_verbose` /
+`load_turtle_verbose` / `parse_trig` / `parse_nquads`). It reports
+which `pgrdf.ingest_dict_path` route the dispatcher actually
+selected for the call — `baseline` / `batched` / `shmem_warm` /
+`combined`. Before this, a caller could SET the GUC but had no way
+to confirm the route a given ingest took except by inferring it
+from timing; the benchmark harness + operators now read it
+directly off the result.
+
+- **`src/query/guc.rs`** — `IngestDictPath::as_str()` returns the canonical lowercase route name (`baseline` / `batched` / `shmem_warm` / `combined`) matching the GUC enum values.
+- **`src/storage/loader.rs`** — `LoaderStats` gains a `path: &'static str` field. `ingest_dispatch` (Turtle) and `ingest_quads_dispatch` (TriG/N-Quads) set `stats.path = path.as_str()` after the chosen ingest function returns, so the recorded route reflects the dispatcher's actual decision (notably: `baseline` and `shmem_warm` share the same physical ingest function but record distinct path strings). Both `stats_to_jsonb` and `quad_stats_to_jsonb` emit the `path` field. The `parse_turtle_dict_batched` spike UDF continues to override `path` with its own `dict_batched` discriminator after serialization (unchanged — it's a separate explicit surface, not a GUC-dispatched route).
+- **`tests/regression/sql/133-verbose-path-field.sql`** + **`tests/regression/expected/133-verbose-path-field.out`** — TA-5 correctness gate. Sets each of the four `ingest_dict_path` values in turn and asserts the verbose JSONB echoes it back for the Turtle path (`parse_turtle_verbose`), the N-Quads path (`parse_nquads`), and the TriG path (`parse_trig`); also locks the unrecognised-value → `combined` fallback. 8 boolean assertions all `t`.
+
+### Verified locally
+
+- 286/286 pgrx tests pass (existing verbose-JSONB assertions unaffected — they field-probe, not exact-match).
+- 93/93 regression tests pass (was 92 — the new 133 path-field gate included).
+
+### Changed (six sources of truth, mechanical bump 0.5.40 → 0.5.41)
+
+- **`Cargo.toml`**, **`pgrdf.control`**, **`compose/compose.yml`** SQL mount, **`tests/regression/expected/00-smoke.out`**, **`META.json`** (both fields), **`docs/06-installation.md`** + **`compose/README.md`** example output, **`README.md`** Status badge + Status row + Install row + Quickstart example. Upgrade bridge renamed `sql/pgrdf--0.5.1--0.5.40.sql` → `sql/pgrdf--0.5.1--0.5.41.sql` (no-op; SQL surface unchanged — TA-5 is a runtime-only change in the `.so`'s JSONB serialization).
+
 ### Added (TA-6 — TriG + N-Quads ingest routes through the combined dict path)
 
 v0.5.40 extends TA-7's `pgrdf.ingest_dict_path` dispatch from

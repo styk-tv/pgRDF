@@ -93,6 +93,14 @@ struct LoaderStats {
     parse_ms: f64,
     dict_ms: f64,
     insert_ms: f64,
+    /// TA-5 — which `pgrdf.ingest_dict_path` route the dispatcher
+    /// selected for this call (`baseline` / `batched` / `shmem_warm`
+    /// / `combined`). Set by `ingest_dispatch` / `ingest_quads_dispatch`
+    /// and surfaced as the `path` field in the verbose-ingest JSONB
+    /// so callers can confirm the route. Empty for ingest functions
+    /// invoked outside the dispatch (e.g. the `parse_turtle_dict_batched`
+    /// spike UDF, which sets its own `dict_batched` discriminator).
+    path: &'static str,
 }
 
 /// Resolve a term to its dictionary id, caching the result for the
@@ -971,7 +979,7 @@ fn ingest_dispatch<R: Read>(reader: R, graph_id: i64, base_iri: Option<&str>) ->
     if shmem_prewarm_on_init() || path == IngestDictPath::ShmemWarm {
         maybe_prewarm_once();
     }
-    match path {
+    let mut stats = match path {
         IngestDictPath::Baseline | IngestDictPath::ShmemWarm => {
             ingest_turtle_with_stats(reader, graph_id, base_iri)
         }
@@ -981,7 +989,11 @@ fn ingest_dispatch<R: Read>(reader: R, graph_id: i64, base_iri: Option<&str>) ->
         IngestDictPath::Combined => {
             ingest_turtle_combined(reader, graph_id, base_iri, dict_batch_size())
         }
-    }
+    };
+    // TA-5 — record the dispatched route so the verbose JSONB can
+    // surface it. `as_str()` matches the GUC enum values exactly.
+    stats.path = path.as_str();
+    stats
 }
 
 thread_local! {
@@ -1014,6 +1026,11 @@ fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
         "parse_ms":         stats.parse_ms,
         "dict_ms":          stats.dict_ms,
         "insert_ms":        stats.insert_ms,
+        // TA-5 — the `pgrdf.ingest_dict_path` route the dispatcher
+        // selected. Empty only when a stats struct is serialized
+        // outside the dispatch (e.g. the `parse_turtle_dict_batched`
+        // spike UDF overrides `path` with `dict_batched` after this).
+        "path":             stats.path,
     }))
 }
 
@@ -1340,14 +1357,17 @@ where
     if shmem_prewarm_on_init() || path == IngestDictPath::ShmemWarm {
         maybe_prewarm_once();
     }
-    match path {
+    let (mut stats, graphs) = match path {
         IngestDictPath::Baseline | IngestDictPath::ShmemWarm => {
             ingest_quads_with_stats(parser, default_graph_id, strict, prefix)
         }
         IngestDictPath::Batched | IngestDictPath::Combined => {
             ingest_quads_combined(parser, default_graph_id, strict, prefix, dict_batch_size())
         }
-    }
+    };
+    // TA-5 — record the dispatched route (see ingest_dispatch).
+    stats.path = path.as_str();
+    (stats, graphs)
 }
 
 /// JSONB stats for the quad-ingest UDFs. Mirrors `stats_to_jsonb`
@@ -1371,6 +1391,9 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
         "parse_ms":         stats.parse_ms,
         "dict_ms":          stats.dict_ms,
         "insert_ms":        stats.insert_ms,
+        // TA-5 — the `pgrdf.ingest_dict_path` route the quad
+        // dispatcher selected for this call.
+        "path":             stats.path,
     }))
 }
 

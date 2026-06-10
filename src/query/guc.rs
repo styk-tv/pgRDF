@@ -112,6 +112,19 @@ impl IngestDictPath {
             _ => Self::Combined,
         }
     }
+
+    /// Canonical lowercase name of the path, matching the GUC enum
+    /// values. Surfaced as the `path` field in the verbose-ingest
+    /// JSONB (TA-5) so callers can confirm which route the dispatch
+    /// actually selected for a given call.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Batched => "batched",
+            Self::ShmemWarm => "shmem_warm",
+            Self::Combined => "combined",
+        }
+    }
 }
 
 /// Register every pgRDF custom GUC. Called once from `_PG_init`.
