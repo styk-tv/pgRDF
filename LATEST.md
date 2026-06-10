@@ -3,55 +3,55 @@
   successful oci-publish.yml run AND after SLSA Build Provenance v1
   attestations have been verified against every GHCR digest below. Do NOT edit
   by hand — the next workflow run will overwrite your changes. Last refresh:
-  2026-06-06 04:17:48Z (version: v0.5.40).
+  2026-06-10 21:22:40Z (version: v0.5.41).
 -->
 
 # pgRDF — latest published artifacts
 
 One publishable surface ships from this repo: the PostgreSQL **extension** (oras-pulled OCI artifact). This file tracks the head on **PostgreSQL 17**. Builds for pg14 / pg15 / pg16 are PAUSED during a stabilization window (see [CHANGELOG.md "Changed (stabilization window)"](./CHANGELOG.md) for context) — they will resume once the multi-PG matrix is stable again. The [Repo packages view](https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle) shows everything currently published.
 
-## pgRDF extension — `v0.5.40` (PostgreSQL 17)
+## pgRDF extension — `v0.5.41` (PostgreSQL 17)
 
 Every digest below carries a verifiable SLSA Build Provenance v1 attestation per [`PROVENANCE.md`](./PROVENANCE.md). v0.5.0–v0.5.9 predate the attestation wiring and never appear here.
 
-`oras pull ghcr.io/styk-tv/pgrdf-bundle:0.5.40-pg17-<arch>` → drop `lib/pgrdf.so` + `share/extension/{pgrdf.control, pgrdf--0.5.40.sql}` next to your `postgres:17` install.
+`oras pull ghcr.io/styk-tv/pgrdf-bundle:0.5.41-pg17-<arch>` → drop `lib/pgrdf.so` + `share/extension/{pgrdf.control, pgrdf--0.5.41.sql}` next to your `postgres:17` install.
 
 | arch  | Pull URI                                             | Also tagged | Digest                                                                  | Created (UTC)       |
 |-------|------------------------------------------------------|-------------|-------------------------------------------------------------------------|---------------------|
-| amd64 | `ghcr.io/styk-tv/pgrdf-bundle:0.5.40-pg17-amd64`     | —           | `sha256:7eb35b40ab17dec2d8569c29969f1b7cdc6d6a4bde8bf4f213f7a59d8099fe3b` | 2026-06-06 04:16:50 |
-| arm64 | `ghcr.io/styk-tv/pgrdf-bundle:0.5.40-pg17-arm64`     | —           | `sha256:d1f668b8a22c3760bcfa94fa3b42cbfa7ae9d0007097bebe91e2e762b42f0b3c` | 2026-06-06 04:16:59 |
+| amd64 | `ghcr.io/styk-tv/pgrdf-bundle:0.5.41-pg17-amd64`     | —           | `sha256:3f38c61cb1e9e57b700be7a95224aff44ce962d555278eb2f4e1201b1c209997` | 2026-06-10 21:21:39 |
+| arm64 | `ghcr.io/styk-tv/pgrdf-bundle:0.5.41-pg17-arm64`     | —           | `sha256:5677121f0a1d204906a4983774d8e1f14b06a2156bfa10ff3e68cc6c3cf419e1` | 2026-06-10 21:21:41 |
 
 |                       |                                                                                                |
 |-----------------------|------------------------------------------------------------------------------------------------|
 | Artifact type         | `application/vnd.styk.pgrdf.bundle.v1+tar`                                                     |
-| Aggregate index       | `ghcr.io/styk-tv/pgrdf-bundle:0.5.40` (also tagged `v0.5.40`)                                  |
-| Aggregate digest      | `sha256:93a81fe138ad0f3ae58285c1a278ed371d8e1501714398f4c40816a363a6ba9d` |
+| Aggregate index       | `ghcr.io/styk-tv/pgrdf-bundle:0.5.41` (also tagged `v0.5.41`)                                  |
+| Aggregate digest      | `sha256:ca9f2562d89d0f467e1903c741228572578cfa9960649f2e157763c267d9cf97` |
 | Provenance            | SLSA Build Provenance v1, Sigstore-backed, pushed as OCI referrer                              |
-| Built by              | [Workflow run](https://github.com/styk-tv/pgRDF/actions/runs/27052191817)                                                                                |
-| Built from commit     | [`200a36306356`](https://github.com/styk-tv/pgRDF/commit/200a36306356921def8313ca439a1e740d38c0b8)                                                                              |
-| Verify (CLI)          | `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.5.40 --repo styk-tv/pgRDF`         |
-| Release notes         | https://github.com/styk-tv/pgRDF/releases/tag/v0.5.40                                          |
-| Tarball mirror        | https://github.com/styk-tv/pgRDF/releases/tag/v0.5.40                                          |
+| Built by              | [Workflow run](https://github.com/styk-tv/pgRDF/actions/runs/27306722713)                                                                                |
+| Built from commit     | [`494bcd5822e1`](https://github.com/styk-tv/pgRDF/commit/494bcd5822e168344acfd1ae29edc352624f12c5)                                                                              |
+| Verify (CLI)          | `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.5.41 --repo styk-tv/pgRDF`         |
+| Release notes         | https://github.com/styk-tv/pgRDF/releases/tag/v0.5.41                                          |
+| Tarball mirror        | https://github.com/styk-tv/pgRDF/releases/tag/v0.5.41                                          |
 | Repo packages view    | https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle                                   |
-| Older PG majors       | PAUSED during the stabilization window — pg14 / pg15 / pg16 leaves are NOT published for v0.5.40. Resumes per CHANGELOG.md once matrix is stable.   |
+| Older PG majors       | PAUSED during the stabilization window — pg14 / pg15 / pg16 leaves are NOT published for v0.5.41. Resumes per CHANGELOG.md once matrix is stable.   |
 
 ## Verifying any artifact above
 
 ```sh
 # Aggregate index (multi-arch; pg17 only during stabilization window)
-gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.5.40 \
+gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.5.41 \
   --repo styk-tv/pgRDF
 
 # A specific PG×arch leaf
-gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.5.40-pg17-amd64 \
+gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.5.41-pg17-amd64 \
   --repo styk-tv/pgRDF
 ```
 
-A successful verify means: signed by GitHub's Fulcio CA against the OIDC token of the v0.5.40 `oci-publish` workflow run, recorded in Sigstore's Rekor transparency log, subject digest matches the pulled artifact.
+A successful verify means: signed by GitHub's Fulcio CA against the OIDC token of the v0.5.41 `oci-publish` workflow run, recorded in Sigstore's Rekor transparency log, subject digest matches the pulled artifact.
 
 ## Pin policy
 
-- There is **no `latest` synonym** on the extension OCI artifact — pin by `pg`×`arch` explicitly (e.g. `0.5.40-pg17-amd64`).
+- There is **no `latest` synonym** on the extension OCI artifact — pin by `pg`×`arch` explicitly (e.g. `0.5.41-pg17-amd64`).
 - Tagged versions are immutable on GHCR.
 - The aggregate `vX.Y.Z` / `X.Y.Z` index references all 8 per-PG×arch leaves for that release; pull it to let your client pick.
 - Per [`PROVENANCE.md`](./PROVENANCE.md) Rule 2: do not consider an artifact "shipped" if its digest does not verify under `gh attestation verify`.
