@@ -5029,6 +5029,19 @@ fn build_from_and_where(
     anchors: &mut HashMap<String, (usize, &'static str)>,
     alias_offset: usize,
 ) -> (String, Vec<String>, ScopePlan) {
+    // M4 — reorder the mandatory BGP into a connected join order so
+    // standalone patterns don't become cross joins (see `connected_order`).
+    // Inner joins are commutative + associative, so the result set is
+    // identical; only the emitted join order (and thus the plan) changes.
+    // Everything downstream (ScopePlan, the emission loop, the anchors
+    // map the projection reads) derives from iteration order, so shadowing
+    // `bgp` with the reordered slice is sufficient and self-contained.
+    let reordered: Vec<ScopedTriple>;
+    let bgp: &[ScopedTriple] = {
+        let order = connected_order(bgp);
+        reordered = order.iter().map(|&i| bgp[i].clone()).collect();
+        &reordered
+    };
     let plan = ScopePlan::build(bgp, optionals, alias_offset);
     let mut where_clauses: Vec<String> = Vec::new();
     let mut from_sql = String::new();
@@ -5188,6 +5201,86 @@ fn triple_var_names(tp: &TriplePattern, out: &mut Vec<String>) {
     if let Some(v) = tp_object_var(tp) {
         out.push(v);
     }
+}
+
+/// M4 — connected, selectivity-aware join ordering for a mandatory BGP.
+///
+/// Returns the indices of `bgp` in an order where **every pattern after
+/// the first shares at least one variable with the union of variables
+/// already placed**. The emission loop in `build_from_and_where` binds
+/// a variable's first occurrence as its anchor and ties later
+/// occurrences to it (`bind_var`), so a connected order guarantees each
+/// emitted `INNER JOIN` carries a real `qN.col = qM.col` equality — i.e.
+/// **no cross joins**.
+///
+/// Why this matters (the LUBM-100 finding): emitting patterns in query
+/// order makes standalone patterns (e.g. the three `?x a Class` type
+/// patterns of LUBM Q2) into `INNER JOIN … ON (constants only)` — a
+/// Cartesian product (GraduateStudents × Universities × Departments,
+/// ~10^11 rows) that no amount of `work_mem` or `ANALYZE` can rescue,
+/// because no statistics make a cross product cheap. Reordering removes
+/// the cross product *structurally*; the result set is identical (inner
+/// joins are commutative + associative) — only the plan changes.
+///
+/// Heuristic: seed with the most *bound* pattern (most constant term
+/// positions = usually most selective), then greedily append the
+/// connectable candidate that shares the most variables with the placed
+/// set, tie-breaking by boundness then lowest original index (stable +
+/// deterministic). A genuinely disconnected BGP component (no shared
+/// variable with anything placed) falls back to a cross join for its
+/// first pattern — rare, and semantically required.
+fn connected_order(bgp: &[ScopedTriple]) -> Vec<usize> {
+    let n = bgp.len();
+    // 0/1 patterns can't form a cross join; 2 patterns are whatever the
+    // single join is — reordering changes nothing observable. Keep
+    // original order so trivial queries are byte-identical to pre-M4.
+    if n <= 2 {
+        return (0..n).collect();
+    }
+    let mut vars: Vec<std::collections::HashSet<String>> = Vec::with_capacity(n);
+    let mut boundness: Vec<i32> = Vec::with_capacity(n);
+    for st in bgp {
+        let mut v = Vec::new();
+        triple_var_names(&st.triple, &mut v);
+        let set: std::collections::HashSet<String> = v.into_iter().collect();
+        // 3 term slots; constant positions = 3 − distinct variable
+        // positions. Higher = more bound = more selective seed/candidate.
+        boundness.push(3 - set.len() as i32);
+        vars.push(set);
+    }
+    let mut placed = vec![false; n];
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Seed = most bound; tie-break lowest index (−i larger for smaller i).
+    let seed = (0..n)
+        .max_by_key(|&i| (boundness[i], -(i as i32)))
+        .expect("connected_order: non-empty bgp");
+    placed[seed] = true;
+    order.push(seed);
+    bound.extend(vars[seed].iter().cloned());
+
+    while order.len() < n {
+        let pick = (0..n)
+            .filter(|&i| !placed[i] && vars[i].intersection(&bound).next().is_some())
+            .max_by_key(|&i| {
+                let shared = vars[i].intersection(&bound).count() as i32;
+                (shared, boundness[i], -(i as i32))
+            })
+            .or_else(|| {
+                // Disconnected component: most-bound remaining pattern.
+                // Its join will be a cross product (correct for a BGP with
+                // no shared variable — the SPARQL result is the product).
+                (0..n)
+                    .filter(|&i| !placed[i])
+                    .max_by_key(|&i| (boundness[i], -(i as i32)))
+            })
+            .expect("connected_order: patterns remain");
+        placed[pick] = true;
+        order.push(pick);
+        bound.extend(vars[pick].iter().cloned());
+    }
+    order
 }
 
 /// Phase F group F1: collect every variable an OPTIONAL block (and
