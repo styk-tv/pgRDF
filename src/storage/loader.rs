@@ -678,11 +678,24 @@ fn ingest_turtle_combined<R: Read>(
     let mut batch_p: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
     let mut batch_o: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
 
-    for triple_result in iter {
+    // Drive the parser by hand (not `for … in iter`) so the parse
+    // timer wraps the actual `next()` call. A `for` loop polls
+    // `next()` at the top of each iteration BEFORE any in-body timer
+    // could start, which would attribute ~0 ns to parse and leak the
+    // real parse time into the unaccounted per-iteration gap (the
+    // bug v0.5.43's LUBM-10 measurement surfaced: parse_ms read 29 ms
+    // vs the baseline path's honest 1549 ms). Mirrors the
+    // `ingest_turtle_with_stats` baseline loop shape.
+    let mut iter = iter;
+    loop {
         let t_parse = Instant::now();
-        // Panic prefix `load_turtle:` matches baseline contract.
-        let triple = triple_result.expect("load_turtle: turtle parse error");
+        let next = iter.next();
         parse_ns += t_parse.elapsed().as_nanos();
+        let triple = match next {
+            // Panic prefix `load_turtle:` matches baseline contract.
+            Some(r) => r.expect("load_turtle: turtle parse error"),
+            None => break,
+        };
 
         let t_dict = Instant::now();
 

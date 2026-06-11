@@ -6,6 +6,31 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Measured (LUBM-10 under the final combined ingest path — first post-TA-7 baseline)
+
+v0.5.43 re-runs the LUBM-10 benchmark against the now-final combined
+dict path (`pgrdf.ingest_dict_path = 'combined'`, the v0.5.37+
+default) and commits the result as a persistent comparison anchor.
+This is the measurement gate before the LUBM-100 first run.
+
+- **Headline (combined v0.5.43 vs pre-TA-7 baseline v0.5.36)**: ingest e2e **24,505 ms → 16,539 ms (−32.5 %)**; ingest dict phase **17,331 ms → 9,746 ms (−43.8 %)** — the combined path's batched + hot-cache dict resolution paying off at 10× LUBM-1 scale. Insert phase flat (5,507 → 5,351 ms; the insert path was deliberately left unchanged per the TA-9 decision). Materialize is reasoner-bound (the `reasonable` crate's forward-chaining) and unchanged within run noise: RDFS ~39 s / 287,422 inferred, OWL-RL ~63 s / 815,968 inferred.
+- **Correctness: byte-identical.** Same `dict_db_calls` (315,060), same `dict_cache_hits` (4,057,182), same `triples_inferred` per profile (287,422 RDFS / 815,968 OWL-RL), and **zero Q1-Q14 count drift** — every cell still matches the locked `tests/perf/lubm/queries/expected-counts.json`. The combined path changed *how fast* ingest resolves the dictionary, not *what* it produces.
+- **`tests/perf/lubm/baseline.lubm-10.combined.json`** + **`baseline.lubm-10.combined.md`** (new) — committed reference snapshot in the richer `benchmark-runner.sh` shape (full ingest Phase-0 breakdown + RDFS/OWL-RL materialize + Q1-Q14 per profile), with a `comparison_vs_pre_ta7_baseline` block and ±30 % timing tolerance. Volatile fields (timestamp, host, git sha/branch) are stripped so the file is a stable run-to-run anchor. The older `baseline.lubm-10.json` (the `run-lubm.sh` contract consumed by `compare-to-baseline.py`) is left in its own schema, untouched.
+
+### Fixed (parse-timer accounting bug in `ingest_turtle_combined`, surfaced by the LUBM-10 measurement)
+
+- **`src/storage/loader.rs`** — `ingest_turtle_combined` drove the parser with `for triple_result in iter`, which polls `iter.next()` (the actual parse work) at the top of each iteration BEFORE the in-body `t_parse` timer starts. The timer therefore measured only the trivial `Result::expect()` unwrap, attributing ~0 ns to parse and leaking the real parse time into the unaccounted per-iteration gap. The LUBM-10 run exposed it: the combined path reported `parse_ms = 29` against the baseline path's honest `1549`. Fixed by driving the parser with an explicit `loop { let t = now(); let next = iter.next(); parse_ns += t.elapsed(); … }` (mirroring the `ingest_turtle_with_stats` baseline shape) so the timer wraps the real `next()` call. Verified honest: LUBM-1 now reports `parse_ms = 107` (was ~2), and the three phase timers sum to within ~0.6 % of `elapsed_ms`. Behavior-preserving — 289/289 pgrx + 93/93 regression green. The quad combined path (`ingest_quads_combined`) was unaffected: it carries no phase timers and honestly reports `parse_ms = 0` on the quad surface (documented in `quad_stats_to_jsonb`).
+
+### Verified locally
+
+- 289/289 pgrx tests pass (loop restructure is behavior-preserving).
+- 93/93 regression tests pass.
+- LUBM-10 e2e 16,539 ms; zero Q1-Q14 drift.
+
+### Changed (six sources of truth, mechanical bump 0.5.42 → 0.5.43)
+
+- **`Cargo.toml`**, **`pgrdf.control`**, **`compose/compose.yml`** SQL mount, **`tests/regression/expected/00-smoke.out`**, **`META.json`** (both fields), **`docs/06-installation.md`** + **`compose/README.md`** example output, **`README.md`** Status badge + Status row + Install row + Quickstart example. Upgrade bridge renamed `sql/pgrdf--0.5.1--0.5.42.sql` → `sql/pgrdf--0.5.1--0.5.43.sql` (no-op; SQL surface unchanged).
+
 ### Added (TA-4 — dict-path parity matrix completed across formats × routes)
 
 v0.5.42 is a **test-only** release closing the dict-path correctness

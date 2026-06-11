@@ -1,0 +1,236 @@
+{
+  "_comment": "Committed LUBM-10 reference snapshot under the FINAL combined ingest path (pgrdf.ingest_dict_path='combined', the v0.5.37+ default). Produced by tests/perf/benchmark-runner.sh; volatile fields (timestamp, host, git sha/branch) stripped so this file is a stable run-to-run comparison anchor. The richer sibling of the run-lubm.sh baseline.lubm-10.json (which stays in its own schema for compare-to-baseline.py). UBA -seed 0 is the deterministic data anchor. Q1-Q14 counts are locked separately in queries/expected-counts.json.",
+  "schema_version": "benchmark-runner.v1",
+  "pgrdf_version": "0.5.43",
+  "postgres_major": 17,
+  "lubm_size": 10,
+  "triples": 1316700,
+  "tbox_triples": 293,
+  "ingest": {
+    "elapsed_ms": 16539.251829,
+    "parse_ms": 1345.967395,
+    "dict_ms": 9746.267176,
+    "insert_ms": 5351.060725,
+    "dict_cache_hits": 4057182,
+    "shmem_cache_hits": 0,
+    "dict_db_calls": 315060,
+    "quad_batches": 1317
+  },
+  "profiles": {
+    "none": {
+      "materialize_ms": null,
+      "triples_inferred": null,
+      "queries": {
+        "q01": {
+          "count": 4,
+          "elapsed_ms_median": 27.03
+        },
+        "q02": {
+          "count": 1721,
+          "elapsed_ms_median": 175.951
+        },
+        "q03": {
+          "count": 6,
+          "elapsed_ms_median": 37.488
+        },
+        "q04": {
+          "count": 0,
+          "elapsed_ms_median": 157.698
+        },
+        "q05": {
+          "count": 0,
+          "elapsed_ms_median": 22.645
+        },
+        "q06": {
+          "count": 0,
+          "elapsed_ms_median": 21.91
+        },
+        "q07": {
+          "count": 0,
+          "elapsed_ms_median": 24.989
+        },
+        "q08": {
+          "count": 0,
+          "elapsed_ms_median": 22.885
+        },
+        "q09": {
+          "count": 0,
+          "elapsed_ms_median": 44.387
+        },
+        "q10": {
+          "count": 0,
+          "elapsed_ms_median": 22.315
+        },
+        "q11": {
+          "count": 0,
+          "elapsed_ms_median": 23.593
+        },
+        "q12": {
+          "count": 0,
+          "elapsed_ms_median": 21.99
+        },
+        "q13": {
+          "count": 0,
+          "elapsed_ms_median": 23.024
+        },
+        "q14": {
+          "count": 75547,
+          "elapsed_ms_median": 161.499
+        }
+      }
+    },
+    "rdfs": {
+      "materialize_ms": 39299.083242,
+      "triples_inferred": 287422,
+      "queries": {
+        "q01": {
+          "count": 4,
+          "elapsed_ms_median": 23.282
+        },
+        "q02": {
+          "count": 1721,
+          "elapsed_ms_median": 227.572
+        },
+        "q03": {
+          "count": 6,
+          "elapsed_ms_median": 24.435
+        },
+        "q04": {
+          "count": 34,
+          "elapsed_ms_median": 145.955
+        },
+        "q05": {
+          "count": 719,
+          "elapsed_ms_median": 25.952
+        },
+        "q06": {
+          "count": 75547,
+          "elapsed_ms_median": 189.134
+        },
+        "q07": {
+          "count": 59,
+          "elapsed_ms_median": 52.505
+        },
+        "q08": {
+          "count": 5916,
+          "elapsed_ms_median": 81.905
+        },
+        "q09": {
+          "count": 1233,
+          "elapsed_ms_median": 433.252
+        },
+        "q10": {
+          "count": 0,
+          "elapsed_ms_median": 23.839
+        },
+        "q11": {
+          "count": 0,
+          "elapsed_ms_median": 21.962
+        },
+        "q12": {
+          "count": 0,
+          "elapsed_ms_median": 24.602
+        },
+        "q13": {
+          "count": 0,
+          "elapsed_ms_median": 62.515
+        },
+        "q14": {
+          "count": 75547,
+          "elapsed_ms_median": 166.689
+        }
+      }
+    },
+    "owl_rl": {
+      "materialize_ms": 63454.485951,
+      "triples_inferred": 815968,
+      "queries": {
+        "q01": {
+          "count": 4,
+          "elapsed_ms_median": 21.418
+        },
+        "q02": {
+          "count": 1721,
+          "elapsed_ms_median": 238.223
+        },
+        "q03": {
+          "count": 6,
+          "elapsed_ms_median": 21.75
+        },
+        "q04": {
+          "count": 34,
+          "elapsed_ms_median": 152.402
+        },
+        "q05": {
+          "count": 719,
+          "elapsed_ms_median": 37.875
+        },
+        "q06": {
+          "count": 99566,
+          "elapsed_ms_median": 248.119
+        },
+        "q07": {
+          "count": 67,
+          "elapsed_ms_median": 123.808
+        },
+        "q08": {
+          "count": 7790,
+          "elapsed_ms_median": 174.234
+        },
+        "q09": {
+          "count": 2540,
+          "elapsed_ms_median": 458.262
+        },
+        "q10": {
+          "count": 4,
+          "elapsed_ms_median": 21.364
+        },
+        "q11": {
+          "count": 224,
+          "elapsed_ms_median": 23.016
+        },
+        "q12": {
+          "count": 15,
+          "elapsed_ms_median": 21.691
+        },
+        "q13": {
+          "count": 33,
+          "elapsed_ms_median": 21.166
+        },
+        "q14": {
+          "count": 75547,
+          "elapsed_ms_median": 178.189
+        }
+      }
+    }
+  },
+  "comparison_vs_pre_ta7_baseline": {
+    "baseline_version": "0.5.36 (pre-combined-path)",
+    "ingest_e2e_ms": {
+      "baseline": 24504.7,
+      "combined": 16539.3,
+      "delta_pct": -32.5
+    },
+    "ingest_dict_ms": {
+      "baseline": 17330.9,
+      "combined": 9746.3,
+      "delta_pct": -43.8
+    },
+    "rdfs_inferred": {
+      "baseline": 287422,
+      "combined": 287422,
+      "identical": true
+    },
+    "owl_rl_inferred": {
+      "baseline": 815968,
+      "combined": 815968,
+      "identical": true
+    },
+    "q1_q14_drift": "none \u2014 every cell matches queries/expected-counts.json"
+  },
+  "comparison_tolerance": {
+    "ingest_e2e_ms_pct": 30,
+    "materialize_ms_pct": 30,
+    "note": "timings are dev-host indicative; counts + inferred totals are exact"
+  }
+}

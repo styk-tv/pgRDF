@@ -1,0 +1,18 @@
+-- pgrdf--0.5.1--0.5.43.sql
+--
+-- No-op upgrade script from v0.5.1 (the only previously-installable
+-- version, due to the Cargo.toml-stuck-at-0.5.1 bug surfaced by
+-- OCI-GERMINATION on 2026-05-30) to v0.5.43.
+--
+-- The pgrdf SCHEMA is byte-identical between 0.5.1 and 0.5.43. v0.5.43
+-- captures the first LUBM-10 measurement under the final combined
+-- ingest path + fixes a parse-timer accounting bug in
+-- `ingest_turtle_combined` (the verbose `parse_ms` was measuring only
+-- the iterator-unwrap, not the actual parse). Both are runtime / test
+-- changes in the .so; the SQL surface is unchanged.
+--
+-- This script must exist for PostgreSQL to consider the
+-- ``ALTER EXTENSION pgrdf UPDATE TO '0.5.43'`` path valid. Its body
+-- intentionally has no DDL — declaring the path is sufficient.
+
+-- (no DDL by design)
