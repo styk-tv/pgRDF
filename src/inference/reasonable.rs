@@ -145,14 +145,18 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
         table.first().get_one::<i64>().ok().flatten().unwrap_or(0)
     });
 
-    // 2. Stream base triples out.
+    // 2. Stream base triples out. (`load_ms` covers the SPI stream +
+    //    the dedup-set build — both scale with base size.)
+    let t_load = Instant::now();
     let base = load_base_triples(graph_id);
     let base_count = base.len() as i64;
     let base_set: HashSet<Triple> = base.iter().cloned().collect();
+    let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
 
     // 3. Reason under the selected profile. Both paths return the
     //    full derived closure (base + entailed); step 4 set-diffs
     //    against `base_set` to keep only the new entailments.
+    let t_reason = Instant::now();
     let (derived, errors): (Vec<Triple>, Vec<String>) = match profile.as_str() {
         "owl-rl" => {
             let mut reasoner = Reasoner::new();
@@ -169,9 +173,12 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
         // rejected every other string.
         _ => unreachable!("profile validated above"),
     };
+    let reason_ms = t_reason.elapsed().as_secs_f64() * 1000.0;
 
     // 4. Set-diff to find ONLY the inferred (entailed-but-not-asserted) triples.
+    let t_diff = Instant::now();
     let inferred: Vec<&Triple> = derived.iter().filter(|t| !base_set.contains(t)).collect();
+    let diff_ms = t_diff.elapsed().as_secs_f64() * 1000.0;
 
     // 5. Write back, batched. Each new triple's terms are interned via
     //    the shmem-aware `put_term_full`; existing IRIs / literals reuse
@@ -181,6 +188,7 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     //    is 8.58M inferred triples, and row-at-a-time SPI was minutes of
     //    pure statement overhead inside the 608 s materialize wall.
     const WRITE_BATCH: usize = 50_000;
+    let t_write = Instant::now();
     let mut written = 0i64;
     let mut batch_s: Vec<i64> = Vec::with_capacity(WRITE_BATCH);
     let mut batch_p: Vec<i64> = Vec::with_capacity(WRITE_BATCH);
@@ -199,6 +207,7 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
         }
     }
     written += flush_inferred(&mut batch_s, &mut batch_p, &mut batch_o, graph_id);
+    let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
 
     // 6. Auto-ANALYZE (M1). The inference closure (e.g. the
     //    `owl:TransitiveProperty` `subOrganizationOf`) inflates join
@@ -209,12 +218,20 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     //    sample-based (fixed sub-second cost). Gated by
     //    `pgrdf.auto_analyze` (default on); skipped when nothing was
     //    inferred (a no-op materialize leaves stats untouched).
+    let t_analyze = Instant::now();
     let analyzed = if written > 0 && crate::query::guc::auto_analyze() {
         Spi::run("ANALYZE pgrdf._pgrdf_quads").is_ok()
     } else {
         false
     };
+    let analyze_ms = t_analyze.elapsed().as_secs_f64() * 1000.0;
 
+    // Phase timers (loader `parse_ms`/`dict_ms`/`insert_ms` parity) so
+    // the materialize wall is attributable: `load_ms` (base stream +
+    // dedup set), `reason_ms` (the profile's fixpoint), `diff_ms`
+    // (set-diff), `write_ms` (dict interning + batched quad inserts),
+    // `analyze_ms` (the M1 ANALYZE). Additive fields — existing
+    // consumers key on the original fields only.
     pgrx::JsonB(json!({
         "base_triples":              base_count,
         "inferred_triples_written":  written,
@@ -222,6 +239,11 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
         "profile":                   profile,
         "reasoner_errors":           errors,
         "auto_analyzed":             analyzed,
+        "load_ms":                   load_ms,
+        "reason_ms":                 reason_ms,
+        "diff_ms":                   diff_ms,
+        "write_ms":                  write_ms,
+        "analyze_ms":                analyze_ms,
         "elapsed_ms":                start.elapsed().as_secs_f64() * 1000.0,
     }))
 }
