@@ -173,23 +173,32 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     // 4. Set-diff to find ONLY the inferred (entailed-but-not-asserted) triples.
     let inferred: Vec<&Triple> = derived.iter().filter(|t| !base_set.contains(t)).collect();
 
-    // 5. Write back. Each new triple's terms are interned via the
-    //    shmem-aware `put_term_full`; existing IRIs / literals reuse
-    //    their dict ids without a table touch.
+    // 5. Write back, batched. Each new triple's terms are interned via
+    //    the shmem-aware `put_term_full`; existing IRIs / literals reuse
+    //    their dict ids without a table touch. The quad rows land via
+    //    unnest-array batches (the loader's `flush_batch` shape) rather
+    //    than one SPI statement per row — at LUBM-100 scale the closure
+    //    is 8.58M inferred triples, and row-at-a-time SPI was minutes of
+    //    pure statement overhead inside the 608 s materialize wall.
+    const WRITE_BATCH: usize = 50_000;
     let mut written = 0i64;
+    let mut batch_s: Vec<i64> = Vec::with_capacity(WRITE_BATCH);
+    let mut batch_p: Vec<i64> = Vec::with_capacity(WRITE_BATCH);
+    let mut batch_o: Vec<i64> = Vec::with_capacity(WRITE_BATCH);
     for t in &inferred {
-        let s_id = subject_id(&t.subject);
-        let p_id = put_term_full(t.predicate.as_str(), term_type::URI, None, None);
-        let o_id = term_id(&t.object);
-        Spi::run_with_args(
-            "INSERT INTO pgrdf._pgrdf_quads
-                (subject_id, predicate_id, object_id, graph_id, is_inferred)
-             VALUES ($1, $2, $3, $4, TRUE)",
-            &[s_id.into(), p_id.into(), o_id.into(), graph_id.into()],
-        )
-        .expect("materialize: insert inferred failed");
-        written += 1;
+        batch_s.push(subject_id(&t.subject));
+        batch_p.push(put_term_full(
+            t.predicate.as_str(),
+            term_type::URI,
+            None,
+            None,
+        ));
+        batch_o.push(term_id(&t.object));
+        if batch_s.len() >= WRITE_BATCH {
+            written += flush_inferred(&mut batch_s, &mut batch_p, &mut batch_o, graph_id);
+        }
     }
+    written += flush_inferred(&mut batch_s, &mut batch_p, &mut batch_o, graph_id);
 
     // 6. Auto-ANALYZE (M1). The inference closure (e.g. the
     //    `owl:TransitiveProperty` `subOrganizationOf`) inflates join
@@ -215,6 +224,47 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
         "auto_analyzed":             analyzed,
         "elapsed_ms":                start.elapsed().as_secs_f64() * 1000.0,
     }))
+}
+
+/// Flush one accumulated batch of inferred (s, p, o) dict-id triples
+/// into `_pgrdf_quads` as a single unnest-array INSERT with
+/// `is_inferred = TRUE` — the loader's `flush_batch` shape, minus the
+/// plan cache (≤ ~200 statements per materialize; parse cost is noise).
+/// Clears the input vecs and returns the number of rows written.
+fn flush_inferred(
+    batch_s: &mut Vec<i64>,
+    batch_p: &mut Vec<i64>,
+    batch_o: &mut Vec<i64>,
+    graph_id: i64,
+) -> i64 {
+    if batch_s.is_empty() {
+        return 0;
+    }
+    let n = batch_s.len() as i64;
+    let s_arr = std::mem::take(batch_s);
+    let p_arr = std::mem::take(batch_p);
+    let o_arr = std::mem::take(batch_o);
+    let int8_oid: pgrx::pg_sys::Oid = pgrx::pg_sys::PgBuiltInOids::INT8OID.into();
+    let int8_array_oid: pgrx::pg_sys::Oid = pgrx::pg_sys::PgBuiltInOids::INT8ARRAYOID.into();
+    // SAFETY: the (value, oid) pairs match by construction
+    // (Vec<i64>/INT8ARRAYOID, i64/INT8OID).
+    let datums = unsafe {
+        [
+            pgrx::datum::DatumWithOid::new(s_arr, int8_array_oid),
+            pgrx::datum::DatumWithOid::new(p_arr, int8_array_oid),
+            pgrx::datum::DatumWithOid::new(o_arr, int8_array_oid),
+            pgrx::datum::DatumWithOid::new(graph_id, int8_oid),
+        ]
+    };
+    Spi::run_with_args(
+        "INSERT INTO pgrdf._pgrdf_quads
+            (subject_id, predicate_id, object_id, graph_id, is_inferred)
+         SELECT s, p, o, $4, TRUE
+           FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS t(s, p, o)",
+        &datums,
+    )
+    .expect("materialize: batched insert inferred failed");
+    n
 }
 
 /// Strict, sound, complete RDFS entailment-rule forward-chain over
