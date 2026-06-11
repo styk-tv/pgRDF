@@ -136,3 +136,23 @@ hierarchy reasoning (the owl-rl column) per the LUBM spec.
 
 **Every cell ≤ 5 s.** The multi-hop joins that previously ran minutes-to-
 timeout (q02, q06–q09 class) are uniformly fast on both profiles.
+
+---
+
+# v0.6.1 — materialize write-path (2.07× at LUBM-100)
+
+v0.6.1 batches `materialize`'s inference-closure write-back (unnest-array quad
+INSERTs + bulk `put_terms_batch` dict resolution) instead of one SPI statement
+per quad and one roundtrip per term. Same LUBM-100 full pass, same environment,
+**byte-identical counts** to v0.6.0:
+
+| phase | v0.6.0 | v0.6.1 |
+|---|---|---|
+| ingest 13,879,970 | 229 s | **209 s** |
+| materialize → 22,463,054 quads | 608 s | **294 s (2.07×)** |
+| 14 queries, none-profile | ≤ 3 s | ≤ 3 s |
+| 14 queries, owl-rl materialized | ≤ 5 s | ≤ 5 s |
+
+Phase attribution at lubm-50 (materialize JSONB `*_ms` timers, new in v0.6.1):
+write-back fell from ~160 s to ~51 s of the wall; reasoning (~15 s) and base
+load (~22 s) are now the next levers (tracked in `_WIP/PLAN.v0.6-forward.md`).

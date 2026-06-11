@@ -6,6 +6,47 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-06-11
+
+### Performance — `materialize` write-path, ~2.4× ★ headline
+
+`pgrdf.materialize` wrote its inference closure inefficiently: one SPI INSERT
+per inferred quad, and one per-term dictionary roundtrip per term instance. At
+LUBM scale the closure is millions of triples (lubm-50: 4.26M; LUBM-100: 8.58M),
+so this was almost entirely per-statement overhead — the write phase was ~78% of
+the materialize wall.
+
+- **Batched quad write-back** — inferred quads now land via unnest-array INSERT
+  in 50k-row batches (the loader's `flush_batch` shape) instead of row-at-a-time.
+- **Batched dictionary resolution** — term instances are deduplicated to
+  distinct terms and resolved through the bulk `put_terms_batch` path (datatype
+  IRIs resolved first), instead of a per-term `put_term_full` roundtrip.
+- **Phase timers** — the materialize JSONB gains `load_ms` / `reason_ms` /
+  `diff_ms` / `write_ms` / `analyze_ms` (loader `parse_ms`/`dict_ms`/`insert_ms`
+  parity), so the wall is attributable. Additive fields.
+
+Measured (lubm-50 owl-rl, 6.89M base → 4.26M inferred): materialize
+**250 s → 103 s (2.4×)**; the write phase **160 s → 51 s**. Result rows
+identical (inferred 4,263,034; LUBM Q2 unchanged at 1 s / 32,923).
+
+**Full LUBM-100 pass (13.88M base → 22.46M after owl-rl, default PG, no manual
+tuning): materialize 608 s → 294 s (2.07×)**; ingest 229 s → 209 s; all 28
+query cells (14 queries × 2 profiles) ≤ 5 s with **byte-identical counts** to
+v0.6.0. See `tests/perf/lubm/RESULTS.m4-join-order.md`.
+
+### Fixed — M4 join-order pin coverage (`construct` / `describe`)
+
+A post-v0.6.0 audit of every SPARQL-executing entry point found that
+`pgrdf.construct()` and `pgrdf.describe()` were their own `#[pg_extern]`
+entry points and never called `pin_join_order()` — so a direct
+`construct`/`describe` with a multi-pattern WHERE could still hit the
+cross-product planner blowup that M4 (v0.5.45) fixed for `pgrdf.sparql()`
+(the 649 s-class regression). Both now pin the join order. `validate(mode
+=> 'pgrdf')` was already covered transitively (it routes through
+`pgrdf.sparql` via SPI); the debug UDFs (`sparql_sql`/`sparql_parse`) execute
+nothing. Result-preserving — `join_collapse_limit` constrains plan search
+only. 93/93 regression green.
+
 ## [0.6.0] — 2026-06-11
 
 ### Milestone — full LUBM-100 benchmark pass, zero tuning ★ release headline
