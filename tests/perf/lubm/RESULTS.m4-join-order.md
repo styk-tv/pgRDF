@@ -100,3 +100,39 @@ Materialize wall cost of the ANALYZE: 240 s → 250 s (noise-level). All 14 LUBM
 queries: 0–2 s on **both** profiles at lubm-50. Validation: 93/93 regression
 with M1 active; GUC-off honored. Same environment as above (k8s VM docker,
 `postgres:17.4-bookworm` default config, tmpfs PGDATA).
+
+---
+
+# LUBM-100 FULL PASS (v0.5.46 = M4 + M1) — the v0.6.0 gate evidence
+
+Complete cross-profile run on **LUBM-100**, default PG config, **zero manual
+tuning** (no manual ANALYZE, no index work, no planner GUCs). PGDATA on a disk
+volume; peak reasoner RAM fit the 32 GiB VM (4 GiB headroom at peak).
+
+| phase | wall |
+|---|---|
+| ingest 13,879,970 triples (combined dict path) | **229 s** |
+| `materialize('owl-rl')` → 22,463,054 total quads, `auto_analyzed=true` | **608 s** |
+
+| query | none-profile (13.88M) | owl-rl materialized (22.46M) |
+|---|---|---|
+| q01 | 0 s / 4 | 0 s / 4 |
+| q02 | **3 s / 129,401** (pre-M4: 649 s) | **5 s / 129,401** (pre-M1: timeout) |
+| q03 | 1 s / 6 | 0 s / 6 |
+| q04 | 0 s / 0¹ | 0 s / 34 |
+| q05 | 0 s / 0¹ | 0 s / 719 |
+| q06 | 0 s / 0¹ | 5 s / 1,048,532 |
+| q07 | 0 s / 0¹ | 5 s / 67 |
+| q08 | 1 s / 0¹ | 0 s / 7,790 |
+| q09 | 2 s / 0¹ | 3 s / 27,247 |
+| q10 | 0 s / 0¹ | 0 s / 4 |
+| q11 | 0 s / 0¹ | 0 s / 224 |
+| q12 | 0 s / 0¹ | 0 s / 15 |
+| q13 | 0 s / 0¹ | 1 s / 472 |
+| q14 | 3 s / 795,970 | 3 s / 795,970 |
+
+¹ zero by design at none-profile — these queries require class/property
+hierarchy reasoning (the owl-rl column) per the LUBM spec.
+
+**Every cell ≤ 5 s.** The multi-hop joins that previously ran minutes-to-
+timeout (q02, q06–q09 class) are uniformly fast on both profiles.
