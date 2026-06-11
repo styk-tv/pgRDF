@@ -49,6 +49,23 @@ LUBM_VOLUME="${LUBM_VOLUME:-pgrdf-lubm-data}"
 EXTENSIONS_DIR="${EXTENSIONS_DIR:-${REPO_ROOT}/compose/extensions}"
 SIDECAR_NAME="pgrdf-bench-pg-$$"
 PG_IMAGE="${PG_IMAGE:-docker.io/library/postgres:17.4-bookworm}"
+# Baked-image mode: when PGRDF_BAKED_IMAGE is set, the sidecar runs a
+# self-contained image with pgrdf (.so/.control/.sql) + the LUBM Tbox
+# fixtures already baked in, and the host bind-mounts for those are
+# skipped. This makes the benchmark portable to a daemon that does NOT
+# share the repo's host filesystem (e.g. a separate colima VM reached
+# via DOCKER_HOST). Default (unset) = the original host-bind-mount path.
+BAKED_IMAGE="${PGRDF_BAKED_IMAGE:-}"
+[ -n "${BAKED_IMAGE}" ] && PG_IMAGE="${BAKED_IMAGE}"
+# Optional Postgres tuning: PGRDF_PG_ARGS is appended verbatim to the
+# postgres server command (e.g. "-c work_mem=256MB -c shared_buffers=8GB").
+# PGRDF_SHM_SIZE sets the container --shm-size (needed when shared_buffers
+# / parallel workers are bumped). Both default to empty (= stock postgres
+# config, the out-of-the-box baseline). The effective values are echoed
+# at boot + recorded in the run JSON so each pass's config is traceable.
+read -r -a PG_TUNE_ARGS <<< "${PGRDF_PG_ARGS:-}"
+PG_SHM_SIZE="${PGRDF_SHM_SIZE:-}"
+PG_CONFIG_LABEL="${PGRDF_CONFIG_LABEL:-$([ -n "${PGRDF_PG_ARGS:-}" ] && echo tuned || echo default)}"
 PG_USER="${POSTGRES_USER:-pgrdf}"
 PG_PASS="${POSTGRES_PASSWORD:-pgrdf}"
 PG_DB="${POSTGRES_DB:-pgrdf}"
@@ -59,13 +76,21 @@ fail() { printf '[bench] FATAL: %s\n' "$*" >&2; exit "${2:-1}"; }
 [ "${RUNTIME}" = "docker" ] || fail "this runner requires docker (got '${RUNTIME}')" 1
 ${RUNTIME} volume inspect "${LUBM_VOLUME}" >/dev/null 2>&1 \
   || fail "${LUBM_VOLUME} volume not present — run 'just lubm-gen ${UNIV_COUNT}' first" 1
-[ -f "${EXTENSIONS_DIR}/lib/pgrdf.so" ] \
-  || fail "${EXTENSIONS_DIR}/lib/pgrdf.so missing — run 'just build-ext' first" 1
+if [ -z "${BAKED_IMAGE}" ]; then
+  [ -f "${EXTENSIONS_DIR}/lib/pgrdf.so" ] \
+    || fail "${EXTENSIONS_DIR}/lib/pgrdf.so missing — run 'just build-ext' first" 1
+fi
 
-DEFAULT_VERSION="$(sed -n "s/^default_version = '\\(.*\\)'/\\1/p" \
-  "${EXTENSIONS_DIR}/share/extension/pgrdf.control")"
+# DEFAULT_VERSION is read from the host control file in both modes (the
+# host always has compose/extensions even when the sidecar daemon does
+# not). PGRDF_VERSION can override it for baked mode if the image was
+# built elsewhere.
+DEFAULT_VERSION="${PGRDF_VERSION:-$(sed -n "s/^default_version = '\\(.*\\)'/\\1/p" \
+  "${EXTENSIONS_DIR}/share/extension/pgrdf.control")}"
 SQL_FILE="${EXTENSIONS_DIR}/share/extension/pgrdf--${DEFAULT_VERSION}.sql"
-[ -f "${SQL_FILE}" ] || fail "missing ${SQL_FILE}" 1
+if [ -z "${BAKED_IMAGE}" ]; then
+  [ -f "${SQL_FILE}" ] || fail "missing ${SQL_FILE}" 1
+fi
 
 DATA_PATH="/lubm-data/lubm-${UNIV_COUNT}/nt/lubm-${UNIV_COUNT}.nt"
 ${RUNTIME} run --rm -v "${LUBM_VOLUME}:/lubm-data:ro" alpine:3.20 \
@@ -86,20 +111,36 @@ done
 cleanup() { ${RUNTIME} rm -f "${SIDECAR_NAME}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
-printf '[bench] booting %s (pg %s, pgrdf %s, lubm-%s, profiles=%s)\n' \
-  "${SIDECAR_NAME}" "${PG_IMAGE##*:}" "${DEFAULT_VERSION}" "${UNIV_COUNT}" "${PROFILES}"
+printf '[bench] booting %s (pg %s, pgrdf %s, lubm-%s, profiles=%s, config=%s)\n' \
+  "${SIDECAR_NAME}" "${PG_IMAGE##*:}" "${DEFAULT_VERSION}" "${UNIV_COUNT}" "${PROFILES}" "${PG_CONFIG_LABEL}"
+[ "${#PG_TUNE_ARGS[@]}" -gt 0 ] && printf '[bench] pg tuning: %s\n' "${PG_TUNE_ARGS[*]}"
 
+# Mount args: the LUBM data volume is always mounted. In default mode
+# the ext (.so/.control/.sql) + Tbox fixtures are bind-mounted from the
+# host; in baked mode they're already inside the image, so we skip them.
+MOUNT_ARGS=(-v "${LUBM_VOLUME}:/lubm-data:ro")
+if [ -z "${BAKED_IMAGE}" ]; then
+  MOUNT_ARGS+=(
+    -v "${REPO_ROOT}/tests/perf/lubm/fixtures:/fixtures:ro"
+    -v "${EXTENSIONS_DIR}/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro"
+    -v "${EXTENSIONS_DIR}/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro"
+    -v "${SQL_FILE}:/usr/share/postgresql/17/extension/pgrdf--${DEFAULT_VERSION}.sql:ro"
+  )
+fi
+
+SHM_ARGS=()
+[ -n "${PG_SHM_SIZE}" ] && SHM_ARGS=(--shm-size "${PG_SHM_SIZE}")
+# `${arr[@]+"${arr[@]}"}` expands to nothing when the array is empty,
+# which is safe under `set -u` across bash versions (an empty array is
+# the default-config path: no shm override, no tuning flags).
 ${RUNTIME} run --rm -d \
   --name "${SIDECAR_NAME}" \
+  ${SHM_ARGS[@]+"${SHM_ARGS[@]}"} \
   -e POSTGRES_USER="${PG_USER}" \
   -e POSTGRES_PASSWORD="${PG_PASS}" \
   -e POSTGRES_DB="${PG_DB}" \
-  -v "${LUBM_VOLUME}:/lubm-data:ro" \
-  -v "${REPO_ROOT}/tests/perf/lubm/fixtures:/fixtures:ro" \
-  -v "${EXTENSIONS_DIR}/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro" \
-  -v "${EXTENSIONS_DIR}/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro" \
-  -v "${SQL_FILE}:/usr/share/postgresql/17/extension/pgrdf--${DEFAULT_VERSION}.sql:ro" \
-  "${PG_IMAGE}" >/dev/null
+  "${MOUNT_ARGS[@]}" \
+  "${PG_IMAGE}" ${PG_TUNE_ARGS[@]+"${PG_TUNE_ARGS[@]}"} >/dev/null
 
 for i in 1 2 3 4 5 6 7 8 9 10; do
   ${RUNTIME} exec "${SIDECAR_NAME}" pg_isready -U "${PG_USER}" >/dev/null 2>&1 && break
