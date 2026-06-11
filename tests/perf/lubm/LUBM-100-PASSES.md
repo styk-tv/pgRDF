@@ -227,3 +227,13 @@ commutative inner joins. Full 93/93 compose regression passes with the M4 `.so`.
 **Validated fix = `connected_order` (build_from_and_where) + `pin_join_order`
 (sparql).** Final gate before ship: re-run the 93-test regression with the GUC
 active (forcing join order on every query must not regress any shape).
+
+## Pass 5 — FULL PASS (v0.5.46 = M4+M1) → v0.6.0 cut
+
+Complete cross-profile LUBM-100 run, default PG config, zero manual tuning:
+ingest 13,879,970 in **229 s**; `materialize('owl-rl')` → 22,463,054 quads,
+`auto_analyzed=true`, **608 s** (RAM peak fit the 32 GiB VM, 4 GiB headroom);
+**all 14 queries ≤ 3 s plain, ≤ 5 s materialized** (q02: 3 s/5 s — was
+649 s/timeout). Full tables: `RESULTS.m4-join-order.md`. Per the project
+rule ("v0.6.0 on the first 0.5.x that passes the full benchmark"),
+**v0.6.0 was cut on this evidence** — journal closed.
