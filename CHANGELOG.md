@@ -6,6 +6,34 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Fixed (M1 — auto-ANALYZE after materialize; v0.5.46) ★ headline
+
+The materialized-profile complement to v0.5.45's M4. `pgrdf.materialize`
+writes the inference closure (e.g. the `owl:TransitiveProperty`
+`subOrganizationOf` in LUBM) but ran **no `ANALYZE`**, so the planner kept
+stale/absent statistics for the inflated table and mis-planned complex
+multi-pattern queries on the materialized graph: LUBM Q2 — 1 s on the
+none-profile graph after M4 — regressed to **180 s+ (timeout)** right after
+`materialize('owl-rl')`.
+
+- **`pgrdf.materialize` now runs `ANALYZE pgrdf._pgrdf_quads`** after writing
+  inferred triples. Gated by the new GUC **`pgrdf.auto_analyze`** (Userset,
+  default **on**); skipped when nothing was inferred. The materialize JSONB
+  gains an **`auto_analyzed`** boolean field (additive).
+- `ANALYZE` is sample-based — fixed sub-second-to-seconds cost (measured:
+  materialize 240 s → 250 s wall on an 11.15M-quad graph, within noise).
+
+**Measured (lubm-50, 11.15M quads after owl-rl, default PG, NO manual
+ANALYZE): Q2 180 s-timeout → 2 s** (count 32,923, identical). Extended
+statistics (`CREATE STATISTICS`) were tested and are NOT needed — regular
+ANALYZE + M4's pinned join order suffices. Result-preserving: 93/93 compose
+regression with M1 active; `pgrdf.auto_analyze=off` honored
+(`auto_analyzed:false`).
+
+With M4 (none-profile) + M1 (materialized profile), all 14 LUBM queries
+return in 0–2 s on both profiles at lubm-50 scale. The full LUBM-100
+cross-profile pass remains the v0.6.0 gate.
+
 ### Fixed (M4 — BGP join-order blowup on large graphs; v0.5.45) ★ headline
 
 Complex multi-pattern SPARQL queries (3+ way BGP joins) ran **minutes-slow on

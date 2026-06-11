@@ -75,3 +75,28 @@ v0.5.45 fixes the **none-profile** multi-hop blowup (Q2 the worst case). The
 **full LUBM-100 pass across all profiles** — including the owl-rl materialized
 profile where Q8/Q9 exercise heavy inferred-type joins — is the **v0.6.0** gate
 and is not yet verified here.
+
+---
+
+# Addendum — M1 auto-ANALYZE after materialize (v0.5.46)
+
+The materialized-profile complement. After `materialize('owl-rl')` (which adds
+the `subOrganizationOf` transitive closure — lubm-50: 6.89M → 11.15M quads),
+Q2 regressed from 1 s back to **180 s+ (timeout)**: materialize wrote millions
+of rows but never refreshed statistics, so the planner mis-planned the
+inflated joins. `ANALYZE` was the missing piece (verified: extended
+`CREATE STATISTICS` adds nothing further — regular ANALYZE + M4's pinned
+order suffices).
+
+**Fix:** `pgrdf.materialize` now runs `ANALYZE pgrdf._pgrdf_quads` at its tail
+(GUC `pgrdf.auto_analyze`, default on; `auto_analyzed` field in the JSONB).
+
+| owl-rl materialized graph (lubm-50, 11.15M quads, NO manual ANALYZE) | Q2 |
+|---|---|
+| v0.5.45 (M4 only) | **180 s+ (timeout)** |
+| **v0.5.46 (M4 + M1)** | **2 s** (32,923 rows) |
+
+Materialize wall cost of the ANALYZE: 240 s → 250 s (noise-level). All 14 LUBM
+queries: 0–2 s on **both** profiles at lubm-50. Validation: 93/93 regression
+with M1 active; GUC-off honored. Same environment as above (k8s VM docker,
+`postgres:17.4-bookworm` default config, tmpfs PGDATA).
