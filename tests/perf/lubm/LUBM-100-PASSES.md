@@ -200,3 +200,30 @@ already-joined set** (never emit a cross join), most-selective-first.
 Eliminates the Cartesian product *structurally*, good plan regardless of
 stats, fully automatic, no operator action. M1 (ANALYZE) becomes a cheap
 complement (helps the simple-pattern selectivity), not the fix.
+
+## Pass 4 — M4 built + measured: emission alone NOT enough; pin the order
+
+Built M4 (`connected_order`) into the `.so`, baked + ran on k8s:
+
+| q02 (LUBM-100, default PG + ANALYZE) | wall | count |
+|---|---|---|
+| pre-M4 (query order) | 649 s | — |
+| ANALYZE only | 600 s+ | — |
+| **M4 connected emission, planner free** | **300 s+ (cap)** | — |
+| **M4 emission + `join_collapse_limit=1`** | **3 s ✓** | 129,401 |
+
+**Correction (2nd bad test):** connected *emission* alone didn't help — PG's
+`join_collapse_limit` (12 ≥ 6) flattens the joins and re-derives its own order
+by cost, so it still picks the cross product from poor single-table estimates.
+The fix needs the emission order **pinned**: `SET LOCAL join_collapse_limit=1` +
+`from_collapse_limit=1` inside `pgrdf.sparql()` (`pin_join_order`). Then the
+planner runs pgRDF's connected order verbatim → **q02 300 s+ → 3 s**.
+
+**Result correctness:** 129,401 rows is right (LUBM-10 none-profile q02 = 1,721
+in our `expected-counts.json`, scales up); Pass 1's "0" was an anomaly on the
+timed-out run. `join_collapse_limit` never changes results; M4 reorders
+commutative inner joins. Full 93/93 compose regression passes with the M4 `.so`.
+
+**Validated fix = `connected_order` (build_from_and_where) + `pin_join_order`
+(sparql).** Final gate before ship: re-run the 93-test regression with the GUC
+active (forcing join order on every query must not regress any shape).

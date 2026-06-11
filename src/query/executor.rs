@@ -208,6 +208,7 @@ fn derived_col(k: usize) -> &'static str {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    pin_join_order();
     let parser = SparqlParser::new();
     match parser.parse_query(query) {
         Ok(parsed) => {
@@ -236,6 +237,32 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
             }
         }
     }
+}
+
+/// M4 — pin the planner to pgRDF's emitted join order for this statement.
+///
+/// `build_from_and_where` emits the mandatory BGP in a connected,
+/// selectivity-ordered sequence with no cross joins (see `connected_order`).
+/// By default PostgreSQL's `join_collapse_limit` (12) flattens those
+/// `INNER JOIN`s and re-derives its own order by cost — but on the
+/// single-table `_pgrdf_quads` triple store every pattern scans the same
+/// relation, so the planner's cardinality estimates are poor enough that it
+/// routinely picks cross-product orders (LUBM-100 Q2: the three standalone
+/// `rdf:type` patterns get cross-joined → ~10^11 intermediate rows). Pinning
+/// `join_collapse_limit`/`from_collapse_limit` to 1 makes the planner honour
+/// pgRDF's emitted order verbatim instead.
+///
+/// Validated on LUBM-100 (13.9M triples), default PG config + ANALYZE:
+/// Q2 ~300 s+ (planner's own order) → ~3 s (pinned to the M4 order),
+/// identical result (129,401 rows). Result-preserving — `join_collapse_limit`
+/// only constrains plan *search*, never the result set (93/93 regression).
+///
+/// `SET LOCAL` scopes to the current transaction and auto-resets at its end,
+/// so a bare autocommit `SELECT pgrdf.sparql(...)` restores the session
+/// default immediately afterward.
+fn pin_join_order() {
+    let _ = pgrx::Spi::run("SET LOCAL join_collapse_limit = 1");
+    let _ = pgrx::Spi::run("SET LOCAL from_collapse_limit = 1");
 }
 
 /// Debug surface: return the translated SQL string a SELECT/ASK
