@@ -92,6 +92,16 @@ pub(crate) static DICT_BATCH_SIZE: GucSetting<i32> =
 /// up-front and rarely amortises in short-lived workloads.
 pub(crate) static SHMEM_PREWARM_ON_INIT: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// `pgrdf.auto_analyze` — when on (default), `pgrdf.materialize` runs
+/// `ANALYZE pgrdf._pgrdf_quads` after writing inferred triples so the
+/// planner has fresh statistics for the inference-inflated table. The
+/// closure of an `owl:TransitiveProperty` (e.g. LUBM `subOrganizationOf`)
+/// inflates join cardinalities; without stats the planner mis-plans
+/// complex multi-pattern queries on a freshly materialized graph (LUBM
+/// Q2: 180 s → 1 s). `ANALYZE` is sample-based (fixed sub-second cost),
+/// so this is on by default; set off to manage `ANALYZE` externally.
+pub(crate) static AUTO_ANALYZE: GucSetting<bool> = GucSetting::<bool>::new(true);
+
 /// `pgrdf.ingest_dict_path` parsed into a Rust enum so callers
 /// don't keep matching the raw string. `parse_turtle` / `load_turtle`
 /// dispatch on this.
@@ -185,6 +195,20 @@ pub fn register() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    GucRegistry::define_bool_guc(
+        c"pgrdf.auto_analyze",
+        c"Run ANALYZE after materialize so the planner has fresh stats.",
+        c"When on (default), pgrdf.materialize runs ANALYZE on \
+          _pgrdf_quads after writing inferred triples. The inference \
+          closure (e.g. owl:TransitiveProperty) inflates join \
+          cardinalities; without fresh stats the planner mis-plans \
+          complex multi-pattern queries on the materialized graph \
+          (LUBM Q2: 180 s -> 1 s). ANALYZE is sample-based (sub-second), \
+          so default on; set off to manage ANALYZE externally.",
+        &AUTO_ANALYZE,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 /// The currently-effective `pgrdf.path_max_depth` for this session.
@@ -209,6 +233,12 @@ pub(crate) fn ingest_dict_path() -> IngestDictPath {
     let raw = INGEST_DICT_PATH.get();
     let s = raw.as_ref().and_then(|c| c.to_str().ok());
     IngestDictPath::from_guc_string(s)
+}
+
+/// Resolved `pgrdf.auto_analyze` — whether `materialize` should run
+/// `ANALYZE` after writing inferred triples (M1; default on).
+pub(crate) fn auto_analyze() -> bool {
+    AUTO_ANALYZE.get()
 }
 
 /// Resolved `pgrdf.dict_batch_size` for this call. Returns at least

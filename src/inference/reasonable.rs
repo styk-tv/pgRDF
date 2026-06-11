@@ -191,12 +191,28 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
         written += 1;
     }
 
+    // 6. Auto-ANALYZE (M1). The inference closure (e.g. the
+    //    `owl:TransitiveProperty` `subOrganizationOf`) inflates join
+    //    cardinalities, so without fresh statistics the planner
+    //    mis-plans complex multi-pattern queries on the materialized
+    //    graph (LUBM Q2: 180 s → 1 s with ANALYZE; the M4 pinned join
+    //    order then executes the well-estimated plan). `ANALYZE` is
+    //    sample-based (fixed sub-second cost). Gated by
+    //    `pgrdf.auto_analyze` (default on); skipped when nothing was
+    //    inferred (a no-op materialize leaves stats untouched).
+    let analyzed = if written > 0 && crate::query::guc::auto_analyze() {
+        Spi::run("ANALYZE pgrdf._pgrdf_quads").is_ok()
+    } else {
+        false
+    };
+
     pgrx::JsonB(json!({
         "base_triples":              base_count,
         "inferred_triples_written":  written,
         "previous_inferred_dropped": dropped,
         "profile":                   profile,
         "reasoner_errors":           errors,
+        "auto_analyzed":             analyzed,
         "elapsed_ms":                start.elapsed().as_secs_f64() * 1000.0,
     }))
 }
