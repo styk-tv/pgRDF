@@ -10,9 +10,9 @@
 //!       │  every base + every entailed RDF triple now in get_triples()
 //!       ▼
 //!   set-diff against base → inferred-only set
-//!       │  intern each term back via put_term_full (shmem hits where warm)
+//!       │  dedup to distinct terms → put_terms_batch bulk resolve (T1c)
 //!       ▼
-//!   INSERT INTO _pgrdf_quads (..., is_inferred = TRUE)
+//!   INSERT INTO _pgrdf_quads (..., is_inferred = TRUE)  ← unnest batches (T1)
 //! ```
 //!
 //! Idempotency. `pgrdf.materialize(g)` first deletes every
@@ -65,7 +65,7 @@
 //! the same `materialize: unknown profile` error until a later
 //! cycle wires it.
 
-use crate::storage::dict::{put_term_full, term_type};
+use crate::storage::dict::{put_terms_batch, term_type};
 use oxrdf::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple};
 use pgrx::prelude::*;
 use reasonable::reasoner::Reasoner;
@@ -187,21 +187,113 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     //    than one SPI statement per row — at LUBM-100 scale the closure
     //    is 8.58M inferred triples, and row-at-a-time SPI was minutes of
     //    pure statement overhead inside the 608 s materialize wall.
+    // T1c — the per-term `put_term_full` calls were 78% of the LUBM-50
+    // materialize wall (write_ms 160 s of 215 s): 12.8M term instances
+    // resolved one SPI roundtrip at a time. Now: dedup the instances to
+    // DISTINCT terms and resolve them via `put_terms_batch` (the
+    // loader's TA-7 bulk path) in chunks. Literals depend on their
+    // datatype IRI's dict id, so datatype IRIs resolve in a first
+    // phase; everything else in a second. Quad rows then flush in
+    // unnest batches as before (T1).
     const WRITE_BATCH: usize = 50_000;
     let t_write = Instant::now();
+
+    // Phase A: distinct datatype IRIs (literals only; rare in closures
+    // but required for generality), resolved first.
+    type TermKey = (i16, String, Option<i64>, Option<String>);
+    let mut dt_ids: HashMap<String, i64> = HashMap::new();
+    for t in &inferred {
+        if let Term::Literal(lit) = &t.object {
+            if lit.language().is_none() {
+                dt_ids
+                    .entry(lit.datatype().as_str().to_string())
+                    .or_insert(0);
+            }
+        }
+    }
+    if !dt_ids.is_empty() {
+        let dt_terms: Vec<TermKey> = dt_ids
+            .keys()
+            .map(|iri| (term_type::URI, iri.clone(), None, None))
+            .collect();
+        let ids = put_terms_batch(&dt_terms);
+        for (k, id) in dt_terms.into_iter().zip(ids) {
+            dt_ids.insert(k.1, id);
+        }
+    }
+
+    // Phase B: dedup every term instance to a distinct-term index.
+    fn key_subj(s: &NamedOrBlankNode) -> (i16, String, Option<i64>, Option<String>) {
+        match s {
+            NamedOrBlankNode::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
+            NamedOrBlankNode::BlankNode(b) => {
+                (term_type::BLANK_NODE, b.as_str().to_string(), None, None)
+            }
+        }
+    }
+    fn key_obj(
+        o: &Term,
+        dt_ids: &HashMap<String, i64>,
+    ) -> (i16, String, Option<i64>, Option<String>) {
+        match o {
+            Term::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
+            Term::BlankNode(b) => (term_type::BLANK_NODE, b.as_str().to_string(), None, None),
+            Term::Literal(lit) => {
+                let lang = lit.language().map(str::to_string);
+                let dt = if lang.is_some() {
+                    None
+                } else {
+                    Some(
+                        *dt_ids
+                            .get(lit.datatype().as_str())
+                            .expect("materialize: datatype resolved in phase A"),
+                    )
+                };
+                (term_type::LITERAL, lit.value().to_string(), dt, lang)
+            }
+            #[allow(unreachable_patterns)]
+            _ => panic!("materialize: unsupported object term (RDF-star out of scope)"),
+        }
+    }
+    let mut distinct: HashMap<TermKey, usize> = HashMap::new();
+    let mut order: Vec<TermKey> = Vec::new();
+    let mut idx_of = |key: TermKey, order: &mut Vec<TermKey>| -> usize {
+        if let Some(&i) = distinct.get(&key) {
+            i
+        } else {
+            let i = order.len();
+            distinct.insert(key.clone(), i);
+            order.push(key);
+            i
+        }
+    };
+    let mut triple_idx: Vec<(usize, usize, usize)> = Vec::with_capacity(inferred.len());
+    for t in &inferred {
+        let si = idx_of(key_subj(&t.subject), &mut order);
+        let pi = idx_of(
+            (term_type::URI, t.predicate.as_str().to_string(), None, None),
+            &mut order,
+        );
+        let oi = idx_of(key_obj(&t.object, &dt_ids), &mut order);
+        triple_idx.push((si, pi, oi));
+    }
+
+    // Resolve the distinct terms in chunks (one INSERT + one lookup
+    // per chunk instead of one roundtrip per instance).
+    let mut term_ids: Vec<i64> = Vec::with_capacity(order.len());
+    for chunk in order.chunks(WRITE_BATCH) {
+        term_ids.extend(put_terms_batch(chunk));
+    }
+
+    // Phase C: emit the quad rows in unnest batches (T1).
     let mut written = 0i64;
     let mut batch_s: Vec<i64> = Vec::with_capacity(WRITE_BATCH);
     let mut batch_p: Vec<i64> = Vec::with_capacity(WRITE_BATCH);
     let mut batch_o: Vec<i64> = Vec::with_capacity(WRITE_BATCH);
-    for t in &inferred {
-        batch_s.push(subject_id(&t.subject));
-        batch_p.push(put_term_full(
-            t.predicate.as_str(),
-            term_type::URI,
-            None,
-            None,
-        ));
-        batch_o.push(term_id(&t.object));
+    for (si, pi, oi) in triple_idx {
+        batch_s.push(term_ids[si]);
+        batch_p.push(term_ids[pi]);
+        batch_o.push(term_ids[oi]);
         if batch_s.len() >= WRITE_BATCH {
             written += flush_inferred(&mut batch_s, &mut batch_p, &mut batch_o, graph_id);
         }
@@ -612,38 +704,6 @@ fn build_object(
                 Term::Literal(Literal::new_simple_literal(value))
             }
         }
-    }
-}
-
-fn subject_id(s: &NamedOrBlankNode) -> i64 {
-    match s {
-        NamedOrBlankNode::NamedNode(n) => put_term_full(n.as_str(), term_type::URI, None, None),
-        NamedOrBlankNode::BlankNode(b) => {
-            put_term_full(b.as_str(), term_type::BLANK_NODE, None, None)
-        }
-    }
-}
-
-fn term_id(t: &Term) -> i64 {
-    match t {
-        Term::NamedNode(n) => put_term_full(n.as_str(), term_type::URI, None, None),
-        Term::BlankNode(b) => put_term_full(b.as_str(), term_type::BLANK_NODE, None, None),
-        Term::Literal(lit) => {
-            let lang = lit.language();
-            let datatype_id = if lang.is_some() {
-                None
-            } else {
-                Some(put_term_full(
-                    lit.datatype().as_str(),
-                    term_type::URI,
-                    None,
-                    None,
-                ))
-            };
-            put_term_full(lit.value(), term_type::LITERAL, datatype_id, lang)
-        }
-        #[allow(unreachable_patterns)]
-        _ => panic!("materialize: unsupported object term (RDF-star out of scope)"),
     }
 }
 
