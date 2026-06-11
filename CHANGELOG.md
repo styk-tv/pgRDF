@@ -6,6 +6,30 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-11
+
+### Milestone — full LUBM-100 benchmark pass, zero tuning ★ release headline
+
+v0.6.0 marks the version where pgRDF completes the **full LUBM-100
+benchmark** (13,879,970 triples, 14 reference queries, both the plain and
+the OWL 2 RL-materialized graph) on commodity hardware with **zero database
+tuning** — no manual indexes, no `ANALYZE`, no planner hints, default
+PostgreSQL configuration:
+
+- ingest 13.88M triples: **229 s**; `materialize('owl-rl')` → 22,463,054
+  quads with automatic statistics refresh: **608 s**.
+- **all 14 queries ≤ 3 s** on the loaded graph; **all 14 queries ≤ 5 s**
+  after reasoning. Benchmark query Q2 (the 6-pattern multi-hop join):
+  **649 s → 3 s** plain, **timeout → 5 s** materialized.
+- environment: Apple-silicon VM (8 vCPU / 32 GiB), stock
+  `postgres:17.4-bookworm` in Docker. Full tables:
+  `tests/perf/lubm/RESULTS.m4-join-order.md`.
+
+The engine surface is identical to v0.5.46 — per the project rule, v0.6.0
+is cut on the first v0.5.x version that passes the full benchmark. The two
+engine changes that deliver it (M4 connected join ordering, v0.5.45; M1
+auto-ANALYZE after materialize, v0.5.46) are detailed in the entries below.
+
 ### Fixed (M1 — auto-ANALYZE after materialize; v0.5.46) ★ headline
 
 The materialized-profile complement to v0.5.45's M4. `pgrdf.materialize`

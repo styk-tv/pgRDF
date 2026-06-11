@@ -6,8 +6,9 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-v0.5.46%20%E2%80%94%20M1%20auto--ANALYZE%20after%20materialize%20%E2%80%94%20RDF%20%2F%20SPARQL%201.1%20%2F%20SHACL%20%2F%20OWL-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
-[![Tests](https://img.shields.io/badge/tests-274%20pgrx%20%2B%2085%20regression%20%2B%2051%20W3C%20%2B%2025%20SHACL%20%2B%203%20LUBM-brightgreen)](#tests)
+[![Status](https://img.shields.io/badge/status-v0.6.0%20%E2%80%94%20LUBM--100%20full%20pass%20%E2%80%94%20RDF%20%2F%20SPARQL%201.1%20%2F%20SHACL%20%2F%20OWL-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
+[![Tests](https://img.shields.io/badge/tests-289%20pgrx%20%2B%2093%20regression%20%2B%2051%20W3C%20%2B%2025%20SHACL%20%2B%203%20LUBM-brightgreen)](#tests)
+[![LUBM-100](https://img.shields.io/badge/LUBM--100-28%2F28%20queries%20%E2%89%A4%205s%20%C2%B7%2013.9M%20triples%20%C2%B7%20zero%20tuning-brightgreen)](tests/perf/lubm/RESULTS.m4-join-order.md)
 [![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20ASK%20%2F%20CONSTRUCT%20%2F%20DESCRIBE%20%2F%20UPDATE%20%2F%20PATHS%20%2F%20GRAPH%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
@@ -24,11 +25,50 @@
 > graph. Load Turtle, query via SPARQL, validate via SHACL, materialize
 > inferences via OWL 2 RL — all addressable from any Postgres client.
 
+## v0.6.0 — the LUBM-100 milestone
+
+pgRDF now completes the **full LUBM-100 benchmark** — the standard,
+generator-verified benchmark for RDF stores ([Lehigh University
+Benchmark](https://swat.cse.lehigh.edu/projects/lubm/), 100 universities,
+14 reference queries) — on ordinary hardware with **zero database tuning**:
+
+| Measured | Result |
+|---|---|
+| Load 13,879,970 triples (Turtle) | **3 min 49 s** |
+| OWL 2 RL reasoning → 22.5M facts, statistics refreshed automatically | **10 min 8 s** |
+| All 14 queries on the loaded graph | **each ≤ 3 s** |
+| All 14 queries after reasoning | **each ≤ 5 s** |
+
+Environment: a laptop — Apple-silicon VM (8 vCPU / 32 GiB), stock
+`postgres:17.4-bookworm` in Docker, **default PostgreSQL configuration**.
+No manual indexes, no `ANALYZE`, no planner hints, no extension settings.
+Full per-query tables and methodology:
+[tests/perf/lubm/RESULTS.m4-join-order.md](tests/perf/lubm/RESULTS.m4-join-order.md).
+
+Two engine changes close the gap from "minutes-to-timeout" to "seconds"
+(shipped v0.5.45 + v0.5.46, both automatic):
+
+- **Connected join ordering** — SPARQL graph patterns are lowered to SQL
+  in a connected, selectivity-aware order and the plan is pinned, so
+  multi-hop joins can never degrade into cross-product plans
+  (benchmark query Q2: **649 s → 3 s** on 13.9M triples).
+- **Automatic statistics after reasoning** — `pgrdf.materialize`
+  refreshes planner statistics when it writes the inference closure
+  (`pgrdf.auto_analyze`, default on), so queries stay fast on the
+  enlarged graph (Q2 after reasoning: **timeout → 5 s**).
+
+The result holds end-to-end: load a real-scale graph, reason over it,
+and query it interactively — in one PostgreSQL instance, with the
+operational surface (backups, monitoring, access control) you already
+run. Verification bar at this cut: 289 integration + 93 regression +
+51 W3C SPARQL + 25 W3C SHACL Core tests green, releases signed with
+SLSA Build Provenance v1, three install paths (tarball / OCI / PGXN).
+
 | | |
 |---|---|
-| **Status** | **v0.5.46 — current advertised release ([LATEST.md](./LATEST.md)). Engine surface unchanged from v0.5.0; the v0.5.10..v0.5.46 cycle ships PGXN packaging, OCI distribution with SLSA Build Provenance v1 attestations, a 5-gate release-pipeline contract ([PROVENANCE.md Rule 7](./PROVENANCE.md)), Phase-0 ingest instrumentation (`parse_ms`/`dict_ms`/`insert_ms`), and additive Track A perf-spike UDFs (`parse_turtle_dict_batched` -17% e2e, `shmem_cache_prewarm` -54% e2e — both behind explicit opt-in surfaces; default `parse_turtle` path unchanged). Pin via `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.5.46` or whatever `LATEST.md` advertises at audit time.**<br><br>**Query** — SPARQL SELECT/ASK over N-pattern BGPs · FILTER · DISTINCT/LIMIT/OFFSET · **type-aware ORDER BY** · **multi-triple OPTIONAL** · UNION · MINUS · aggregates (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE) **incl. over UNION** · HAVING · **downstream BIND** · **VALUES** · named-graph scoping (`GRAPH <iri>` + `GRAPH ?g` + composition) · **CONSTRUCT** (constant/variable/blank-node/multi-triple templates · WHERE-shorthand · round-trip ingest) · **DESCRIBE** (W3C §16.4 CBD via `pgrdf.describe`) · **property paths** (`^` `+` `*` `?` · `\|` alternation · materialised-closure no-CTE fallback · `pgrdf.path_max_depth` guard).<br>**Update** — full SPARQL UPDATE: INSERT/DELETE DATA · INSERT/DELETE WHERE · DELETE+INSERT WHERE · `WITH <iri>` scoping · lifecycle algebra (`DROP`/`CLEAR`/`CREATE GRAPH` × `DEFAULT`/`NAMED`/`ALL`).<br>**Storage** — CRUD + Turtle / **TriG** / **N-Quads** ingest (`parse_turtle` / `parse_trig` / `parse_nquads`) · per-graph LIST partitions · lifecycle UDFs (`drop`/`clear`/`copy`/`move_graph`, **BIGINT + IRI overloads**) · shmem dict cache (§4.1) + prepared-plan cache (§4.2) + prepared bulk-INSERT (§4.3 phase A).<br>**Inference** — `pgrdf.materialize(graph_id, profile)` — **`owl-rl` and `rdfs`** profiles. **Validation** — `pgrdf.validate(data, shapes, mode)` → real W3C `sh:ValidationReport` JSONB; SHACL Core native (genuine W3C SHACL Core 25/25); `mode=>'sparql'` is shipped + honest, upstream-gated ([ERRATA E-012](specs/ERRATA.v0.5.md)).<br><br>**Shipped on the v0.4/v0.5 countdown:** `v0.4.0` SHACL · `v0.4.1` named-graph §3 · `v0.4.2` lifecycle UDFs §5 · `v0.4.3` SPARQL UPDATE §4 · `v0.4.4` CONSTRUCT §6 · `v0.4.5` property paths §7 · `v0.4.6` §11 SPARQL backlog · **`v0.5.0` — the complete surface** (DESCRIBE, TriG/N-Quads, IRI lifecycle overloads, `rdfs`+`owl-rl` profiles, native SHACL Core 25/25).<br>**Documented upstream gates** (honest, not defects): [E-011](specs/ERRATA.v0.4.md) — RDF 1.2 triple terms + crates.io publish gated on `gtfierro/reasonable#50`; [E-012](specs/ERRATA.v0.5.md) — SHACL-SPARQL constraint execution gated on `rudof` (#21/#94); the `mode=>'sparql'` surface ships honest.<br>**Deferred → v0.6-FUTURE:** executor.rs core-BGP carve · `heap_multi_insert` phase B · real SHACL-SPARQL engine · federated SERVICE · incremental materialisation · RDF 1.2 (see [SPEC.pgRDF.LLD.v0.6-FUTURE](specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md)). |
+| **Status** | **v0.6.0 — current advertised release ([LATEST.md](./LATEST.md)). Engine surface unchanged from v0.5.0; the v0.5.10..v0.6.0 cycle ships PGXN packaging, OCI distribution with SLSA Build Provenance v1 attestations, a 5-gate release-pipeline contract ([PROVENANCE.md Rule 7](./PROVENANCE.md)), Phase-0 ingest instrumentation (`parse_ms`/`dict_ms`/`insert_ms`), and additive Track A perf-spike UDFs (`parse_turtle_dict_batched` -17% e2e, `shmem_cache_prewarm` -54% e2e — both behind explicit opt-in surfaces; default `parse_turtle` path unchanged). Pin via `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.0` or whatever `LATEST.md` advertises at audit time.**<br><br>**Query** — SPARQL SELECT/ASK over N-pattern BGPs · FILTER · DISTINCT/LIMIT/OFFSET · **type-aware ORDER BY** · **multi-triple OPTIONAL** · UNION · MINUS · aggregates (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE) **incl. over UNION** · HAVING · **downstream BIND** · **VALUES** · named-graph scoping (`GRAPH <iri>` + `GRAPH ?g` + composition) · **CONSTRUCT** (constant/variable/blank-node/multi-triple templates · WHERE-shorthand · round-trip ingest) · **DESCRIBE** (W3C §16.4 CBD via `pgrdf.describe`) · **property paths** (`^` `+` `*` `?` · `\|` alternation · materialised-closure no-CTE fallback · `pgrdf.path_max_depth` guard).<br>**Update** — full SPARQL UPDATE: INSERT/DELETE DATA · INSERT/DELETE WHERE · DELETE+INSERT WHERE · `WITH <iri>` scoping · lifecycle algebra (`DROP`/`CLEAR`/`CREATE GRAPH` × `DEFAULT`/`NAMED`/`ALL`).<br>**Storage** — CRUD + Turtle / **TriG** / **N-Quads** ingest (`parse_turtle` / `parse_trig` / `parse_nquads`) · per-graph LIST partitions · lifecycle UDFs (`drop`/`clear`/`copy`/`move_graph`, **BIGINT + IRI overloads**) · shmem dict cache (§4.1) + prepared-plan cache (§4.2) + prepared bulk-INSERT (§4.3 phase A).<br>**Inference** — `pgrdf.materialize(graph_id, profile)` — **`owl-rl` and `rdfs`** profiles. **Validation** — `pgrdf.validate(data, shapes, mode)` → real W3C `sh:ValidationReport` JSONB; SHACL Core native (genuine W3C SHACL Core 25/25); `mode=>'sparql'` is shipped + honest, upstream-gated ([ERRATA E-012](specs/ERRATA.v0.5.md)).<br><br>**Shipped on the v0.4/v0.5 countdown:** `v0.4.0` SHACL · `v0.4.1` named-graph §3 · `v0.4.2` lifecycle UDFs §5 · `v0.4.3` SPARQL UPDATE §4 · `v0.4.4` CONSTRUCT §6 · `v0.4.5` property paths §7 · `v0.4.6` §11 SPARQL backlog · **`v0.5.0` — the complete surface** (DESCRIBE, TriG/N-Quads, IRI lifecycle overloads, `rdfs`+`owl-rl` profiles, native SHACL Core 25/25).<br>**Documented upstream gates** (honest, not defects): [E-011](specs/ERRATA.v0.4.md) — RDF 1.2 triple terms + crates.io publish gated on `gtfierro/reasonable#50`; [E-012](specs/ERRATA.v0.5.md) — SHACL-SPARQL constraint execution gated on `rudof` (#21/#94); the `mode=>'sparql'` surface ships honest.<br>**Deferred → v0.6-FUTURE:** executor.rs core-BGP carve · `heap_multi_insert` phase B · real SHACL-SPARQL engine · federated SERVICE · incremental materialisation · RDF 1.2 (see [SPEC.pgRDF.LLD.v0.6-FUTURE](specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md)). |
 | **Supported PG** | 14, 15, 16, 17. PG 18 adoption stays deferred — pgrx 0.16 pin; 0.18.0 still fails to build locally and changes the schema-gen model. See [ERRATA](specs/ERRATA.v0.2.md) E-006. |
-| **Install** | Three paths. **GitHub-release tarball** — per-file `:ro` bind-mount of `.so`/`.control`/`.sql` into stock `postgres:17.4-bookworm` (8 tarballs: pg14-17 × amd64/arm64 + SHA256SUMS). **Anonymous OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.5.46` (zero credentials, public; pin to whatever [`LATEST.md`](./LATEST.md) advertises at audit time — every advertised digest carries an attested SLSA Build Provenance v1, verifiable via `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`). **PGXN source install** — `pgxn install pgrdf --pg_config /path/to/pg_config` on a host with Rust 1.91 + `cargo-pgrx 0.16` (see [INSTALL.md](INSTALL.md)). Per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). |
+| **Install** | Three paths. **GitHub-release tarball** — per-file `:ro` bind-mount of `.so`/`.control`/`.sql` into stock `postgres:17.4-bookworm` (8 tarballs: pg14-17 × amd64/arm64 + SHA256SUMS). **Anonymous OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.0` (zero credentials, public; pin to whatever [`LATEST.md`](./LATEST.md) advertises at audit time — every advertised digest carries an attested SLSA Build Provenance v1, verifiable via `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`). **PGXN source install** — `pgxn install pgrdf --pg_config /path/to/pg_config` on a host with Rust 1.91 + `cargo-pgrx 0.16` (see [INSTALL.md](INSTALL.md)). Per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
 
 ## What you can do today
@@ -176,7 +216,7 @@ just psql             # opens a psql shell to the pgrdf database
 # 2. Inside psql
 pgrdf=# CREATE EXTENSION pgrdf;
 pgrdf=# SELECT pgrdf.version();
-        --  → 0.5.46   (whatever LATEST.md currently advertises)
+        --  → 0.6.0   (whatever LATEST.md currently advertises)
 pgrdf=# SELECT pgrdf.parse_turtle('@prefix ex: <http://e.com/> . ex:a ex:p ex:b .', 1);
         --  → 1
 ```
