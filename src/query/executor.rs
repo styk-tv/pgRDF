@@ -373,6 +373,11 @@ fn sparql_sql(query: &str) -> String {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    // M4 coverage gap (found post-v0.6.0 audit): construct() is its own
+    // entry point — without the pin a direct `pgrdf.construct(...)` with
+    // a multi-pattern WHERE hits the cross-product planner blowup that
+    // sparql() is protected from. Same SET LOCAL, txn-scoped.
+    pin_join_order();
     // Slice 54 — recognise the W3C SPARQL 1.1 §16.2.4 shorthand form
     // `CONSTRUCT WHERE { pattern }` (template omitted; the pattern IS
     // the template). We probe the original query string BEFORE handing
@@ -1525,6 +1530,10 @@ fn expand_template_per_solution(template_rows: &[Value], n_solutions: usize) -> 
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    // M4 coverage gap (found post-v0.6.0 audit): describe() is its own
+    // entry point — pin the join order so a multi-pattern WHERE can't
+    // cross-product (see construct()/sparql()).
+    pin_join_order();
     let parsed = SparqlParser::new()
         .parse_query(query)
         .unwrap_or_else(|e| panic!("pgrdf.describe: parse error: {e}"));
