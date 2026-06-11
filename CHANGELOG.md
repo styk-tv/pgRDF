@@ -6,6 +6,47 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Fixed (M4 — BGP join-order blowup on large graphs; v0.5.45) ★ headline
+
+Complex multi-pattern SPARQL queries (3+ way BGP joins) ran **minutes-slow on
+large graphs** and were effectively unusable at scale. On LUBM-100 (13.9M
+triples) Q2 — a 6-pattern, 3-variable triangle join — took **649 s**. Root
+cause: the executor emitted BGP patterns in **query order**, so standalone
+patterns (Q2's three `rdf:type` patterns) became **cross joins**
+(GraduateStudents × Universities × Departments ≈ 10¹¹ intermediate rows), and
+PostgreSQL's `join_collapse_limit` re-derived its own (still cross-product)
+order from the single-table store's poor cardinality estimates. **`ANALYZE`
+does not fix it** (no statistics make a Cartesian product cheap — verified:
+Q2 stayed 600 s+ after ANALYZE).
+
+Two-part fix, both inside the extension, both fully automatic — **no manual
+indexes, no `ANALYZE`, no PG config**:
+
+- **`executor.rs::build_from_and_where` → `connected_order`** — reorders the
+  mandatory BGP into a *connected, selectivity-ordered* sequence: each pattern
+  after the seed shares ≥1 variable with the already-placed set, so no emitted
+  `INNER JOIN` is ever a cross join. A genuinely disconnected BGP component
+  keeps its (semantically required) cross join.
+- **`executor.rs::sparql` → `pin_join_order`** — `SET LOCAL
+  join_collapse_limit = 1` + `from_collapse_limit = 1` so PostgreSQL honours
+  pgRDF's emitted order verbatim instead of re-flattening it. `SET LOCAL` is
+  txn-scoped (auto-resets after a bare autocommit `SELECT pgrdf.sparql(...)`).
+  Connected emission alone is **not** sufficient — both parts are required.
+
+**Result (LUBM-100 Q2, default PG, no `ANALYZE`): 649 s → ~3 s (≈ 200×)**,
+result identical (129,401 rows). All 14 LUBM queries on a freshly loaded
+lubm-50 graph (6.89M triples, **`reltuples = -1`, never analyzed**) return in
+**0–1 s** — the fix works out-of-the-box because each pinned join hits a
+hexastore index via its equality predicate (index scans regardless of stats).
+
+**Result-preserving:** `join_collapse_limit` constrains plan *search* only,
+never the result set; M4 reorders commutative inner joins. 93/93 compose
+regression tests pass with M4 active. See
+`tests/perf/lubm/RESULTS.m4-join-order.md` for the full measurement +
+environment (Colima k8s VM 8 vCPU/32 GiB, `postgres:17.4-bookworm`, tmpfs
+PGDATA). The owl-rl materialized-profile heavy joins (Q8/Q9) and the **full**
+LUBM-100 pass remain the **v0.6.0** gate.
+
 ### Measured (LUBM-10 under the final combined ingest path — first post-TA-7 baseline)
 
 v0.5.43 re-runs the LUBM-10 benchmark against the now-final combined
