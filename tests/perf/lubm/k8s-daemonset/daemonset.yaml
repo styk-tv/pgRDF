@@ -1,0 +1,87 @@
+# pgRDF LUBM-100 benchmark — Kubernetes DaemonSet.
+#
+# Lands ONE benchmark pod on every Azure Standard_D8s_v6 node (8 vCPU / 32 GiB).
+# Each pod: (init) generates LUBM-100 → (postgres) serves the latest published
+# pgRDF on DEFAULT config → (runner) ingests, queries, materializes, queries
+# again with count verification, then idles for `kubectl logs`.
+#
+# Before applying: replace REGISTRY_PLACEHOLDER with your registry and build +
+# push the two images (see README.md). The node pool should be dedicated to the
+# run (the pod requests ~7 vCPU / ~26 GiB).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pgrdf-lubm100-bench
+  labels: { app: pgrdf-lubm100-bench }
+spec:
+  selector:
+    matchLabels: { app: pgrdf-lubm100-bench }
+  template:
+    metadata:
+      labels: { app: pgrdf-lubm100-bench }
+    spec:
+      # Pin to the D8s_v6 pool. AKS labels every node with its VM size; the
+      # `kubernetes.azure.com/agentpool: <pool>` label is the alternative if
+      # the pool is exclusively D8s_v6.
+      nodeSelector:
+        node.kubernetes.io/instance-type: Standard_D8s_v6
+      # If the benchmark pool is tainted, uncomment a matching toleration:
+      # tolerations:
+      #   - key: workload
+      #     operator: Equal
+      #     value: benchmark
+      #     effect: NoSchedule
+      restartPolicy: Always            # DaemonSet requires Always; runner ends in `sleep infinity`
+      terminationGracePeriodSeconds: 5
+
+      initContainers:
+        # Generate LUBM-100 (UBA -seed 0, deterministic) into the shared volume.
+        - name: generate
+          image: REGISTRY_PLACEHOLDER/pgrdf-lubm-generator:latest
+          imagePullPolicy: IfNotPresent
+          args: ["100"]                # 100 universities = 13,879,970 triples
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            requests: { cpu: "2", memory: 2Gi }
+            limits:   { cpu: "4", memory: 4Gi }
+
+      containers:
+        # The Postgres server with pgRDF preloaded. DEFAULT config — no tuning.
+        - name: postgres
+          image: REGISTRY_PLACEHOLDER/pgrdf-lubm-bench:0.6.0
+          imagePullPolicy: IfNotPresent
+          args: ["postgres", "-c", "shared_preload_libraries=pgrdf"]
+          env:
+            - { name: POSTGRES_USER,     value: pgrdf }
+            - { name: POSTGRES_PASSWORD, value: pgrdf }
+            - { name: POSTGRES_DB,       value: pgrdf }
+            - { name: PGDATA,            value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - { containerPort: 5432, name: postgres }
+          volumeMounts:
+            - { name: data,   mountPath: /data, readOnly: true }   # server-side load_turtle reads the .nt
+            - { name: pgdata, mountPath: /var/lib/postgresql/data } # on node disk — RAM stays free for the reasoner
+          resources:
+            requests: { cpu: "6", memory: 26Gi }
+            limits:   { cpu: "8", memory: 30Gi }
+
+        # The benchmark driver — same image (has psql + the queries + run.sh).
+        - name: runner
+          image: REGISTRY_PLACEHOLDER/pgrdf-lubm-bench:0.6.0
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/run-benchmark"]
+          env:
+            - { name: POSTGRES_USER,     value: pgrdf }
+            - { name: POSTGRES_PASSWORD, value: pgrdf }
+            - { name: POSTGRES_DB,       value: pgrdf }
+            - { name: QUERY_TIMEOUT,     value: "600s" }
+          resources:
+            requests: { cpu: "1", memory: 512Mi }
+            limits:   { cpu: "2", memory: 1Gi }
+
+      volumes:
+        - name: data                   # shared: generate writes, postgres reads (~8 GiB: raw+nt+ttl)
+          emptyDir: { sizeLimit: 12Gi }
+        - name: pgdata                 # postgres PGDATA on node ephemeral disk (~6 GiB after materialize)
+          emptyDir: { sizeLimit: 20Gi }

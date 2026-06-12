@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.4
+#
+# Self-contained LUBM-100 benchmark image: stock Postgres 17 + the *published*
+# pgRDF extension + the 14 LUBM reference queries + the Univ-Bench Tbox + the
+# benchmark runner. The SAME image runs both pod containers (the `postgres`
+# server and the `runner`).
+#
+# Build (context MUST be tests/perf/lubm — NOT the repo root; the root carries
+# ref-* symlinks that break the build context):
+#
+#   docker build -f tests/perf/lubm/k8s-daemonset/Dockerfile.benchmark \
+#     --build-arg PGRDF_VERSION=0.6.0 \
+#     --platform linux/amd64 \
+#     -t <REGISTRY>/pgrdf-lubm-bench:0.6.0  tests/perf/lubm
+#
+# amd64 only — Azure Standard_D8s_v6 is x86_64. The extension is the glibc
+# release tarball published on the GitHub release for v${PGRDF_VERSION}.
+
+FROM postgres:17.4-bookworm
+
+# Latest published pgRDF release. 0.6.0 is current; bump to 0.6.1 once it is
+# pushed (it must exist as a GitHub release asset to be downloadable here).
+ARG PGRDF_VERSION=0.6.0
+ARG TARGETARCH=amd64
+
+RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
+    curl -fsSL -o /tmp/pgrdf.tgz \
+      "https://github.com/styk-tv/pgRDF/releases/download/v${PGRDF_VERSION}/pgrdf-${PGRDF_VERSION}-pg17-glibc-${TARGETARCH}.tar.gz"; \
+    tar -xzf /tmp/pgrdf.tgz -C /tmp; \
+    cp /tmp/pgrdf-*/lib/pgrdf.so      /usr/lib/postgresql/17/lib/; \
+    cp /tmp/pgrdf-*/share/extension/* /usr/share/postgresql/17/extension/; \
+    rm -rf /tmp/pgrdf*; \
+    apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# Benchmark inputs. The Tbox is read server-side by load_turtle (so it must be
+# on the postgres container's filesystem); the queries are read client-side by
+# the runner. Baking both into the one image keeps the pod free of ConfigMaps.
+COPY fixtures/univ-bench.ttl  /fixtures/univ-bench.ttl
+COPY queries/                /queries/
+COPY k8s-daemonset/run.sh    /usr/local/bin/run-benchmark
+RUN chmod +x /usr/local/bin/run-benchmark
