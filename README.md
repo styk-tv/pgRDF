@@ -324,7 +324,7 @@ artifact-parity proof after rebuild, before the compose-based test
 bar). Use it after touching anything in `compose/`, `fixtures/`, or
 the test SQL fixtures.
 
-Current bar — **274 pgrx + 85 pg_regress + 51 W3C-sparql + 25
+Current bar — **289 pgrx + 93 pg_regress + 51 W3C-sparql + 25
 W3C SHACL Core + 3 LUBM-shape** green across the full pgrx PG
 14-17 matrix and the compose-based regression runtime (PG 17).
 Covers:

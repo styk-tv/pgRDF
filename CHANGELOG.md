@@ -6,7 +6,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-## [0.6.1] — 2026-06-11
+## [0.6.1] — 2026-06-12
 
 ### Performance — `materialize` write-path, ~2.4× ★ headline
 
