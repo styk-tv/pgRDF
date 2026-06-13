@@ -100,6 +100,14 @@ struct LoaderStats {
     /// phase. Surfaced in the verbose JSONB so the bulk breakdown reads
     /// parse → dict → resolve → insert.
     resolve_ms: f64,
+    /// v0.6.3 bulk path only — the index drop+rebuild phase (the
+    /// defer-index optimization). 0.0 when defer did not fire.
+    index_ms: f64,
+    /// v0.6.3 bulk path only — whether the defer-index optimization
+    /// fired (hexastore + dict-hash indexes dropped before the load and
+    /// rebuilt after). False on the serial paths and on bulk loads below
+    /// `pgrdf.bulk_defer_index_min`.
+    defer_index: bool,
     /// TA-5 — which `pgrdf.ingest_dict_path` route the dispatcher
     /// selected for this call (`baseline` / `batched` / `shmem_warm`
     /// / `combined`). Set by `ingest_dispatch` / `ingest_quads_dispatch`
@@ -1046,7 +1054,9 @@ fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
         "parse_ms":         stats.parse_ms,
         "dict_ms":          stats.dict_ms,
         "resolve_ms":       stats.resolve_ms,
+        "index_ms":         stats.index_ms,
         "insert_ms":        stats.insert_ms,
+        "defer_index":      stats.defer_index,
         // TA-5 — the `pgrdf.ingest_dict_path` route the dispatcher
         // selected. Empty only when a stats struct is serialized
         // outside the dispatch (e.g. the `parse_turtle_dict_batched`
@@ -1412,7 +1422,9 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
         "parse_ms":         stats.parse_ms,
         "dict_ms":          stats.dict_ms,
         "resolve_ms":       stats.resolve_ms,
+        "index_ms":         stats.index_ms,
         "insert_ms":        stats.insert_ms,
+        "defer_index":      stats.defer_index,
         // TA-5 — the `pgrdf.ingest_dict_path` route the quad
         // dispatcher selected for this call.
         "path":             stats.path,
@@ -1422,6 +1434,37 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
 // ─────────────────────────────────────────────────────────────────────
 // UDF surface
 // ─────────────────────────────────────────────────────────────────────
+
+/// Drop the hexastore (SPO/POS/OSP) + the dict `_pgrdf_dict_val_idx`
+/// hash before a fresh bulk load so the dict and quad bulk-inserts skip
+/// per-row index maintenance. Serialised through the same advisory gate
+/// as partition creation (`acquire_partition_ddl_gate`, released at txn
+/// end). Only called on the empty-dict fast path at/above
+/// `pgrdf.bulk_defer_index_min`, where the quads table is empty.
+fn bulk_drop_indexes() {
+    crate::storage::partition::acquire_partition_ddl_gate();
+    Spi::run(
+        "DROP INDEX IF EXISTS pgrdf._pgrdf_idx_spo, pgrdf._pgrdf_idx_pos, \
+         pgrdf._pgrdf_idx_osp, pgrdf._pgrdf_dict_val_idx",
+    )
+    .expect("load_turtle: bulk defer-index drop");
+}
+
+/// Rebuild the indexes dropped by `bulk_drop_indexes` after the bulk
+/// load completes. The DDL mirrors `sql/schema_v0_2_0.sql` exactly and
+/// uses `ON pgrdf._pgrdf_quads` (not `ON ONLY`) so the hexastore indexes
+/// cascade to the LIST partitions. `CREATE INDEX` is parallel-aware
+/// (honours `max_parallel_maintenance_workers`).
+fn bulk_rebuild_indexes() {
+    for ddl in [
+        "CREATE INDEX _pgrdf_idx_spo ON pgrdf._pgrdf_quads (subject_id, predicate_id, object_id) INCLUDE (is_inferred)",
+        "CREATE INDEX _pgrdf_idx_pos ON pgrdf._pgrdf_quads (predicate_id, object_id, subject_id) INCLUDE (is_inferred)",
+        "CREATE INDEX _pgrdf_idx_osp ON pgrdf._pgrdf_quads (object_id, subject_id, predicate_id) INCLUDE (is_inferred)",
+        "CREATE INDEX _pgrdf_dict_val_idx ON pgrdf._pgrdf_dictionary USING HASH (lexical_value)",
+    ] {
+        Spi::run(ddl).expect("load_turtle: bulk defer-index rebuild");
+    }
+}
 
 /// v0.6.2 — parallel bulk-ingest fast path (`load_turtle(..., bulk_load
 /// => TRUE)` on a FRESH dictionary). Four passes; SPI touches ONLY the
@@ -1535,6 +1578,21 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
     stats.parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
     let triples: usize = per_chunk.iter().map(|c| c.len()).sum();
     stats.triples = triples as i64;
+
+    // Defer-index (v0.6.3): on a large fresh load, drop the hexastore +
+    // dict-hash indexes now and rebuild them after PASS 4, so the dict
+    // and quad bulk-inserts don't pay per-row index maintenance. Gated
+    // above `pgrdf.bulk_defer_index_min` so tiny loads (the parallel test
+    // suite) never take the global ACCESS-EXCLUSIVE index DDL. The
+    // empty-dict precondition (see `bulk_load_guarded`) means the quads
+    // table is empty, so the rebuild is over just the freshly-loaded data.
+    let defer = (triples as i64) >= crate::query::guc::bulk_defer_index_min() as i64;
+    stats.defer_index = defer;
+    if defer {
+        let t_idx = Instant::now();
+        bulk_drop_indexes();
+        stats.index_ms += t_idx.elapsed().as_secs_f64() * 1000.0;
+    }
 
     // ── PASS 2: dict resolve via SELF-ASSIGNED ids ──────────────────
     let t_dict = Instant::now();
@@ -1662,6 +1720,13 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
         flush_batch(&mut bs, &mut bp, &mut bo, graph_id, &mut stats);
     }
     stats.insert_ms = t_insert.elapsed().as_secs_f64() * 1000.0;
+
+    // Rebuild the deferred indexes over the freshly-loaded data.
+    if defer {
+        let t_idx = Instant::now();
+        bulk_rebuild_indexes();
+        stats.index_ms += t_idx.elapsed().as_secs_f64() * 1000.0;
+    }
     stats.elapsed_ms = t_all.elapsed().as_secs_f64() * 1000.0;
     stats
 }
@@ -2367,9 +2432,15 @@ mod tests {
         .unwrap();
         let v = &j.0;
         assert_eq!(v["triples"], 1);
-        for k in ["parse_ms", "dict_ms", "resolve_ms", "insert_ms"] {
+        for k in ["parse_ms", "dict_ms", "resolve_ms", "insert_ms", "index_ms"] {
             assert!(v[k].is_number(), "verbose bulk output carries {k}");
         }
+        // A tiny load stays below `pgrdf.bulk_defer_index_min`, so the
+        // defer-index optimization does not fire (no global index DDL).
+        assert_eq!(
+            v["defer_index"], false,
+            "a tiny load stays below the defer-index threshold"
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -2414,6 +2485,54 @@ mod tests {
             shared_rows, 1,
             "shared term deduped via fallback (no duplicate row)"
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Force the defer-index path (`bulk_defer_index_min = 0`) and confirm
+    /// the load is correct and the four indexes are rebuilt + usable. This
+    /// fires global ACCESS-EXCLUSIVE index DDL, which is unsafe to run
+    /// concurrently with the rest of the suite, so it is a no-op unless
+    /// `PGRDF_RUN_DEFER_TEST` is set. Run it in isolation:
+    ///   PGRDF_RUN_DEFER_TEST=1 cargo pgrx test pg17 load_turtle_bulk_defer_index_rebuilds
+    #[pg_test]
+    fn load_turtle_bulk_defer_index_rebuilds() {
+        if std::env::var("PGRDF_RUN_DEFER_TEST").is_err() {
+            return;
+        }
+        Spi::run("SET pgrdf.bulk_defer_index_min = 0").unwrap();
+
+        let nt = concat!(
+            "<http://ex/a> <http://ex/p> <http://ex/b> .\n",
+            "<http://ex/a> <http://ex/q> \"v\" .\n",
+            "<http://ex/c> <http://ex/p> <http://ex/b> .\n",
+        );
+        let path = "/tmp/pgrdf_bulk_defer.nt";
+        std::fs::write(path, nt).expect("write temp .nt");
+
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.load_turtle_verbose($1, $2, NULL, TRUE)",
+            &[path.into(), 7_531i64.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(j.0["triples"], 3);
+        assert_eq!(j.0["defer_index"], true, "forced defer-index fired");
+
+        let idx: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pg_indexes
+              WHERE schemaname = 'pgrdf'
+                AND indexname IN ('_pgrdf_idx_spo', '_pgrdf_idx_pos',
+                                  '_pgrdf_idx_osp', '_pgrdf_dict_val_idx')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(idx, 4, "all four indexes rebuilt after the defer load");
+
+        let cq: i64 = Spi::get_one_with_args("SELECT pgrdf.count_quads($1)", &[7_531i64.into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(cq, 3, "quads queryable via the rebuilt indexes");
 
         let _ = std::fs::remove_file(path);
     }

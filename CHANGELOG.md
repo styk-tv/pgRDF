@@ -6,6 +6,43 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-06-13
+
+### Added — deferred-index bulk load ★ headline
+
+A second lever for the parallel bulk loader: on a large fresh load,
+`load_turtle(…, bulk_load => true)` now drops the hexastore (SPO/POS/OSP)
+and the dictionary `_pgrdf_dict_val_idx` indexes **before** the load, streams
+the rows in index-free (heap only), then rebuilds the indexes in parallel
+(`CREATE INDEX` is parallel-aware). This removes the per-row index
+maintenance that the dict and quad bulk-inserts would otherwise pay — the
+separate, fast `index` phase in the LUBM-10→500 benchmark.
+
+- **`pgrdf.bulk_defer_index_min`** (GUC, default `100000`) — the triple-count
+  threshold at/above which the defer happens. The drop/rebuild takes ACCESS
+  EXCLUSIVE on the global tables, so loads below the threshold (and the
+  parallel test suite) keep their indexes live; set very high to disable, or
+  `0` to always defer (only safe with no concurrent writers). The
+  drop/rebuild reuses the partition-DDL advisory gate and mirrors the index
+  DDL in `sql/schema_v0_2_0.sql` exactly (no `ON ONLY`, so it cascades to the
+  LIST partitions).
+- **`index_ms` + `defer_index`** added to the `load_turtle_verbose` JSONB so
+  the bulk breakdown reads parse → dict → resolve → insert → index and callers
+  can see whether the defer fired. Additive.
+
+Verification: the skip path (below threshold → `defer_index=false`, indexes
+untouched) is locked by the bulk verbose pgrx test; the real drop→load→rebuild
+path is exercised by an isolated, env-gated pgrx test
+(`PGRDF_RUN_DEFER_TEST=1 … load_turtle_bulk_defer_index_rebuilds`, run alone
+because the global index DDL is unsafe under the parallel suite) and validated
+at scale by the LUBM benchmark. 293 pgrx green (suite stable across repeated
+runs), fmt + clippy clean.
+
+Note: the self-assigned-id fast path's `max(id)` + `OVERRIDING SYSTEM VALUE`
+id reservation is correct for its intended single fresh load but not
+concurrency-safe against other dict writers — a proper sequence-based
+reservation is tracked for a follow-up; production (fresh-load) is unaffected.
+
 ## [0.6.2] — 2026-06-13
 
 ### Added — parallel bulk loader (`load_turtle(…, bulk_load => true)`) ★ headline

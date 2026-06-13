@@ -56,6 +56,15 @@ pub(crate) const MIN_DICT_BATCH_SIZE: i32 = 0;
 /// the defer queue starts to matter on small-RAM hosts.
 pub(crate) const MAX_DICT_BATCH_SIZE: i32 = 10_000;
 
+/// Default `pgrdf.bulk_defer_index_min` — the parallel bulk loader
+/// (`load_turtle(..., bulk_load => true)`) only defers + rebuilds the
+/// hexastore + dict-hash indexes when the parsed triple count reaches
+/// this threshold. 100k sits well above any unit-test fixture and below
+/// the smallest benchmark scale (LUBM-10 = 1.32M), so tiny loads —
+/// including the parallel pgrx test suite — never trigger the global
+/// ACCESS-EXCLUSIVE index DDL.
+pub(crate) const DEFAULT_BULK_DEFER_INDEX_MIN: i32 = 100_000;
+
 /// `pgrdf.ingest_dict_path` — selects which dict-resolution path
 /// `parse_turtle` + `load_turtle` (and verbose variants) dispatch
 /// through. Valid values:
@@ -101,6 +110,16 @@ pub(crate) static SHMEM_PREWARM_ON_INIT: GucSetting<bool> = GucSetting::<bool>::
 /// Q2: 180 s → 1 s). `ANALYZE` is sample-based (fixed sub-second cost),
 /// so this is on by default; set off to manage `ANALYZE` externally.
 pub(crate) static AUTO_ANALYZE: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// `pgrdf.bulk_defer_index_min` — triple-count threshold at/above which
+/// `load_turtle(..., bulk_load => true)` drops the hexastore (SPO/POS/
+/// OSP) + dict `_pgrdf_dict_val_idx` indexes before loading and rebuilds
+/// them after, skipping per-row index maintenance during a fresh bulk
+/// load. The drop/rebuild takes ACCESS EXCLUSIVE on the global tables,
+/// so it is gated above this threshold (default 100k). Only consulted on
+/// the empty-dict fast path.
+pub(crate) static BULK_DEFER_INDEX_MIN: GucSetting<i32> =
+    GucSetting::<i32>::new(DEFAULT_BULK_DEFER_INDEX_MIN);
 
 /// `pgrdf.ingest_dict_path` parsed into a Rust enum so callers
 /// don't keep matching the raw string. `parse_turtle` / `load_turtle`
@@ -209,6 +228,22 @@ pub fn register() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    GucRegistry::define_int_guc(
+        c"pgrdf.bulk_defer_index_min",
+        c"Triple threshold above which bulk_load defers + rebuilds indexes.",
+        c"load_turtle(..., bulk_load => true) on a fresh database drops the \
+          hexastore (SPO/POS/OSP) and the dict _pgrdf_dict_val_idx index \
+          before loading and rebuilds them afterwards, when the parsed \
+          triple count is at least this value (default 100000). The \
+          drop/rebuild takes ACCESS EXCLUSIVE on the global tables, so \
+          small loads stay below it. Set very high to disable; 0 = always \
+          defer (only safe with no concurrent writers on the tables).",
+        &BULK_DEFER_INDEX_MIN,
+        0,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 /// The currently-effective `pgrdf.path_max_depth` for this session.
@@ -256,4 +291,10 @@ pub(crate) fn dict_batch_size() -> usize {
 /// `loader::ingest_dispatch` consults this on every ingest call.
 pub(crate) fn shmem_prewarm_on_init() -> bool {
     SHMEM_PREWARM_ON_INIT.get()
+}
+
+/// Resolved `pgrdf.bulk_defer_index_min` — the triple threshold at/above
+/// which the parallel bulk loader defers + rebuilds its indexes.
+pub(crate) fn bulk_defer_index_min() -> i32 {
+    BULK_DEFER_INDEX_MIN.get()
 }

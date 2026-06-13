@@ -6,7 +6,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-v0.6.2%20%E2%80%94%20parallel%20bulk%20ingest%20%E2%80%94%20LUBM--100%20full%20pass%20%E2%80%94%20SPARQL%201.1%20%2F%20SHACL%20%2F%20OWL-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
+[![Status](https://img.shields.io/badge/status-v0.6.3%20%E2%80%94%20parallel%20bulk%20ingest%20%E2%80%94%20LUBM--100%20full%20pass%20%E2%80%94%20SPARQL%201.1%20%2F%20SHACL%20%2F%20OWL-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
 [![Tests](https://img.shields.io/badge/tests-292%20pgrx%20%2B%2093%20regression%20%2B%2051%20W3C%20%2B%2025%20SHACL%20%2B%203%20LUBM-brightgreen)](#tests)
 [![LUBM-100](https://img.shields.io/badge/LUBM--100-28%2F28%20queries%20%E2%89%A4%205s%20%C2%B7%2013.9M%20triples%20%C2%B7%20zero%20tuning-brightgreen)](tests/perf/lubm/RESULTS.m4-join-order.md)
 [![Scale](https://img.shields.io/badge/scale-LUBM--500%20%C2%B7%20112M%20quads%20materialized-blue)](#proven-at-scale-lubm-10-to-lubm-500)
@@ -76,7 +76,7 @@ Two engine changes close the gap from "minutes-to-timeout" to "seconds"
 The result holds end-to-end: load a real-scale graph, reason over it,
 and query it interactively — in one PostgreSQL instance, with the
 operational surface (backups, monitoring, access control) you already
-run. Verification bar at this cut: 292 integration + 93 regression +
+run. Verification bar at this cut: 293 integration + 93 regression +
 51 W3C SPARQL + 25 W3C SHACL Core tests green, releases signed with
 SLSA Build Provenance v1, three install paths (tarball / OCI / PGXN).
 
@@ -123,6 +123,9 @@ The advantage **grows with scale**: per-triple ingest stays near-linear
 (5.3 → 9.65 µs). It ships as a one-flag option —
 `pgrdf.load_turtle(path, graph, bulk_load => true)` — with a safe automatic
 fallback to the standard path whenever the dictionary is already populated.
+At scale (above `pgrdf.bulk_defer_index_min`, v0.6.3) the same flag also
+defers the hexastore + dictionary indexes and rebuilds them in parallel after
+the heap-only load — the separate `index` column in the table above.
 
 ## Capabilities
 
@@ -167,8 +170,8 @@ Dictionary-encoded terms over a LIST-partitioned hexastore (SPO / POS / OSP cove
 | | |
 |---|---|
 | **PostgreSQL** | 14 · 15 · 16 · 17 (PG 18 deferred — pgrx 0.16 pin; [ERRATA E-006](specs/ERRATA.v0.2.md)) |
-| **Install** | **OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.2` (public, zero-cred; every digest SLSA-attested, verify with `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`) · **tarballs** (pg14–17 × amd64/arm64) · **PGXN** — `pgxn install pgrdf`. See [INSTALL.md](INSTALL.md). |
-| **Current release** | **v0.6.2** — [LATEST.md](./LATEST.md) is authoritative at audit time |
+| **Install** | **OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.3` (public, zero-cred; every digest SLSA-attested, verify with `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`) · **tarballs** (pg14–17 × amd64/arm64) · **PGXN** — `pgxn install pgrdf`. See [INSTALL.md](INSTALL.md). |
+| **Current release** | **v0.6.3** — [LATEST.md](./LATEST.md) is authoritative at audit time |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
 
 ## What you can do today
@@ -316,7 +319,7 @@ just psql             # opens a psql shell to the pgrdf database
 # 2. Inside psql
 pgrdf=# CREATE EXTENSION pgrdf;
 pgrdf=# SELECT pgrdf.version();
-        --  → 0.6.2   (whatever LATEST.md currently advertises)
+        --  → 0.6.3   (whatever LATEST.md currently advertises)
 pgrdf=# SELECT pgrdf.parse_turtle('@prefix ex: <http://e.com/> . ex:a ex:p ex:b .', 1);
         --  → 1
 ```
@@ -421,7 +424,7 @@ artifact-parity proof after rebuild, before the compose-based test
 bar). Use it after touching anything in `compose/`, `fixtures/`, or
 the test SQL fixtures.
 
-Current bar — **292 pgrx + 93 pg_regress + 51 W3C-sparql + 25
+Current bar — **293 pgrx + 93 pg_regress + 51 W3C-sparql + 25
 W3C SHACL Core + 3 LUBM-shape** green across the full pgrx PG
 14-17 matrix and the compose-based regression runtime (PG 17).
 Covers:
