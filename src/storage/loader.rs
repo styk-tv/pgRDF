@@ -1436,11 +1436,15 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Drop the hexastore (SPO/POS/OSP) + the dict `_pgrdf_dict_val_idx`
-/// hash before a fresh bulk load so the dict and quad bulk-inserts skip
-/// per-row index maintenance. Serialised through the same advisory gate
+/// hash + the dict `unique_term` UNIQUE constraint (v0.6.4) before a
+/// fresh bulk load, so the dict and quad bulk-inserts skip per-row index
+/// + uniqueness maintenance. Serialised through the same advisory gate
 /// as partition creation (`acquire_partition_ddl_gate`, released at txn
 /// end). Only called on the empty-dict fast path at/above
-/// `pgrdf.bulk_defer_index_min`, where the quads table is empty.
+/// `pgrdf.bulk_defer_index_min`, where the quads table is empty. Safe to
+/// drop `unique_term`: the self-assigned-id path de-duplicates terms in
+/// Rust, so the load produces no duplicate tuples; the re-add in
+/// `bulk_rebuild_indexes` VALIDATES that (a backstop against a dedup bug).
 fn bulk_drop_indexes() {
     crate::storage::partition::acquire_partition_ddl_gate();
     Spi::run(
@@ -1448,19 +1452,25 @@ fn bulk_drop_indexes() {
          pgrdf._pgrdf_idx_osp, pgrdf._pgrdf_dict_val_idx",
     )
     .expect("load_turtle: bulk defer-index drop");
+    Spi::run("ALTER TABLE pgrdf._pgrdf_dictionary DROP CONSTRAINT IF EXISTS unique_term")
+        .expect("load_turtle: bulk defer unique_term drop");
 }
 
-/// Rebuild the indexes dropped by `bulk_drop_indexes` after the bulk
-/// load completes. The DDL mirrors `sql/schema_v0_2_0.sql` exactly and
-/// uses `ON pgrdf._pgrdf_quads` (not `ON ONLY`) so the hexastore indexes
-/// cascade to the LIST partitions. `CREATE INDEX` is parallel-aware
-/// (honours `max_parallel_maintenance_workers`).
+/// Rebuild the indexes + the `unique_term` constraint dropped by
+/// `bulk_drop_indexes` after the bulk load completes. The DDL mirrors
+/// `sql/schema_v0_2_0.sql` exactly and uses `ON pgrdf._pgrdf_quads` (not
+/// `ON ONLY`) so the hexastore indexes cascade to the LIST partitions.
+/// `CREATE INDEX` is parallel-aware (honours
+/// `max_parallel_maintenance_workers`); the final `ADD CONSTRAINT
+/// unique_term` re-validates dictionary uniqueness over the loaded data.
 fn bulk_rebuild_indexes() {
     for ddl in [
         "CREATE INDEX _pgrdf_idx_spo ON pgrdf._pgrdf_quads (subject_id, predicate_id, object_id) INCLUDE (is_inferred)",
         "CREATE INDEX _pgrdf_idx_pos ON pgrdf._pgrdf_quads (predicate_id, object_id, subject_id) INCLUDE (is_inferred)",
         "CREATE INDEX _pgrdf_idx_osp ON pgrdf._pgrdf_quads (object_id, subject_id, predicate_id) INCLUDE (is_inferred)",
         "CREATE INDEX _pgrdf_dict_val_idx ON pgrdf._pgrdf_dictionary USING HASH (lexical_value)",
+        "ALTER TABLE pgrdf._pgrdf_dictionary ADD CONSTRAINT unique_term \
+         UNIQUE (term_type, lexical_value, datatype_iri_id, language_tag)",
     ] {
         Spi::run(ddl).expect("load_turtle: bulk defer-index rebuild");
     }
@@ -2528,6 +2538,20 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(idx, 4, "all four indexes rebuilt after the defer load");
+
+        // v0.6.4: the deferred `unique_term` constraint is re-added (and
+        // validated) over the loaded data.
+        let con: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pg_constraint
+              WHERE conname = 'unique_term'
+                AND conrelid = 'pgrdf._pgrdf_dictionary'::regclass",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            con, 1,
+            "unique_term constraint re-added after the defer load"
+        );
 
         let cq: i64 = Spi::get_one_with_args("SELECT pgrdf.count_quads($1)", &[7_531i64.into()])
             .unwrap()

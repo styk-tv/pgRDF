@@ -6,6 +6,32 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-06-13
+
+### Added — deferred `unique_term` constraint on bulk load ★ headline
+
+The defer-index path (v0.6.3) now also defers the dictionary's `unique_term`
+UNIQUE constraint. On a fresh bulk load above `pgrdf.bulk_defer_index_min`,
+`load_turtle(…, bulk_load => true)` drops `unique_term` (alongside the
+hexastore + dict-hash indexes), streams the dictionary rows in without its
+per-row uniqueness check, then re-adds it after — which **rebuilds and
+re-validates** uniqueness over the loaded data in one pass instead of paying
+it row-by-row.
+
+This is safe because the self-assigned-id fast path already de-duplicates
+terms in Rust (a `HashSet` over `(term_type, lexical_value, datatype_iri_id,
+language_tag)`), so the load produces no duplicate tuples; the `ADD
+CONSTRAINT` is a **fail-loud backstop** (a dedup bug would abort the load,
+not corrupt the dictionary), and the whole drop → load → re-add runs in one
+transaction, so any validation failure rolls the entire load back. It's the
+next ingest lever measured in the LUBM benchmark (toward ~70 s at LUBM-250).
+
+Gated by the same `pgrdf.bulk_defer_index_min` threshold (default 100000), so
+loads below it — and the parallel test suite — keep the constraint live. The
+drop/re-add reuses the partition-DDL advisory gate and mirrors
+`sql/schema_v0_2_0.sql`. 293 pgrx green; the isolated env-gated defer test
+(`PGRDF_RUN_DEFER_TEST=1`) now also asserts the constraint is re-added.
+
 ## [0.6.3] — 2026-06-13
 
 ### Added — deferred-index bulk load ★ headline
