@@ -93,6 +93,13 @@ struct LoaderStats {
     parse_ms: f64,
     dict_ms: f64,
     insert_ms: f64,
+    /// v0.6.2 bulk path only — the PASS-3 triple→id resolve phase
+    /// (`resolve` of every s/p/o against the in-memory term→id maps,
+    /// run in parallel via rayon). 0.0 on the serial paths, which
+    /// resolve terms inline during `dict_ms` rather than as a distinct
+    /// phase. Surfaced in the verbose JSONB so the bulk breakdown reads
+    /// parse → dict → resolve → insert.
+    resolve_ms: f64,
     /// TA-5 — which `pgrdf.ingest_dict_path` route the dispatcher
     /// selected for this call (`baseline` / `batched` / `shmem_warm`
     /// / `combined`). Set by `ingest_dispatch` / `ingest_quads_dispatch`
@@ -1038,6 +1045,7 @@ fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
         // measures.
         "parse_ms":         stats.parse_ms,
         "dict_ms":          stats.dict_ms,
+        "resolve_ms":       stats.resolve_ms,
         "insert_ms":        stats.insert_ms,
         // TA-5 — the `pgrdf.ingest_dict_path` route the dispatcher
         // selected. Empty only when a stats struct is serialized
@@ -1403,6 +1411,7 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
         // JSON shape so downstream consumers see a stable schema.
         "parse_ms":         stats.parse_ms,
         "dict_ms":          stats.dict_ms,
+        "resolve_ms":       stats.resolve_ms,
         "insert_ms":        stats.insert_ms,
         // TA-5 — the `pgrdf.ingest_dict_path` route the quad
         // dispatcher selected for this call.
@@ -1414,37 +1423,324 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
 // UDF surface
 // ─────────────────────────────────────────────────────────────────────
 
+/// v0.6.2 — parallel bulk-ingest fast path (`load_turtle(..., bulk_load
+/// => TRUE)` on a FRESH dictionary). Four passes; SPI touches ONLY the
+/// main backend thread and the rayon regions are pure-CPU (no SPI /
+/// palloc inside any closure), so it is safe on a single PG backend.
+///
+///   PASS 1 (rayon) — parse the whole line-oriented `.nt` on all cores,
+///                    split at newline boundaries → per-chunk raw triples.
+///   PASS 2 (main)  — dedup unique terms in-memory and dictionary-load
+///                    with SELF-ASSIGNED ids: assign `base + i` in Rust,
+///                    plain `INSERT … OVERRIDING SYSTEM VALUE`, then
+///                    `setval` the identity sequence. No per-term anti-
+///                    join — that anti-join + lookup JOIN is the measured
+///                    66–74 % of serial ingest, unnecessary on a fresh
+///                    dict where the in-Rust dedup already guarantees one
+///                    row per term.
+///   PASS 3 (rayon) — resolve every triple → (s,p,o) id tuple against the
+///                    now-complete read-only term→id maps.
+///   PASS 4 (main)  — bulk-insert the quads via the existing prepared
+///                    `flush_batch`.
+///
+/// Dict rows are byte-identical to the serial combined path (same
+/// interning rules), so `count_quads` + the LUBM query counts are the
+/// correctness gate. The caller guarantees the dict is empty (see
+/// `bulk_load_guarded`). `.nt` blank-node labels are document-scoped, so
+/// merging by label across chunks is correct for N-Triples; arbitrary
+/// multi-line Turtle / anonymous `[]` blanks are out of scope for the
+/// newline-split parse (use the default serial path for those).
+fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
+    use rayon::prelude::*;
+    // Raw term as parsed; a literal's datatype is carried as its IRI
+    // STRING here and resolved to a dict id in PASS 2.
+    type RawKey = (i16, String, Option<String>, Option<String>);
+
+    let t_all = Instant::now();
+    let mut stats = LoaderStats {
+        path: "parallel_bulk",
+        ..Default::default()
+    };
+
+    let mut bytes = Vec::new();
+    File::open(path)
+        .unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"))
+        .read_to_end(&mut bytes)
+        .unwrap_or_else(|e| panic!("load_turtle: failed to read {path:?}: {e}"));
+
+    let nthreads = rayon::current_num_threads().max(1);
+    let total = bytes.len();
+    let mut bounds = vec![0usize];
+    for k in 1..nthreads {
+        let mut i = (total * k) / nthreads;
+        while i < total && bytes[i] != b'\n' {
+            i += 1;
+        }
+        if i < total {
+            i += 1;
+        }
+        bounds.push(i.min(total));
+    }
+    bounds.push(total);
+    let chunks: Vec<(usize, usize)> = bounds
+        .windows(2)
+        .map(|w| (w[0], w[1]))
+        .filter(|(a, b)| a < b)
+        .collect();
+
+    // ── PASS 1: parallel parse → per-chunk raw triples ──────────────
+    let t_parse = Instant::now();
+    let per_chunk: Vec<Vec<(RawKey, RawKey, RawKey)>> = chunks
+        .par_iter()
+        .map(|&(a, b)| {
+            let mut out = Vec::new();
+            for r in TurtleParser::new().for_reader(&bytes[a..b]) {
+                let t = r.expect("load_turtle: turtle parse error");
+                let s: RawKey = match &t.subject {
+                    NamedOrBlankNode::NamedNode(n) => {
+                        (term_type::URI, n.as_str().to_string(), None, None)
+                    }
+                    NamedOrBlankNode::BlankNode(bn) => {
+                        (term_type::BLANK_NODE, bn.as_str().to_string(), None, None)
+                    }
+                };
+                let p: RawKey = (term_type::URI, t.predicate.as_str().to_string(), None, None);
+                let o: RawKey = match &t.object {
+                    Term::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
+                    Term::BlankNode(bn) => {
+                        (term_type::BLANK_NODE, bn.as_str().to_string(), None, None)
+                    }
+                    Term::Literal(lit) => match lit.language() {
+                        Some(l) => (
+                            term_type::LITERAL,
+                            lit.value().to_string(),
+                            None,
+                            Some(l.to_string()),
+                        ),
+                        None => (
+                            term_type::LITERAL,
+                            lit.value().to_string(),
+                            Some(lit.datatype().as_str().to_string()),
+                            None,
+                        ),
+                    },
+                    #[allow(unreachable_patterns)]
+                    _ => panic!("load_turtle: unsupported object term"),
+                };
+                out.push((s, p, o));
+            }
+            out
+        })
+        .collect();
+    stats.parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
+    let triples: usize = per_chunk.iter().map(|c| c.len()).sum();
+    stats.triples = triples as i64;
+
+    // ── PASS 2: dict resolve via SELF-ASSIGNED ids ──────────────────
+    let t_dict = Instant::now();
+    let base: i64 = Spi::get_one::<i64>("SELECT COALESCE(max(id),0) FROM pgrdf._pgrdf_dictionary")
+        .expect("load_turtle: dict base-id probe")
+        .unwrap_or(0);
+    let chunk_sz = 500_000usize;
+    let ins =
+        |id0: i64, tt: Vec<i16>, lv: Vec<String>, di: Vec<Option<i64>>, lt: Vec<Option<String>>| {
+            let ids: Vec<i64> = (0..tt.len() as i64).map(|k| id0 + k).collect();
+            Spi::run_with_args(
+                "INSERT INTO pgrdf._pgrdf_dictionary \
+             (id, term_type, lexical_value, datatype_iri_id, language_tag) \
+             OVERRIDING SYSTEM VALUE \
+             SELECT * FROM unnest($1::int8[], $2::int2[], $3::text[], $4::int8[], $5::text[])",
+                &[ids.into(), tt.into(), lv.into(), di.into(), lt.into()],
+            )
+            .expect("load_turtle: dict bulk insert");
+        };
+    // tier 1 — URI / BLANK terms + literal datatype IRIs (ids base+1..).
+    let mut uri_set: HashSet<(i16, String)> = HashSet::new();
+    for chunk in &per_chunk {
+        for (s, p, o) in chunk {
+            if s.0 != term_type::LITERAL {
+                uri_set.insert((s.0, s.1.clone()));
+            }
+            uri_set.insert((p.0, p.1.clone()));
+            if o.0 != term_type::LITERAL {
+                uri_set.insert((o.0, o.1.clone()));
+            } else if let Some(dt) = &o.2 {
+                uri_set.insert((term_type::URI, dt.clone()));
+            }
+        }
+    }
+    let uri_keys: Vec<(i16, String)> = uri_set.into_iter().collect();
+    let mut uri_map: HashMap<(i16, String), i64> = HashMap::with_capacity(uri_keys.len());
+    for (i, (tt, lv)) in uri_keys.iter().enumerate() {
+        uri_map.insert((*tt, lv.clone()), base + 1 + i as i64);
+    }
+    for (ci, ch) in uri_keys.chunks(chunk_sz).enumerate() {
+        ins(
+            base + 1 + (ci * chunk_sz) as i64,
+            ch.iter().map(|(tt, _)| *tt).collect(),
+            ch.iter().map(|(_, lv)| lv.clone()).collect(),
+            vec![None; ch.len()],
+            vec![None; ch.len()],
+        );
+    }
+    let u = uri_keys.len() as i64;
+    // tier 2 — literals keyed (lexical, datatype_id, lang); ids base+U+1..
+    let mut lit_set: HashSet<(String, Option<i64>, Option<String>)> = HashSet::new();
+    for chunk in &per_chunk {
+        for (_, _, o) in chunk {
+            if o.0 == term_type::LITERAL {
+                let dt_id =
+                    o.2.as_ref()
+                        .map(|dt| uri_map[&(term_type::URI, dt.clone())]);
+                lit_set.insert((o.1.clone(), dt_id, o.3.clone()));
+            }
+        }
+    }
+    let lit_keys: Vec<(String, Option<i64>, Option<String>)> = lit_set.into_iter().collect();
+    let mut lit_map: HashMap<(String, Option<i64>, Option<String>), i64> =
+        HashMap::with_capacity(lit_keys.len());
+    for (i, k) in lit_keys.iter().enumerate() {
+        lit_map.insert(k.clone(), base + 1 + u + i as i64);
+    }
+    for (ci, ch) in lit_keys.chunks(chunk_sz).enumerate() {
+        ins(
+            base + 1 + u + (ci * chunk_sz) as i64,
+            vec![term_type::LITERAL; ch.len()],
+            ch.iter().map(|(lv, _, _)| lv.clone()).collect(),
+            ch.iter().map(|(_, di, _)| *di).collect(),
+            ch.iter().map(|(_, _, lt)| lt.clone()).collect(),
+        );
+    }
+    // Advance the identity sequence past our self-assigned block so a
+    // later GENERATED-ALWAYS insert can't collide with these ids.
+    Spi::run_with_args(
+        "SELECT setval(pg_get_serial_sequence('pgrdf._pgrdf_dictionary', 'id'), $1, true)",
+        &[(base + u + lit_keys.len() as i64).into()],
+    )
+    .expect("load_turtle: dict identity setval");
+    stats.dict_ms = t_dict.elapsed().as_secs_f64() * 1000.0;
+
+    // ── PASS 3: resolve every triple → id tuple (parallel) ──────────
+    let t_resolve = Instant::now();
+    let resolve = |k: &RawKey| -> i64 {
+        if k.0 == term_type::LITERAL {
+            let dt_id =
+                k.2.as_ref()
+                    .map(|dt| uri_map[&(term_type::URI, dt.clone())]);
+            lit_map[&(k.1.clone(), dt_id, k.3.clone())]
+        } else {
+            uri_map[&(k.0, k.1.clone())]
+        }
+    };
+    let ids: Vec<(i64, i64, i64)> = per_chunk
+        .par_iter()
+        .flat_map_iter(|chunk| {
+            chunk
+                .iter()
+                .map(|(s, p, o)| (resolve(s), resolve(p), resolve(o)))
+        })
+        .collect();
+    stats.resolve_ms = t_resolve.elapsed().as_secs_f64() * 1000.0;
+
+    // ── PASS 4: bulk INSERT quads via the existing prepared flush_batch ─
+    let t_insert = Instant::now();
+    let mut bs: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    let mut bp: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    let mut bo: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    for (s, p, o) in &ids {
+        bs.push(*s);
+        bp.push(*p);
+        bo.push(*o);
+        if bs.len() >= BATCH_SIZE {
+            flush_batch(&mut bs, &mut bp, &mut bo, graph_id, &mut stats);
+            bs.reserve(BATCH_SIZE);
+            bp.reserve(BATCH_SIZE);
+            bo.reserve(BATCH_SIZE);
+        }
+    }
+    if !bs.is_empty() {
+        flush_batch(&mut bs, &mut bp, &mut bo, graph_id, &mut stats);
+    }
+    stats.insert_ms = t_insert.elapsed().as_secs_f64() * 1000.0;
+    stats.elapsed_ms = t_all.elapsed().as_secs_f64() * 1000.0;
+    stats
+}
+
+/// Guard for `load_turtle(..., bulk_load => TRUE)`. The self-assigned-id
+/// fast path is correct ONLY on an empty dictionary: it dedups within
+/// the input (not against existing rows) and `unique_term` is
+/// NULLS-DISTINCT, so a clash with an existing term would silently
+/// insert a duplicate. An empty dict also implies empty quads, which is
+/// what makes the (future) defer-index step safe. On a populated dict we
+/// fall back to the standard `ingest_dispatch` (combined) path, which
+/// anti-joins every term — slower, always correct. Callers see the
+/// `path` discriminator (`parallel_bulk` vs the GUC route) to confirm
+/// which fired. Recommended order for the win: bulk-load the large file
+/// FIRST into a fresh database, then load smaller files normally.
+fn bulk_load_guarded(path: &str, graph_id: i64, base_iri: Option<&str>) -> LoaderStats {
+    let empty = Spi::get_one::<bool>("SELECT NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_dictionary)")
+        .expect("bulk_load: empty-dict probe")
+        .unwrap_or(false);
+    if empty {
+        ingest_turtle_parallel_bulk(path, graph_id)
+    } else {
+        let file = File::open(path)
+            .unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
+        ingest_dispatch(BufReader::new(file), graph_id, base_iri)
+    }
+}
+
 /// Load a Turtle file from a server-side path into the named graph.
 /// Returns the number of triples inserted. `base_iri` resolves
 /// relative IRIs; pass NULL or '' for absolute-IRI-only files.
 ///
-/// SQL: `pgrdf.load_turtle(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) -> BIGINT`.
+/// `bulk_load => TRUE` selects the v0.6.2 parallel bulk fast path on a
+/// fresh database (line-oriented N-Triples input; see
+/// `ingest_turtle_parallel_bulk`); it transparently falls back to the
+/// default path when the dictionary is already populated.
+///
+/// SQL: `pgrdf.load_turtle(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL, bulk_load BOOLEAN DEFAULT FALSE) -> BIGINT`.
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
-fn load_turtle(path: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL")) -> i64 {
+fn load_turtle(
+    path: &str,
+    graph_id: i64,
+    base_iri: default!(Option<&str>, "NULL"),
+    bulk_load: default!(bool, false),
+) -> i64 {
+    let base = base_iri.filter(|s| !s.is_empty());
+    if bulk_load {
+        return bulk_load_guarded(path, graph_id, base).triples;
+    }
     let file =
         File::open(path).unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
-    let base = base_iri.filter(|s| !s.is_empty());
     ingest_dispatch(BufReader::new(file), graph_id, base).triples
 }
 
 /// Same as `load_turtle` but returns JSONB stats: triples,
 /// dict_cache_hits, shmem_cache_hits, dict_db_calls, quad_batches,
-/// elapsed_ms. Useful for measuring whether the cache + batching
-/// paths are firing.
+/// elapsed_ms, and the parse/dict/resolve/insert phase breakdown.
+/// Useful for measuring whether the cache + batching paths are firing.
+/// `bulk_load => TRUE` measures the v0.6.2 parallel bulk path (the
+/// `resolve_ms` phase is non-zero only there).
 ///
-/// SQL: `pgrdf.load_turtle_verbose(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL) -> JSONB`.
+/// SQL: `pgrdf.load_turtle_verbose(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL, bulk_load BOOLEAN DEFAULT FALSE) -> JSONB`.
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn load_turtle_verbose(
     path: &str,
     graph_id: i64,
     base_iri: default!(Option<&str>, "NULL"),
+    bulk_load: default!(bool, false),
 ) -> pgrx::JsonB {
-    let file = File::open(path)
-        .unwrap_or_else(|e| panic!("load_turtle_verbose: failed to open {path:?}: {e}"));
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = ingest_dispatch(BufReader::new(file), graph_id, base);
+    let stats = if bulk_load {
+        bulk_load_guarded(path, graph_id, base)
+    } else {
+        let file = File::open(path)
+            .unwrap_or_else(|e| panic!("load_turtle_verbose: failed to open {path:?}: {e}"));
+        ingest_dispatch(BufReader::new(file), graph_id, base)
+    };
     stats_to_jsonb(&stats)
 }
 
@@ -1972,5 +2268,153 @@ mod tests {
         }
         Spi::run("SET pgrdf.ingest_dict_path = 'combined'").unwrap();
         assert_path_matrix_parity(gids, 5);
+    }
+
+    // ─── v0.6.2 — parallel bulk-ingest fast path ────────────────────
+    //
+    // `load_turtle(path, graph_id, base_iri, bulk_load => TRUE)` is a
+    // FRESH-LOAD fast path: rayon-parse the line-oriented .nt on all
+    // cores, dedup terms in-memory, dictionary-load with SELF-ASSIGNED
+    // ids (no per-term anti-join), resolve triples → id tuples in
+    // parallel, bulk-insert quads. Valid only on an EMPTY dictionary;
+    // on a populated dict it falls back to the (correct) `combined`
+    // path. These tests lock both behaviours + the verbose breakdown.
+    //
+    // Each `#[pg_test]` runs in a rolled-back txn, so the dictionary
+    // starts EMPTY — the fast path fires. Fixtures carry no blank nodes
+    // (parser-assigned labels needn't byte-match across invocations).
+
+    /// Fast path fires on an empty dict and is byte-correct: exact
+    /// triple/quad counts, the right decoded-lexical set, and — the
+    /// self-assigned-id invariant — every logical term interned EXACTLY
+    /// once (no duplicate dict rows; GROUP BY treats the NULL datatype/
+    /// lang columns as equal, unlike the NULLS-DISTINCT `unique_term`).
+    #[pg_test]
+    fn load_turtle_bulk_basic_parity() {
+        let nt = concat!(
+            "<http://ex/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://xmlns.com/foaf/0.1/Person> .\n",
+            "<http://ex/alice> <http://xmlns.com/foaf/0.1/name> \"Alice\" .\n",
+            "<http://ex/alice> <http://ex/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+            "<http://ex/alice> <http://ex/greet> \"Hi\"@en .\n",
+            "<http://ex/alice> <http://xmlns.com/foaf/0.1/knows> <http://ex/bob> .\n",
+        );
+        let path = "/tmp/pgrdf_bulk_basic.nt";
+        std::fs::write(path, nt).expect("write temp .nt");
+
+        let n: i64 = Spi::get_one_with_args(
+            "SELECT pgrdf.load_turtle($1, $2, NULL, TRUE)",
+            &[path.into(), 7_500i64.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 5, "bulk load returns the triple count");
+
+        let cq: i64 = Spi::get_one_with_args("SELECT pgrdf.count_quads($1)", &[7_500i64.into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(cq, 5, "all 5 quads landed in the graph");
+
+        let dupes: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM (
+               SELECT 1 FROM pgrdf._pgrdf_dictionary
+               GROUP BY term_type, lexical_value, datatype_iri_id, language_tag
+               HAVING count(*) > 1) z",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            dupes, 0,
+            "no duplicate dictionary rows (self-assigned-id correctness)"
+        );
+
+        let set_ok: bool = Spi::get_one(
+            "WITH lex AS (
+               SELECT s.lexical_value sl, p.lexical_value pl, o.lexical_value ol,
+                      o.term_type ot, o.language_tag og
+                 FROM pgrdf._pgrdf_quads q
+                 JOIN pgrdf._pgrdf_dictionary s ON s.id = q.subject_id
+                 JOIN pgrdf._pgrdf_dictionary p ON p.id = q.predicate_id
+                 JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id
+                WHERE q.graph_id = 7500)
+             SELECT count(*) = 5
+                AND count(*) FILTER (WHERE ol = 'Alice' AND ot = 3) = 1
+                AND count(*) FILTER (WHERE ol = '30' AND ot = 3) = 1
+                AND count(*) FILTER (WHERE ol = 'Hi' AND og = 'en') = 1
+                AND count(*) FILTER (WHERE ol = 'http://ex/bob' AND ot = 1) = 1
+                AND count(DISTINCT sl) = 1
+               FROM lex",
+        )
+        .unwrap()
+        .unwrap_or(false);
+        assert!(set_ok, "decoded-lexical triple set matches expected");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Verbose variant keeps the four-phase breakdown on the bulk path,
+    /// including the new `resolve_ms` (triple→id) timer.
+    #[pg_test]
+    fn load_turtle_bulk_verbose_phase_breakdown() {
+        let nt = "<http://ex/s> <http://ex/p> <http://ex/o> .\n";
+        let path = "/tmp/pgrdf_bulk_verbose.nt";
+        std::fs::write(path, nt).expect("write temp .nt");
+
+        let j: pgrx::JsonB = Spi::get_one_with_args(
+            "SELECT pgrdf.load_turtle_verbose($1, $2, NULL, TRUE)",
+            &[path.into(), 7_510i64.into()],
+        )
+        .unwrap()
+        .unwrap();
+        let v = &j.0;
+        assert_eq!(v["triples"], 1);
+        for k in ["parse_ms", "dict_ms", "resolve_ms", "insert_ms"] {
+            assert!(v[k].is_number(), "verbose bulk output carries {k}");
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// On a NON-empty dictionary the fast path's empty-dict guard routes
+    /// to the correct `combined` fallback: a term shared with the prior
+    /// load stays a SINGLE dict row (the fast path would have inserted a
+    /// duplicate with a fresh self-assigned id).
+    #[pg_test]
+    fn load_turtle_bulk_falls_back_on_populated_dict() {
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "<http://ex/s> <http://ex/p> <http://ex/shared> .".into(),
+                7_520i64.into(),
+            ],
+        )
+        .unwrap();
+
+        let nt = concat!(
+            "<http://ex/s2> <http://ex/p> <http://ex/shared> .\n",
+            "<http://ex/s3> <http://ex/p> <http://ex/new> .\n",
+        );
+        let path = "/tmp/pgrdf_bulk_fallback.nt";
+        std::fs::write(path, nt).expect("write temp .nt");
+
+        let n: i64 = Spi::get_one_with_args(
+            "SELECT pgrdf.load_turtle($1, $2, NULL, TRUE)",
+            &[path.into(), 7_521i64.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 2);
+
+        let shared_rows: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_dictionary
+              WHERE term_type = 1 AND lexical_value = 'http://ex/shared'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            shared_rows, 1,
+            "shared term deduped via fallback (no duplicate row)"
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 }

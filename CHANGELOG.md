@@ -6,6 +6,63 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-06-13
+
+### Added — parallel bulk loader (`load_turtle(…, bulk_load => true)`) ★ headline
+
+A fresh-load fast path that takes RDF ingest off the single backend core.
+`pgrdf.load_turtle` and `pgrdf.load_turtle_verbose` gain a trailing
+`bulk_load BOOLEAN DEFAULT FALSE` argument (backward-compatible — existing
+2-/3-arg calls are unaffected). When `bulk_load => true` on an **empty
+dictionary**:
+
+- **Parallel parse** — the whole line-oriented `.nt` is parsed across all
+  cores (rayon), split at newline boundaries.
+- **Self-assigned-id dictionary load** — unique terms are de-duplicated in
+  memory and dictionary ids are assigned in Rust (`base + i`), then
+  bulk-inserted (`INSERT … OVERRIDING SYSTEM VALUE` + `setval`). This
+  eliminates the per-term anti-join `INSERT … WHERE NOT EXISTS` + lookup
+  `JOIN` that dominated serial ingest (66–74% of the wall, super-linear).
+- **Parallel triple→id resolve** — every quad's s/p/o is resolved against
+  the in-memory term maps in parallel, then bulk-inserted via the existing
+  `flush_batch`. SPI touches only the main backend thread; the rayon
+  regions are pure-CPU.
+- **Empty-dict guard** — on a populated dictionary the call transparently
+  falls back to the standard `combined` path (which anti-joins every term),
+  so it is always correct; only the fresh-load case takes the fast path.
+
+Measured on a 32-vCPU box (Azure `Standard_E32as_v7`, native PostgreSQL 17),
+correctness-gated against the serial loader to the triple: ingest
+**LUBM-250 240 s → 105 s (2.3×)**, **LUBM-500 667 s → 192 s (3.5×)**;
+per-triple ingest holds near-linear (~2.3–3.0 µs across LUBM-10→500) where
+the serial path was super-linear (5.3 → 9.65 µs). Dictionary rows are
+byte-identical to the serial path.
+
+- **`resolve_ms` phase timer** — `load_turtle_verbose` gains a `resolve_ms`
+  field so the bulk breakdown reads parse → dict → resolve → insert.
+  Additive; 0.0 on the serial paths.
+- **rayon** added as a direct dependency (already resolved transitively at
+  1.12.0 — no version churn).
+
+Internals: `src/storage/loader.rs` — `ingest_turtle_parallel_bulk` (the four
+passes) + `bulk_load_guarded` (the empty-dict guard). 3 new pgrx tests
+(`load_turtle_bulk_basic_parity` / `_verbose_phase_breakdown` /
+`_falls_back_on_populated_dict`) lock parity (incl. zero duplicate dict
+rows), the verbose breakdown, and the fallback. 292 pgrx green.
+
+Note: the parallel path is a **line-oriented N-Triples** fast path (the
+newline-boundary split does not handle multi-line Turtle / anonymous `[]`
+blanks — those use the default serial path). The deferred-index lever
+(drop hexastore → load heap-only → parallel rebuild) is the next 0.6.x.
+
+### Documentation
+
+README gains a **"Proven at scale: LUBM-10 to LUBM-500"** section (the
+full-pipeline table + the parallel-ingest speedups) and an honest note that
+OWL-RL materialisation is now the dominant cost at scale — tracked in
+[#1](https://github.com/styk-tv/pgRDF/issues/1), upstream
+`gtfierro/reasonable#57`.
+
 ## [0.6.1] — 2026-06-12
 
 ### Performance — `materialize` write-path, ~2.4× ★ headline

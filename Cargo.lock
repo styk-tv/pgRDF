@@ -1676,13 +1676,14 @@ dependencies = [
 
 [[package]]
 name = "pgrdf"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "oxrdf",
  "oxttl",
  "pgrx",
  "pgrx-tests",
  "prefixmap",
+ "rayon",
  "reasonable",
  "rudof_rdf",
  "serde_json",

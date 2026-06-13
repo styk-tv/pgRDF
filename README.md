@@ -6,15 +6,16 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
 [![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-v0.6.1%20%E2%80%94%20LUBM--100%20full%20pass%20%E2%80%94%20RDF%20%2F%20SPARQL%201.1%20%2F%20SHACL%20%2F%20OWL-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
+[![Status](https://img.shields.io/badge/status-v0.6.2%20%E2%80%94%20parallel%20bulk%20ingest%20%E2%80%94%20LUBM--100%20full%20pass%20%E2%80%94%20SPARQL%201.1%20%2F%20SHACL%20%2F%20OWL-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
 [![Tests](https://img.shields.io/badge/tests-289%20pgrx%20%2B%2093%20regression%20%2B%2051%20W3C%20%2B%2025%20SHACL%20%2B%203%20LUBM-brightgreen)](#tests)
 [![LUBM-100](https://img.shields.io/badge/LUBM--100-28%2F28%20queries%20%E2%89%A4%205s%20%C2%B7%2013.9M%20triples%20%C2%B7%20zero%20tuning-brightgreen)](tests/perf/lubm/RESULTS.m4-join-order.md)
+[![Scale](https://img.shields.io/badge/scale-LUBM--500%20%C2%B7%20112M%20quads%20materialized-blue)](#proven-at-scale-lubm-10-to-lubm-500)
 [![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20ASK%20%2F%20CONSTRUCT%20%2F%20DESCRIBE%20%2F%20UPDATE%20%2F%20PATHS%20%2F%20GRAPH%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![BulkIngest](https://img.shields.io/badge/bulk%20ingest-LLD%20%C2%A74.3%20phase%20A-yellow)](specs/SPEC.pgRDF.LLD.v0.3.md)
 [![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20via%20reasonable-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
-[![Validation](https://img.shields.io/badge/SHACL%20validate-SHACL%20Core%20via%20shacl%200.3.1-success)](docs/05-validation.md)
+[![Validation](https://img.shields.io/badge/SHACL%20validate-SHACL%20Core%20via%20shacl%200.3.2-success)](docs/05-validation.md)
 [![CI](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml/badge.svg)](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml)
 [![W3C](https://img.shields.io/badge/W3C%20SPARQL%201.1-51%20shape%20tests-blue)](tests/w3c-sparql/)
 [![W3C SHACL](https://img.shields.io/badge/W3C%20SHACL%20Core-25%2F25-blue)](docs/05-validation.md)
@@ -24,6 +25,18 @@
 > Treat Postgres as the storage + execution engine for your knowledge
 > graph. Load Turtle, query via SPARQL, validate via SHACL, materialize
 > inferences via OWL 2 RL — all addressable from any Postgres client.
+
+pgRDF turns a single PostgreSQL instance into a complete semantic-web
+engine — dictionary-encoded hexastore storage, a SPARQL 1.1 query **and**
+update engine, a W3C-conformant SHACL Core validator, and an OWL 2 RL
+reasoner — with no sidecar triple store and no second system to operate.
+It began as a SELECT/ASK triple store and grew, release over release, into
+the full SPARQL 1.1 surface (CONSTRUCT, DESCRIBE, property paths,
+aggregates, named graphs, the complete UPDATE algebra), genuine W3C SHACL
+Core conformance (25/25), OWL 2 RL **and** RDFS materialisation, and a
+benchmark record running from LUBM-10 to a **112-million-quad** materialised
+LUBM-500 closure — every release CI-built and signed with SLSA Build
+Provenance v1.
 
 ## The LUBM-100 milestone
 
@@ -67,11 +80,67 @@ run. Verification bar at this cut: 289 integration + 93 regression +
 51 W3C SPARQL + 25 W3C SHACL Core tests green, releases signed with
 SLSA Build Provenance v1, three install paths (tarball / OCI / PGXN).
 
+## Proven at scale: LUBM-10 to LUBM-500
+
+Beyond the single-laptop LUBM-100 milestone above, pgRDF has been run end
+to end across the full LUBM ladder on a dedicated 32-vCPU / 256 GiB box
+(Azure `Standard_E32as_v7`, native PostgreSQL 17) — load → index → OWL-RL
+materialise → SPARQL — with **every result correctness-gated against the
+known LUBM answer counts**:
+
+| LUBM-N | base triples | ingest | index | materialize (OWL-RL) | total quads (closure) |
+|---|---|---|---|---|---|
+| 10  | 1.32M | 3s   | 1s  | 15s     | 2.13M |
+| 100 | 13.9M | 34s  | 8s  | 4m 37s  | 22.46M |
+| 250 | 34.5M | 105s | 15s | 10m 9s  | 55.88M |
+| 500 | 69.1M | 192s | 47s | ~43m    | **111.83M** |
+
+LUBM-500 builds a full materialised closure of **111.8 million quads** on a
+single box (peak 146 / 256 GiB RAM) — load, reason, and query in one
+PostgreSQL instance, no sharding.
+
+### Parallel bulk ingest — landing in the v0.6.x line
+
+The ingest column above uses the new **parallel bulk loader** (landing in
+v0.6.2). Profiling the serial loader on the 32-vCPU box showed it pinned to
+~1 core, with **66–74% of ingest spent in dictionary resolution** — an
+anti-join `INSERT … WHERE NOT EXISTS` plus a lookup `JOIN` over a *growing*
+term index, super-linear and untouched by any config knob. The rewrite
+parses across all cores (rayon), resolves triple→id in memory, and — on a
+fresh load — assigns dictionary ids in Rust and bulk-inserts them, so both
+heavy SQL statements **disappear from the query profile**:
+
+| dataset | triples | serial ingest | parallel ingest | speed-up |
+|---|---|---|---|---|
+| LUBM-100 | 13.9M | 74–183s | **34s** | up to 5× |
+| LUBM-250 | 34.5M | 240s | **105s** | 2.3× |
+| LUBM-500 | 69.1M | 667s | **192s** | **3.5×** |
+
+The advantage **grows with scale**: per-triple ingest stays near-linear
+(~2.3–3.0 µs from LUBM-10 to 500) where the serial path was super-linear
+(5.3 → 9.65 µs). It ships as a one-flag option —
+`pgrdf.load_turtle(path, graph, bulk_load => true)` — with a safe automatic
+fallback to the standard path whenever the dictionary is already populated.
+
+### The honest bottleneck — OWL-RL materialisation
+
+With ingest parallelised, **materialisation is now the dominant cost** —
+~88% of the LUBM-500 wall, and super-linear. The OWL-RL reasoner is built on
+a single-threaded Datalog engine (`datafrog`) whose fixpoint runs ~90
+inference rules sequentially on one core (sampled at 56–81% of a single
+core — so the limit is the engine's design, not the hardware). A concrete
+parallelisation proposal is filed upstream
+([gtfierro/reasonable#57](https://github.com/gtfierro/reasonable/issues/57))
+and tracked here in
+[#1](https://github.com/styk-tv/pgRDF/issues/1). At billion-triple scale the
+practical answer is to query the raw/truthy graph rather than fully
+materialise — matching how production Wikidata query services operate.
+
 | | |
 |---|---|
-| **Status** | **v0.6.1 — current advertised release ([LATEST.md](./LATEST.md)). Engine surface unchanged from v0.5.0; the v0.5.10..v0.6.1 cycle ships PGXN packaging, OCI distribution with SLSA Build Provenance v1 attestations, a 5-gate release-pipeline contract ([PROVENANCE.md Rule 7](./PROVENANCE.md)), Phase-0 ingest instrumentation (`parse_ms`/`dict_ms`/`insert_ms`), and additive Track A perf-spike UDFs (`parse_turtle_dict_batched` -17% e2e, `shmem_cache_prewarm` -54% e2e — both behind explicit opt-in surfaces; default `parse_turtle` path unchanged). Pin via `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.1` or whatever `LATEST.md` advertises at audit time.**<br><br>**Query** — SPARQL SELECT/ASK over N-pattern BGPs · FILTER · DISTINCT/LIMIT/OFFSET · **type-aware ORDER BY** · **multi-triple OPTIONAL** · UNION · MINUS · aggregates (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE) **incl. over UNION** · HAVING · **downstream BIND** · **VALUES** · named-graph scoping (`GRAPH <iri>` + `GRAPH ?g` + composition) · **CONSTRUCT** (constant/variable/blank-node/multi-triple templates · WHERE-shorthand · round-trip ingest) · **DESCRIBE** (W3C §16.4 CBD via `pgrdf.describe`) · **property paths** (`^` `+` `*` `?` · `\|` alternation · materialised-closure no-CTE fallback · `pgrdf.path_max_depth` guard).<br>**Update** — full SPARQL UPDATE: INSERT/DELETE DATA · INSERT/DELETE WHERE · DELETE+INSERT WHERE · `WITH <iri>` scoping · lifecycle algebra (`DROP`/`CLEAR`/`CREATE GRAPH` × `DEFAULT`/`NAMED`/`ALL`).<br>**Storage** — CRUD + Turtle / **TriG** / **N-Quads** ingest (`parse_turtle` / `parse_trig` / `parse_nquads`) · per-graph LIST partitions · lifecycle UDFs (`drop`/`clear`/`copy`/`move_graph`, **BIGINT + IRI overloads**) · shmem dict cache (§4.1) + prepared-plan cache (§4.2) + prepared bulk-INSERT (§4.3 phase A).<br>**Inference** — `pgrdf.materialize(graph_id, profile)` — **`owl-rl` and `rdfs`** profiles. **Validation** — `pgrdf.validate(data, shapes, mode)` → real W3C `sh:ValidationReport` JSONB; SHACL Core native (genuine W3C SHACL Core 25/25); `mode=>'sparql'` is shipped + honest, upstream-gated ([ERRATA E-012](specs/ERRATA.v0.5.md)).<br><br>**Shipped on the v0.4/v0.5 countdown:** `v0.4.0` SHACL · `v0.4.1` named-graph §3 · `v0.4.2` lifecycle UDFs §5 · `v0.4.3` SPARQL UPDATE §4 · `v0.4.4` CONSTRUCT §6 · `v0.4.5` property paths §7 · `v0.4.6` §11 SPARQL backlog · **`v0.5.0` — the complete surface** (DESCRIBE, TriG/N-Quads, IRI lifecycle overloads, `rdfs`+`owl-rl` profiles, native SHACL Core 25/25).<br>**Documented upstream gates** (honest, not defects): [E-011](specs/ERRATA.v0.4.md) — RDF 1.2 triple terms + crates.io publish gated on `gtfierro/reasonable#50`; [E-012](specs/ERRATA.v0.5.md) — SHACL-SPARQL constraint execution gated on `rudof` (#21/#94); the `mode=>'sparql'` surface ships honest.<br>**Deferred → v0.6-FUTURE:** executor.rs core-BGP carve · `heap_multi_insert` phase B · real SHACL-SPARQL engine · federated SERVICE · incremental materialisation · RDF 1.2 (see [SPEC.pgRDF.LLD.v0.6-FUTURE](specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md)). |
+| **Status** | **v0.6.2 — current advertised release ([LATEST.md](./LATEST.md)).** The full SPARQL 1.1 + SHACL Core + OWL-RL surface, plus the new **parallel bulk loader** (`load_turtle(…, bulk_load => true)` — 2.3–3.5× ingest on a fresh load); hardened across the v0.5/v0.6 cycle with PGXN packaging, anonymous OCI distribution under SLSA Build Provenance v1 attestation ([PROVENANCE.md](./PROVENANCE.md)), and the LUBM-100 → LUBM-500 benchmark record. Pin via `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.2` (or whatever `LATEST.md` advertises at audit time).<br><br>**Query** — SPARQL SELECT/ASK over N-pattern BGPs · FILTER · DISTINCT/LIMIT/OFFSET · **type-aware ORDER BY** · **multi-triple OPTIONAL** · UNION · MINUS · aggregates (COUNT/SUM/AVG/type-aware MIN-MAX/GROUP_CONCAT/SAMPLE) **incl. over UNION** · HAVING · **downstream BIND** · **VALUES** · named-graph scoping (`GRAPH <iri>` + `GRAPH ?g` + composition) · **CONSTRUCT** (constant/variable/blank-node/multi-triple templates · WHERE-shorthand · round-trip ingest) · **DESCRIBE** (W3C §16.4 CBD via `pgrdf.describe`) · **property paths** (`^` `+` `*` `?` · `\|` alternation · materialised-closure no-CTE fallback · `pgrdf.path_max_depth` guard).<br>**Update** — full SPARQL UPDATE: INSERT/DELETE DATA · INSERT/DELETE WHERE · DELETE+INSERT WHERE · `WITH <iri>` scoping · lifecycle algebra (`DROP`/`CLEAR`/`CREATE GRAPH` × `DEFAULT`/`NAMED`/`ALL`).<br>**Storage** — CRUD + Turtle / **TriG** / **N-Quads** ingest (`parse_turtle` / `parse_trig` / `parse_nquads`) · per-graph LIST partitions · lifecycle UDFs (`drop`/`clear`/`copy`/`move_graph`, **BIGINT + IRI overloads**) · shmem dict cache (§4.1) + prepared-plan cache (§4.2) + prepared bulk-INSERT (§4.3 phase A).<br>**Inference** — `pgrdf.materialize(graph_id, profile)` — **`owl-rl` and `rdfs`** profiles. **Validation** — `pgrdf.validate(data, shapes, mode)` → real W3C `sh:ValidationReport` JSONB; SHACL Core native (genuine W3C SHACL Core 25/25); `mode=>'sparql'` is shipped + honest, upstream-gated ([ERRATA E-012](specs/ERRATA.v0.5.md)).<br><br>**Shipped on the v0.4/v0.5 countdown:** `v0.4.0` SHACL · `v0.4.1` named-graph §3 · `v0.4.2` lifecycle UDFs §5 · `v0.4.3` SPARQL UPDATE §4 · `v0.4.4` CONSTRUCT §6 · `v0.4.5` property paths §7 · `v0.4.6` §11 SPARQL backlog · **`v0.5.0` — the complete surface** (DESCRIBE, TriG/N-Quads, IRI lifecycle overloads, `rdfs`+`owl-rl` profiles, native SHACL Core 25/25).<br>**Documented upstream gates** (honest, not defects): [E-011](specs/ERRATA.v0.4.md) — RDF 1.2 triple terms + crates.io publish gated on `gtfierro/reasonable#50`; [E-012](specs/ERRATA.v0.5.md) — SHACL-SPARQL constraint execution gated on `rudof` (#21/#94); the `mode=>'sparql'` surface ships honest.<br>**Deferred → v0.6-FUTURE:** executor.rs core-BGP carve · `heap_multi_insert` phase B · real SHACL-SPARQL engine · federated SERVICE · incremental materialisation · RDF 1.2 (see [SPEC.pgRDF.LLD.v0.6-FUTURE](specs/SPEC.pgRDF.LLD.v0.6-FUTURE.md)). |
 | **Supported PG** | 14, 15, 16, 17. PG 18 adoption stays deferred — pgrx 0.16 pin; 0.18.0 still fails to build locally and changes the schema-gen model. See [ERRATA](specs/ERRATA.v0.2.md) E-006. |
-| **Install** | Three paths. **GitHub-release tarball** — per-file `:ro` bind-mount of `.so`/`.control`/`.sql` into stock `postgres:17.4-bookworm` (8 tarballs: pg14-17 × amd64/arm64 + SHA256SUMS). **Anonymous OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.1` (zero credentials, public; pin to whatever [`LATEST.md`](./LATEST.md) advertises at audit time — every advertised digest carries an attested SLSA Build Provenance v1, verifiable via `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`). **PGXN source install** — `pgxn install pgrdf --pg_config /path/to/pg_config` on a host with Rust 1.91 + `cargo-pgrx 0.16` (see [INSTALL.md](INSTALL.md)). Per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). |
+| **Install** | Three paths. **GitHub-release tarball** — per-file `:ro` bind-mount of `.so`/`.control`/`.sql` into stock `postgres:17.4-bookworm` (8 tarballs: pg14-17 × amd64/arm64 + SHA256SUMS). **Anonymous OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.2` (zero credentials, public; pin to whatever [`LATEST.md`](./LATEST.md) advertises at audit time — every advertised digest carries an attested SLSA Build Provenance v1, verifiable via `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`). **PGXN source install** — `pgxn install pgrdf --pg_config /path/to/pg_config` on a host with Rust 1.91 + `cargo-pgrx 0.16` (see [INSTALL.md](INSTALL.md)). Per [SPEC.pgRDF.INSTALL.v0.2](specs/SPEC.pgRDF.INSTALL.v0.2.md). |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
 
 ## What you can do today
@@ -219,7 +288,7 @@ just psql             # opens a psql shell to the pgrdf database
 # 2. Inside psql
 pgrdf=# CREATE EXTENSION pgrdf;
 pgrdf=# SELECT pgrdf.version();
-        --  → 0.6.1   (whatever LATEST.md currently advertises)
+        --  → 0.6.2   (whatever LATEST.md currently advertises)
 pgrdf=# SELECT pgrdf.parse_turtle('@prefix ex: <http://e.com/> . ex:a ex:p ex:b .', 1);
         --  → 1
 ```
