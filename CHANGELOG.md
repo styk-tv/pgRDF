@@ -6,6 +6,29 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.5] — 2026-06-14
+
+### Performance — parallel in-Rust term dedup on the bulk path ★ headline
+
+The parallel bulk loader's term de-duplication (PASS 2 of
+`ingest_turtle_parallel_bulk`) is now parallel. Previously it built one
+`HashSet` over every parsed term-ref serially — ~100M references at LUBM-500,
+a measured ~22 s at LUBM-250, on a single core while the parse and resolve
+passes already used all cores.
+
+Each rayon chunk now builds its own local `HashSet`, and the per-chunk sets
+are union-reduced (extending the larger with the smaller to minimise
+rehashing) for both the URI/blank tier and the literal tier. Pure-CPU, no SPI
+in the parallel region. **Behaviour-preserving** — the resulting de-duplicated
+term sets, dictionary rows, and quad counts are byte-identical to the serial
+build (the `load_turtle_bulk_basic_parity` test — exact decoded-lexical set +
+zero duplicate dictionary rows — is unchanged and green). 293 pgrx green, fmt
++ clippy clean.
+
+This closes the last single-core slice of the bulk-load fast path: parse
+(parallel), dedup (now parallel), dict-resolve (in-memory), triple→id resolve
+(parallel), quad insert (batched).
+
 ## [0.6.4] — 2026-06-14
 
 ### Added — deferred `unique_term` constraint on bulk load ★ headline

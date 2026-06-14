@@ -1,0 +1,19 @@
+-- pgrdf--0.5.1--0.6.5.sql
+--
+-- Upgrade-path declaration from v0.5.1 (the earliest installable
+-- version) to v0.6.5. PostgreSQL requires this file to exist for
+-- `ALTER EXTENSION pgrdf UPDATE TO '0.6.5'` to be a valid path.
+--
+-- No DDL by design. The v0.5.1 -> v0.6.x deltas are runtime / `.so`
+-- changes (the M4 join-order pin, auto-ANALYZE after materialize,
+-- the batched materialize write-back, the v0.6.2 parallel bulk
+-- loader, the v0.6.3/v0.6.4 deferred-index + deferred-constraint
+-- bulk-load path, and the v0.6.5 parallel in-Rust term dedup). v0.6.2
+-- also adds the `bulk_load` parameter to `load_turtle` /
+-- `load_turtle_verbose`; the authoritative full surface ships in the
+-- base install script `pgrdf--0.6.5.sql`, which a fresh `CREATE
+-- EXTENSION pgrdf` installs. In-place upgrades from 0.5.1 keep the
+-- prior function signatures — re-install (fresh CREATE EXTENSION) to
+-- pick up the new bulk-load surface.
+--
+-- (no DDL by design)

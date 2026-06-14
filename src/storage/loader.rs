@@ -1623,20 +1623,34 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
             .expect("load_turtle: dict bulk insert");
         };
     // tier 1 — URI / BLANK terms + literal datatype IRIs (ids base+1..).
-    let mut uri_set: HashSet<(i16, String)> = HashSet::new();
-    for chunk in &per_chunk {
-        for (s, p, o) in chunk {
-            if s.0 != term_type::LITERAL {
-                uri_set.insert((s.0, s.1.clone()));
+    // Dedup in parallel: each chunk builds a local HashSet, then the sets
+    // are union-reduced (extend the larger with the smaller to minimise
+    // rehashing). The serial single-HashSet build over ~100M term-refs was
+    // a measured ~22 s at LUBM-250 (v0.6.5).
+    let uri_set: HashSet<(i16, String)> = per_chunk
+        .par_iter()
+        .map(|chunk| {
+            let mut local: HashSet<(i16, String)> = HashSet::new();
+            for (s, p, o) in chunk {
+                if s.0 != term_type::LITERAL {
+                    local.insert((s.0, s.1.clone()));
+                }
+                local.insert((p.0, p.1.clone()));
+                if o.0 != term_type::LITERAL {
+                    local.insert((o.0, o.1.clone()));
+                } else if let Some(dt) = &o.2 {
+                    local.insert((term_type::URI, dt.clone()));
+                }
             }
-            uri_set.insert((p.0, p.1.clone()));
-            if o.0 != term_type::LITERAL {
-                uri_set.insert((o.0, o.1.clone()));
-            } else if let Some(dt) = &o.2 {
-                uri_set.insert((term_type::URI, dt.clone()));
+            local
+        })
+        .reduce(HashSet::new, |mut a, mut b| {
+            if a.len() < b.len() {
+                std::mem::swap(&mut a, &mut b);
             }
-        }
-    }
+            a.extend(b);
+            a
+        });
     let uri_keys: Vec<(i16, String)> = uri_set.into_iter().collect();
     let mut uri_map: HashMap<(i16, String), i64> = HashMap::with_capacity(uri_keys.len());
     for (i, (tt, lv)) in uri_keys.iter().enumerate() {
@@ -1653,17 +1667,29 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
     }
     let u = uri_keys.len() as i64;
     // tier 2 — literals keyed (lexical, datatype_id, lang); ids base+U+1..
-    let mut lit_set: HashSet<(String, Option<i64>, Option<String>)> = HashSet::new();
-    for chunk in &per_chunk {
-        for (_, _, o) in chunk {
-            if o.0 == term_type::LITERAL {
-                let dt_id =
-                    o.2.as_ref()
-                        .map(|dt| uri_map[&(term_type::URI, dt.clone())]);
-                lit_set.insert((o.1.clone(), dt_id, o.3.clone()));
+    // Same parallel dedup; `uri_map` is read-only here, safe to share
+    // across the rayon closures.
+    let lit_set: HashSet<(String, Option<i64>, Option<String>)> = per_chunk
+        .par_iter()
+        .map(|chunk| {
+            let mut local: HashSet<(String, Option<i64>, Option<String>)> = HashSet::new();
+            for (_, _, o) in chunk {
+                if o.0 == term_type::LITERAL {
+                    let dt_id =
+                        o.2.as_ref()
+                            .map(|dt| uri_map[&(term_type::URI, dt.clone())]);
+                    local.insert((o.1.clone(), dt_id, o.3.clone()));
+                }
             }
-        }
-    }
+            local
+        })
+        .reduce(HashSet::new, |mut a, mut b| {
+            if a.len() < b.len() {
+                std::mem::swap(&mut a, &mut b);
+            }
+            a.extend(b);
+            a
+        });
     let lit_keys: Vec<(String, Option<i64>, Option<String>)> = lit_set.into_iter().collect();
     let mut lit_map: HashMap<(String, Option<i64>, Option<String>), i64> =
         HashMap::with_capacity(lit_keys.len());
