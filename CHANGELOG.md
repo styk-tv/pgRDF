@@ -6,7 +6,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-## [0.6.4] — 2026-06-13
+## [0.6.4] — 2026-06-14
 
 ### Added — deferred `unique_term` constraint on bulk load ★ headline
 
