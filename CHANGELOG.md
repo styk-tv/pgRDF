@@ -6,6 +6,29 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.6] — 2026-06-15
+
+### Performance — larger bulk quad-insert batch ★ headline
+
+PASS 4 of the parallel bulk loader (`load_turtle(…, bulk_load => true)`) now
+flushes quads in **50,000-row batches** (new `BULK_QUAD_BATCH`) instead of the
+streaming path's 1,000. The handoff flagged the 1k-batch `INSERT … unnest` as
+a quad-insert bottleneck; a pure batch load has no per-statement latency
+concern, so the larger batch amortises the SPI + executor round-trip over
+~50× fewer flushes (≈34.5k → ≈690 at LUBM-250), and the rows insert heap-only
+when the bulk path has deferred its indexes (v0.6.3). 50k × 3 `int8` arrays
+≈ 1.2 MB each — far under PG's 1 GB datum ceiling.
+
+The streaming `BATCH_SIZE` (1,000) for `parse_turtle` / the serial paths is
+unchanged (it trades batch size against the latency between parsing a term and
+seeing its quad). Behaviour-preserving — identical quads / dictionary rows
+(`load_turtle_bulk_basic_parity` green); fmt + clippy clean.
+
+Note: the deeper `heap_multi_insert` / COPY-BINARY rewrite (bypassing the
+executor entirely, LLD §12 phase B) remains a tracked follow-up — bigger win
+but `pg_sys` + partition-routing risk; this larger-batch lever is the safe
+first cut at the same bottleneck.
+
 ## [0.6.5] — 2026-06-15
 
 ### Performance — parallel in-Rust term dedup on the bulk path ★ headline

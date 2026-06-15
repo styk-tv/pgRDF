@@ -42,6 +42,16 @@ use std::time::Instant;
 /// ceiling while amortising the SPI round-trip cost.
 const BATCH_SIZE: usize = 1000;
 
+/// Quads buffered per flush on the v0.6.2 parallel BULK path (PASS 4).
+/// A pure batch load has no per-statement latency concern (unlike the
+/// streaming `BATCH_SIZE` path), so a much larger batch amortises the
+/// SPI + executor round-trip over ~50× fewer flushes — the handoff
+/// flagged the 1k-batch `INSERT … unnest` as a quad-insert bottleneck.
+/// 50k × 3 `int8` arrays ≈ 1.2 MB each, far under PG's 1 GB datum
+/// ceiling, and the rows insert heap-only when the bulk path has
+/// deferred its indexes. (v0.6.6)
+const BULK_QUAD_BATCH: usize = 50_000;
+
 /// Static SQL for the batched quad flush. Phase 3 step 3 (LLD §4.3,
 /// phase A): the string is constant, so a single prepared statement
 /// — stashed in the per-backend `plan_cache` from Phase 3 step 2 —
@@ -1738,18 +1748,18 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
 
     // ── PASS 4: bulk INSERT quads via the existing prepared flush_batch ─
     let t_insert = Instant::now();
-    let mut bs: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
-    let mut bp: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
-    let mut bo: Vec<i64> = Vec::with_capacity(BATCH_SIZE);
+    let mut bs: Vec<i64> = Vec::with_capacity(BULK_QUAD_BATCH);
+    let mut bp: Vec<i64> = Vec::with_capacity(BULK_QUAD_BATCH);
+    let mut bo: Vec<i64> = Vec::with_capacity(BULK_QUAD_BATCH);
     for (s, p, o) in &ids {
         bs.push(*s);
         bp.push(*p);
         bo.push(*o);
-        if bs.len() >= BATCH_SIZE {
+        if bs.len() >= BULK_QUAD_BATCH {
             flush_batch(&mut bs, &mut bp, &mut bo, graph_id, &mut stats);
-            bs.reserve(BATCH_SIZE);
-            bp.reserve(BATCH_SIZE);
-            bo.reserve(BATCH_SIZE);
+            bs.reserve(BULK_QUAD_BATCH);
+            bp.reserve(BULK_QUAD_BATCH);
+            bo.reserve(BULK_QUAD_BATCH);
         }
     }
     if !bs.is_empty() {
