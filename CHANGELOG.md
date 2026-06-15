@@ -6,7 +6,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-## [0.6.5] — 2026-06-14
+## [0.6.5] — 2026-06-15
 
 ### Performance — parallel in-Rust term dedup on the bulk path ★ headline
 
