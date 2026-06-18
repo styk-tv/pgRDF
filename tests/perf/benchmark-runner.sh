@@ -142,8 +142,19 @@ ${RUNTIME} run --rm -d \
   "${MOUNT_ARGS[@]}" \
   "${PG_IMAGE}" ${PG_TUNE_ARGS[@]+"${PG_TUNE_ARGS[@]}"} >/dev/null
 
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  ${RUNTIME} exec "${SIDECAR_NAME}" pg_isready -U "${PG_USER}" >/dev/null 2>&1 && break
+# Wait until the server is up AND the POSTGRES_DB (pgrdf) database
+# actually exists + answers a query. `pg_isready` only pings the server
+# process — the official postgres image briefly accepts socket
+# connections on its temporary init server while the entrypoint is still
+# running init scripts and creating POSTGRES_DB (before the final
+# restart). On a loaded runner pg_isready returns "accepting" inside that
+# window, so the next `psql -d pgrdf` raced ahead of the db's creation
+# and died with `FATAL: database "pgrdf" does not exist` (the
+# perf-nightly failures on 2026-06-11 / 2026-06-18). A real `SELECT 1`
+# against the target db only succeeds once init is complete.
+for i in $(seq 1 30); do
+  ${RUNTIME} exec "${SIDECAR_NAME}" \
+    psql -U "${PG_USER}" -d "${PG_DB}" -tAc 'SELECT 1' >/dev/null 2>&1 && break
   sleep 1
 done
 
