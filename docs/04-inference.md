@@ -133,11 +133,10 @@ SELECT pgrdf.materialize(g, 'bogus');   -- ERROR: materialize: unknown profile "
   shipped indexes.
 - The reasoner is in-process and CPU-bound; expect roughly linear
   scaling in graph size for typical OWL 2 RL ontologies.
-- Writeback is currently row-by-row INSERT (one SPI call per
-  inferred triple). For graphs with many entailments this is the
-  hotspot; switching to the cached `INSERT … unnest` flush path
-  from `src/storage/loader.rs::flush_batch` is the obvious v0.4
-  follow-up and is tracked as a Phase 3 step 3b dependency.
+- Writeback uses the cached `INSERT … unnest` batch flush path
+  (`src/storage/loader.rs::flush_batch`) — shipped in v0.6.1, which
+  roughly halved LUBM-100 materialize wall time (608s → 294s) over
+  the earlier row-by-row INSERT.
 
 ## Removing inferred state without re-deriving
 

@@ -136,19 +136,19 @@ for path in turtle_paths {
 }
 ```
 
-**Drop a whole graph (constant time)** — the partition swap path,
-not a `DELETE`:
+**Drop a whole graph (constant time)** — drops the partition and its
+mapping row, not a `DELETE`:
 
 ```rust
 client.execute(
-    &format!("DROP TABLE pgrdf._pgrdf_quads_g{}", graph_id),
-    &[],
+    "SELECT pgrdf.drop_graph($1)",
+    &[&graph_id],
 ).await?;
 ```
 
-(Don't use bind parameters in table names; build the identifier
-yourself and reject obvious injection. `graph_id` here is `i64`
-which can't contain DDL.)
+(Use `pgrdf.drop_graph` rather than a raw `DROP TABLE` on the
+partition — the UDF also removes the `_pgrdf_graphs` mapping row, and
+it takes a bind parameter so there's no identifier-injection concern.)
 
 ## Caveats
 

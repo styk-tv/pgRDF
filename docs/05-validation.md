@@ -1,16 +1,19 @@
 # 05 — Validation
 
-> **Status: real SHACL Core (v0.4) + the `mode` argument and the
-> W3C SHACL Core manifest gate (v0.5).** The SQL surface
+> **Status: real SHACL Core (v0.4) + the three-way `mode` argument
+> and the W3C SHACL Core manifest gate (v0.5).** The SQL surface
 > `pgrdf.validate(data BIGINT, shapes BIGINT, mode TEXT DEFAULT
-> 'native') → JSONB` is a real W3C-shape SHACL Core validator
-> backed by the rudof project's `shacl 0.3.x` crate. The v0.3 stub
-> is gone. The v0.4 upstream unblock is tracked in
-> [`specs/ERRATA.v0.4.md`](../specs/ERRATA.v0.4.md) **E-011**; the
-> v0.5 `mode`-arg scope is tracked in
-> [`specs/ERRATA.v0.5.md`](../specs/ERRATA.v0.5.md) **E-012**
-> (SHACL-SPARQL upstream stub) and **E-013** (Core manifest gate
-> invariant + final 25 / 25 full-pass).
+> 'native') → JSONB` is a real W3C-shape validator returning an
+> `sh:ValidationReport`. `mode` selects the engine: `'native'`
+> (rudof Core, full-pass), `'sparql'` (rudof `SparqlEngine` — as of
+> `shacl 0.3.2` upstream-incomplete, **not recommended**), and
+> `'pgrdf'` (pgRDF-native SHACL-SPARQL, the authoritative path for
+> `sh:sparql` constraints). The v0.3 stub is gone. The Core manifest
+> gate invariant + 25 / 25 full-pass are tracked in
+> [`specs/ERRATA.v0.5.md`](../specs/ERRATA.v0.5.md) **E-013**; the
+> SHACL-SPARQL correctness gap that makes `'pgrdf'` authoritative is
+> tracked in [`specs/ERRATA.v0.6.md`](../specs/ERRATA.v0.6.md)
+> **E-014**.
 
 ## Surface
 
@@ -19,14 +22,16 @@ SELECT pgrdf.validate(data_graph_id, shapes_graph_id [, mode]);
 --   data_graph_id   — graph containing the assertions to validate
 --   shapes_graph_id — graph containing the SHACL shapes (sh:NodeShape /
 --                     sh:PropertyShape) those assertions must satisfy
---   mode            — TEXT DEFAULT 'native'; one of {'native','sparql'}.
---                     'native' is the Rust-native SHACL Core engine
---                     (the v0.4 surface, unchanged — the 2-arg form
---                     defaults here). 'sparql' is wired but the
---                     upstream shacl 0.3.1 SparqlEngine is a stub
---                     (ERRATA.v0.5 E-012): it returns a deterministic
---                     structured "unavailable" report (conforms:null
---                     + an error naming the gap), never a panic.
+--   mode            — TEXT DEFAULT 'native'; one of
+--                     {'native','sparql','pgrdf'}.
+--                     'native' is the rudof Core engine (the v0.4
+--                     surface, unchanged — the 2-arg form defaults
+--                     here). 'sparql' dispatches to rudof's
+--                     SparqlEngine, which as of shacl 0.3.2 is
+--                     upstream-incomplete (ERRATA.v0.6 E-014) and not
+--                     recommended. 'pgrdf' is the pgRDF-native
+--                     SHACL-SPARQL engine — the authoritative path for
+--                     sh:sparql / sh:select constraints.
 --                     An unknown mode errors `validate: unknown mode`.
 -- Returns JSONB:
 --   {
@@ -66,22 +71,23 @@ engine is not invoked.
 
 `pgrdf.validate(data, shapes, mode TEXT DEFAULT 'native')`:
 
-- `'native'` — the Rust-native SHACL Core engine. The default; the
+- `'native'` — the rudof SHACL Core engine. The default; the
   2-arg `pgrdf.validate(d, s)` form is byte-identical to v0.4.
-- `'sparql'` — the SHACL-SPARQL mode. `shacl 0.3.1` has **no**
-  SHACL-SPARQL constraint component and its `SparqlEngine` is an
-  upstream stub (`unimplemented!()` in every target-resolution
-  method). pgRDF does **not** invoke the broken engine (a panic the
-  SQL caller cannot act on); `'sparql'` returns a clean,
-  deterministic structured report: `conforms:null`, empty
-  `results`, `mode:"sparql"`, and an `error` naming the gap +
-  ERRATA.v0.5 **E-012**. Forward-compatible: the day a rudof
-  release ships the engine, one guard is deleted and the existing
-  `&validation_mode` dispatch routes `'sparql'` through with no
-  signature change.
+- `'sparql'` — dispatches to rudof's `SparqlEngine`. As of
+  `shacl 0.3.2` the engine is functional in places but
+  upstream-incomplete: common SHACL-SPARQL topologies silently
+  return `conforms:true` with 0 violations even though the
+  constraint compiled into the IR (ERRATA.v0.6 **E-014**). **Not
+  recommended** — use `'pgrdf'` for SHACL-SPARQL.
+- `'pgrdf'` — the pgRDF-native SHACL-SPARQL engine. It evaluates
+  each `sh:sparql` / `sh:select` constraint directly against the
+  dictionary-indexed hexastore (no N-Triples rehydrate) and returns
+  the correct `conforms` verdict on the W3C SHACL-SPARQL suite where
+  `'sparql'` returns the wrong one. The authoritative SHACL-SPARQL
+  path (ERRATA.v0.6 **E-014**).
 - Any other value → `validate: unknown mode "<x>" (supported:
-  'native', 'sparql')`, raised **before** any work (no silent
-  fallback — mirrors `materialize: unknown profile`).
+  'native', 'sparql', 'pgrdf')`, raised **before** any work (no
+  silent fallback — mirrors `materialize: unknown profile`).
 
 ## Example
 
@@ -157,10 +163,11 @@ Bob is silent because he conforms.
 4. **Compile shapes** — `shacl::ShaclDataManager::load(…)`
    compiles the shapes graph into a SHACL `IRSchema`.
 5. **Validate** — `GraphValidation::new(data).validate(&schema,
-   &validation_mode)` runs the requested engine. `'native'` is the
-   in-process Rust engine. `'sparql'` short-circuits to the E-012
-   structured report **before** this step (the upstream engine is a
-   stub) — steps 5-6 are skipped for `'sparql'`.
+   &validation_mode)` runs the requested rudof engine: `'native'`
+   (Core) or `'sparql'` (SparqlEngine; upstream-incomplete per
+   E-014). The `'pgrdf'` mode takes a separate in-house path that
+   evaluates each `sh:sparql` constraint directly against the
+   dictionary-indexed hexastore rather than rehydrating into rudof.
 6. **Shape** — the resulting `ValidationReport.results()` maps to
    the JSONB shape above. Severities normalise to the canonical
    `sh:` constants; literals render Turtle-ish.
@@ -174,11 +181,11 @@ calling Postgres transaction.
 - SHACL Core — `sh:NodeShape` + `sh:PropertyShape` + the standard
   Core constraint components (cardinality, value-type, value-range,
   string, property-pair, logical, shape-based).
-- `'native'` engine (in-process). The `'sparql'` mode argument
-  ships (v0.5) but the upstream `shacl 0.3.1` SPARQL engine is a
-  stub (E-012) — `'sparql'` returns the deterministic structured
-  report, not a validation. SHACL-SPARQL (`sh:sparql`/`sh:select`)
-  constraint components are not parsed by `shacl 0.3.1` at all.
+- Three engines: `'native'` (rudof Core, in-process), `'sparql'`
+  (rudof SparqlEngine — upstream-incomplete as of `shacl 0.3.2`,
+  E-014, not recommended), and `'pgrdf'` (the pgRDF-native
+  SHACL-SPARQL engine, the authoritative path for `sh:sparql` /
+  `sh:select` constraints).
 - Validation against materialised graphs works via the rehydrate's
   `is_inferred` inclusivity: `pgrdf.materialize` then
   `pgrdf.validate` validates the entailed closure (regression
@@ -197,9 +204,9 @@ blank-node-relabelling dictionary rehydrate — a serialization
 artifact that does not flip conformance). There is no excluded Core
 fixture: `prop-nodeKind-001` is graded in `fixtures/core/` and passes
 with the W3C-authoritative `conforms:false` result. `just
-test-shacl-manifest --sparql` asserts the
-E-012 known state (`conforms:null` for every fixture — the upstream
-SparqlEngine stub).
+test-shacl-manifest --sparql` exercises the rudof `'sparql'` engine,
+whose divergent SHACL-SPARQL verdicts (vs the authoritative
+`'pgrdf'` engine) are tracked as ERRATA.v0.6 **E-014**.
 
 ### Out of scope (v0.4)
 
@@ -260,9 +267,11 @@ version (the `features = ["rdf-12"]` opt-in stays).
   §5 / §6 (the `mode` arg + the W3C SHACL Core gate, shipped in v0.5.0)
 - ERRATA: [`E-011`](../specs/ERRATA.v0.4.md) — fork patch +
   unblock vehicle.
-- ERRATA: [`E-012`](../specs/ERRATA.v0.5.md) — `shacl 0.3.1`
-  SHACL-SPARQL mode is an upstream stub; the `mode` arg ships
-  forward-compatible.
+- ERRATA: [`E-013`](../specs/ERRATA.v0.5.md) — W3C SHACL Core
+  manifest gate invariant (25/25 full-pass).
+- ERRATA: [`E-014`](../specs/ERRATA.v0.6.md) — the rudof `'sparql'`
+  SHACL-SPARQL engine is upstream-incomplete (`shacl 0.3.2`); the
+  native `mode => 'pgrdf'` engine is the authoritative path.
 - ERRATA: [`E-013`](../specs/ERRATA.v0.5.md) — the W3C SHACL Core
   gate `sh:conforms` invariant + the final 25/25 full-pass.
 - ERRATA: [`E-009`](../specs/ERRATA.v0.2.md) — original

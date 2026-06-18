@@ -21,15 +21,23 @@ CREATE EXTENSION IF NOT EXISTS pg_prewarm;
 --   'buffer'   → load into shared_buffers (default)
 --   'read'     → just read pages from disk (warm the OS page cache)
 --   'prefetch' → posix_fadvise; lighter, async
+-- The dictionary is a plain table: warm its heap + indexes directly.
 SELECT pg_prewarm('pgrdf._pgrdf_dictionary');
-SELECT pg_prewarm('pgrdf._pgrdf_quads');
-
--- Warm the indexes pgRDF queries hit most often.
 SELECT pg_prewarm('pgrdf._pgrdf_dictionary_pkey');
-SELECT pg_prewarm('pgrdf._pgrdf_quads_pkey');
-SELECT pg_prewarm('pgrdf._pgrdf_quads_spo_idx');
-SELECT pg_prewarm('pgrdf._pgrdf_quads_pos_idx');
-SELECT pg_prewarm('pgrdf._pgrdf_quads_osp_idx');
+SELECT pg_prewarm('pgrdf._pgrdf_dict_val_idx');
+
+-- _pgrdf_quads is LIST-partitioned by graph, so the parent has no
+-- storage of its own. Warm each partition's heap, then each
+-- partition's hexastore (SPO/POS/OSP) indexes.
+SELECT pg_prewarm(c.oid::regclass::text)
+  FROM pg_inherits i
+  JOIN pg_class c ON c.oid = i.inhrelid
+ WHERE i.inhparent = 'pgrdf._pgrdf_quads'::regclass;
+
+SELECT pg_prewarm(ix.indexrelid::regclass::text)
+  FROM pg_inherits i
+  JOIN pg_index  ix ON ix.indrelid = i.inhrelid
+ WHERE i.inhparent = 'pgrdf._pgrdf_quads'::regclass;
 ```
 
 ### When to use this
@@ -54,10 +62,10 @@ SELECT pg_prewarm('pgrdf._pgrdf_quads_osp_idx');
 
 - `pg_prewarm` does not preserve across restarts. For autostart
   recipes, see the `pg_prewarm.autoprewarm` setting in PG docs.
-- The `_pgrdf_quads_spo_idx` / `_pgrdf_quads_pos_idx` /
-  `_pgrdf_quads_osp_idx` index names match pgRDF's hexastore at
-  v0.5; if an internal storage change renames them, this recipe
-  needs updating. The relation names are stable per LLD v0.5 §2.
+- The hexastore index names are `_pgrdf_idx_spo` / `_pgrdf_idx_pos` /
+  `_pgrdf_idx_osp`; because `_pgrdf_quads` is partitioned, the query
+  above warms each partition's copy of them via `pg_inherits`. The
+  relation names are stable per LLD §2.
 
 ## `pg_stat_statements` — aggregating pgRDF's translated SQL (TE-2)
 
@@ -103,7 +111,8 @@ maintains:
   named at the SPARQL level; the class IRI resolves to a dict-id
   bound as `$N`.
 - **Plan-cache hits** in pgRDF correspond 1:1 to repeat hits on the
-  same `pg_stat_statements` row (see `pgrdf.plan_cache_stats()`).
+  same `pg_stat_statements` row (see the `plan_cache_*` counters in
+  `pgrdf.stats()`).
 - **Aggregates over UNION** produce a single CTE-shaped SQL whose
   text is stable; UNION branches don't fork the statement id.
 

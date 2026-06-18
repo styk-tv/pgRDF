@@ -23,8 +23,8 @@ in several subtle ways (file locations, build flags). Use the slow loop
 below to verify that.
 
 PG 18 is deferred pending a stable pgrx 0.17+/0.18 line on current
-rustc (ERRATA E-006). The current v0.5.x line pins to pgrx 0.16.1 +
-PG 14–17.
+rustc (ERRATA E-006). The current v0.6.x line pins to pgrx 0.16.1 +
+PG 14–17 (only pg17 is published during the stabilization window).
 
 ## 7.2 Slow loop — stock postgres container
 

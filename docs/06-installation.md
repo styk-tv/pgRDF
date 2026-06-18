@@ -77,9 +77,10 @@ deferred until v1.0.
 
 To move from one v0.x version to the next:
 
-1. **Export your data** while still on the old version. v0.3 has no
-   `CONSTRUCT` UDF, so dump the dictionary-decoded quads directly via
-   SQL — per graph:
+1. **Export your data** while still on the old version.
+   `pgrdf.construct(query)` returns constructed triples as JSONB
+   rows, or dump the dictionary-decoded quads directly via SQL —
+   per graph:
 
    ```sql
    SELECT s.lexical_value AS subject,
@@ -93,10 +94,10 @@ To move from one v0.x version to the next:
    ```
 
    Serialise the result to Turtle externally (psycopg → `oxttl`,
-   `rdflib`, etc.). A future release is expected to add a
-   `pgrdf.construct_turtle(…)` UDF for direct Turtle output (see
-   [`specs/SPEC.pgRDF.LLD.v0.4.md`](../specs/SPEC.pgRDF.LLD.v0.4.md)
-   §6); until that lands the SQL dump above is the supported path.
+   `rdflib`, etc.). `pgrdf.construct` emits JSONB rows rather than a
+   Turtle string; a direct-Turtle UDF (`pgrdf.construct_turtle(…)`)
+   is a possible future addition. Until then the SQL dump above or
+   external serialisation is the supported export path.
 
 2. **Drop the extension**:
 
@@ -119,10 +120,10 @@ To move from one v0.x version to the next:
 
 ### Why no in-place upgrade?
 
-- Pre-1.0 schema is fluid. Anticipated additions (named-graph
-  scoping, an IRI ↔ `graph_id` mapping table per LLD v0.4 §3,
-  CONSTRUCT, SPARQL UPDATE) require migrations the v0.3 schema can't
-  describe ahead of time.
+- Pre-1.0 schema is fluid. Features that landed since the early
+  schema (named-graph scoping, the IRI ↔ `graph_id` mapping table,
+  CONSTRUCT, SPARQL UPDATE) each needed a migration the original
+  schema couldn't describe ahead of time, and more may follow.
 - The dictionary `id` space is not stable across versions — the same
   Turtle re-ingested under a different build gets different integer
   ids.

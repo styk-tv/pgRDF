@@ -1,13 +1,14 @@
 # 10 — Roadmap
 
-> **v0.3 LLD is the authoritative shipped contract**
-> ([`specs/SPEC.pgRDF.LLD.v0.3.md`](../specs/SPEC.pgRDF.LLD.v0.3.md) §5).
-> Phase numbering on this page tracks the v0.3 phase map verbatim:
-> Phase 1 done, Phase 2 (Functional SPARQL Coverage) done through
-> sub-steps 2.0 / 2.1 / 2.2, Phase 3 (Storage Performance) steps 1-2
-> shipped + step 3 phase A shipped, Phase 4 (Inference) shipped,
-> Phase 5 (Validation) stub shipped, Phase 6 (CI + Conformance +
-> Release) step 1 shipped.
+> **Historical phase map (v0.3 era).** This page tracks the original
+> v0.3 LLD phase numbering verbatim and is kept as a development
+> record; for the *current* shipped status see `CHANGELOG.md`,
+> `README.md`, and the v0.6-forward LLD. As of v0.6.6: validation is
+> real (SHACL Core full-pass + native SHACL-SPARQL), the parallel
+> bulk loader has shipped, releases are SLSA-attested, and the LUBM
+> benchmarks (10→500) are real. The v0.3 phase snapshot below —
+> Phase 1–4 shipped, Phase 5 (Validation) then a stub, Phase 6 step 1
+> shipped — is preserved as written.
 >
 > **Forward-look:**
 > [`specs/SPEC.pgRDF.LLD.v0.5.md`](../specs/SPEC.pgRDF.LLD.v0.5.md)
@@ -426,9 +427,8 @@ LLD v0.3 §5.4.
   follow-up requires sourcing a signing key, publishing the public
   half, and wiring the secret. See `docs/09-release.md` "Aggregate
   checksums" for the consumer-side verification recipe.
-- License attribution surface (Apache 2.0 / 2026) declared at
-  repo root; NOTICE distribution in the release tarball flagged
-  as workflow follow-up (slice #36 adjacent finding).
+- License surface: MIT (2026) declared at repo root, re-licensed
+  from Apache 2.0 in v0.5.1; `NOTICE` removed — `LICENSE` only.
 - MSRV declared `rust-version = "1.91"` in `Cargo.toml` (slice
   #49).
 - Target gates: W3C SPARQL 1.1 ≥ 95 % pass; SHACL ≥ 90 % pass.

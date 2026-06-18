@@ -421,16 +421,14 @@ SELECT * FROM pgrdf.sparql(
 returns FALSE for OPTIONAL vars that didn't match. (For mandatory
 vars it's always TRUE since INNER joins guarantee non-null.)
 
-#### Today's restrictions
+#### Scoping notes
 
-- **Each OPTIONAL block must hold exactly one triple pattern.**
-  Multi-pattern OPTIONALs require a derived-table refactor that
-  lands in the next slice. The executor panics with a clear
-  message if you give it `OPTIONAL { a . b . }`.
-- **Nested OPTIONAL inside OPTIONAL** isn't supported yet — only
-  flat chains at the same level.
+- **Multi-pattern OPTIONALs** (`OPTIONAL { ?s a . ?s b . }`) and
+  **nested OPTIONAL inside OPTIONAL** are both supported — each
+  group lowers to its own LEFT JOIN (nested where needed).
 - **OPTIONAL's inner FILTER** sees only that OPTIONAL's variables
-  and the mandatory anchors, not other OPTIONAL groups' variables.
+  and the mandatory anchors, not other OPTIONAL groups' variables
+  (per SPARQL scoping).
 
 ### UNION
 
@@ -909,14 +907,13 @@ is supported for projection — Literal / NamedNode / Variable,
 `STR` / `LANG` / `DATATYPE` / `UCASE` / `LCASE` / `STRLEN`,
 arithmetic, `CONCAT`.
 
-#### Today's restrictions
+#### Notes
 
-- **Aggregates on top of UNION** aren't supported. Aggregates over
-  a UNION result require a derived-table refactor that lands in
-  a later slice (v0.4).
-- **Filtering on a BIND output** (referencing `?v` from
-  `BIND(expr AS ?v)` in a later FILTER or BGP) isn't supported yet
-  — queued for v0.4.
+- **Aggregates over a UNION** are supported — the UNION result is
+  grouped and aggregated like any other pattern.
+- **Referencing a `BIND(expr AS ?v)` output downstream** (in a later
+  FILTER or BGP) is supported; `?v` is in scope for the rest of the
+  group.
 
 ### Solution modifiers — DISTINCT / LIMIT / OFFSET / ORDER BY
 
@@ -982,15 +979,12 @@ list and ORDER BY references it by ordinal position. The
 `execute` layer only emits the projected columns into JSONB, so
 those hidden columns are invisible to callers.
 
-This is **lexicographic order on the term's string form**, not
-SPARQL's full type-aware ordering. For string-typed literals and
-IRIs that's the same answer; for numeric literals it sorts as
-strings (`"10"` < `"2"`), which is wrong. Use numeric FILTER plus
-a Postgres `ORDER BY (sparql->>'n')::numeric` wrapping the
-`pgrdf.sparql` call when you need numeric ordering today. Full
-type-aware `ORDER BY ?n` over `xsd:numeric` literals lands in
-v0.4. (Note: aggregate `MIN`/`MAX` already use the type-aware
-path — see the aggregates section above.)
+This is **type-aware ordering** (SPARQL 1.1 §15.1): `xsd:numeric`
+literals sort numerically (`2` before `10`), strings and IRIs sort
+by lexical form, and the type groups order per the spec — so
+`ORDER BY ?n` over numeric literals gives the right answer with no
+wrapping needed. Aggregate `MIN`/`MAX` use the same type-aware
+path — see the aggregates section above.
 
 #### DISTINCT + ORDER BY interaction
 

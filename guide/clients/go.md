@@ -142,13 +142,14 @@ for _, path := range paths {
 
 ```go
 _, err := conn.Exec(ctx,
-	fmt.Sprintf(`DROP TABLE pgrdf._pgrdf_quads_g%d`, graphID),
+	`SELECT pgrdf.drop_graph($1)`, graphID,
 )
 ```
 
-`fmt.Sprintf` on a vetted integer is safe (a `int64` can't be SQL).
-Don't pass `graphID` through `$1` — DDL doesn't accept bind params
-for table names.
+`pgrdf.drop_graph` drops the graph's partition **and** removes its
+`_pgrdf_graphs` mapping row in one call — use it instead of a raw
+`DROP TABLE` on the partition, which would strand the mapping row.
+It takes a bind parameter, so no string formatting is needed.
 
 ## sqlc + pgrdf
 
@@ -182,8 +183,9 @@ You unmarshal the per-row JSON into a struct in application code.
 
 - pgRDF's strict Turtle parser will reject off-spec TTL. Don't
   swallow parse errors in your client; the source is the bug.
-- `pgrdf.sparql` searches every graph today (no `GRAPH { … }`
-  scope yet). v0.4 work.
+- `pgrdf.sparql` searches the default union of all graphs; scope a
+  query with `GRAPH <iri> { … }` or `GRAPH ?g { … }` to target or
+  bind named graphs.
 - Set `SET search_path = pgrdf, public;` per connection to drop the
   schema prefix on every call.
 - `pgrdf.load_turtle` holds the SPI connection for the duration of

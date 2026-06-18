@@ -4,13 +4,14 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is **`v0.5.1`** — a maintenance release on top of the
-v0.5.0 engine surface. It is flagged `isPrerelease=false` +
-`isLatest=true` and supersedes `v0.5.0` as "latest". Cargo.toml reads
-`version = "0.5.1"` and the tagged release now carries both the binary
-tarball matrix and the PGXN source zip. See `CHANGELOG.md` for the
-running set of `[Unreleased]` entries that move into the next `[N.M.P]`
-block at tag time.
+The current cut is **`v0.6.6`** (`isPrerelease=false`,
+`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.6`, and the
+tagged release carries the binary tarball matrix, the PGXN source
+zip, and an SLSA-attested OCI bundle. The per-release notes below
+cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.6 history
+(the parallel bulk loader and its levers) lives in `CHANGELOG.md`,
+which is the authoritative running log — new entries land under
+`[Unreleased]` and move into the next `[N.M.P]` block at tag time.
 
 ## v0.5.1 — 2026-05-23
 

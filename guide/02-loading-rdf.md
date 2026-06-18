@@ -1,11 +1,12 @@
 # 02 — Loading RDF
 
-pgRDF supports Turtle today (other syntaxes — N-Triples, TriG,
-N-Quads — are queued for v0.4 alongside the SPARQL-side
-serialisation surface). There are two entry points: file-based
-and string-based.
+pgRDF ingests Turtle, TriG, and N-Quads (N-Triples are a Turtle
+subset). This page covers the Turtle entry points — file-based
+(`load_turtle`) and string-based (`parse_turtle`); the quad-bearing
+formats use `parse_trig` and `parse_nquads`, which honour the graph
+labels in the data.
 
-## `pgrdf.load_turtle(path, graph_id, base_iri = NULL) → BIGINT`
+## `pgrdf.load_turtle(path, graph_id, base_iri = NULL, bulk_load = false) → BIGINT`
 
 Reads a Turtle file from a path the Postgres process can see and
 ingests every triple. Returns the count.
@@ -269,9 +270,14 @@ SELECT id FROM pgrdf._pgrdf_dictionary
   primes the cache, every subsequent flush reuses it.
 - The full `tests/perf/smoke-ontologies.sh` set (~17K triples across
   24 ontologies) currently completes in a few seconds total.
-- True `COPY … FROM STDIN (FORMAT BINARY)` /
-  `heap_multi_insert` for millions-of-triples-per-second instance
-  loads is the v0.4 fast path (LLD §4.3 phase B).
+- For large fresh loads, `load_turtle(…, bulk_load => true)` runs a
+  parallel fast path — all-cores parse, in-memory term dedup,
+  self-assigned-id dictionary load, parallel triple→id resolve, and
+  batched quad insert — measured at 2.3–3.5× the streaming path on
+  LUBM-250/500. It applies to a fresh (empty) dictionary and falls
+  back to the streaming path on a populated one. A deeper
+  `heap_multi_insert` / `COPY … FORMAT BINARY` quad insert (LLD §12
+  phase B) is a tracked follow-up.
 
 ## What still doesn't work
 

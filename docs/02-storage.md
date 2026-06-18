@@ -436,8 +436,10 @@ Two candidate paths, both FFI-heavy:
    needs more glue (binary header bytes, the per-tuple binary
    tuple layout).
 
-Tracked as **Phase 3 step 3b** in the v0.3 LLD; lands in v0.4
-unless promoted forward.
+The parallel bulk loader (`bulk_load => true`, v0.6.2–v0.6.6) already
+delivers a 2.3–3.5× fast path; this deeper `heap_multi_insert` /
+COPY-BINARY quad insert (LLD §12 phase B) remains a tracked
+follow-up for a larger win.
 
 ### Graph routing
 

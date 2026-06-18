@@ -15,21 +15,21 @@ Phase 1 = core storage + build automation; Phase 2 = SPARQL
 functional coverage; Phase 3 = storage performance; Phase 4 =
 inference (OWL 2 RL); Phase 5 = validation (SHACL); Phase 6 =
 CI + W3C conformance + release. v0.3 engine surface is
-**feature-complete** modulo the explicitly deferred Phase 3
-step 3b (heap_multi_insert) and Phase 5's blocked SHACL
-integration (ERRATA E-009).
+**feature-complete**; since then the parallel bulk loader (v0.6.2–
+v0.6.6) and real SHACL Core + native SHACL-SPARQL validation have
+shipped, leaving the deeper `heap_multi_insert` quad insert (Phase 3
+step 3b) as the main open performance item.
 
-| Layer | Runtime | Pre-v0.3 | v0.3 (current) | v0.4 target |
-|---|---|---|---|---|
-| Rust unit (`cargo test`) | sec | smoke | parser + executor + cache primitives | full storage coverage |
-| pgrx integration (`cargo pgrx test`) | ~30 s | 79 ✅ | **93 ✅** | + heap_multi_insert tests |
-| pg_regress golden | ~1 min | 25 ✅ | **39 ✅** | + W3C TTL-manifest runner outputs |
-| W3C-shape harness | ~5 s on top of regression | — | **23 ✅** | superseded by the TTL-manifest runner |
-| LUBM-shape harness | ~3 s on top of regression | — | **3 ✅** | superseded by LUBM-1/10/100 real benchmarks |
-| Ontology smoke | sec each, manual | 24 ontologies, 17 134 triples ✅ | (same set) | (same set) |
-| W3C SPARQL 1.1 conformance (full manifest) | min | scaffolded | runner not wired ⏳ | ≥ 30 % pass |
-| W3C SHACL conformance | min | scaffolded | not wired ⏳ (blocked, ERRATA E-009) | ≥ 50 % pass once E-009 clears |
-| LUBM perf (real LUBM gen + cross-engine) | min | — | scaffold only | LUBM-10 vs Jena TDB / Apache AGE |
+| Layer | Runtime | Status (current) |
+|---|---|---|
+| Rust unit (`cargo test`) | sec | parser + executor + cache primitives |
+| pgrx integration (`cargo pgrx test`) | ~30 s | **293 ✅** |
+| pg_regress golden | ~1 min | **93 ✅** |
+| W3C SPARQL 1.1 shape harness | ~5 s on top of regression | **51 ✅** |
+| W3C SHACL Core manifest gate | ~5 s | **25 / 25 ✅** (full-pass) |
+| LUBM-shape correctness harness | ~3 s | **3 ✅** |
+| LUBM real benchmark (10→500) | min | LUBM-100 full pass; LUBM-10→500 scaling ✅ |
+| Ontology smoke | sec each, manual | 24 ontologies, 17,134 triples ✅ |
 
 Test counts are absolute (cumulative, not per-phase). The number
 ratchets with every commit on `main`; a green build is required to

@@ -51,7 +51,7 @@ SELECT * FROM pgrdf.sparql(
 - **Researchers + tool authors** who need a strict-by-default,
   well-isolated triple store with cheap per-graph partition drops.
 
-## What's in pgRDF today (Alpha, v0.3 engine feature-complete)
+## What's in pgRDF today (Alpha, v0.6.x)
 
 | Feature | Status |
 |---|---|
@@ -69,10 +69,12 @@ SELECT * FROM pgrdf.sparql(
 | TriG / N-Quads ingest (`pgrdf.parse_trig`, `pgrdf.parse_nquads`) | ✅ v0.5 |
 | Operator surface — `pgrdf.stats()`, `pgrdf.shmem_reset()`, `pgrdf.plan_cache_clear()` | ✅ |
 | Regression suite + W3C-shape SPARQL harness + W3C SHACL Core manifest gate in CI (PR-gate, every PG major) | ✅ v0.5 |
-| SHACL Core validation — real W3C-shape report (`pgrdf.validate(data, shapes [, mode])`); SHACL-SPARQL mode upstream-stubbed ([ERRATA.v0.5 E-012](../specs/ERRATA.v0.5.md)) | ✅ v0.4 / v0.5 |
-| 2× ingest target (true COPY BINARY / `heap_multi_insert` phase B) | ⏳ v0.6-FUTURE |
-| Full W3C SPARQL 1.1 TTL-manifest runner against `w3c/rdf-tests` | ⏳ v0.6-FUTURE |
-| LUBM-10 / LUBM-100 cross-engine benchmarks (Jena TDB, Apache AGE) | ⏳ v0.6-FUTURE |
+| SHACL Core validation — real W3C-shape report (`pgrdf.validate(data, shapes [, mode])`), full-pass 25/25; native SHACL-SPARQL via `mode => 'pgrdf'` (authoritative; the rudof `'sparql'` mode is upstream-incomplete — [ERRATA.v0.6 E-014](../specs/ERRATA.v0.6.md)) | ✅ v0.4 / v0.5 |
+| Parallel bulk loader (`load_turtle(…, bulk_load => true)`) — 2.3–3.5× ingest on LUBM-250/500 | ✅ v0.6.2–v0.6.6 |
+| LUBM-10 → LUBM-500 scaling benchmarks (full LUBM-100 pass) | ✅ v0.6 |
+| Deeper `heap_multi_insert` / COPY BINARY quad insert (LLD §12 phase B) | ⏳ FUTURE |
+| Full W3C SPARQL 1.1 TTL-manifest runner against `w3c/rdf-tests` | ⏳ FUTURE |
+| LUBM cross-engine comparison (Jena TDB, Apache AGE) | ⏳ FUTURE |
 | SPARQL surface — property paths (`^`/`+`/`*`/`?`/`\|` alternation) | ✅ v0.4.5 |
 | SPARQL surface — VALUES, multi-triple OPTIONAL, DESCRIBE, type-aware ORDER BY, aggregates over UNION, downstream BIND | ✅ v0.5 |
 

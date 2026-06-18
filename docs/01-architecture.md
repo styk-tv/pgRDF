@@ -35,10 +35,10 @@ process). It provides four engines, each a Rust module under `src/`:
 
 | Engine | Module | Authoritative spec | Status |
 |---|---|---|---|
-| Storage | `src/storage/{dict,hexastore,loader,shmem_cache,stats}.rs` | LLD §3, §4.1, §4.3 | ✅ schema + CRUD + Turtle ingest; ✅ shmem dict cache (§4.1); ✅ bulk-INSERT plan reuse (§4.3 phase A); ⏳ heap_multi_insert / true COPY BINARY (§4.3 phase B) v0.4 |
-| Query | `src/query/{parser,executor,plan_cache}.rs` | LLD §4.2 | ✅ SPARQL SELECT/ASK with BGP + FILTER + OPTIONAL + UNION + MINUS + aggregates (incl. type-aware MIN/MAX) + HAVING (alias + inline) + BIND + solution modifiers; ✅ prepared-plan cache (§4.2) — fully parameterised SQL, per-backend `OwnedPreparedStatement` cache |
+| Storage | `src/storage/{dict,hexastore,loader,shmem_cache,stats}.rs` | LLD §3, §4.1, §4.3 | ✅ schema + CRUD + Turtle/TriG/N-Quads ingest; ✅ shmem dict cache (§4.1); ✅ bulk-INSERT plan reuse (§4.3 phase A); ✅ parallel bulk loader (`bulk_load => true`, v0.6.2–v0.6.6); ⏳ heap_multi_insert / COPY BINARY quad insert (§4.3 phase B) |
+| Query | `src/query/{parser,executor,plan_cache}.rs` | LLD §4.2 | ✅ SPARQL 1.1 SELECT/ASK/CONSTRUCT/DESCRIBE + UPDATE; BGP + FILTER + OPTIONAL + UNION + MINUS + VALUES + BIND + property paths + named graphs (GRAPH) + aggregates (incl. type-aware MIN/MAX) + HAVING (alias + inline) + type-aware ORDER BY + solution modifiers; ✅ prepared-plan cache (§4.2) — fully parameterised SQL, per-backend `OwnedPreparedStatement` cache |
 | Inference | `src/inference/reasonable.rs` | LLD §2; ERRATA E-002 | ✅ `pgrdf.materialize` via `reasonable` (OWL 2 RL forward chain, idempotent re-derivation) |
-| Validation | `src/validation/shacl.rs` | LLD §2; ERRATA E-001 / E-009 | 🚧 surface stub — real `shacl_validation` integration blocked by upstream dep conflict (E-009); v0.4 |
+| Validation | `src/validation/shacl.rs` | LLD §2; ERRATA E-013 / E-014 | ✅ real SHACL Core (W3C full-pass 25/25) via rudof `shacl`; `mode => 'pgrdf'` adds native SHACL-SPARQL (authoritative, E-014) |
 
 ## Key invariants
 
