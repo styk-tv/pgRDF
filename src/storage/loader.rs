@@ -1689,15 +1689,19 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
             a.extend(b);
             a
         });
+    // Reserve + insert one chunk at a time so neither the reserved-id
+    // vector nor the SPI result set ever exceeds `chunk_sz` — bounds
+    // memory at billion-term scale (a single reserve(N) would materialise
+    // N int8s twice over). `uri_map` is the unavoidable O(N) term→id table.
     let uri_keys: Vec<(i16, String)> = uri_set.into_iter().collect();
-    let uri_ids = reserve(uri_keys.len());
     let mut uri_map: HashMap<(i16, String), i64> = HashMap::with_capacity(uri_keys.len());
-    for (i, (tt, lv)) in uri_keys.iter().enumerate() {
-        uri_map.insert((*tt, lv.clone()), uri_ids[i]);
-    }
-    for (ch, ch_ids) in uri_keys.chunks(chunk_sz).zip(uri_ids.chunks(chunk_sz)) {
+    for ch in uri_keys.chunks(chunk_sz) {
+        let ch_ids = reserve(ch.len());
+        for ((tt, lv), id) in ch.iter().zip(&ch_ids) {
+            uri_map.insert((*tt, lv.clone()), *id);
+        }
         ins(
-            ch_ids.to_vec(),
+            ch_ids,
             ch.iter().map(|(tt, _)| *tt).collect(),
             ch.iter().map(|(_, lv)| lv.clone()).collect(),
             vec![None; ch.len()],
@@ -1729,15 +1733,15 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
             a
         });
     let lit_keys: Vec<(String, Option<i64>, Option<String>)> = lit_set.into_iter().collect();
-    let lit_ids = reserve(lit_keys.len());
     let mut lit_map: HashMap<(String, Option<i64>, Option<String>), i64> =
         HashMap::with_capacity(lit_keys.len());
-    for (i, k) in lit_keys.iter().enumerate() {
-        lit_map.insert(k.clone(), lit_ids[i]);
-    }
-    for (ch, ch_ids) in lit_keys.chunks(chunk_sz).zip(lit_ids.chunks(chunk_sz)) {
+    for ch in lit_keys.chunks(chunk_sz) {
+        let ch_ids = reserve(ch.len());
+        for (k, id) in ch.iter().zip(&ch_ids) {
+            lit_map.insert(k.clone(), *id);
+        }
         ins(
-            ch_ids.to_vec(),
+            ch_ids,
             vec![term_type::LITERAL; ch.len()],
             ch.iter().map(|(lv, _, _)| lv.clone()).collect(),
             ch.iter().map(|(_, di, _)| *di).collect(),
