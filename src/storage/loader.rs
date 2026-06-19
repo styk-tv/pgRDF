@@ -1494,13 +1494,13 @@ fn bulk_rebuild_indexes() {
 ///   PASS 1 (rayon) — parse the whole line-oriented `.nt` on all cores,
 ///                    split at newline boundaries → per-chunk raw triples.
 ///   PASS 2 (main)  — dedup unique terms in-memory and dictionary-load
-///                    with SELF-ASSIGNED ids: assign `base + i` in Rust,
-///                    plain `INSERT … OVERRIDING SYSTEM VALUE`, then
-///                    `setval` the identity sequence. No per-term anti-
-///                    join — that anti-join + lookup JOIN is the measured
-///                    66–74 % of serial ingest, unnecessary on a fresh
-///                    dict where the in-Rust dedup already guarantees one
-///                    row per term.
+///                    with ids RESERVED from the identity sequence
+///                    (`nextval` per term, race-free against a concurrent
+///                    loader — #20), inserted via `OVERRIDING SYSTEM
+///                    VALUE`. No per-term anti-join — that anti-join +
+///                    lookup JOIN is the measured 66–74 % of serial
+///                    ingest, unnecessary on a fresh dict where the
+///                    in-Rust dedup already guarantees one row per term.
 ///   PASS 3 (rayon) — resolve every triple → (s,p,o) id tuple against the
 ///                    now-complete read-only term→id maps.
 ///   PASS 4 (main)  — bulk-insert the quads via the existing prepared
@@ -1614,24 +1614,52 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
         stats.index_ms += t_idx.elapsed().as_secs_f64() * 1000.0;
     }
 
-    // ── PASS 2: dict resolve via SELF-ASSIGNED ids ──────────────────
+    // ── PASS 2: dict resolve via sequence-RESERVED ids ──────────────
     let t_dict = Instant::now();
-    let base: i64 = Spi::get_one::<i64>("SELECT COALESCE(max(id),0) FROM pgrdf._pgrdf_dictionary")
-        .expect("load_turtle: dict base-id probe")
-        .unwrap_or(0);
     let chunk_sz = 500_000usize;
-    let ins =
-        |id0: i64, tt: Vec<i16>, lv: Vec<String>, di: Vec<Option<i64>>, lt: Vec<Option<String>>| {
-            let ids: Vec<i64> = (0..tt.len() as i64).map(|k| id0 + k).collect();
-            Spi::run_with_args(
-                "INSERT INTO pgrdf._pgrdf_dictionary \
+    // Reserve `n` ids atomically from the dictionary's IDENTITY sequence
+    // (the same allocator GENERATED ALWAYS uses), so a concurrent loader
+    // is never handed an overlapping range (#20). Replaces the old
+    // `max(id)` snapshot + trailing `setval`, which raced two writers
+    // onto the same ids. Ids may be non-contiguous under concurrency
+    // (they are opaque, so it is harmless); a lone single-connection
+    // load gets a contiguous block, identical to the prior behaviour.
+    let reserve = |n: usize| -> Vec<i64> {
+        if n == 0 {
+            return Vec::new();
+        }
+        Spi::connect_mut(|client| {
+            client
+                .update(
+                    "SELECT nextval(pg_get_serial_sequence('pgrdf._pgrdf_dictionary','id')) \
+                     FROM generate_series(1, $1)",
+                    None,
+                    &[(n as i64).into()],
+                )
+                .expect("load_turtle: dict id reservation")
+                .into_iter()
+                .map(|row| {
+                    row.get::<i64>(1)
+                        .expect("reserved id")
+                        .expect("reserved id NULL")
+                })
+                .collect::<Vec<i64>>()
+        })
+    };
+    let ins = |ids: Vec<i64>,
+               tt: Vec<i16>,
+               lv: Vec<String>,
+               di: Vec<Option<i64>>,
+               lt: Vec<Option<String>>| {
+        Spi::run_with_args(
+            "INSERT INTO pgrdf._pgrdf_dictionary \
              (id, term_type, lexical_value, datatype_iri_id, language_tag) \
              OVERRIDING SYSTEM VALUE \
              SELECT * FROM unnest($1::int8[], $2::int2[], $3::text[], $4::int8[], $5::text[])",
-                &[ids.into(), tt.into(), lv.into(), di.into(), lt.into()],
-            )
-            .expect("load_turtle: dict bulk insert");
-        };
+            &[ids.into(), tt.into(), lv.into(), di.into(), lt.into()],
+        )
+        .expect("load_turtle: dict bulk insert");
+    };
     // tier 1 — URI / BLANK terms + literal datatype IRIs (ids base+1..).
     // Dedup in parallel: each chunk builds a local HashSet, then the sets
     // are union-reduced (extend the larger with the smaller to minimise
@@ -1662,20 +1690,20 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
             a
         });
     let uri_keys: Vec<(i16, String)> = uri_set.into_iter().collect();
+    let uri_ids = reserve(uri_keys.len());
     let mut uri_map: HashMap<(i16, String), i64> = HashMap::with_capacity(uri_keys.len());
     for (i, (tt, lv)) in uri_keys.iter().enumerate() {
-        uri_map.insert((*tt, lv.clone()), base + 1 + i as i64);
+        uri_map.insert((*tt, lv.clone()), uri_ids[i]);
     }
-    for (ci, ch) in uri_keys.chunks(chunk_sz).enumerate() {
+    for (ch, ch_ids) in uri_keys.chunks(chunk_sz).zip(uri_ids.chunks(chunk_sz)) {
         ins(
-            base + 1 + (ci * chunk_sz) as i64,
+            ch_ids.to_vec(),
             ch.iter().map(|(tt, _)| *tt).collect(),
             ch.iter().map(|(_, lv)| lv.clone()).collect(),
             vec![None; ch.len()],
             vec![None; ch.len()],
         );
     }
-    let u = uri_keys.len() as i64;
     // tier 2 — literals keyed (lexical, datatype_id, lang); ids base+U+1..
     // Same parallel dedup; `uri_map` is read-only here, safe to share
     // across the rayon closures.
@@ -1701,27 +1729,23 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
             a
         });
     let lit_keys: Vec<(String, Option<i64>, Option<String>)> = lit_set.into_iter().collect();
+    let lit_ids = reserve(lit_keys.len());
     let mut lit_map: HashMap<(String, Option<i64>, Option<String>), i64> =
         HashMap::with_capacity(lit_keys.len());
     for (i, k) in lit_keys.iter().enumerate() {
-        lit_map.insert(k.clone(), base + 1 + u + i as i64);
+        lit_map.insert(k.clone(), lit_ids[i]);
     }
-    for (ci, ch) in lit_keys.chunks(chunk_sz).enumerate() {
+    for (ch, ch_ids) in lit_keys.chunks(chunk_sz).zip(lit_ids.chunks(chunk_sz)) {
         ins(
-            base + 1 + u + (ci * chunk_sz) as i64,
+            ch_ids.to_vec(),
             vec![term_type::LITERAL; ch.len()],
             ch.iter().map(|(lv, _, _)| lv.clone()).collect(),
             ch.iter().map(|(_, di, _)| *di).collect(),
             ch.iter().map(|(_, _, lt)| lt.clone()).collect(),
         );
     }
-    // Advance the identity sequence past our self-assigned block so a
-    // later GENERATED-ALWAYS insert can't collide with these ids.
-    Spi::run_with_args(
-        "SELECT setval(pg_get_serial_sequence('pgrdf._pgrdf_dictionary', 'id'), $1, true)",
-        &[(base + u + lit_keys.len() as i64).into()],
-    )
-    .expect("load_turtle: dict identity setval");
+    // No `setval` needed: nextval already advanced the sequence past the
+    // reserved block, so a later GENERATED-ALWAYS insert can't collide.
     stats.dict_ms = t_dict.elapsed().as_secs_f64() * 1000.0;
 
     // ── PASS 3: resolve every triple → id tuple (parallel) ──────────
@@ -2530,6 +2554,66 @@ mod tests {
         assert_eq!(
             shared_rows, 1,
             "shared term deduped via fallback (no duplicate row)"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Concurrency-safety (issue #20): the bulk fast path must allocate
+    /// dictionary ids from the table's IDENTITY sequence (the shared,
+    /// race-free allocator), NOT from a `max(id)` snapshot. The sequence
+    /// is non-transactional, so a prior allocation can leave it ahead of
+    /// `max(id)` on an empty dict — exactly the divergence the old
+    /// `max(id)`-based reservation raced on. Pre-advancing the sequence
+    /// and asserting the assigned ids respect it pins the fix and fails on
+    /// the old `max(id)` + `setval` reservation (which assigns ids from 1,
+    /// ignoring the sequence).
+    #[pg_test]
+    fn load_turtle_bulk_reserves_from_identity_sequence() {
+        // Empty dict (rolled-back txn) but a sequence already advanced
+        // well past max(id): the classic max(id) != nextval divergence.
+        Spi::run(
+            "SELECT setval(pg_get_serial_sequence('pgrdf._pgrdf_dictionary','id'), 100000, true)",
+        )
+        .unwrap();
+
+        let nt = concat!(
+            "<http://ex/s1> <http://ex/p> <http://ex/o1> .\n",
+            "<http://ex/s2> <http://ex/p> <http://ex/o2> .\n",
+        );
+        let path = "/tmp/pgrdf_bulk_seq.nt";
+        std::fs::write(path, nt).expect("write temp .nt");
+
+        let n: i64 = Spi::get_one_with_args(
+            "SELECT pgrdf.load_turtle($1, $2, NULL, TRUE)",
+            &[path.into(), 7_530i64.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 2, "bulk load returns the triple count");
+
+        // Every assigned id must come from the sequence (> 100000), not
+        // from max(id)+1 (the old reservation → ids from 1).
+        let min_id: i64 = Spi::get_one("SELECT min(id) FROM pgrdf._pgrdf_dictionary")
+            .unwrap()
+            .unwrap();
+        assert!(
+            min_id > 100_000,
+            "bulk path allocates from the IDENTITY sequence (min id {min_id} must exceed the pre-advanced sequence value)"
+        );
+
+        // The sequence is left at/above the highest assigned id, so a
+        // following IDENTITY insert can't collide with a bulk-assigned id.
+        let max_id: i64 = Spi::get_one("SELECT max(id) FROM pgrdf._pgrdf_dictionary")
+            .unwrap()
+            .unwrap();
+        let next_after: i64 =
+            Spi::get_one("SELECT nextval(pg_get_serial_sequence('pgrdf._pgrdf_dictionary','id'))")
+                .unwrap()
+                .unwrap();
+        assert!(
+            next_after > max_id,
+            "sequence advanced past the highest assigned id ({next_after} > {max_id})"
         );
 
         let _ = std::fs::remove_file(path);
