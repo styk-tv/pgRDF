@@ -279,6 +279,66 @@ SELECT id FROM pgrdf._pgrdf_dictionary
   `heap_multi_insert` / `COPY … FORMAT BINARY` quad insert (LLD §12
   phase B) is a tracked follow-up.
 
+## Tuning for large bulk loads (Tier-1, big-RAM)
+
+When you're ingesting hundreds of millions to billions of quads into a
+**fresh** database on a big-RAM node, the defaults leave a lot on the
+table. The profile below pairs `load_turtle(…, bulk_load => true)` with
+server settings that keep the bottleneck on CPU + I/O rather than WAL
+and checkpoints.
+
+### Postgres server settings
+
+Set these in `postgresql.conf` (or `ALTER SYSTEM` + reload) **before**
+the load. Values assume a dedicated box with tens of GB of RAM; scale
+to your hardware.
+
+| Setting | Suggested | Why |
+|---|---|---|
+| `shared_buffers` | 25–40 % of RAM | Keep the dictionary + hot index pages resident. |
+| `maintenance_work_mem` | 2–8 GB | Faster index (re)builds — used by the defer-index rebuild and `ANALYZE`. |
+| `max_wal_size` | 32–64 GB | Fewer checkpoints during the load; the single biggest win for sustained write throughput. |
+| `checkpoint_timeout` | 30–60 min | Same — spread checkpoints out. |
+| `wal_compression` | `on` | Less WAL volume on a write-heavy load. |
+| `effective_io_concurrency` | 200–256 (SSD/NVMe) | Concurrent prefetch for the parallel resolve + index scans. |
+| `max_parallel_maintenance_workers` | 4–8 | Parallelises the defer-index rebuild. |
+| `max_parallel_workers` / `…_per_gather` | ≈ core count | Headroom for the parallel index build + later queries. |
+
+### Durability vs. speed (read the caveat)
+
+For a **rebuildable** bulk import — a fresh load you can simply re-run
+from source if the box dies mid-load — you can trade crash durability
+for throughput:
+
+| Setting | Bulk value | Caveat |
+|---|---|---|
+| `synchronous_commit` | `off` | Safe-ish: a crash loses recently-committed txns but never corrupts. Fine for a reloadable import. |
+| `fsync` | `off` | **Dangerous.** A crash can corrupt the cluster — only when the whole DB is disposable and you'll reload from scratch. Turn it back `on` (and restart) before the data matters. |
+| `full_page_writes` | `off` | Only meaningful alongside `fsync = off`; same caveat. |
+
+Restore `synchronous_commit` / `fsync` / `full_page_writes` to their
+durable defaults — and `CHECKPOINT` — once the load completes and
+before the database goes into service.
+
+### pgRDF knobs
+
+| Knob | Default | For big loads |
+|---|---|---|
+| `bulk_load => true` (a `load_turtle` arg) | `false` | Use it. The parallel fast path fires only on a **fresh** (empty) dictionary, so load the largest file first into a clean database, then load smaller files normally. |
+| `pgrdf.bulk_defer_index_min` | `100000` | Above this row count the fast path drops the hexastore indexes + `unique_term`, loads heap-only, then rebuilds in parallel. The default is already the right call at scale. |
+| `pgrdf.dict_batch_size` | `500` | The streaming dict batch size; irrelevant on the bulk path (it batches in-Rust). |
+| `pgrdf.auto_analyze` | `on` | Leave on — the automatic post-load / post-materialize `ANALYZE` is what keeps the planner honest at scale. |
+
+### Order of operations
+
+1. Fresh database, server tuned as above, durability relaxed (only if
+   the load is rebuildable).
+2. `load_turtle('/data/big.ttl', 1, NULL, true)` — largest file first.
+3. Load any smaller / incremental files (these take the streaming path
+   once the dictionary is populated).
+4. `pgrdf.materialize(...)` if you need inference.
+5. Restore durable settings, `CHECKPOINT`, put the DB into service.
+
 ## What still doesn't work
 
 | Symptom | Cause |
