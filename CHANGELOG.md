@@ -6,6 +6,36 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.8] — 2026-06-20
+
+### Added — streaming / windowed bulk loader (`load_turtle_streaming`) ★ headline
+
+A bounded-RAM ingest path for graphs larger than RAM.
+`pgrdf.load_turtle_streaming(path, graph_id, window_triples DEFAULT 20_000_000,
+id_reserve_block DEFAULT 1_000_000, base_iri DEFAULT NULL)` reads the file through a
+`BufReader` one `window_triples`-sized window at a time — parse, intern, flush — and
+**never holds the whole file in RAM**: peak memory is bounded by one window plus the
+dictionary, regardless of total file size. The dictionary is a **persistent in-Rust
+`HashMap` carried across windows**, so term resolution is a hashmap lookup, never the
+per-term SQL anti-join that walls the serial streaming path (`dict_db_calls = 0`).
+Indexes are dropped once before the first window and rebuilt once after the last
+(defer-index across the entire load). The verbose stats gain `windows` and `dict_terms`.
+
+This is the path to importing graphs that do not fit the whole-file parallel fast path.
+Measured on a 160-vCPU / 1.28 TiB host against Wikidata `truthy`: an 8 GB slice
+(71.5 M triples) at **277 k triples/s**, a 32 GB slice (273 M triples) at
+**317 k triples/s** — matching the whole-file fast path's throughput, at a fraction of
+its memory (the whole-file path would need > 1 TB RAM at that scale). Loaded counts are
+exact; malformed lines are accounted by `parse_skipped` (see below).
+
+### Added — lenient bulk parse (skip + count malformed triples)
+
+The bulk parse passes now **skip and count** a malformed triple — a bad IRI, an oxttl
+parse error — instead of aborting the whole load. One bad line in a
+multi-hundred-million-triple Wikidata dump no longer kills the ingest. The count surfaces
+as `parse_skipped` in the loader stats (both `stats_to_jsonb` and `quad_stats_to_jsonb`);
+full streaming parse speed is retained via oxttl's built-in error recovery.
+
 ## [0.6.7] — 2026-06-20
 
 ### Fixed — concurrency-safe bulk dictionary id reservation ★ headline
