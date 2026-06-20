@@ -1572,7 +1572,9 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
     // iterator continues, so a malformed triple (e.g. Wikidata's stray control-char IRIs) is
     // SKIPPED + counted rather than aborting the whole multi-hundred-million-triple load. Full
     // streaming parse speed is retained; the count surfaces as `parse_skipped` in the stats.
-    let parsed: Vec<(Vec<(RawKey, RawKey, RawKey)>, i64)> = chunks
+    type RawTriple = (RawKey, RawKey, RawKey);
+    type ParsedChunk = (Vec<RawTriple>, i64);
+    let parsed: Vec<ParsedChunk> = chunks
         .par_iter()
         .map(|&(a, b)| {
             let mut out = Vec::new();
@@ -1935,7 +1937,9 @@ fn ingest_turtle_streaming(
 
         // PASS 1 (rayon): parallel parse this window, lenient (skip+count parse errors).
         let t_parse = Instant::now();
-        let parsed: Vec<(Vec<(RawKey, RawKey, RawKey)>, i64)> = window_lines
+        type RawTriple = (RawKey, RawKey, RawKey);
+        type ParsedChunk = (Vec<RawTriple>, i64);
+        let parsed: Vec<ParsedChunk> = window_lines
             .par_chunks(4096)
             .map(|lines| {
                 let mut out: Vec<(RawKey, RawKey, RawKey)> = Vec::with_capacity(lines.len());
