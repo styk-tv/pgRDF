@@ -67,6 +67,11 @@ type DictKey = (i16, String, Option<i64>, Option<String>);
 #[derive(Default)]
 struct LoaderStats {
     triples: i64,
+    /// Lenient bulk parse (v0.7) — triples skipped because oxttl returned a
+    /// syntax error (malformed source, e.g. Wikidata's stray control-char
+    /// IRIs). oxttl recovers + continues (toolkit `error_recovery_state`), so
+    /// these are dropped + counted, not fatal. 0 on a clean load / serial paths.
+    parse_skipped: i64,
     /// Term references that resolved out of the per-call HashMap cache.
     dict_cache_hits: i64,
     /// Term references that fell through the per-call HashMap and
@@ -1052,6 +1057,7 @@ fn maybe_prewarm_once() {
 fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
     pgrx::JsonB(json!({
         "triples":          stats.triples,
+        "parse_skipped":    stats.parse_skipped,
         "dict_cache_hits":  stats.dict_cache_hits,
         "shmem_cache_hits": stats.shmem_cache_hits,
         "dict_db_calls":    stats.dict_db_calls,
@@ -1418,6 +1424,7 @@ where
 fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
     pgrx::JsonB(json!({
         "triples":          stats.triples,
+        "parse_skipped":    stats.parse_skipped,
         "dict_cache_hits":  stats.dict_cache_hits,
         "shmem_cache_hits": stats.shmem_cache_hits,
         "dict_db_calls":    stats.dict_db_calls,
@@ -1553,12 +1560,23 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
 
     // ── PASS 1: parallel parse → per-chunk raw triples ──────────────
     let t_parse = Instant::now();
-    let per_chunk: Vec<Vec<(RawKey, RawKey, RawKey)>> = chunks
+    // Lenient: oxttl recovers after a syntax error (toolkit `error_recovery_state`) and the
+    // iterator continues, so a malformed triple (e.g. Wikidata's stray control-char IRIs) is
+    // SKIPPED + counted rather than aborting the whole multi-hundred-million-triple load. Full
+    // streaming parse speed is retained; the count surfaces as `parse_skipped` in the stats.
+    let parsed: Vec<(Vec<(RawKey, RawKey, RawKey)>, i64)> = chunks
         .par_iter()
         .map(|&(a, b)| {
             let mut out = Vec::new();
+            let mut skipped: i64 = 0;
             for r in TurtleParser::new().for_reader(&bytes[a..b]) {
-                let t = r.expect("load_turtle: turtle parse error");
+                let t = match r {
+                    Ok(t) => t,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
                 let s: RawKey = match &t.subject {
                     NamedOrBlankNode::NamedNode(n) => {
                         (term_type::URI, n.as_str().to_string(), None, None)
@@ -1592,10 +1610,13 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
                 };
                 out.push((s, p, o));
             }
-            out
+            (out, skipped)
         })
         .collect();
     stats.parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
+    stats.parse_skipped = parsed.iter().map(|(_, s)| *s).sum();
+    let per_chunk: Vec<Vec<(RawKey, RawKey, RawKey)>> =
+        parsed.into_iter().map(|(c, _)| c).collect();
     let triples: usize = per_chunk.iter().map(|c| c.len()).sum();
     stats.triples = triples as i64;
 
