@@ -32,7 +32,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::mem;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -131,6 +131,12 @@ struct LoaderStats {
     /// invoked outside the dispatch (e.g. the `parse_turtle_dict_batched`
     /// spike UDF, which sets its own `dict_batched` discriminator).
     path: &'static str,
+    /// Streaming path only — number of windows processed (each ~`window_triples`
+    /// lines streamed → parsed → dict-resolved against the persistent map → inserted).
+    windows: i64,
+    /// Streaming path only — distinct dictionary terms the persistent in-Rust map
+    /// resolved across the whole load (final cross-window `HashMap` size).
+    dict_terms: i64,
 }
 
 /// Resolve a term to its dictionary id, caching the result for the
@@ -1078,6 +1084,8 @@ fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
         // outside the dispatch (e.g. the `parse_turtle_dict_batched`
         // spike UDF overrides `path` with `dict_batched` after this).
         "path":             stats.path,
+        "windows":          stats.windows,
+        "dict_terms":       stats.dict_terms,
     }))
 }
 
@@ -1824,6 +1832,345 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
     }
     stats.elapsed_ms = t_all.elapsed().as_secs_f64() * 1000.0;
     stats
+}
+
+/// v0.7 — **streaming / windowed** parallel bulk-ingest. Breaks the whole-file-in-RAM
+/// ceiling of `ingest_turtle_parallel_bulk` AND avoids the slow SQL anti-join past
+/// window 1, while staying parallel on parse. The `.nt` is streamed through a
+/// `BufReader` in WINDOWS of ~`window_triples` lines (never `read_to_end`); a
+/// **persistent** in-Rust `HashMap<DictKey,i64>` lives across ALL windows, so dict
+/// resolution is an in-memory lookup — never a SQL anti-join. Peak RAM ≈ one window's
+/// triples + the persistent map (unique-terms, sub-linear in triples), so it's linear
+/// where the whole-file path went super-linear (a 32 GB load was killed at ~2 h).
+/// Defer-index ONCE across all windows. Empty-dict by construction (the guard enforces).
+/// Single-loader id reservation: contiguous block via `min(nextval … generate_series)`.
+fn ingest_turtle_streaming(
+    path: &str,
+    graph_id: i64,
+    window_triples: usize,
+    id_reserve_block: usize,
+) -> LoaderStats {
+    use rayon::prelude::*;
+    type RawKey = (i16, String, Option<String>, Option<String>);
+
+    let t_all = Instant::now();
+    let mut stats = LoaderStats {
+        path: "streaming",
+        ..Default::default()
+    };
+
+    // Persistent across ALL windows: the anti-join replacement.
+    let mut dict: HashMap<DictKey, i64> = HashMap::new();
+    let mut next_id: i64 = 0;
+    let mut id_hi: i64 = 0;
+    let reserve_block_sz = id_reserve_block.max(1) as i64;
+
+    // Reserve a contiguous [lo, lo+n) id block from the dict IDENTITY sequence.
+    // (Single-loader: generate_series pulls nextval n times with nothing interleaved,
+    // so the block is contiguous; ids are opaque, gaps under concurrency are harmless.)
+    let reserve = |n: i64| -> i64 {
+        Spi::get_one_with_args::<i64>(
+            "SELECT min(v) FROM (SELECT nextval(\
+             pg_get_serial_sequence('pgrdf._pgrdf_dictionary','id')) AS v \
+             FROM generate_series(1, $1)) s",
+            &[n.into()],
+        )
+        .expect("load_turtle_streaming: dict id block reservation")
+        .expect("load_turtle_streaming: id block reservation NULL")
+    };
+    // Same dict-insert SQL as the bulk path's `ins`.
+    let ins = |ids: Vec<i64>,
+               tt: Vec<i16>,
+               lv: Vec<String>,
+               di: Vec<Option<i64>>,
+               lt: Vec<Option<String>>| {
+        if ids.is_empty() {
+            return;
+        }
+        Spi::run_with_args(
+            "INSERT INTO pgrdf._pgrdf_dictionary \
+             (id, term_type, lexical_value, datatype_iri_id, language_tag) \
+             OVERRIDING SYSTEM VALUE \
+             SELECT * FROM unnest($1::int8[], $2::int2[], $3::text[], $4::int8[], $5::text[])",
+            &[ids.into(), tt.into(), lv.into(), di.into(), lt.into()],
+        )
+        .expect("load_turtle_streaming: dict bulk insert");
+    };
+
+    // Defer-index ONCE across the whole multi-window load.
+    let t_idx0 = Instant::now();
+    bulk_drop_indexes();
+    stats.index_ms += t_idx0.elapsed().as_secs_f64() * 1000.0;
+    stats.defer_index = true;
+
+    let file = File::open(path)
+        .unwrap_or_else(|e| panic!("load_turtle_streaming: failed to open {path:?}: {e}"));
+    let mut reader = BufReader::with_capacity(1 << 20, file);
+    let mut window_lines: Vec<String> = Vec::with_capacity(window_triples);
+    let mut bs: Vec<i64> = Vec::with_capacity(BULK_QUAD_BATCH);
+    let mut bp: Vec<i64> = Vec::with_capacity(BULK_QUAD_BATCH);
+    let mut bo: Vec<i64> = Vec::with_capacity(BULK_QUAD_BATCH);
+
+    loop {
+        window_lines.clear();
+        let mut eof = false;
+        while window_lines.len() < window_triples {
+            let mut line = String::new();
+            let n = reader
+                .read_line(&mut line)
+                .unwrap_or_else(|e| panic!("load_turtle_streaming: read error on {path:?}: {e}"));
+            if n == 0 {
+                eof = true;
+                break;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            window_lines.push(line);
+        }
+        if window_lines.is_empty() {
+            break;
+        }
+
+        // PASS 1 (rayon): parallel parse this window, lenient (skip+count parse errors).
+        let t_parse = Instant::now();
+        let parsed: Vec<(Vec<(RawKey, RawKey, RawKey)>, i64)> = window_lines
+            .par_chunks(4096)
+            .map(|lines| {
+                let mut out: Vec<(RawKey, RawKey, RawKey)> = Vec::with_capacity(lines.len());
+                let mut skipped: i64 = 0;
+                for line in lines {
+                    for r in TurtleParser::new().for_reader(line.as_bytes()) {
+                        let t = match r {
+                            Ok(t) => t,
+                            Err(_) => {
+                                skipped += 1;
+                                continue;
+                            }
+                        };
+                        let s: RawKey = match &t.subject {
+                            NamedOrBlankNode::NamedNode(n) => {
+                                (term_type::URI, n.as_str().to_string(), None, None)
+                            }
+                            NamedOrBlankNode::BlankNode(bn) => {
+                                (term_type::BLANK_NODE, bn.as_str().to_string(), None, None)
+                            }
+                        };
+                        let p: RawKey =
+                            (term_type::URI, t.predicate.as_str().to_string(), None, None);
+                        let o: RawKey = match &t.object {
+                            Term::NamedNode(n) => {
+                                (term_type::URI, n.as_str().to_string(), None, None)
+                            }
+                            Term::BlankNode(bn) => {
+                                (term_type::BLANK_NODE, bn.as_str().to_string(), None, None)
+                            }
+                            Term::Literal(lit) => match lit.language() {
+                                Some(l) => (
+                                    term_type::LITERAL,
+                                    lit.value().to_string(),
+                                    None,
+                                    Some(l.to_string()),
+                                ),
+                                None => (
+                                    term_type::LITERAL,
+                                    lit.value().to_string(),
+                                    Some(lit.datatype().as_str().to_string()),
+                                    None,
+                                ),
+                            },
+                            #[allow(unreachable_patterns)]
+                            _ => panic!("load_turtle_streaming: unsupported object term"),
+                        };
+                        out.push((s, p, o));
+                    }
+                }
+                (out, skipped)
+            })
+            .collect();
+        stats.parse_ms += t_parse.elapsed().as_secs_f64() * 1000.0;
+        stats.parse_skipped += parsed.iter().map(|(_, s)| *s).sum::<i64>();
+        let window: Vec<(RawKey, RawKey, RawKey)> =
+            parsed.into_iter().flat_map(|(c, _)| c).collect();
+        stats.triples += window.len() as i64;
+
+        // PASS 2 (main): intern NEW terms into the persistent map. Macros (not closures)
+        // so `n_*` are not borrow-captured and `mem::take` is free after each tier.
+        let t_dict = Instant::now();
+        let mut n_ids: Vec<i64> = Vec::new();
+        let mut n_tt: Vec<i16> = Vec::new();
+        let mut n_lv: Vec<String> = Vec::new();
+        let mut n_di: Vec<Option<i64>> = Vec::new();
+        let mut n_lt: Vec<Option<String>> = Vec::new();
+        macro_rules! alloc_id {
+            () => {{
+                if next_id >= id_hi {
+                    let lo = reserve(reserve_block_sz);
+                    next_id = lo;
+                    id_hi = lo + reserve_block_sz;
+                }
+                let id = next_id;
+                next_id += 1;
+                id
+            }};
+        }
+        macro_rules! intern1 {
+            ($tt:expr, $lv:expr) => {{
+                let key: DictKey = ($tt, $lv.to_string(), None, None);
+                if !dict.contains_key(&key) {
+                    let id = alloc_id!();
+                    n_ids.push(id);
+                    n_tt.push($tt);
+                    n_lv.push($lv.to_string());
+                    n_di.push(None);
+                    n_lt.push(None);
+                    dict.insert(key, id);
+                }
+            }};
+        }
+        // tier-1: URI/blank + datatype IRIs first (so a literal's datatype id exists).
+        for (s, p, o) in &window {
+            if s.0 != term_type::LITERAL {
+                intern1!(s.0, &s.1);
+            }
+            intern1!(p.0, &p.1);
+            if o.0 != term_type::LITERAL {
+                intern1!(o.0, &o.1);
+            } else if let Some(dt) = &o.2 {
+                intern1!(term_type::URI, dt);
+            }
+        }
+        ins(
+            mem::take(&mut n_ids),
+            mem::take(&mut n_tt),
+            mem::take(&mut n_lv),
+            mem::take(&mut n_di),
+            mem::take(&mut n_lt),
+        );
+        // tier-2: literals, keyed (LITERAL, lexical, datatype_id, lang).
+        macro_rules! intern2 {
+            ($lv:expr, $di:expr, $lt:expr) => {{
+                let key: DictKey = (term_type::LITERAL, $lv.to_string(), $di, $lt.clone());
+                if !dict.contains_key(&key) {
+                    let id = alloc_id!();
+                    n_ids.push(id);
+                    n_tt.push(term_type::LITERAL);
+                    n_lv.push($lv.to_string());
+                    n_di.push($di);
+                    n_lt.push($lt.clone());
+                    dict.insert(key, id);
+                }
+            }};
+        }
+        for (_, _, o) in &window {
+            if o.0 == term_type::LITERAL {
+                let di =
+                    o.2.as_ref()
+                        .map(|dt| dict[&(term_type::URI, dt.clone(), None, None)]);
+                intern2!(&o.1, di, &o.3);
+            }
+        }
+        ins(
+            mem::take(&mut n_ids),
+            mem::take(&mut n_tt),
+            mem::take(&mut n_lv),
+            mem::take(&mut n_di),
+            mem::take(&mut n_lt),
+        );
+        stats.dict_ms += t_dict.elapsed().as_secs_f64() * 1000.0;
+
+        // PASS 3+4: resolve (pure lookups) + bulk-insert quads via flush_batch.
+        let t_ins = Instant::now();
+        for (s, p, o) in &window {
+            let rs = dict[&(s.0, s.1.clone(), None, None)];
+            let rp = dict[&(p.0, p.1.clone(), None, None)];
+            let ro = if o.0 == term_type::LITERAL {
+                let di =
+                    o.2.as_ref()
+                        .map(|dt| dict[&(term_type::URI, dt.clone(), None, None)]);
+                dict[&(term_type::LITERAL, o.1.clone(), di, o.3.clone())]
+            } else {
+                dict[&(o.0, o.1.clone(), None, None)]
+            };
+            bs.push(rs);
+            bp.push(rp);
+            bo.push(ro);
+            if bs.len() >= BULK_QUAD_BATCH {
+                flush_batch(&mut bs, &mut bp, &mut bo, graph_id, &mut stats);
+                bs.reserve(BULK_QUAD_BATCH);
+                bp.reserve(BULK_QUAD_BATCH);
+                bo.reserve(BULK_QUAD_BATCH);
+            }
+        }
+        stats.insert_ms += t_ins.elapsed().as_secs_f64() * 1000.0;
+        stats.windows += 1;
+        if eof {
+            break;
+        }
+    }
+    if !bs.is_empty() {
+        let t_ins = Instant::now();
+        flush_batch(&mut bs, &mut bp, &mut bo, graph_id, &mut stats);
+        stats.insert_ms += t_ins.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    let t_idx1 = Instant::now();
+    bulk_rebuild_indexes();
+    stats.index_ms += t_idx1.elapsed().as_secs_f64() * 1000.0;
+
+    stats.dict_terms = dict.len() as i64;
+    stats.elapsed_ms = t_all.elapsed().as_secs_f64() * 1000.0;
+    stats
+}
+
+/// Guard for the streaming path: like `bulk_load_guarded`, correct ONLY on an empty
+/// dict (it dedups via its persistent map, not against existing rows). Empty → stream;
+/// populated → fall back to the always-correct combined `ingest_dispatch`.
+fn streaming_load_guarded(
+    path: &str,
+    graph_id: i64,
+    window_triples: usize,
+    id_reserve_block: usize,
+    base_iri: Option<&str>,
+) -> LoaderStats {
+    let empty = Spi::get_one::<bool>("SELECT NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_dictionary)")
+        .expect("load_turtle_streaming: empty-dict probe")
+        .unwrap_or(false);
+    if empty {
+        ingest_turtle_streaming(path, graph_id, window_triples, id_reserve_block)
+    } else {
+        let file = File::open(path)
+            .unwrap_or_else(|e| panic!("load_turtle_streaming: failed to open {path:?}: {e}"));
+        ingest_dispatch(BufReader::new(file), graph_id, base_iri)
+    }
+}
+
+/// v0.7 — streaming/windowed parallel bulk ingest of a line-oriented N-Triples file.
+/// Bounded RAM (one window + the persistent dict) and no SQL anti-join — the fix for
+/// the whole-file `bulk_load => TRUE` ceiling + super-linearity. Requires an EMPTY dict.
+///
+/// SQL: `pgrdf.load_turtle_streaming(path TEXT, graph_id BIGINT,
+///       window_triples INT DEFAULT 20000000, id_reserve_block INT DEFAULT 1000000,
+///       base_iri TEXT DEFAULT NULL) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn load_turtle_streaming(
+    path: &str,
+    graph_id: i64,
+    window_triples: default!(i32, 20_000_000),
+    id_reserve_block: default!(i32, 1_000_000),
+    base_iri: default!(Option<&str>, "NULL"),
+) -> pgrx::JsonB {
+    let base = base_iri.filter(|s| !s.is_empty());
+    let stats = streaming_load_guarded(
+        path,
+        graph_id,
+        window_triples.max(1) as usize,
+        id_reserve_block.max(1) as usize,
+        base,
+    );
+    stats_to_jsonb(&stats)
 }
 
 /// Guard for `load_turtle(..., bulk_load => TRUE)`. The self-assigned-id
