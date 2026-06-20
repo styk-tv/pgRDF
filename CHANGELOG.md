@@ -6,6 +6,52 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.7] — 2026-06-20
+
+### Fixed — concurrency-safe bulk dictionary id reservation ★ headline
+
+The parallel bulk loader (`load_turtle(…, bulk_load => true)`) reserved
+dictionary ids from a `max(id)` snapshot + `OVERRIDING SYSTEM VALUE`, then
+`setval`-advanced the identity sequence. Two concurrent bulk loaders (or a
+bulk load racing the standard IDENTITY path) could read the same `max(id)`
+and collide on `_pgrdf_dictionary_pkey` — the intermittent dup-key flake.
+PASS 2 now reserves the exact id count atomically from the table's own
+IDENTITY sequence (`SELECT nextval(seq) FROM generate_series(1,N)`) and
+inserts with those ids; the `setval` is gone (nextval already advanced the
+sequence). Race-free against any concurrent allocator; behaviour and ids
+are unchanged for a single-connection load. The reservation runs per
+500,000-row chunk, so neither the id vector nor the SPI result set grows
+with the dictionary — **bounded memory at billion-term scale**. New test
+`load_turtle_bulk_reserves_from_identity_sequence` (TDD red→green); 294
+pgrx green.
+
+### Docs — Tier-1 big-RAM bulk-ingest tuning profile
+
+`guide/02-loading-rdf` gains a "Tuning for large bulk loads" section: the
+Postgres server settings (`shared_buffers`, `max_wal_size`,
+`checkpoint_timeout`, `wal_compression`, `effective_io_concurrency`,
+`maintenance_work_mem`, parallel-maintenance workers), the
+durability-vs-speed tradeoff with the `fsync=off` corruption caveat, the
+pgRDF knobs (`bulk_load`, `pgrdf.bulk_defer_index_min`,
+`pgrdf.dict_batch_size`, `pgrdf.auto_analyze`) and their defaults, and the
+recommended order of operations (largest file first into a fresh dict).
+
+### Docs — guide/ + docs/ refreshed to the v0.6 surface
+
+Paragraph-by-paragraph stale-info pass: the `'pgrdf'` SHACL-SPARQL mode,
+the partition-aware `pg_prewarm` recipe + real index names, GRAPH scoping,
+`pgrdf.drop_graph`, shipped CONSTRUCT/UPDATE, MIT (not Apache-2.0), and the
+current test bar. Historical per-release records left intact.
+
+### Not implemented — heap_multi_insert / COPY-BINARY quad insert
+
+Closed as **measured-negative**. The TA-10/TA-11 spikes
+(`tests/perf/lubm/spike-ta10.lubm-1.md`) found the bulk-INSERT mechanic is
+~13% of insert cost; heap_multi_insert / COPY BINARY would gain ~5–10% of
+`insert_ms` (~1% e2e) for ~200 lines of unsafe `pg_sys`. The real lever
+(hexastore index maintenance, ~51%) is already captured by the defer-index
+path (v0.6.3) + defer-constraint (v0.6.4).
+
 ## [0.6.6] — 2026-06-15
 
 ### Performance — larger bulk quad-insert batch ★ headline
