@@ -1470,7 +1470,12 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
 /// drop `unique_term`: the self-assigned-id path de-duplicates terms in
 /// Rust, so the load produces no duplicate tuples; the re-add in
 /// `bulk_rebuild_indexes` VALIDATES that (a backstop against a dedup bug).
-fn bulk_drop_indexes() {
+///
+/// `pub(crate)` so the R2.1 staged loader coordinator
+/// (`storage::staged::pool::load_turtle_staged_run`) reuses the EXACT same defer-index drop (incl.
+/// the partition-DDL gate) before its STAGE phase — the staged INDEX phase then rebuilds via
+/// `jobctl::index_ddls()` (byte-identical to `bulk_rebuild_indexes`).
+pub(crate) fn bulk_drop_indexes() {
     crate::storage::partition::acquire_partition_ddl_gate();
     Spi::run(
         "DROP INDEX IF EXISTS pgrdf._pgrdf_idx_spo, pgrdf._pgrdf_idx_pos, \

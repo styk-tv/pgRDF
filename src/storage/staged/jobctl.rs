@@ -9,12 +9,12 @@
 //! `PgLwLock<[T; N]>` table, `PgAtomic` counters, and registration from the `_PG_init` postmaster
 //! path. See `_WIP/SPEC.STAGED-LOADER-R2.bgworker-design.md` §4.
 
-// R2.0: the shmem segment, its registration, AND the parent↔worker accessors (`create_job`,
-// `claim_worker_slot`, `report_worker`, …) used by `super::pool`. A handful of slot fields stay
-// reserved for the not-yet-implemented real phases — `tspace`/`guc` (per-worker SET LOCAL levers,
-// §5), `range_lo`/`range_hi` (STAGE byte ranges / RESOLVE row ranges, §6.A/C), and the STAGE/DICT/
-// RESOLVE/INDEX phase ordinals beyond the minimal ping — so the crate-level allow remains until
-// R2.1 wires them. Everything the ping coordinator needs is read.
+// R2.1 wires the real phases, so `range_lo`/`range_hi` (STAGE byte ranges) and every phase ordinal
+// are now used. The `tspace`/`guc` inline byte arrays remain RESERVED: R2.1 applies the per-session
+// parallel levers via `phases::apply_session_gucs` (computed in-worker from `num_cpus`) rather than
+// shipping a serialised GUC blob through shmem, and the staging tablespace is not yet a coordinator
+// argument. Keep a narrow allow for those reserved fields + the still-unused `resume`-path helpers
+// rather than deleting struct fields the design (§4/§5) calls for.
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -37,11 +37,15 @@ pub const ERR_CAP: usize = 512;
 /// Phase ordinals (also the resumable high-water mark in [`JobSlot::phase`]).
 pub mod phase {
     pub const NONE: u8 = 0;
-    pub const STAGE: u8 = 1; // A — parallel COPY → UNLOGGED staging
+    pub const STAGE: u8 = 1; // A — parallel parse → UNLOGGED staging
     pub const DICT: u8 = 2; // B — set-based dedup → dictionary
     pub const RESOLVE: u8 = 3; // C — parallel hash-join → quads
     pub const INDEX: u8 = 4; // D — hexastore indexes (concurrent workers)
     pub const DONE: u8 = 5;
+    /// R2.0 pool-proof sentinel — the `load_turtle_staged_ping` worker body (a marker INSERT), kept
+    /// as a standalone regression test of the spawn/wait/report machinery distinct from the real
+    /// phases. Never a real high-water mark; only set on the ping coordinator's worker slots.
+    pub const PING: u8 = 250;
 }
 
 /// Job lifecycle state.
@@ -78,6 +82,13 @@ pub struct JobSlot {
 unsafe impl PGRXSharedMemory for JobSlot {}
 
 impl JobSlot {
+    /// The server-side `.nt` path, decoded from the inline byte array (`path_len` bytes). The
+    /// coordinator validated `path.len() <= PATH_CAP` at [`create_job`], so this never truncates.
+    pub fn path(&self) -> String {
+        let n = (self.path_len as usize).min(PATH_CAP);
+        String::from_utf8_lossy(&self.path[..n]).into_owned()
+    }
+
     const fn default_const() -> Self {
         Self {
             in_use: 0,
@@ -210,7 +221,17 @@ pub fn create_job(
 /// (`0..MAX_SLOTS`) — this integer is what gets passed to the worker via `set_argument`, and the
 /// worker reads its slot (then follows `job_idx` to the job) on entry. `None` ⇒ no free slot / not
 /// ready. Status starts at 0 (`spawned`); the worker overwrites it via [`report_worker`].
-pub fn claim_worker_slot(job_idx: usize, phase: u8, shard: u16) -> Option<usize> {
+///
+/// `range_lo`/`range_hi` are the STAGE worker's file byte offsets (snapped to newline boundaries by
+/// the coordinator, §6.A); pass `0, 0` for phases that don't byte-range (DICT/RESOLVE/INDEX and the
+/// ping). `shard` selects the INDEX DDL (0..n) for the INDEX phase.
+pub fn claim_worker_slot(
+    job_idx: usize,
+    phase: u8,
+    shard: u16,
+    range_lo: u64,
+    range_hi: u64,
+) -> Option<usize> {
     if !is_ready() {
         return None;
     }
@@ -224,8 +245,8 @@ pub fn claim_worker_slot(job_idx: usize, phase: u8, shard: u16) -> Option<usize>
                 _pad0: 0,
                 job_idx: job_idx as u16,
                 shard,
-                range_lo: 0,
-                range_hi: 0,
+                range_lo,
+                range_hi,
             };
             return Some(idx);
         }
@@ -283,6 +304,35 @@ pub fn mark_job_done(idx: usize) {
     let mut jobs = JOBS.exclusive();
     jobs[idx].state = state::DONE;
     jobs[idx].phase = phase::DONE;
+}
+
+/// Advance the job's `phase` high-water mark after a phase's workers have all succeeded. This is the
+/// committed-by-the-coordinator record of "this phase is complete"; on a resume the coordinator reads
+/// it back and skips finished phases (§7). Coordinator-only; no-op when not ready.
+pub fn advance_phase(idx: usize, phase: u8) {
+    if !is_ready() {
+        return;
+    }
+    let mut jobs = JOBS.exclusive();
+    jobs[idx].phase = phase;
+}
+
+/// The dictionary/quad index-rebuild DDLs for the staged loader's **INDEX** phase — the SAME 5
+/// statements `loader.rs::bulk_rebuild_indexes` runs after a single-backend bulk load (3 hexastore
+/// covering indexes on `_pgrdf_quads`, the dict `lexical_value` hash index, and the re-add of the
+/// `unique_term` constraint that validates dictionary uniqueness over the loaded data). The staged
+/// INDEX phase spawns one worker per entry so all 5 build/validate steps run SIMULTANEOUSLY across
+/// backends (§6.D); each worker's `shard` field is the index into this slice. Kept here (next to the
+/// worker plumbing) so the coordinator can size the INDEX phase by `index_ddls().len()`.
+pub fn index_ddls() -> &'static [&'static str] {
+    &[
+        "CREATE INDEX _pgrdf_idx_spo ON pgrdf._pgrdf_quads (subject_id, predicate_id, object_id) INCLUDE (is_inferred)",
+        "CREATE INDEX _pgrdf_idx_pos ON pgrdf._pgrdf_quads (predicate_id, object_id, subject_id) INCLUDE (is_inferred)",
+        "CREATE INDEX _pgrdf_idx_osp ON pgrdf._pgrdf_quads (object_id, subject_id, predicate_id) INCLUDE (is_inferred)",
+        "CREATE INDEX _pgrdf_dict_val_idx ON pgrdf._pgrdf_dictionary USING HASH (lexical_value)",
+        "ALTER TABLE pgrdf._pgrdf_dictionary ADD CONSTRAINT unique_term \
+         UNIQUE (term_type, lexical_md5, datatype_iri_id, language_tag)",
+    ]
 }
 
 /// Release job `idx` and every [`WorkerSlot`] that pointed at it (frees the `in_use` flags so the

@@ -31,13 +31,16 @@
 //! default `READ COMMITTED` snapshot) is therefore an INDEPENDENT, in-table proof that each worker
 //! committed — distinct from `succeeded`, which is the shmem `WorkerSlot.status` flag.
 
-use crate::storage::staged::jobctl;
+use crate::storage::staged::{jobctl, phases};
 use pgrx::bgworkers::{
     BackgroundWorker, BackgroundWorkerBuilder, BackgroundWorkerStatus, DynamicBackgroundWorker,
     SignalWakeFlags,
 };
 use pgrx::prelude::*;
 use serde_json::json;
+use std::fs::File;
+use std::io::Read;
+use std::time::Instant;
 
 /// The exported symbol Postgres dlsym's as each worker's `main`. MUST match
 /// `set_function(...)` below and be `#[pg_guard] extern "C-unwind" fn(Datum)` returning void.
@@ -110,24 +113,45 @@ pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGTERM | SignalWakeFlags::SIGHUP);
 
     // A dynamic worker has no inherited DB; reconnect to the one the coordinator ran in.
-    let job = jobctl::read_worker(slot);
-    let dbjob = jobctl::read_job(job.job_idx as usize);
-    let db_oid = pg_sys::Oid::from_u32(dbjob.db_oid);
+    let w = jobctl::read_worker(slot);
+    let job = jobctl::read_job(w.job_idx as usize);
+    let db_oid = pg_sys::Oid::from_u32(job.db_oid);
     BackgroundWorker::connect_worker_to_spi_by_oid(Some(db_oid), None);
 
-    let job_id = dbjob.job_id;
+    let job_id = job.job_id;
     let pid = unsafe { pg_sys::MyProcPid };
 
     // ONE committed transaction = this worker's recovery point. `BackgroundWorker::transaction`
     // begins/commits the xact and runs the body under `PgTryBuilder`, so a SQL ERROR inside is
-    // caught and surfaced as a panic to `catch_unwind` rather than longjmp'ing past us.
+    // caught and surfaced as a panic to `catch_unwind` rather than longjmp'ing past us. The body
+    // dispatches on the worker's phase — the R2.1 STAGE/DICT/RESOLVE/INDEX bodies, or the R2.0 PING
+    // marker INSERT kept as a standalone pool-machinery regression.
     let result = std::panic::catch_unwind(|| {
-        BackgroundWorker::transaction(|| {
-            Spi::run_with_args(
-                "INSERT INTO pgrdf._pgrdf_staged_ping (job_id, worker_slot, pid) VALUES ($1, $2, $3)",
-                &[job_id.into(), (slot as i64).into(), (pid as i64).into()],
-            )
-            .expect("staged worker: ping INSERT failed");
+        BackgroundWorker::transaction(|| match w.phase {
+            jobctl::phase::PING => {
+                Spi::run_with_args(
+                    "INSERT INTO pgrdf._pgrdf_staged_ping (job_id, worker_slot, pid) VALUES ($1, $2, $3)",
+                    &[job_id.into(), (slot as i64).into(), (pid as i64).into()],
+                )
+                .expect("staged worker: ping INSERT failed");
+            }
+            jobctl::phase::STAGE => {
+                phases::apply_session_gucs();
+                let _ = phases::stage(&job, &w);
+            }
+            jobctl::phase::DICT => {
+                phases::apply_session_gucs();
+                let _ = phases::dict(&job, &w);
+            }
+            jobctl::phase::RESOLVE => {
+                phases::apply_session_gucs();
+                let _ = phases::resolve(&job, &w);
+            }
+            jobctl::phase::INDEX => {
+                phases::apply_session_gucs();
+                phases::build_index(&job, &w);
+            }
+            other => panic!("staged worker: unknown phase ordinal {other}"),
         })
     });
 
@@ -186,7 +210,7 @@ fn load_turtle_staged_ping(n_workers: i32) -> pgrx::JsonB {
     let mut handles: Vec<DynamicBackgroundWorker> = Vec::with_capacity(want);
     let mut spawn_failures = 0usize;
     for i in 0..want {
-        let wslot = match jobctl::claim_worker_slot(job_idx, jobctl::phase::STAGE, i as u16) {
+        let wslot = match jobctl::claim_worker_slot(job_idx, jobctl::phase::PING, i as u16, 0, 0) {
             Some(s) => s,
             None => {
                 spawn_failures += 1;

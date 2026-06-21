@@ -9,8 +9,10 @@
 //! (`BackgroundWorker::transaction(|| …)`), not the coordinator — that's the load-bearing design
 //! decision (pgrx 0.16 cannot emit a transaction-controlling PROCEDURE).
 //!
-//! Design: `_WIP/SPEC.STAGED-LOADER-R2.bgworker-design.md`. Phasing: R2.0 (this) = the pool
-//! skeleton + shmem job segment; later R2.1 = multi-stream COPY + sharded dict; R2.2 = tuning.
+//! Design: `_WIP/SPEC.STAGED-LOADER-R2.bgworker-design.md`. Phasing: R2.0 = the pool skeleton +
+//! shmem job segment (the "ping" proof); R2.1 (this) = the REAL STAGE/DICT/RESOLVE/INDEX phase
+//! bodies + the `load_turtle_staged_run` coordinator; R2.2 = nested-parallelism tuning.
 
 pub mod jobctl;
+pub mod phases;
 pub mod pool;
