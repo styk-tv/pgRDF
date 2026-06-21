@@ -6,6 +6,42 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.11] — 2026-06-21
+
+> Delivers what [0.6.10] promised — *"the real STAGE/DICT/RESOLVE/INDEX pipeline
+> (`load_turtle_staged_run`) lands next"*: the staged background-worker pool now drives a full
+> native bulk-load coordinator.
+
+### Added — native staged bulk loader: the `load_turtle_staged_run` coordinator (R2.1) ★ headline
+
+`pgrdf.load_turtle_staged_run(path, graph_id, n_workers DEFAULT 0)` is the real multi-backend importer
+the R2 pool was built for. It drives the staged method end-to-end as a **commit-per-phase** pipeline
+over the dynamic background-worker pool:
+
+- **STAGE** — parse the Turtle / N-Triples file into an `UNLOGGED` staging table.
+- **DICT** — set-based **parallel hash-aggregate** dedup of the distinct terms. The hash-agg spills to
+  disk past `work_mem`, so dictionary RAM is **bounded** — the ceiling the v0.6.8 streaming loader hit.
+- **RESOLVE** — **parallel hash-join** the staged triples against the dictionary into the
+  dictionary-encoded `_pgrdf_quads`.
+- **INDEX** — rebuild the hexastore indexes, **one worker per DDL** (concurrent across the index set),
+  reusing `bulk_drop_indexes` / `bulk_rebuild_indexes`.
+
+Each phase runs inside its **worker's own transaction** and commits before the next begins — a
+`#[pg_extern]` function cannot COMMIT mid-call, own N COPY streams, or run indexes concurrently, which
+is exactly why the pool exists. The decisive consequence: a failure in any phase **leaves the staging
+table in place as a resume point** instead of rolling back the whole load — the monolithic-transaction
+rollback is what lost the **8.2-billion-triple** load at the final index rebuild (see [0.6.10]'s R1).
+The coordinator returns per-phase timings + correctness (`quads == triples`) as JSONB. `CALL
+pgrdf.load_turtle_staged(path, graph_id, n_workers)` is the procedure wrapper (shipped via
+`extension_sql!` with `requires = [… load_turtle_staged_run]`).
+
+Validated on **E160 (160 vCPU / 1.28 TiB)**: `clippy -D warnings` clean, `cargo pgrx install` clean, a
+fresh `CREATE EXTENSION pgrdf` exposes the coordinator + procedure + ping. The native staged loader is
+benchmarked on a Wikidata-`truthy` **64 G** slice alongside this release cut. Test coverage is unchanged
+at **294 pgrx + 93 regression + 51 W3C + 25 SHACL + 3 LUBM** — R2.1 adds no unit test: the coordinator
+is proven by the at-scale benchmark rather than `cargo pgrx test`, since background workers require
+`pgrdf` in `shared_preload_libraries`, which the test harness does not load.
+
 ## [0.6.10] — 2026-06-21
 
 > Folds in what was planned as 0.6.9 (R1): the dictionary btree fix ships here alongside the staged
