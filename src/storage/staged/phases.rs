@@ -26,10 +26,11 @@
 use crate::storage::dict::term_type;
 use crate::storage::staged::jobctl::{self, JobSlot, WorkerSlot};
 use oxrdf::{NamedOrBlankNode, Term};
-use oxttl::TurtleParser;
+use oxttl::NTriplesParser;
 use pgrx::prelude::*;
+use rayon::prelude::*;
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 
 /// Staging columns: the raw triple as parsed, with the object split into its
 /// (type, lexical value, datatype IRI string, language tag) so the set-based DICT/RESOLVE phases can
@@ -38,10 +39,21 @@ use std::io::Read;
 /// DICT); `o_lang` is the language tag. NULL `o_dt`/`o_lang` mirror the NULLS-DISTINCT dict key.
 const STAGE_COLS: &str = "s text, p text, o_type smallint, o_val text, o_dt text, o_lang text";
 
-/// Rows inserted per `INSERT … SELECT * FROM unnest(...)` batch in STAGE. 50k matches the loader's
-/// `BULK_QUAD_BATCH`; large enough to amortise SPI round-trips, small enough to bound the per-batch
-/// array memory.
-const STAGE_BATCH: usize = 50_000;
+/// Lines pulled from the worker's byte range into one STAGE window before it is parsed (on all cores)
+/// and `COPY`-flushed. The whole file is ~1.2 TB, so STAGE must never hold more than one window: peak
+/// RAM is bounded by `STAGE_WINDOW_LINES` × (the parsed row's owned strings + the serialized TSV
+/// buffer for that window), NOT by the worker's byte range. At ~120 B/line for truthy N-Triples, 4 M
+/// lines ≈ ~0.5 GB of raw line bytes plus a similar order for the parsed `String`s and the TSV
+/// buffer — call it ~1.5–2 GB resident per window. That comfortably fits the 251 GB E32 box (with
+/// 32 cores all parsing one window) and is dwarfed on the 1.26 TB E160. Larger windows amortise the
+/// per-window COPY round-trip further but raise the floor; 4 M is the balance the E160 benchmark hit.
+const STAGE_WINDOW_LINES: usize = 4_000_000;
+
+/// Lines per rayon `par_chunks` slice when parsing a window. Each chunk is parsed by its own
+/// `NTriplesParser`; 4096 matches the streaming loader's `par_chunks(4096)` — small enough to balance
+/// work across all cores on the last (short) window, large enough that the per-chunk parser
+/// construction cost is amortised over thousands of lines.
+const STAGE_PARSE_CHUNK: usize = 4096;
 
 /// The deterministic staging table name for `job_id` (UNLOGGED, dropped on success). Resumable runs
 /// re-find it by this name (§7). Qualified into the `pgrdf` schema.
@@ -119,113 +131,263 @@ pub fn prepare_for_load(job: &JobSlot) {
     Spi::run(&sql).expect("staged STAGE: create staging table failed");
 }
 
-/// **STAGE** (Phase A). Parse this worker's byte range of the `.nt` file leniently and bulk-insert
-/// its rows into the pre-created UNLOGGED staging table.
+/// One parsed staging row, owned: exactly the six staging columns. The object is pre-split into
+/// `(o_type, o_val, o_dt, o_lang)` by the verbatim oxttl term→column mapping (see [`stage`]). Built
+/// in the rayon parse closures (pure-CPU, no SPI), then serialized to the COPY TSV on the worker
+/// thread.
+type StagedRow = (String, String, i16, String, Option<String>, Option<String>);
+
+/// Append one text value to a COPY-TEXT-format buffer, escaping the four bytes PostgreSQL's COPY TEXT
+/// reader treats specially: backslash, newline, carriage-return, and tab (the field delimiter). Every
+/// other byte (including the UTF-8 continuation bytes of multi-byte chars) is passed through
+/// untouched — COPY TEXT is byte-transparent outside these escapes, so a value round-trips exactly.
+/// This is the inverse of the server-side `COPY … FROM '<file>' WITH (FORMAT text)` parse, so a value
+/// written here is read back byte-identical to the oxttl-parsed string. NULLs are handled by the
+/// caller (it writes the literal `\N` instead of calling this).
+fn copy_escape_into(out: &mut String, v: &str) {
+    for ch in v.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Serialize one [`StagedRow`] as a single COPY-TEXT line (tab-delimited, `\n`-terminated) into
+/// `out`. Column order matches the `COPY {stg} (s,p,o_type,o_val,o_dt,o_lang)` target. `o_type` is an
+/// integer (no escaping needed); `o_dt`/`o_lang` emit the literal `\N` when `None` (the COPY-TEXT NULL
+/// sentinel), mirroring the staging table's NULL `o_dt`/`o_lang` and the dict's NULLS-DISTINCT key.
+fn write_copy_row(out: &mut String, row: &StagedRow) {
+    let (s, p, o_type, o_val, o_dt, o_lang) = row;
+    copy_escape_into(out, s);
+    out.push('\t');
+    copy_escape_into(out, p);
+    out.push('\t');
+    // o_type is a smallint 1/2/3 — write it directly, no escaping.
+    out.push_str(itoa_smallint(*o_type));
+    out.push('\t');
+    copy_escape_into(out, o_val);
+    out.push('\t');
+    match o_dt {
+        Some(dt) => copy_escape_into(out, dt),
+        None => out.push_str("\\N"),
+    }
+    out.push('\t');
+    match o_lang {
+        Some(l) => copy_escape_into(out, l),
+        None => out.push_str("\\N"),
+    }
+    out.push('\n');
+}
+
+/// The `o_type` smallint is always one of `term_type::{URI,BLANK_NODE,LITERAL}` (1/2/3), so map it to
+/// a static `&str` instead of allocating via `format!`/`to_string` on the hot path (one call per
+/// staged row, billions of rows). Any other value is a contract violation (the term→column mapping
+/// only emits 1/2/3) and panics rather than silently mis-staging.
+fn itoa_smallint(v: i16) -> &'static str {
+    match v {
+        x if x == term_type::URI => "1",
+        x if x == term_type::BLANK_NODE => "2",
+        x if x == term_type::LITERAL => "3",
+        _ => panic!("staged STAGE: unexpected o_type {v}"),
+    }
+}
+
+/// Parse one window's lines ACROSS ALL CORES into owned [`StagedRow`]s, leniently (a malformed line
+/// is skipped and counted, not fatal — the same Wikidata-control-byte robustness as
+/// `loader.rs::load_turtle_streaming`). N-Triples is line-oriented, so the window buffer splits
+/// cleanly on `\n` and each `par_chunks` slice is parsed by its own `NTriplesParser` — embarrassingly
+/// parallel, no shared state. The term→column extraction is byte-for-byte the same match the serial
+/// `stage()` used (URI/blank → `as_str()` sans brackets; literal → lexical value sans quotes, with
+/// datatype IRI string XOR language tag), so the staged rows are identical regardless of core count.
+/// Returns `(rows, skipped)`.
+fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64) {
+    let parsed: Vec<(Vec<StagedRow>, i64)> = lines
+        .par_chunks(STAGE_PARSE_CHUNK)
+        .map(|chunk| {
+            let mut out: Vec<StagedRow> = Vec::with_capacity(chunk.len());
+            let mut skipped: i64 = 0;
+            for line in chunk {
+                for r in NTriplesParser::new().for_reader(line.as_bytes()) {
+                    let t = match r {
+                        Ok(t) => t,
+                        Err(_) => {
+                            skipped += 1;
+                            continue; // lenient: skip malformed triples (Wikidata control bytes)
+                        }
+                    };
+                    let s = match &t.subject {
+                        NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
+                        NamedOrBlankNode::BlankNode(b) => b.as_str().to_string(),
+                    };
+                    let p = t.predicate.as_str().to_string();
+                    let (o_type, o_val, o_dt, o_lang): (
+                        i16,
+                        String,
+                        Option<String>,
+                        Option<String>,
+                    ) = match &t.object {
+                        Term::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
+                        Term::BlankNode(b) => {
+                            (term_type::BLANK_NODE, b.as_str().to_string(), None, None)
+                        }
+                        Term::Literal(lit) => match lit.language() {
+                            Some(l) => (
+                                term_type::LITERAL,
+                                lit.value().to_string(),
+                                None,
+                                Some(l.to_string()),
+                            ),
+                            None => (
+                                term_type::LITERAL,
+                                lit.value().to_string(),
+                                Some(lit.datatype().as_str().to_string()),
+                                None,
+                            ),
+                        },
+                        #[allow(unreachable_patterns)]
+                        _ => panic!("staged STAGE: unsupported object term"),
+                    };
+                    out.push((s, p, o_type, o_val, o_dt, o_lang));
+                }
+            }
+            (out, skipped)
+        })
+        .collect();
+    let skipped: i64 = parsed.iter().map(|(_, s)| *s).sum();
+    let rows: Vec<StagedRow> = parsed.into_iter().flat_map(|(c, _)| c).collect();
+    (rows, skipped)
+}
+
+/// Load one parsed window into `{table}` via server-side **COPY** (the fast path the E160 benchmark
+/// measured at 71.5 M rows in 31 s, vs minutes for `unnest` INSERT). pgrx/SPI does not expose COPY
+/// FROM STDIN, so the robust route is: serialize the window's rows to a server-side temp file in COPY
+/// TEXT format, `COPY … FROM '<file>'`, then delete the file.
+///
+/// The temp file lives in `/tmp` (world-writable + sticky on every supported platform). The pgRDF
+/// backend process — which is BOTH the writer here (it is an ordinary OS process) and the reader (the
+/// COPY runs in this same backend's transaction) — owns the file, so the server-side COPY can always
+/// read it back; no cross-user permission question arises because there is no second user. The file
+/// name carries `job_id` + a per-window counter so concurrent jobs / windows never collide, and it is
+/// removed on the success path. The COPY runs inside the STAGE worker's transaction (this function is
+/// called from within it), so the staged rows are part of the same per-phase recovery unit.
+fn copy_window(table: &str, job_id: i64, window_idx: u64, rows: &[StagedRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    let path = format!("/tmp/pgrdf_stg_{job_id}_{window_idx}.tsv");
+
+    // Serialize to the TSV. Pre-size generously (~96 B/row is a low-ball for truthy) so the buffer
+    // rarely reallocates; a BufWriter keeps the actual disk writes block-sized.
+    {
+        let f = File::create(&path)
+            .unwrap_or_else(|e| panic!("staged STAGE: create temp {path:?} failed: {e}"));
+        let mut w = BufWriter::new(f);
+        let mut buf = String::with_capacity(rows.len().saturating_mul(96).min(256 << 20));
+        for row in rows {
+            write_copy_row(&mut buf, row);
+            // Drain the in-memory buffer to the writer in bounded chunks so peak extra RAM is the
+            // chunk, not the whole window's TSV on top of the parsed rows.
+            if buf.len() >= (64 << 20) {
+                w.write_all(buf.as_bytes())
+                    .unwrap_or_else(|e| panic!("staged STAGE: write temp {path:?} failed: {e}"));
+                buf.clear();
+            }
+        }
+        w.write_all(buf.as_bytes())
+            .unwrap_or_else(|e| panic!("staged STAGE: write temp {path:?} failed: {e}"));
+        w.flush()
+            .unwrap_or_else(|e| panic!("staged STAGE: flush temp {path:?} failed: {e}"));
+    }
+
+    // COPY it in. FORMAT text + the default tab delimiter + `\N` NULL match `write_copy_row`. The
+    // path is a backend-local string literal we control (job_id + counter, no user input), so the
+    // single-quote interpolation is safe; still, COPY only accepts a string literal here.
+    let sql = format!(
+        "COPY {table} (s, p, o_type, o_val, o_dt, o_lang) FROM '{path}' WITH (FORMAT text)"
+    );
+    let copy_res = Spi::run(&sql);
+    // Always remove the temp file, success or failure, so a resumed run does not accrete TSVs.
+    let _ = std::fs::remove_file(&path);
+    copy_res.unwrap_or_else(|e| panic!("staged STAGE: COPY from {path:?} failed: {e}"));
+}
+
+/// **STAGE** (Phase A). Stream this worker's byte range of the `.nt` file in bounded WINDOWS, parse
+/// each window across ALL cores with rayon, and load it into the pre-created UNLOGGED staging table
+/// via server-side **COPY** (the fast path).
 ///
 /// The coordinator snapped `[range_lo, range_hi)` to newline boundaries and recorded them in the
-/// [`WorkerSlot`]; the worker opens the file, reads exactly that slice, and feeds it to oxttl. The
-/// lenient parse (skip + count on a malformed triple) is the same Wikidata-control-byte robustness
-/// the streaming loader uses (`loader.rs` ~1948). Rows go in via `INSERT … SELECT * FROM unnest(...)`
-/// batches — the multi-backend parallelism (N workers each owning a disjoint slice, each committing
-/// its own transaction) is the win that breaks the single-COPY wall; binary COPY-from-Rust-buffer is
-/// a later micro-opt (issue #23). Returns the count of triples staged by THIS worker (for the tally).
+/// [`WorkerSlot`]; today it spawns ONE STAGE worker over the whole file, so the across-cores
+/// parallelism lives INSIDE this worker (rayon over each window) rather than across N table-writing
+/// backends — which deliberately avoids the extension-lock contention that N bgworkers writing one
+/// table caused. The flow per window:
+///
+/// 1. **Stream** up to [`STAGE_WINDOW_LINES`] lines from `[lo, hi)` via `File::take(hi-lo)` + a
+///    `BufReader` (never `read_to_end` — the file is ~1.2 TB; peak RAM is one window, not the range).
+///    Blank/comment lines are dropped here, matching `load_turtle_streaming`.
+/// 2. **Parse** the window across all cores ([`parse_window_par`]): split on `\n`, `par_chunks` the
+///    lines, each parsed by its own `NTriplesParser` (truthy is N-Triples — line-oriented + perfectly
+///    parallel). Lenient: malformed lines are skipped + counted, same as today.
+/// 3. **COPY** the parsed rows into the staging table ([`copy_window`]) via a server-side temp TSV,
+///    not `unnest` INSERT — the measured order-of-magnitude win at scale.
+///
+/// Returns the total count of triples staged by THIS worker (summed across windows), for the tally.
 pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
     let path = job.path();
-    let lo = w.range_lo as usize;
-    let hi = w.range_hi as usize;
+    let lo = w.range_lo;
+    let hi = w.range_hi;
+    let table = staging_table(job.job_id);
 
     let mut file =
         File::open(&path).unwrap_or_else(|e| panic!("staged STAGE: open {path:?} failed: {e}"));
-    // Read exactly the byte slice [lo, hi). seek+take avoids loading the whole (40 GB) file.
+    // Stream exactly the byte slice [lo, hi): seek to lo, then `.take(hi-lo)` so the BufReader's reads
+    // naturally stop at the range end without ever materialising the whole (~1.2 TB) file. The
+    // coordinator snapped both bounds to newline boundaries, so the slice is a whole number of lines.
     use std::io::Seek;
-    file.seek(std::io::SeekFrom::Start(lo as u64))
+    file.seek(std::io::SeekFrom::Start(lo))
         .unwrap_or_else(|e| panic!("staged STAGE: seek to {lo} failed: {e}"));
-    let mut buf = vec![0u8; hi.saturating_sub(lo)];
-    file.read_exact(&mut buf)
-        .unwrap_or_else(|e| panic!("staged STAGE: read [{lo},{hi}) failed: {e}"));
+    let mut reader = BufReader::with_capacity(1 << 20, file.take(hi.saturating_sub(lo)));
 
-    let table = staging_table(job.job_id);
-
-    // Column batch buffers for the unnest insert.
-    let mut bs: Vec<String> = Vec::with_capacity(STAGE_BATCH);
-    let mut bp: Vec<String> = Vec::with_capacity(STAGE_BATCH);
-    let mut bot: Vec<i16> = Vec::with_capacity(STAGE_BATCH);
-    let mut bov: Vec<String> = Vec::with_capacity(STAGE_BATCH);
-    let mut bod: Vec<Option<String>> = Vec::with_capacity(STAGE_BATCH);
-    let mut bol: Vec<Option<String>> = Vec::with_capacity(STAGE_BATCH);
+    let mut window_lines: Vec<String> = Vec::with_capacity(STAGE_WINDOW_LINES);
     let mut staged: i64 = 0;
+    let mut window_idx: u64 = 0;
 
-    let flush = |bs: &mut Vec<String>,
-                 bp: &mut Vec<String>,
-                 bot: &mut Vec<i16>,
-                 bov: &mut Vec<String>,
-                 bod: &mut Vec<Option<String>>,
-                 bol: &mut Vec<Option<String>>| {
-        if bs.is_empty() {
-            return;
+    loop {
+        // ── Fill one window from the stream (bounded by line count AND the byte range via `take`).
+        window_lines.clear();
+        let mut eof = false;
+        while window_lines.len() < STAGE_WINDOW_LINES {
+            let mut line = String::new();
+            let n = reader
+                .read_line(&mut line)
+                .unwrap_or_else(|e| panic!("staged STAGE: read [{lo},{hi}) failed: {e}"));
+            if n == 0 {
+                eof = true;
+                break;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue; // skip blank / comment lines (match load_turtle_streaming)
+            }
+            window_lines.push(line);
         }
-        let sql = format!(
-            "INSERT INTO {table} (s, p, o_type, o_val, o_dt, o_lang) \
-             SELECT * FROM unnest($1::text[], $2::text[], $3::smallint[], \
-                                  $4::text[], $5::text[], $6::text[])"
-        );
-        Spi::run_with_args(
-            &sql,
-            &[
-                std::mem::take(bs).into(),
-                std::mem::take(bp).into(),
-                std::mem::take(bot).into(),
-                std::mem::take(bov).into(),
-                std::mem::take(bod).into(),
-                std::mem::take(bol).into(),
-            ],
-        )
-        .expect("staged STAGE: batch insert failed");
-    };
+        if window_lines.is_empty() {
+            break;
+        }
 
-    for r in TurtleParser::new().for_reader(buf.as_slice()) {
-        let t = match r {
-            Ok(t) => t,
-            Err(_) => continue, // lenient: skip malformed triples (Wikidata control bytes)
-        };
-        let s = match &t.subject {
-            NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
-            NamedOrBlankNode::BlankNode(b) => b.as_str().to_string(),
-        };
-        let p = t.predicate.as_str().to_string();
-        let (o_type, o_val, o_dt, o_lang): (i16, String, Option<String>, Option<String>) =
-            match &t.object {
-                Term::NamedNode(n) => (term_type::URI, n.as_str().to_string(), None, None),
-                Term::BlankNode(b) => (term_type::BLANK_NODE, b.as_str().to_string(), None, None),
-                Term::Literal(lit) => match lit.language() {
-                    Some(l) => (
-                        term_type::LITERAL,
-                        lit.value().to_string(),
-                        None,
-                        Some(l.to_string()),
-                    ),
-                    None => (
-                        term_type::LITERAL,
-                        lit.value().to_string(),
-                        Some(lit.datatype().as_str().to_string()),
-                        None,
-                    ),
-                },
-                #[allow(unreachable_patterns)]
-                _ => panic!("staged STAGE: unsupported object term"),
-            };
-        bs.push(s);
-        bp.push(p);
-        bot.push(o_type);
-        bov.push(o_val);
-        bod.push(o_dt);
-        bol.push(o_lang);
-        staged += 1;
-        if bs.len() >= STAGE_BATCH {
-            flush(&mut bs, &mut bp, &mut bot, &mut bov, &mut bod, &mut bol);
+        // ── Parse this window across all cores, then COPY it in.
+        let (rows, _skipped) = parse_window_par(&window_lines);
+        staged += rows.len() as i64;
+        copy_window(&table, job.job_id, window_idx, &rows);
+        window_idx += 1;
+
+        if eof {
+            break;
         }
     }
-    flush(&mut bs, &mut bp, &mut bot, &mut bov, &mut bod, &mut bol);
     staged
 }
 
