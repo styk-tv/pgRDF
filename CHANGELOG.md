@@ -6,6 +6,42 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.10] — 2026-06-21
+
+> Folds in what was planned as 0.6.9 (R1): the dictionary btree fix ships here alongside the staged
+> background-worker pool foundation (R2). 0.6.9 was not cut as a standalone tag.
+
+### Fixed — dictionary `unique_term` hashes the lexical value (the 2704-byte btree limit) ★ headline
+
+The `unique_term` UNIQUE constraint embedded the full `lexical_value` in its btree key, so a literal
+longer than PostgreSQL's **2704-byte btree key limit** (⅓ of an 8 KB page) aborts the index build.
+At Wikidata scale this was fatal: a measured **3312-byte literal** rolled back an **8.2-billion-triple**
+full-`truthy` load at the final index rebuild — the whole load lost because it was one transaction.
+The fix adds a generated `lexical_md5 BYTEA` column (`decode(md5(lexical_value),'hex')` — 128-bit,
+collision ~1e-20 even at billion-term scale, built-in/no dependency, fixed 16 bytes) and keys
+`unique_term` on `(term_type, lexical_md5, datatype_iri_id, language_tag)` instead of the raw value.
+The loader insert paths are **unchanged** (explicit column lists; PostgreSQL computes the generated
+column); only `bulk_rebuild_indexes`' `ADD CONSTRAINT` column list moves. Smaller unique index and a
+faster rebuild at scale (16-byte keys vs long strings) as a bonus. The `0.5.1 -> 0.6.10` upgrade script
+carries the matching DDL (add the column + re-key the constraint) — the first schema-migrating upgrade
+in the 0.6.x line. New `#[pg_test] parse_turtle_long_literal_over_btree_limit` locks the fix; the full
+pgrx integration suite is green.
+
+### Added — staged bulk-loader background-worker pool (foundation)
+
+The first piece of the native, multi-backend, all-cores RDF importer (the method proven as a
+benchmark prototype: parse → UNLOGGED staging → PostgreSQL set-based **parallel** dedup → parallel
+hash-join resolve → concurrent index, committed per phase). A `#[pg_extern]` function can't COMMIT
+between phases, run indexes concurrently, or own N COPY streams — those need multiple backends — so
+this ships a **pgrx dynamic background-worker pool**: a shared-memory job-control segment
+(`storage::staged::jobctl`, registered from `_PG_init` alongside the dict cache) plus a `spawn_checked`
+discipline (always `set_notify_pid`, always honour `load_dynamic`'s `Result`) and the worker entry
+point. Commit-per-phase lives in the **workers'** own transactions (`BackgroundWorker::transaction`),
+not the coordinator. `pgrdf.load_turtle_staged_ping(n)` proves the machinery end-to-end: N background
+workers each spawn, run their own committed transaction, and the coordinator detects all N — with
+graceful degradation on pool exhaustion. Requires `pgrdf` in `shared_preload_libraries` (like the dict
+cache). The real STAGE/DICT/RESOLVE/INDEX pipeline (`load_turtle_staged_run`) lands next.
+
 ## [0.6.8] — 2026-06-20
 
 ### Added — streaming / windowed bulk loader (`load_turtle_streaming`) ★ headline
