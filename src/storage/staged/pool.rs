@@ -38,8 +38,6 @@ use pgrx::bgworkers::{
 };
 use pgrx::prelude::*;
 use serde_json::json;
-use std::fs::File;
-use std::io::Read;
 use std::time::Instant;
 
 /// The exported symbol Postgres dlsym's as each worker's `main`. MUST match
@@ -137,6 +135,11 @@ pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
             }
             jobctl::phase::STAGE => {
                 phases::apply_session_gucs();
+                // Phase-A prep (defer indexes, ensure partition, create the UNLOGGED staging table)
+                // runs HERE in the STAGE worker's committed transaction — never the coordinator's —
+                // so its ACCESS EXCLUSIVE locks release before DICT/RESOLVE/INDEX run (see
+                // `phases::prepare_for_load`). R2.1 STAGE is a single worker, so this also can't race.
+                phases::prepare_for_load(&job);
                 let _ = phases::stage(&job, &w);
             }
             jobctl::phase::DICT => {
@@ -292,5 +295,281 @@ fn load_turtle_staged_ping(n_workers: i32) -> pgrx::JsonB {
         "ping_rows": ping_rows,
         "postmaster_died": postmaster_died,
         "error": if first_err.is_empty() { serde_json::Value::Null } else { json!(first_err) },
+    }))
+}
+
+/// One spawned worker's spec for a phase: its `shard` (selects the INDEX DDL; 0 elsewhere) and its
+/// `[range_lo, range_hi)` file byte offsets (STAGE only; `0,0` for DICT/RESOLVE/INDEX).
+type WorkerSpec = (u16, u64, u64);
+
+/// The outcome of one phase, surfaced by [`run_phase`] so the coordinator can gate A→B→C→D.
+enum PhaseOutcome {
+    /// Every worker of the phase reported success in shmem.
+    Ok,
+    /// The phase failed; `String` is the human-readable reason (the first worker error string when
+    /// one was recorded, else a synthesised spawn/startup/postmaster cause). The coordinator ABORTS
+    /// on this — it leaves the staging table in place as the resume point and returns the error.
+    Failed(String),
+}
+
+/// Run ONE phase of the staged pipeline: for each spec claim a [`jobctl::WorkerSlot`], spawn a
+/// dynamic worker bound to it, then `wait_for_startup` + `wait_for_shutdown` on every handle —
+/// honouring each `Result` per §7 — and finally read each worker's shmem `status` to decide the
+/// outcome. This is the proven `load_turtle_staged_ping` spawn/wait/report pattern, generalised so
+/// the coordinator can drive it once per phase and gate on the result.
+///
+/// The worker outcome channel is **shmem, not the exit code**: a worker that `ereport`s ERROR still
+/// *stops*, so `wait_for_shutdown` returns `Ok(())`; the real success/failure is the `WorkerSlot
+/// .status` it wrote via [`jobctl::report_worker`] before returning. So after every handle has been
+/// joined we scan exactly THIS phase's claimed slots (not the whole job) — any `status == 2`
+/// (error), any spawn rejection, any failed startup, or a dead postmaster ⇒ [`PhaseOutcome::Failed`].
+///
+/// The coordinator holds NO lock on any shared table while this blocks in `wait_for_shutdown`, so a
+/// worker that needs `_pgrdf_dictionary` / `_pgrdf_quads` (DICT/RESOLVE/INDEX) can take its locks
+/// freely — the deadlock the ping module documents is avoided by keeping all table mutation in the
+/// workers (see `phases::prepare_for_load`).
+fn run_phase(job_idx: usize, phase: u8, specs: &[WorkerSpec]) -> PhaseOutcome {
+    // Spawn each worker, honouring every load_dynamic Result. A spawn failure (pool exhausted) is a
+    // phase failure for the real pipeline — unlike the best-effort ping, the staged load is only
+    // correct if every phase worker actually ran.
+    let mut handles: Vec<DynamicBackgroundWorker> = Vec::with_capacity(specs.len());
+    let mut claimed: Vec<usize> = Vec::with_capacity(specs.len());
+    let mut spawn_err: Option<String> = None;
+    for &(shard, lo, hi) in specs {
+        let wslot = match jobctl::claim_worker_slot(job_idx, phase, shard, lo, hi) {
+            Some(s) => s,
+            None => {
+                spawn_err.get_or_insert_with(|| {
+                    "no free worker slot (jobctl MAX_SLOTS reached)".to_string()
+                });
+                continue;
+            }
+        };
+        claimed.push(wslot);
+        let name = format!(
+            "pgrdf:job={}:phase={}:shard={}",
+            jobctl::job_id_of(job_idx),
+            phase,
+            shard
+        );
+        match spawn_checked(&name, wslot) {
+            Ok(h) => handles.push(h),
+            Err(e) => {
+                // Record the claimed slot as failed so the per-phase scan is consistent.
+                jobctl::report_worker(wslot, false, &e);
+                spawn_err.get_or_insert(e);
+            }
+        }
+    }
+
+    // wait_for_startup borrows &self (handle survives to move into `started`); wait_for_shutdown
+    // consumes it. A startup Err means the worker never ran ⇒ phase failure; PostmasterDied aborts.
+    let mut started: Vec<DynamicBackgroundWorker> = Vec::with_capacity(handles.len());
+    let mut startup_failures = 0usize;
+    let mut postmaster_died = false;
+    for h in handles {
+        match h.wait_for_startup() {
+            Ok(_pid) => started.push(h),
+            Err(BackgroundWorkerStatus::PostmasterDied) => postmaster_died = true,
+            Err(_status) => startup_failures += 1,
+        }
+    }
+    for h in started {
+        match h.wait_for_shutdown() {
+            Ok(()) => {}
+            Err(BackgroundWorkerStatus::PostmasterDied) => postmaster_died = true,
+            Err(_status) => {} // worker still reported via shmem; nothing to add
+        }
+    }
+
+    // Scan THIS phase's claimed slots only (status: 1 ok, 2 error, 0 never reported).
+    let mut errored = 0usize;
+    let mut never_reported = 0usize;
+    for &idx in &claimed {
+        match jobctl::read_worker(idx).status {
+            1 => {}
+            2 => errored += 1,
+            _ => never_reported += 1,
+        }
+    }
+
+    if postmaster_died {
+        return PhaseOutcome::Failed("postmaster died during phase".to_string());
+    }
+    if errored > 0 || spawn_err.is_some() || startup_failures > 0 || never_reported > 0 {
+        // Prefer the actual worker error string the failing worker recorded in the JobSlot.
+        let job_err = jobctl::job_err(job_idx);
+        let reason = if !job_err.is_empty() {
+            job_err
+        } else if let Some(e) = spawn_err {
+            e
+        } else {
+            format!(
+                "phase failed (errored={errored}, startup_failures={startup_failures}, \
+                 never_reported={never_reported})"
+            )
+        };
+        return PhaseOutcome::Failed(reason);
+    }
+    PhaseOutcome::Ok
+}
+
+/// **R2.1 coordinator** — the real native staged bulk loader. Spawns the STAGE → DICT → RESOLVE →
+/// INDEX worker pipeline (each phase its own background worker(s), each its own committed
+/// transaction), gating on every phase, and returns load stats as JSONB.
+///
+/// Pipeline (`_WIP/SPEC.STAGED-LOADER-R2.bgworker-design.md` §3.3/§6):
+/// * **A STAGE** — 1 worker: defer indexes + ensure the partition + create the UNLOGGED staging table
+///   (`phases::prepare_for_load`), then parse the whole `.nt` leniently and bulk-insert it
+///   (`phases::stage`). Multi-stream byte-ranged COPY is the documented R2.1-followup micro-opt;
+///   correctness-first here is a single STAGE worker (the design blesses single-worker-per-phase).
+/// * **B DICT** — 1 worker: set-based `INSERT … SELECT DISTINCT` dedup into `_pgrdf_dictionary`,
+///   driven by PG's **parallel hash-aggregate** (lights up cores INSIDE the one worker's query).
+/// * **C RESOLVE** — 1 worker: `INSERT … SELECT … JOIN dict ×3` → `_pgrdf_quads`, driven by PG's
+///   **parallel hash-join** (lights up cores inside the query).
+/// * **D INDEX** — one worker per [`jobctl::index_ddls`] entry (5): the 3 hexastore indexes + the
+///   dict hash index + the `unique_term` constraint re-add, built SIMULTANEOUSLY across backends.
+///
+/// **No coordinator-held table locks.** The coordinator never touches `_pgrdf_dictionary` /
+/// `_pgrdf_quads` / the staging table while workers run (all mutation is in workers, which COMMIT and
+/// release locks) — otherwise the locks it holds across `wait_for_shutdown` would deadlock the very
+/// workers it waits on. It reads the final counts only AFTER the INDEX phase, when no worker remains.
+///
+/// **Gating + abort/resume.** After each phase the coordinator records the `phase` high-water mark
+/// ([`jobctl::advance_phase`]); on ANY phase failure it ABORTS — returns the error, leaves the
+/// staging table as the resume point, and does NOT mark the job done. On success it drops staging and
+/// returns `{job_id, triples, dict_terms, quads, phase_ms:{stage,dict,resolve,index}, n_workers}`.
+///
+/// Refuses (clear error, not a panic) when pgRDF isn't in `shared_preload_libraries` — the worker
+/// pool needs the shmem job-control segment.
+///
+/// SQL: `pgrdf.load_turtle_staged_run(path TEXT, graph_id BIGINT, n_workers INT DEFAULT 0) -> JSONB`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)) -> pgrx::JsonB {
+    if !jobctl::is_ready() {
+        error!(
+            "pgrdf staged loader requires pgrdf in shared_preload_libraries \
+             (the worker pool needs the shmem job-control segment)"
+        );
+    }
+
+    // R2.1: STAGE/DICT/RESOLVE are a single worker each (their parallelism is PG's intra-query
+    // parallel hash-agg / hash-join); INDEX is one worker per DDL. n_workers is recorded for the
+    // result + a future multi-stream STAGE; 0 ⇒ auto. INDEX width is fixed by index_ddls().len().
+    let n_index = jobctl::index_ddls().len();
+    let requested = if n_workers > 0 {
+        n_workers as usize
+    } else {
+        n_index
+    };
+
+    // The file length bounds the (single) STAGE worker's byte range [0, len). Read BEFORE creating
+    // the job so a bad path errors cleanly with no orphaned job slot.
+    let file_len = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) => error!("pgrdf staged loader: cannot stat {path:?}: {e}"),
+    };
+
+    let db_oid: u32 = unsafe { pg_sys::MyDatabaseId }.to_u32();
+    let job_idx =
+        jobctl::create_job(path, graph_id, db_oid, requested as u16, 0).unwrap_or_else(|| {
+            error!(
+                "pgrdf staged loader: no free job slot (MAX_JOBS reached) or path exceeds PATH_CAP"
+            )
+        });
+    let job_id = jobctl::job_id_of(job_idx);
+
+    // Helper: on a phase failure, leave staging intact (resume point), free the shmem slots, and
+    // return the abort JSONB. The job row stays FAILED (report_worker set it) — not marked done.
+    let abort = |phase_label: &str, reason: String| -> pgrx::JsonB {
+        let out = json!({
+            "job_id": job_id,
+            "ok": false,
+            "failed_phase": phase_label,
+            "error": reason,
+            "n_workers": requested,
+            "note": "staging table left in place as the resume point",
+        });
+        jobctl::release_job(job_idx);
+        pgrx::JsonB(out)
+    };
+
+    // ── PHASE A — STAGE (prep + parse + load), single worker over the whole file ────────────────
+    let t = Instant::now();
+    if let PhaseOutcome::Failed(reason) =
+        run_phase(job_idx, jobctl::phase::STAGE, &[(0u16, 0u64, file_len)])
+    {
+        return abort("stage", reason);
+    }
+    let stage_ms = t.elapsed().as_secs_f64() * 1000.0;
+    jobctl::advance_phase(job_idx, jobctl::phase::STAGE);
+
+    // ── PHASE B — DICT (set-based dedup, PG parallel hash-agg), single worker ────────────────────
+    let t = Instant::now();
+    if let PhaseOutcome::Failed(reason) =
+        run_phase(job_idx, jobctl::phase::DICT, &[(0u16, 0u64, 0u64)])
+    {
+        return abort("dict", reason);
+    }
+    let dict_ms = t.elapsed().as_secs_f64() * 1000.0;
+    jobctl::advance_phase(job_idx, jobctl::phase::DICT);
+
+    // ── PHASE C — RESOLVE (parallel hash-join → quads), single worker ───────────────────────────
+    let t = Instant::now();
+    if let PhaseOutcome::Failed(reason) =
+        run_phase(job_idx, jobctl::phase::RESOLVE, &[(0u16, 0u64, 0u64)])
+    {
+        return abort("resolve", reason);
+    }
+    let resolve_ms = t.elapsed().as_secs_f64() * 1000.0;
+    jobctl::advance_phase(job_idx, jobctl::phase::RESOLVE);
+
+    // ── PHASE D — INDEX (the 5 index_ddls, one worker each, built simultaneously) ────────────────
+    let index_specs: Vec<WorkerSpec> = (0..n_index).map(|i| (i as u16, 0u64, 0u64)).collect();
+    let t = Instant::now();
+    if let PhaseOutcome::Failed(reason) = run_phase(job_idx, jobctl::phase::INDEX, &index_specs) {
+        return abort("index", reason);
+    }
+    let index_ms = t.elapsed().as_secs_f64() * 1000.0;
+    jobctl::advance_phase(job_idx, jobctl::phase::INDEX);
+
+    // ── Done — read the final counts (no worker runs now, so the coordinator's ACCESS SHARE on
+    // these tables conflicts with nothing), then drop the staging table and release the job. ──────
+    let stg = phases::staging_table(job_id);
+    let triples = Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {stg}"))
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    let dict_terms = Spi::get_one::<i64>("SELECT count(*)::bigint FROM pgrdf._pgrdf_dictionary")
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    let quads = Spi::get_one_with_args::<i64>(
+        "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
+        &[graph_id.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(0);
+
+    Spi::run(&format!("DROP TABLE IF EXISTS {stg}")).expect("staged loader: drop staging table");
+
+    jobctl::mark_job_done(job_idx);
+    jobctl::release_job(job_idx);
+
+    pgrx::JsonB(json!({
+        "job_id": job_id,
+        "ok": true,
+        "triples": triples,
+        "dict_terms": dict_terms,
+        "quads": quads,
+        "phase_ms": {
+            "stage": stage_ms,
+            "dict": dict_ms,
+            "resolve": resolve_ms,
+            "index": index_ms,
+        },
+        "n_workers": requested,
     }))
 }

@@ -74,6 +74,35 @@ extension_sql_file!(
     requires = ["schema_v0_2_0"],
 );
 
+// R2.1 — `CALL` ergonomics for the staged loader. A thin PL/pgSQL wrapper over the coordinator
+// FUNCTION `pgrdf.load_turtle_staged_run` (which does the real spawn/wait/gate work; its workers own
+// the per-phase commits). Shipped via `extension_sql!` so users can `CALL pgrdf.load_turtle_staged(
+// path, graph_id [, n_workers])` instead of `SELECT`ing the function. `requires` the function's
+// generated SQL (referenced by its Rust path) so the procedure is created after it exists.
+// Design: `_WIP/SPEC.STAGED-LOADER-R2.bgworker-design.md` §3.2.
+extension_sql!(
+    r#"
+CREATE PROCEDURE pgrdf.load_turtle_staged(
+    path TEXT,
+    graph_id BIGINT,
+    n_workers INT DEFAULT 0
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    r JSONB;
+BEGIN
+    r := pgrdf.load_turtle_staged_run(path, graph_id, n_workers);
+    RAISE NOTICE 'pgrdf staged load: %', r;
+END;
+$$;
+"#,
+    name = "staged_loader_procedure",
+    // pgrx matches a `requires` FullPath by `module_path.ends_with(path-without-last-segment)`; the
+    // extern's module_path is `pgrdf::storage::staged::pool` (no `crate::`), so the reference must
+    // omit the `crate::` prefix or the suffix match fails (pgrx-sql-entity-graph pgrx_sql.rs:566).
+    requires = [storage::staged::pool::load_turtle_staged_run],
+);
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {

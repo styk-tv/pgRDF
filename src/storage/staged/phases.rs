@@ -78,6 +78,47 @@ pub fn apply_session_gucs() {
     Spi::run(&sql).expect("staged phase: apply_session_gucs failed");
 }
 
+/// **STAGE prep** — the once-per-load setup that MUST run in a worker's committed transaction, never
+/// the coordinator's. If the coordinator ran `bulk_drop_indexes` / `create_quads_partition` itself it
+/// would hold their `ACCESS EXCLUSIVE` locks on `_pgrdf_dictionary` / `_pgrdf_quads` for the whole
+/// function (a pgrx 0.16 function can't COMMIT to release them, §1.2), and the DICT/RESOLVE/INDEX
+/// workers — which need those very tables — would block on the coordinator while the coordinator
+/// blocks in `wait_for_shutdown`: a deadlock. Running prep inside the (single) STAGE worker commits +
+/// releases every lock before the next phase spawns. The coordinator therefore touches NO shared
+/// table while workers run.
+///
+/// Three steps, all in the STAGE worker's one transaction:
+/// 1. [`crate::storage::loader::bulk_drop_indexes`] — drop the 3 hexastore indexes, the dict
+///    `lexical_value` hash index, and the `unique_term` constraint, so the DICT/RESOLVE inserts skip
+///    per-row index + uniqueness maintenance (the existing defer-index win, now multi-backend). Phase
+///    D rebuilds them via the byte-identical [`super::jobctl::index_ddls`].
+/// 2. [`crate::storage::partition::create_quads_partition`] — ensure the LIST partition
+///    `_pgrdf_quads_g<graph_id>` exists, since RESOLVE inserts into the parent `_pgrdf_quads` (which
+///    routes to it). Idempotent; shares the same advisory partition-DDL gate.
+/// 3. `CREATE UNLOGGED TABLE _pgrdf_stg_<job_id> (…) WITH (parallel_workers = nproc)` — the staging
+///    table. UNLOGGED skips WAL (the measured 141 GB win); the `parallel_workers` reloption is what
+///    actually lifts PG's per-table worker cap so DICT's hash-agg / RESOLVE's hash-join scan it on all
+///    cores (§5). `IF NOT EXISTS` keeps it resume-safe.
+pub fn prepare_for_load(job: &JobSlot) {
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8)
+        .max(1);
+    // (1) Defer indexes — the SAME drop (incl. the partition-DDL gate) the single-backend bulk path
+    // uses; Phase D rebuilds the identical set via `index_ddls()`.
+    crate::storage::loader::bulk_drop_indexes();
+    // (2) Ensure the destination partition exists (RESOLVE inserts into the parent `_pgrdf_quads`).
+    crate::storage::partition::create_quads_partition(job.graph_id);
+    // (3) The UNLOGGED staging table, with the parallel_workers reloption that lets DICT/RESOLVE scan
+    // it on all cores. Created here (in a committed worker txn), not by the coordinator, so its
+    // ACCESS EXCLUSIVE creation lock is released before DICT/RESOLVE run.
+    let table = staging_table(job.job_id);
+    let sql = format!(
+        "CREATE UNLOGGED TABLE IF NOT EXISTS {table} ({STAGE_COLS}) WITH (parallel_workers = {nproc})"
+    );
+    Spi::run(&sql).expect("staged STAGE: create staging table failed");
+}
+
 /// **STAGE** (Phase A). Parse this worker's byte range of the `.nt` file leniently and bulk-insert
 /// its rows into the pre-created UNLOGGED staging table.
 ///
@@ -114,12 +155,12 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
     let mut bol: Vec<Option<String>> = Vec::with_capacity(STAGE_BATCH);
     let mut staged: i64 = 0;
 
-    let mut flush = |bs: &mut Vec<String>,
-                     bp: &mut Vec<String>,
-                     bot: &mut Vec<i16>,
-                     bov: &mut Vec<String>,
-                     bod: &mut Vec<Option<String>>,
-                     bol: &mut Vec<Option<String>>| {
+    let flush = |bs: &mut Vec<String>,
+                 bp: &mut Vec<String>,
+                 bot: &mut Vec<i16>,
+                 bov: &mut Vec<String>,
+                 bod: &mut Vec<Option<String>>,
+                 bol: &mut Vec<Option<String>>| {
         if bs.is_empty() {
             return;
         }
@@ -181,77 +222,115 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
         bol.push(o_lang);
         staged += 1;
         if bs.len() >= STAGE_BATCH {
-            flush(
-                &mut bs, &mut bp, &mut bot, &mut bov, &mut bod, &mut bol,
-            );
+            flush(&mut bs, &mut bp, &mut bot, &mut bov, &mut bod, &mut bol);
         }
     }
-    flush(
-        &mut bs, &mut bp, &mut bot, &mut bov, &mut bod, &mut bol,
-    );
+    flush(&mut bs, &mut bp, &mut bot, &mut bov, &mut bod, &mut bol);
     staged
 }
 
 /// **DICT** (Phase B). Set-based dedup of every staged term into `_pgrdf_dictionary`, ids drawn from
-/// the IDENTITY sequence (never supplied — #20). Two statements to honour the datatype-id ordering
-/// (see module docs): URIs/blanks first (so a literal's datatype IRI already has a dict id), then the
-/// literals with `datatype_iri_id` resolved by joining the just-inserted dictionary.
+/// the IDENTITY sequence (never supplied — #20).
 ///
-/// `WHERE NOT EXISTS` against the existing dictionary makes this safe on a non-empty dict too (the
-/// staged-loader fast path expects an empty dict, but the anti-join costs little when it IS empty and
-/// keeps the statement correct if it isn't). PG's **parallel hash-aggregate** does the `DISTINCT`
-/// (spills past `work_mem`, RAM-bounded — the whole point). Returns the dict row count afterwards.
+/// ## Why CTAS-then-INSERT, not a direct `INSERT … SELECT DISTINCT`
+///
+/// `_pgrdf_dictionary.id` is `GENERATED ALWAYS AS IDENTITY`, so PostgreSQL marks **every**
+/// `INSERT INTO _pgrdf_dictionary SELECT …` plan parallel-UNSAFE — the whole statement (including the
+/// `DISTINCT` over the staging scan) runs single-threaded on the leader. Measured on E160: a direct
+/// `INSERT … SELECT DISTINCT` over a 36 M-row / 4.7 GB staging table pinned ONE core for 22 min and
+/// had not finished (the 5-way `UNION ALL` re-scans the whole table 5×, all serial). `EXPLAIN`
+/// confirmed `Insert → HashAggregate → Seq Scan` with no `Gather`.
+///
+/// The fix: do the expensive dedup in a **parallel `CREATE UNLOGGED TABLE … AS SELECT DISTINCT`**
+/// (no identity target ⇒ PG14+ uses a parallel plan: `Gather → Parallel Append → Parallel Seq Scan`,
+/// 32+ workers lighting up cores — verified by `EXPLAIN`), then a cheap **serial** `INSERT INTO
+/// _pgrdf_dictionary SELECT … FROM <materialised distinct set>`. The serial INSERT only handles the
+/// already-distinct rows (~14 M for 4 G truthy, not the ~92 M raw term occurrences), so the IDENTITY
+/// `nextval`-per-row cost is paid once per *distinct* term, not per occurrence.
+///
+/// Two materialisations to honour the datatype-id ordering (module docs): URIs/blanks first (so a
+/// literal's datatype IRI already has a dict id), then literals with `datatype_iri_id` resolved by
+/// joining the just-inserted dictionary. `WHERE NOT EXISTS` keeps each INSERT correct on a non-empty
+/// dict (the fast path expects empty; the anti-join is cheap over the distinct set when it is).
+/// Returns the dict row count afterwards. The temp tables are named deterministically per `job_id`
+/// (resume-safe) and dropped at the end.
 pub fn dict(job: &JobSlot, _w: &WorkerSlot) -> i64 {
     let stg = staging_table(job.job_id);
-
-    // Statement 1 — all URI + blank-node terms in ONE pass: subjects (s, always URI/blank),
-    // predicates (p, always URI), object URIs/blanks (o_type in {URI,BLANK}), and the DISTINCT
-    // object datatype IRIs (o_dt, a URI). datatype_iri_id + language_tag are NULL for these. The
-    // sub-select UNIONs the four term sources; the outer DISTINCT + WHERE NOT EXISTS dedups against
-    // both the batch itself and any pre-existing rows. ids come from IDENTITY (4 explicit cols only).
     let uri = term_type::URI as i32;
     let blank = term_type::BLANK_NODE as i32;
     let literal = term_type::LITERAL as i32;
-    let sql1 = format!(
-        "INSERT INTO pgrdf._pgrdf_dictionary (term_type, lexical_value, datatype_iri_id, language_tag) \
-         SELECT DISTINCT tt, lv, NULL::bigint, NULL::text \
-         FROM ( \
+    let uri_tmp = format!("pgrdf._pgrdf_dtmp_uri_{}", job.job_id);
+    let lit_tmp = format!("pgrdf._pgrdf_dtmp_lit_{}", job.job_id);
+
+    // ── URI/blank terms ─────────────────────────────────────────────────────────────────────────
+    // Step 1 (PARALLEL): materialise the DISTINCT URI/blank terms — subjects (URI/blank),
+    // predicates (URI), object URIs/blanks, and the DISTINCT object datatype IRIs — into a plain
+    // UNLOGGED table. No identity column on the target ⇒ the DISTINCT + 5-way Parallel Append scan
+    // runs across all cores (this is the phase that was the 22-min single-core wall).
+    Spi::run(&format!("DROP TABLE IF EXISTS {uri_tmp}")).expect("staged DICT: drop stale uri tmp");
+    let cta_uri = format!(
+        "CREATE UNLOGGED TABLE {uri_tmp} AS \
+         SELECT DISTINCT tt, lv FROM ( \
              SELECT {blank}::smallint AS tt, s AS lv FROM {stg} WHERE s LIKE '_:%' \
              UNION ALL SELECT {uri}::smallint, s FROM {stg} WHERE s NOT LIKE '_:%' \
              UNION ALL SELECT {uri}::smallint, p FROM {stg} \
              UNION ALL SELECT o_type::smallint, o_val FROM {stg} WHERE o_type IN ({uri}, {blank}) \
              UNION ALL SELECT {uri}::smallint, o_dt FROM {stg} WHERE o_type = {literal} AND o_dt IS NOT NULL \
-         ) u \
+         ) u"
+    );
+    Spi::run(&cta_uri).expect("staged DICT: parallel URI/blank DISTINCT CTAS failed");
+
+    // Step 2 (serial, fast): copy the already-distinct URI/blank terms into the dict. ids from
+    // IDENTITY (4 explicit cols only). Anti-join against the dict keeps it correct on a non-empty
+    // dict; over the distinct set it is cheap.
+    let ins_uri = format!(
+        "INSERT INTO pgrdf._pgrdf_dictionary (term_type, lexical_value, datatype_iri_id, language_tag) \
+         SELECT u.tt, u.lv, NULL::bigint, NULL::text FROM {uri_tmp} u \
          WHERE NOT EXISTS ( \
              SELECT 1 FROM pgrdf._pgrdf_dictionary d \
              WHERE d.term_type = u.tt AND d.lexical_md5 = decode(md5(u.lv), 'hex') \
                AND d.datatype_iri_id IS NULL AND d.language_tag IS NULL \
          )"
     );
-    Spi::run(&sql1).expect("staged DICT: URI/blank dedup insert failed");
+    Spi::run(&ins_uri).expect("staged DICT: URI/blank dict insert failed");
 
-    // Statement 2 — literals, keyed (LITERAL, lexical, datatype_iri_id, language_tag). The datatype
-    // id is resolved by LEFT JOIN to the dictionary on the datatype IRI's URI term (inserted in
-    // statement 1). A language-tagged literal has datatype_iri_id NULL (matching the loader). The
-    // anti-join is the matching NULLS-DISTINCT 4-tuple. DISTINCT over the resolved tuple dedups.
-    let sql2 = format!(
-        "INSERT INTO pgrdf._pgrdf_dictionary (term_type, lexical_value, datatype_iri_id, language_tag) \
-         SELECT DISTINCT {literal}::smallint, st.o_val, dt.id, st.o_lang \
-         FROM {stg} st \
-         LEFT JOIN pgrdf._pgrdf_dictionary dt \
-                ON st.o_dt IS NOT NULL AND dt.term_type = {uri} \
-               AND dt.lexical_md5 = decode(md5(st.o_dt), 'hex') \
-               AND dt.datatype_iri_id IS NULL AND dt.language_tag IS NULL \
-         WHERE st.o_type = {literal} \
-           AND NOT EXISTS ( \
-               SELECT 1 FROM pgrdf._pgrdf_dictionary d \
-               WHERE d.term_type = {literal} \
-                 AND d.lexical_md5 = decode(md5(st.o_val), 'hex') \
-                 AND d.datatype_iri_id IS NOT DISTINCT FROM dt.id \
-                 AND d.language_tag IS NOT DISTINCT FROM st.o_lang \
-           )"
+    // ── Literal terms ───────────────────────────────────────────────────────────────────────────
+    // Step 3 (PARALLEL): materialise the DISTINCT literals (lexical, datatype IRI string, language)
+    // into a plain UNLOGGED table — again parallelised (no identity target). The datatype id is NOT
+    // resolved here (it is a string at this point); it is resolved in the serial insert below.
+    Spi::run(&format!("DROP TABLE IF EXISTS {lit_tmp}")).expect("staged DICT: drop stale lit tmp");
+    let cta_lit = format!(
+        "CREATE UNLOGGED TABLE {lit_tmp} AS \
+         SELECT DISTINCT o_val, o_dt, o_lang FROM {stg} WHERE o_type = {literal}"
     );
-    Spi::run(&sql2).expect("staged DICT: literal dedup insert failed");
+    Spi::run(&cta_lit).expect("staged DICT: parallel literal DISTINCT CTAS failed");
+
+    // Step 4 (serial, fast): copy literals into the dict, resolving each `datatype_iri_id` by LEFT
+    // JOIN to the dictionary on the datatype IRI's URI term (inserted in step 2). A language-tagged
+    // literal has datatype_iri_id NULL (matching the loader). The anti-join is the NULLS-DISTINCT
+    // 4-tuple. The distinct set may still contain rows differing only by resolved datatype id, so the
+    // outer DISTINCT collapses any such duplicates.
+    let ins_lit = format!(
+        "INSERT INTO pgrdf._pgrdf_dictionary (term_type, lexical_value, datatype_iri_id, language_tag) \
+         SELECT DISTINCT {literal}::smallint, l.o_val, dt.id, l.o_lang \
+         FROM {lit_tmp} l \
+         LEFT JOIN pgrdf._pgrdf_dictionary dt \
+                ON l.o_dt IS NOT NULL AND dt.term_type = {uri} \
+               AND dt.lexical_md5 = decode(md5(l.o_dt), 'hex') \
+               AND dt.datatype_iri_id IS NULL AND dt.language_tag IS NULL \
+         WHERE NOT EXISTS ( \
+             SELECT 1 FROM pgrdf._pgrdf_dictionary d \
+             WHERE d.term_type = {literal} \
+               AND d.lexical_md5 = decode(md5(l.o_val), 'hex') \
+               AND d.datatype_iri_id IS NOT DISTINCT FROM dt.id \
+               AND d.language_tag IS NOT DISTINCT FROM l.o_lang \
+         )"
+    );
+    Spi::run(&ins_lit).expect("staged DICT: literal dict insert failed");
+
+    // Drop the dedup temp tables (resume-safe names; harmless to leave, but tidy up on success).
+    Spi::run(&format!("DROP TABLE IF EXISTS {uri_tmp}")).expect("staged DICT: drop uri tmp");
+    Spi::run(&format!("DROP TABLE IF EXISTS {lit_tmp}")).expect("staged DICT: drop lit tmp");
 
     Spi::get_one::<i64>("SELECT count(*)::bigint FROM pgrdf._pgrdf_dictionary")
         .ok()
