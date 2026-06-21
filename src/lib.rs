@@ -51,6 +51,7 @@ pub extern "C-unwind" fn _PG_init() {
     if in_postmaster {
         storage::shmem_cache::init_in_postmaster();
         query::plan_cache::init_in_postmaster();
+        storage::staged::jobctl::init_in_postmaster();
     }
 }
 

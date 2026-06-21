@@ -29,4 +29,5 @@ pub mod loader;
 pub mod loader_ta11;
 pub mod partition;
 pub mod shmem_cache;
+pub mod staged;
 pub mod stats;
