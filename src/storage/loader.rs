@@ -2460,6 +2460,29 @@ mod tests {
         assert!(person.is_some());
     }
 
+    /// R1: a literal longer than PostgreSQL's 2704-byte btree-key limit loads.
+    /// `unique_term` now keys on `lexical_md5` (a 16-byte hash of the value), so a
+    /// long Wikidata-style literal no longer overflows the btree. Before R1 the
+    /// raw-`lexical_value` unique btree aborted such inserts — at Wikidata scale
+    /// (a measured 3312-byte literal) this rolled back the entire 8.2B-triple
+    /// full-truthy load at the final index rebuild.
+    #[pg_test]
+    fn parse_turtle_long_literal_over_btree_limit() {
+        let long = "x".repeat(3000); // > 2704
+        let ttl = format!("@prefix ex: <http://example.com/> .\nex:s ex:p \"{long}\" .\n");
+        let n: i64 =
+            Spi::get_one_with_args("SELECT pgrdf.parse_turtle($1, $2)", &[ttl.into(), 7_133i64.into()])
+                .unwrap()
+                .unwrap();
+        assert_eq!(n, 1);
+        let got: Option<i64> = Spi::get_one_with_args(
+            "SELECT id FROM pgrdf._pgrdf_dictionary WHERE term_type = 3 AND length(lexical_value) = $1",
+            &[3000i32.into()],
+        )
+        .unwrap();
+        assert!(got.is_some(), "3000-byte literal must be in the dictionary");
+    }
+
     /// Datatypes round-trip into the dictionary.
     #[pg_test]
     fn parse_turtle_typed_literal() {
