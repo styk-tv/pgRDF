@@ -7,7 +7,14 @@ CREATE TABLE IF NOT EXISTS _pgrdf_dictionary (
     lexical_value   TEXT     NOT NULL,
     datatype_iri_id BIGINT,
     language_tag    TEXT,
-    CONSTRAINT unique_term UNIQUE (term_type, lexical_value, datatype_iri_id, language_tag)
+    -- R1 (v0.6.9): the uniqueness key hashes the lexical value so the btree key is FIXED-SIZE.
+    -- A raw-lexical_value unique btree key exceeds PostgreSQL's 2704-byte limit on long Wikidata
+    -- literals (measured: a 3312-byte literal aborted the 8.2B-triple full-truthy load at the final
+    -- index rebuild, rolling back the whole transaction). md5 is 128-bit (collision ~1e-20 even at
+    -- billion-term scale), built-in (no extension dependency), 16 bytes as bytea. The generated column
+    -- is computed by PostgreSQL, so the loader insert paths are unchanged (they list explicit columns).
+    lexical_md5     BYTEA GENERATED ALWAYS AS (decode(md5(lexical_value), 'hex')) STORED,
+    CONSTRAINT unique_term UNIQUE (term_type, lexical_md5, datatype_iri_id, language_tag)
 );
 
 -- HASH index is significantly faster for exact string matching during ingestion.

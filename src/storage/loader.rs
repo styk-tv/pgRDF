@@ -1495,7 +1495,7 @@ fn bulk_rebuild_indexes() {
         "CREATE INDEX _pgrdf_idx_osp ON pgrdf._pgrdf_quads (object_id, subject_id, predicate_id) INCLUDE (is_inferred)",
         "CREATE INDEX _pgrdf_dict_val_idx ON pgrdf._pgrdf_dictionary USING HASH (lexical_value)",
         "ALTER TABLE pgrdf._pgrdf_dictionary ADD CONSTRAINT unique_term \
-         UNIQUE (term_type, lexical_value, datatype_iri_id, language_tag)",
+         UNIQUE (term_type, lexical_md5, datatype_iri_id, language_tag)",
     ] {
         Spi::run(ddl).expect("load_turtle: bulk defer-index rebuild");
     }
