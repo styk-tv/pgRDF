@@ -419,16 +419,22 @@ fn run_phase(job_idx: usize, phase: u8, specs: &[WorkerSpec]) -> PhaseOutcome {
 /// transaction), gating on every phase, and returns load stats as JSONB.
 ///
 /// Pipeline (`_WIP/SPEC.STAGED-LOADER-R2.bgworker-design.md` §3.3/§6):
-/// * **A STAGE** — 1 worker: defer indexes + ensure the partition + create the UNLOGGED staging table
+/// * **A STAGE** — 1 worker: defer indexes + create the UNLOGGED staging table
 ///   (`phases::prepare_for_load`), then parse the whole `.nt` leniently and bulk-insert it
 ///   (`phases::stage`). Multi-stream byte-ranged COPY is the documented R2.1-followup micro-opt;
 ///   correctness-first here is a single STAGE worker (the design blesses single-worker-per-phase).
-/// * **B DICT** — 1 worker: set-based `INSERT … SELECT DISTINCT` dedup into `_pgrdf_dictionary`,
-///   driven by PG's **parallel hash-aggregate** (lights up cores INSIDE the one worker's query).
-/// * **C RESOLVE** — 1 worker: `INSERT … SELECT … JOIN dict ×3` → `_pgrdf_quads`, driven by PG's
-///   **parallel hash-join** (lights up cores inside the query).
-/// * **D INDEX** — one worker per [`jobctl::index_ddls`] entry (5): the 3 hexastore indexes + the
-///   dict hash index + the `unique_term` constraint re-add, built SIMULTANEOUSLY across backends.
+///   The destination partition is NOT created here — RESOLVE owns it (standalone CTAS → ATTACH).
+/// * **B DICT** — 1 worker: parallel `CREATE TABLE … AS SELECT … row_number()` dedup, then ONE
+///   `INSERT … OVERRIDING SYSTEM VALUE` into `_pgrdf_dictionary` (pre-assigned ids, no per-row
+///   `nextval`); also builds the `(term_type, lexical_md5)` join index + widens the dict's
+///   `parallel_workers` so RESOLVE runs N-wide (`phases::dict`).
+/// * **C RESOLVE** — 1 worker: a **parallel hash-join** `CREATE TABLE _pgrdf_quads_g<g> AS SELECT …`
+///   (3× join to the dict), then `ATTACH` it as the graph's partition — a CTAS, not a serial INSERT
+///   into the routed parent (`phases::resolve`).
+/// * **D INDEX** — one worker per [`jobctl::index_ddls`] entry (5): the 3 hexastore indexes (built
+///   parent-wide over the now-attached partition) + the dict hash index + the `unique_term`
+///   constraint re-add, built SIMULTANEOUSLY across backends. The coordinator then drops DICT's
+///   transient RESOLVE join index in its final cleanup.
 ///
 /// **No coordinator-held table locks.** The coordinator never touches `_pgrdf_dictionary` /
 /// `_pgrdf_quads` / the staging table while workers run (all mutation is in workers, which COMMIT and
@@ -505,7 +511,7 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
     let stage_ms = t.elapsed().as_secs_f64() * 1000.0;
     jobctl::advance_phase(job_idx, jobctl::phase::STAGE);
 
-    // ── PHASE B — DICT (set-based dedup, PG parallel hash-agg), single worker ────────────────────
+    // ── PHASE B — DICT (parallel row_number() dedup + OVERRIDING SYSTEM VALUE insert), 1 worker ──
     let t = Instant::now();
     if let PhaseOutcome::Failed(reason) =
         run_phase(job_idx, jobctl::phase::DICT, &[(0u16, 0u64, 0u64)])
@@ -515,7 +521,7 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
     let dict_ms = t.elapsed().as_secs_f64() * 1000.0;
     jobctl::advance_phase(job_idx, jobctl::phase::DICT);
 
-    // ── PHASE C — RESOLVE (parallel hash-join → quads), single worker ───────────────────────────
+    // ── PHASE C — RESOLVE (parallel hash-join CTAS → ATTACH partition), single worker ────────────
     let t = Instant::now();
     if let PhaseOutcome::Failed(reason) =
         run_phase(job_idx, jobctl::phase::RESOLVE, &[(0u16, 0u64, 0u64)])
@@ -554,6 +560,15 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
     .unwrap_or(0);
 
     Spi::run(&format!("DROP TABLE IF EXISTS {stg}")).expect("staged loader: drop staging table");
+
+    // Drop the transient `(term_type, lexical_md5)` index DICT built for RESOLVE's hash joins — it is
+    // redundant now Phase D's `unique_term` UNIQUE (a `(term_type, lexical_md5, …)` prefix) exists, so
+    // it is not part of the canonical schema. Safe here: no worker runs, nothing holds the dict lock.
+    Spi::run(&format!(
+        "DROP INDEX IF EXISTS pgrdf.{}",
+        phases::dict_resolve_index()
+    ))
+    .expect("staged loader: drop RESOLVE join index");
 
     jobctl::mark_job_done(job_idx);
     jobctl::release_job(job_idx);
