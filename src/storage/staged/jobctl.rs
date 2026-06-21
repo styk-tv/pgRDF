@@ -9,9 +9,12 @@
 //! `PgLwLock<[T; N]>` table, `PgAtomic` counters, and registration from the `_PG_init` postmaster
 //! path. See `_WIP/SPEC.STAGED-LOADER-R2.bgworker-design.md` §4.
 
-// R2.0 foundation: the shmem segment + its registration. The slot fields, the JOBS/WSLOTS tables,
-// and the accessors are read by the coordinator + worker bodies landing in the next R2.0 step; until
-// then they are intentionally not-yet-read. Remove this allow when the coordinator wires them up.
+// R2.0: the shmem segment, its registration, AND the parent↔worker accessors (`create_job`,
+// `claim_worker_slot`, `report_worker`, …) used by `super::pool`. A handful of slot fields stay
+// reserved for the not-yet-implemented real phases — `tspace`/`guc` (per-worker SET LOCAL levers,
+// §5), `range_lo`/`range_hi` (STAGE byte ranges / RESOLVE row ranges, §6.A/C), and the STAGE/DICT/
+// RESOLVE/INDEX phase ordinals beyond the minimal ping — so the crate-level allow remains until
+// R2.1 wires them. Everything the ping coordinator needs is read.
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -150,4 +153,187 @@ static SHMEM_READY: AtomicBool = AtomicBool::new(false);
 
 pub fn is_ready() -> bool {
     SHMEM_READY.load(Ordering::Relaxed)
+}
+
+// ── R2.0 accessors ────────────────────────────────────────────────────────────────────────────
+//
+// The parent (coordinator) and the spawned workers talk ONLY through these. Locking mirrors
+// `storage::shmem_cache` exactly: `JOBS.exclusive()` / `WSLOTS.exclusive()` for mutation,
+// `.share()` for a read snapshot. Every accessor short-circuits when `!is_ready()` (pgRDF not in
+// `shared_preload_libraries`) so a mis-deployed extension degrades to a clear coordinator-side error
+// rather than touching an uninitialised pointer slot.
+
+/// Claim a free [`JobSlot`], assign the next monotonic `job_id`, and copy the server-side `path`
+/// in as inline bytes. Returns the JOB INDEX (`0..MAX_JOBS`) for the coordinator to address the row
+/// (NOT the public `job_id`; read that back via [`read_job`]). `None` ⇒ all job slots in use OR
+/// `path` longer than [`PATH_CAP`] (validated, never truncated — §3 risk #3b) OR shmem not ready.
+///
+/// `db_oid` is the coordinator's `pg_sys::MyDatabaseId`: a dynamic worker does NOT inherit the
+/// spawner's database, so each worker reconnects with `connect_worker_to_spi_by_oid(Some(db_oid))`.
+pub fn create_job(
+    path: &str,
+    graph_id: i64,
+    db_oid: u32,
+    n_workers: u16,
+    n_shards: u16,
+) -> Option<usize> {
+    if !is_ready() {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() > PATH_CAP {
+        return None;
+    }
+    let job_id = NEXT_JOB_ID.get().fetch_add(1, Ordering::Relaxed) as i64;
+    let mut jobs = JOBS.exclusive();
+    for idx in 0..MAX_JOBS {
+        if jobs[idx].in_use == 0 {
+            let mut slot = JobSlot::default_const();
+            slot.in_use = 1;
+            slot.phase = phase::NONE;
+            slot.state = state::RUNNING;
+            slot.n_workers = n_workers;
+            slot.n_shards = n_shards;
+            slot.db_oid = db_oid;
+            slot.graph_id = graph_id;
+            slot.job_id = job_id;
+            slot.path_len = bytes.len() as u16;
+            slot.path[..bytes.len()].copy_from_slice(bytes);
+            jobs[idx] = slot;
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// Claim a free [`WorkerSlot`] for `job_idx` running `phase`/`shard`. Returns the SLOT INDEX
+/// (`0..MAX_SLOTS`) — this integer is what gets passed to the worker via `set_argument`, and the
+/// worker reads its slot (then follows `job_idx` to the job) on entry. `None` ⇒ no free slot / not
+/// ready. Status starts at 0 (`spawned`); the worker overwrites it via [`report_worker`].
+pub fn claim_worker_slot(job_idx: usize, phase: u8, shard: u16) -> Option<usize> {
+    if !is_ready() {
+        return None;
+    }
+    let mut wslots = WSLOTS.exclusive();
+    for idx in 0..MAX_SLOTS {
+        if wslots[idx].in_use == 0 {
+            wslots[idx] = WorkerSlot {
+                in_use: 1,
+                phase,
+                status: 0,
+                _pad0: 0,
+                job_idx: job_idx as u16,
+                shard,
+                range_lo: 0,
+                range_hi: 0,
+            };
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// Read a copy of [`JobSlot`] `idx` out from under the share lock. Returns by value (`Copy`) so the
+/// caller holds no lock while it works — the same "snapshot then release" shape the dict cache uses.
+pub fn read_job(idx: usize) -> JobSlot {
+    let jobs = JOBS.share();
+    jobs[idx]
+}
+
+/// Read a copy of [`WorkerSlot`] `idx`. By value; lock released on return (see [`read_job`]).
+pub fn read_worker(idx: usize) -> WorkerSlot {
+    let wslots = WSLOTS.share();
+    wslots[idx]
+}
+
+/// Worker outcome channel — §7. A bgworker that `ereport`s ERROR still *stops*, so the parent's
+/// `wait_for_shutdown()` returns `Ok(())`; the worker therefore signals success/failure HERE, in
+/// shmem, before it returns. `ok=false` records `err` (truncated to [`ERR_CAP`]) into the owning
+/// [`JobSlot`] as the first-failure string the coordinator surfaces, and flips the job to
+/// `state::FAILED`. No-op when shmem isn't ready.
+pub fn report_worker(idx: usize, ok: bool, err: &str) {
+    if !is_ready() {
+        return;
+    }
+    let job_idx = {
+        let mut wslots = WSLOTS.exclusive();
+        wslots[idx].status = if ok { 1 } else { 2 };
+        wslots[idx].job_idx as usize
+    };
+    if !ok {
+        let mut jobs = JOBS.exclusive();
+        let j = &mut jobs[job_idx];
+        // Only record the FIRST failure (don't clobber an earlier worker's error string).
+        if j.err_len == 0 {
+            let bytes = err.as_bytes();
+            let n = bytes.len().min(ERR_CAP);
+            j.err[..n].copy_from_slice(&bytes[..n]);
+            j.err_len = n as u16;
+        }
+        j.state = state::FAILED;
+    }
+}
+
+/// Mark job index `idx` done (state + `phase` high-water = DONE). Coordinator calls this after every
+/// worker has been joined and no failure was recorded. No-op when not ready.
+pub fn mark_job_done(idx: usize) {
+    if !is_ready() {
+        return;
+    }
+    let mut jobs = JOBS.exclusive();
+    jobs[idx].state = state::DONE;
+    jobs[idx].phase = phase::DONE;
+}
+
+/// Release job `idx` and every [`WorkerSlot`] that pointed at it (frees the `in_use` flags so the
+/// fixed-capacity tables can be reused). Coordinator's final cleanup, success OR failure — the
+/// workers have already exited, so their slots are inert and safe to reclaim. No-op when not ready.
+pub fn release_job(idx: usize) {
+    if !is_ready() {
+        return;
+    }
+    {
+        let mut wslots = WSLOTS.exclusive();
+        for w in wslots.iter_mut() {
+            if w.in_use != 0 && w.job_idx as usize == idx {
+                *w = WorkerSlot::default_const();
+            }
+        }
+    }
+    let mut jobs = JOBS.exclusive();
+    jobs[idx] = JobSlot::default_const();
+}
+
+/// The first-failure error string recorded in [`JobSlot`] `idx`, if any. Empty ⇒ no worker failed.
+pub fn job_err(idx: usize) -> String {
+    let j = read_job(idx);
+    let n = (j.err_len as usize).min(ERR_CAP);
+    String::from_utf8_lossy(&j.err[..n]).into_owned()
+}
+
+/// The public monotonic `job_id` of job index `idx`.
+pub fn job_id_of(idx: usize) -> i64 {
+    read_job(idx).job_id
+}
+
+/// Count `(succeeded, failed)` across every in-use [`WorkerSlot`] pointing at job `idx`, from the
+/// shmem `status` field (1 = ok, 2 = error) — the authoritative outcome channel (§7). A worker that
+/// started but never reported (status still 0) counts as neither. `(0, 0)` when not ready.
+pub fn tally_job(idx: usize) -> (usize, usize) {
+    if !is_ready() {
+        return (0, 0);
+    }
+    let wslots = WSLOTS.share();
+    let mut ok = 0usize;
+    let mut err = 0usize;
+    for w in wslots.iter() {
+        if w.in_use != 0 && w.job_idx as usize == idx {
+            match w.status {
+                1 => ok += 1,
+                2 => err += 1,
+                _ => {}
+            }
+        }
+    }
+    (ok, err)
 }

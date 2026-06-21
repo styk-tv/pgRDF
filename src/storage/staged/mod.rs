@@ -13,3 +13,4 @@
 //! skeleton + shmem job segment; later R2.1 = multi-stream COPY + sharded dict; R2.2 = tuning.
 
 pub mod jobctl;
+pub mod pool;
