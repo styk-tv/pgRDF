@@ -94,6 +94,14 @@ pub fn spawn_checked(name: &str, worker_slot: usize) -> Result<DynamicBackground
 /// recorded failure (`WorkerSlot.status = error` + message) instead of an uncaught unwind across the
 /// FFI boundary. The outcome is reported via shmem, NOT the exit code — a worker that `ereport`s
 /// ERROR still "stops", so the parent's `wait_for_shutdown` returns `Ok(())` regardless (§7).
+///
+/// `#[no_mangle]` is MANDATORY here: the postmaster resolves this worker by the *string* name
+/// passed to `set_function("pgrdf_staged_worker_main")` via `dlsym`, so the symbol must be exported
+/// UNMANGLED and under exactly that name. Without it Rust both name-mangles the symbol AND
+/// dead-code-eliminates it (nothing references the function by Rust path — only by string), so the
+/// postmaster's launcher fails with `could not find function "pgrdf_staged_worker_main" in
+/// pgrdf.so` and every worker exits code 1 before its body runs (observed on E160).
+#[no_mangle]
 #[pg_guard]
 pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
     let slot =
