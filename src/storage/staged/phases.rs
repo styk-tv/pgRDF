@@ -406,6 +406,50 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
     staged
 }
 
+/// The dedup SELECT that feeds `dict_lit` — one row per DISTINCT literal IDENTITY, i.e. per distinct
+/// `(lexical value, datatype-IRI string, language tag)` triple, NOT per lexical value. This is the
+/// single source of truth shared by [`dict`] and its regression test.
+///
+/// An RDF literal's identity is its `(value, datatype, language)` triple, mirroring the dict's
+/// `unique_term (term_type, lexical_md5, datatype_iri_id, language_tag)` key. Grouping by `o_val`
+/// alone (and stamping `max(o_dt)`/`max(o_lang)`) would collapse `"Berlin"@en`, `"Berlin"@de`,
+/// `"1"^^xsd:integer` and a plain/lang `"1"` into ONE dict row carrying the MAX datatype AND the MAX
+/// language — a row that is simultaneously typed and language-tagged (impossible in RDF) and loses
+/// every variant but one. So the GROUP/SELECT key is the FULL `(o_val, o_dt, o_lang)`; each distinct
+/// literal becomes its own dict id. `o_dt`/`o_lang` are NULLABLE and NULLS-DISTINCT under `GROUP BY`
+/// the same way the dict's NULLS-DISTINCT `unique_term` treats them, so a plain `"1"` (o_dt NULL,
+/// o_lang NULL) and `"1"^^xsd:string` (o_dt = the xsd:string IRI) stay distinct.
+fn dict_lit_dedup_select(stg: &str, literal: i32) -> String {
+    format!("SELECT o_val, o_dt, o_lang FROM {stg} WHERE o_type = {literal} GROUP BY o_val, o_dt, o_lang")
+}
+
+/// The object-side `ON` predicate of RESOLVE's quad-object → dict-id hash join (the `dobj` join in
+/// [`resolve`]). Single source of truth, shared with the regression test.
+///
+/// `dobj` is the candidate `_pgrdf_dictionary` row; `st` is the staging row; `ddt` is a SECOND dict
+/// alias LEFT-JOINed so a literal's datatype-IRI **string** can be compared (the dict stores the
+/// datatype as a dict *id* in `datatype_iri_id`, not the IRI string). The match is:
+///
+/// * `term_type` + `lexical_md5` — the value, as before.
+/// * `language_tag IS NOT DISTINCT FROM o_lang` — NULL-safe, so a plain/typed literal (lang NULL) and
+///   a `@en` literal with the same value resolve to DIFFERENT ids; URIs/blanks have NULL lang and
+///   `st.o_lang` is NULL for them, so this stays TRUE (no change to URI/blank resolution).
+/// * `ddt.lexical_value IS NOT DISTINCT FROM o_dt` — `ddt` is the datatype IRI's own URI term
+///   (`ddt.id = dobj.datatype_iri_id`); via the LEFT JOIN it is NULL exactly when `dobj.datatype_iri_id`
+///   is NULL (URI/blank, or a no-datatype/lang literal), and `NULL IS NOT DISTINCT FROM st.o_dt` is
+///   TRUE only when `st.o_dt` is itself NULL — again preserving URI/blank resolution unchanged while
+///   making `"1"^^xsd:integer` vs a plain/lang `"1"` resolve to their own ids.
+///
+/// Without the datatype/language predicates the object join would be AMBIGUOUS now that `dict_lit`
+/// keeps multiple rows per lexical value (see [`dict_lit_dedup_select`]): `(term_type, lexical_md5)`
+/// alone would match several dict rows and bind the object to an arbitrary one.
+fn resolve_object_join_on() -> &'static str {
+    "ON dobj.term_type = st.o_type \
+        AND dobj.lexical_md5 = decode(md5(st.o_val), 'hex') \
+        AND dobj.language_tag IS NOT DISTINCT FROM st.o_lang \
+        AND ddt.lexical_value IS NOT DISTINCT FROM st.o_dt"
+}
+
 /// The UNQUALIFIED name of the dictionary index RESOLVE's hash joins probe (built by [`dict`],
 /// dropped by the coordinator after INDEX). `(term_type, lexical_md5)` — the prefix RESOLVE matches
 /// s/p/o on. Redundant once Phase D's `unique_term` (a `(term_type, lexical_md5, …)`-prefixed UNIQUE)
@@ -503,17 +547,16 @@ pub fn dict(job: &JobSlot, _w: &WorkerSlot) -> i64 {
     );
     Spi::run(&cta_blank).expect("staged DICT: parallel dict_blank CTAS failed");
 
-    // ── (3) dict_lit: DISTINCT literals (lexical, datatype IRI string, language), ids continue ────
-    // GROUP BY o_val with max(o_dt)/max(o_lang) collapses literals that share a lexical value — this
-    // matches the benchmark and is the cause of the object-join caveat noted on `resolve`.
+    // ── (3) dict_lit: DISTINCT literals by FULL identity (lexical value, datatype IRI string,
+    // language tag), ids continue. The dedup key is the WHOLE `(o_val, o_dt, o_lang)` triple — see
+    // `dict_lit_dedup_select`: each distinct RDF literal gets its own dict id, so `"Berlin"@en` /
+    // `"Berlin"@de` / `"1"^^xsd:integer` / a plain `"1"` are FOUR rows, not one collapsed row.
     let cta_lit = format!(
         "CREATE UNLOGGED TABLE {d_lit} WITH (parallel_workers = {nproc}) AS \
          SELECT {base}::bigint + (SELECT count(*) FROM {d_uri}) \
                               + (SELECT count(*) FROM {d_blank}) + row_number() OVER () AS id, \
-                o_val AS lexical_value, o_dt, o_lang FROM ( \
-             SELECT o_val, max(o_dt) AS o_dt, max(o_lang) AS o_lang \
-             FROM {stg} WHERE o_type = {literal} GROUP BY o_val \
-         ) d"
+                o_val AS lexical_value, o_dt, o_lang FROM ( {dedup} ) d",
+        dedup = dict_lit_dedup_select(&stg, literal)
     );
     Spi::run(&cta_lit).expect("staged DICT: parallel dict_lit CTAS failed");
 
@@ -594,13 +637,14 @@ pub fn dict(job: &JobSlot, _w: &WorkerSlot) -> i64 {
 /// [`dict`]) let the parallel hash build scan it N-wide. Subject term_type is `2` for a blank label
 /// (`s LIKE '\_:%'`) else `1`; predicate is `1`; object is `o_type` directly.
 ///
-/// **Object-join caveat (verify on the box).** The object is matched on `(term_type, lexical_md5)`
-/// ONLY — NOT the datatype/language. The benchmark verified its corpus is collision-free on that pair,
-/// and `dict` collapses literals sharing a lexical value to ONE dict row (`GROUP BY o_val`). If a real
-/// corpus carries two literals with the SAME lexical value but DIFFERENT datatype/language (e.g.
-/// `"5"^^xsd:int` and `"5"@en`), `dict` keeps only one and this join binds every such object to that
-/// single id — a lossy match. This is the single biggest correctness assumption inherited from the
-/// benchmark; flagged for validation.
+/// **Object join matches the FULL literal identity** (see [`resolve_object_join_on`]). `dict_lit` now
+/// keeps one row per distinct `(value, datatype, language)` (see [`dict_lit_dedup_select`]), so the
+/// object join can no longer match on `(term_type, lexical_md5)` alone — that would be AMBIGUOUS across
+/// the several dict rows a single lexical value can now have. The `dobj` join therefore also requires
+/// `language_tag IS NOT DISTINCT FROM o_lang` and (via a LEFT-JOINed `ddt` = the dict row of `dobj`'s
+/// datatype IRI) `ddt.lexical_value IS NOT DISTINCT FROM o_dt`, both NULL-safe so URIs/blanks and
+/// no-datatype/lang literals (all NULL `o_dt`/`o_lang`) still resolve exactly as before. So
+/// `"5"^^xsd:int` and `"5"@en` resolve to their OWN ids — the prior lossy value-only collision is gone.
 pub fn resolve(job: &JobSlot, _w: &WorkerSlot) -> i64 {
     let stg = staging_table(job.job_id);
     let graph_id = job.graph_id;
@@ -639,8 +683,12 @@ pub fn resolve(job: &JobSlot, _w: &WorkerSlot) -> i64 {
 
     // ── (1) PARALLEL hash-join CTAS → standalone _pgrdf_quads_g<g> ─────────────────────────────────
     // ds: subject (term_type 2 if a blank label, else 1); dp: predicate (1); dobj: object (o_type).
-    // Object matched on (term_type, lexical_md5) ONLY — see the caveat in the doc comment. Columns are
-    // emitted in the parent's order with explicit casts so ATTACH sees a structurally identical table.
+    // The object is matched on its FULL literal identity, not value alone (see `resolve_object_join_on`
+    // / `dict_lit_dedup_select`): `dobj` carries `language_tag` directly and a LEFT-JOINed `ddt` (the
+    // dict row of `dobj`'s datatype IRI) supplies the datatype IRI STRING to compare against `o_dt`,
+    // both via `IS NOT DISTINCT FROM` so NULLs (URIs/blanks, plain literals) match correctly. Columns
+    // are emitted in the parent's order with explicit casts so ATTACH sees a structurally identical
+    // table.
     let cta = format!(
         "CREATE TABLE pgrdf.{part} WITH (parallel_workers = {nproc}) AS \
          SELECT ds.id AS subject_id, dp.id AS predicate_id, dobj.id AS object_id, \
@@ -653,8 +701,9 @@ pub fn resolve(job: &JobSlot, _w: &WorkerSlot) -> i64 {
               ON dp.term_type = {uri} \
              AND dp.lexical_md5 = decode(md5(st.p), 'hex') \
          JOIN pgrdf._pgrdf_dictionary dobj \
-              ON dobj.term_type = st.o_type \
-             AND dobj.lexical_md5 = decode(md5(st.o_val), 'hex')"
+         LEFT JOIN pgrdf._pgrdf_dictionary ddt ON ddt.id = dobj.datatype_iri_id \
+              {dobj_on}",
+        dobj_on = resolve_object_join_on()
     );
     Spi::run(&cta).expect("staged RESOLVE: parallel hash-join CTAS failed");
 
@@ -704,4 +753,215 @@ pub fn build_index(_job: &JobSlot, w: &WorkerSlot) {
         .get(i)
         .unwrap_or_else(|| panic!("staged INDEX: ddl index {i} out of range"));
     Spi::run(ddl).unwrap_or_else(|e| panic!("staged INDEX: DDL #{i} failed: {e}"));
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_schema]
+mod tests {
+    use super::{dict_lit_dedup_select, parse_window_par, resolve_object_join_on};
+    use crate::storage::dict::term_type;
+    use pgrx::prelude::*;
+
+    /// Regression for the literal full-key dedup bug (release-blocking): the staged loader used to
+    /// deduplicate literals by lexical VALUE alone — `GROUP BY o_val` with `max(o_dt)`/`max(o_lang)` —
+    /// collapsing `"Berlin"@en`, `"Berlin"@de`, `"1"^^xsd:integer` and a plain/lang `"1"` into ONE dict
+    /// row stamped with the MAX datatype AND the MAX language (a row that is simultaneously typed and
+    /// language-tagged — impossible in RDF — and loses every variant but one). The matching value-only
+    /// RESOLVE object join then bound every such object to that single id.
+    ///
+    /// This drives the EXACT production SQL — the same `dict_lit_dedup_select` and
+    /// `resolve_object_join_on` the [`super::dict`]/[`super::resolve`] phases build — against a tiny
+    /// hand-built staging + dictionary pair (no background-worker pool, so it runs in the ordinary
+    /// `cargo pgrx test` harness), and asserts the literal IDENTITY is preserved end to end.
+    #[pg_test]
+    fn staged_literal_full_key_dedup_and_resolve() {
+        let stg = "pgrdf._pgrdf_stg_littest";
+        let uri = term_type::URI as i32;
+        let blank = term_type::BLANK_NODE as i32;
+        let literal = term_type::LITERAL as i32;
+
+        // ── Fixture: the four bug literals (Berlin@en/@de, "1"^^xsd:integer, "1"@en) + a URI object
+        // and a blank object (to prove URI/blank resolution is unchanged), each on a distinct subject
+        // so every staged row resolves to exactly one quad. Mirrors STAGE_COLS.
+        Spi::run(&format!(
+            "DROP TABLE IF EXISTS {stg}; CREATE TABLE {stg} ({cols});",
+            cols = super::STAGE_COLS
+        ))
+        .expect("create staging fixture");
+        Spi::run(&format!(
+            "INSERT INTO {stg}(s,p,o_type,o_val,o_dt,o_lang) VALUES \
+             ('http://ex/a','http://ex/label',{literal},'Berlin',NULL,'en'), \
+             ('http://ex/b','http://ex/label',{literal},'Berlin',NULL,'de'), \
+             ('http://ex/c','http://ex/n',{literal},'1','http://www.w3.org/2001/XMLSchema#integer',NULL), \
+             ('http://ex/d','http://ex/n',{literal},'1',NULL,'en'), \
+             ('http://ex/e','http://ex/ref',{uri},'http://ex/target',NULL,NULL), \
+             ('http://ex/f','http://ex/bn',{blank},'_:b0',NULL,NULL)"
+        ))
+        .expect("seed staging fixture");
+
+        // ── DICT (the fixed full-key dedup feeds dict_lit) — the same shape super::dict builds, minus
+        // the parallel_workers reloption (irrelevant to correctness). base = current MAX(id).
+        let base: i64 =
+            Spi::get_one::<i64>("SELECT COALESCE(MAX(id),0)::bigint FROM pgrdf._pgrdf_dictionary")
+                .unwrap()
+                .unwrap_or(0);
+        // The dict_* are TEMP tables: each #[pg_test] runs in its own rolled-back transaction, so
+        // they are fresh here and vanish at test end — no pre-drop needed.
+        Spi::run(&format!(
+            "CREATE TEMP TABLE dict_uri_lt AS \
+             SELECT {base}::bigint + row_number() OVER () AS id, u AS lexical_value FROM ( \
+               SELECT u FROM ( \
+                 SELECT s AS u FROM {stg} WHERE s NOT LIKE '\\_:%' \
+                 UNION ALL SELECT p FROM {stg} \
+                 UNION ALL SELECT o_val FROM {stg} WHERE o_type = {uri} \
+                 UNION ALL SELECT o_dt FROM {stg} WHERE o_type = {literal} AND o_dt IS NOT NULL \
+               ) a GROUP BY u) d"
+        ))
+        .expect("dict_uri");
+        Spi::run(&format!(
+            "CREATE TEMP TABLE dict_blank_lt AS \
+             SELECT {base}::bigint + (SELECT count(*) FROM dict_uri_lt) + row_number() OVER () AS id, \
+                    b AS lexical_value FROM ( \
+               SELECT b FROM ( \
+                 SELECT s AS b FROM {stg} WHERE s LIKE '\\_:%' \
+                 UNION ALL SELECT o_val FROM {stg} WHERE o_type = {blank} \
+               ) a GROUP BY b) d"
+        ))
+        .expect("dict_blank");
+        // The line under test: dict_lit's dedup SELECT is the production helper verbatim.
+        Spi::run(&format!(
+            "CREATE TEMP TABLE dict_lit_lt AS \
+             SELECT {base}::bigint + (SELECT count(*) FROM dict_uri_lt) \
+                                  + (SELECT count(*) FROM dict_blank_lt) + row_number() OVER () AS id, \
+                    o_val AS lexical_value, o_dt, o_lang FROM ( {dedup} ) d",
+            dedup = dict_lit_dedup_select(stg, literal)
+        ))
+        .expect("dict_lit (full-key dedup)");
+        Spi::run(&format!(
+            "CREATE TEMP TABLE dict_all_lt AS \
+             SELECT id, {uri}::smallint AS term_type, lexical_value, NULL::bigint AS datatype_iri_id, \
+                    NULL::text AS language_tag FROM dict_uri_lt \
+             UNION ALL SELECT id, {blank}::smallint, lexical_value, NULL::bigint, NULL::text FROM dict_blank_lt \
+             UNION ALL SELECT l.id, {literal}::smallint, l.lexical_value, u.id, l.o_lang \
+                       FROM dict_lit_lt l LEFT JOIN dict_uri_lt u ON u.lexical_value = l.o_dt"
+        ))
+        .expect("dict_all");
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_dictionary (id, term_type, lexical_value, datatype_iri_id, language_tag) \
+             OVERRIDING SYSTEM VALUE \
+             SELECT id, term_type, lexical_value, datatype_iri_id, language_tag FROM dict_all_lt",
+        )
+        .expect("dict insert");
+        Spi::run(
+            "SELECT setval(pg_get_serial_sequence('pgrdf._pgrdf_dictionary','id'), \
+                           GREATEST((SELECT COALESCE(MAX(id),1) FROM pgrdf._pgrdf_dictionary),1), true)",
+        )
+        .expect("resync identity");
+
+        // ── Assertion 1: "Berlin"@en and "Berlin"@de are TWO distinct dict rows (not one). ──────────
+        let berlin: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_dictionary \
+             WHERE term_type = 3 AND lexical_value = 'Berlin'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            berlin, 2,
+            r#""Berlin"@en and "Berlin"@de must be two distinct dict rows"#
+        );
+
+        // ── Assertion 2: ZERO dict rows carry BOTH a datatype_iri_id AND a language_tag (the
+        // impossible-in-RDF state the value-only dedup produced). ──────────────────────────────────
+        let both: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_dictionary \
+             WHERE datatype_iri_id IS NOT NULL AND language_tag IS NOT NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            both, 0,
+            "no dict row may have BOTH a datatype and a language tag"
+        );
+
+        // ── Assertion 3: "1"^^xsd:integer and a plain/lang "1" are distinct dict rows. ─────────────
+        let ones: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_dictionary \
+             WHERE term_type = 3 AND lexical_value = '1'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ones, 2,
+            r#""1"^^xsd:integer and a lang/plain "1" must be distinct dict rows"#
+        );
+
+        // ── RESOLVE (the fixed full-key object join) — the same `resolve_object_join_on` predicate +
+        // its `ddt` LEFT JOIN that super::resolve builds. Every staged row must resolve to exactly one
+        // quad bound to the CORRECT object id (no value-only collision, no fan-out from the ddt join).
+        Spi::run(&format!(
+            "CREATE TEMP TABLE _q_littest AS \
+             SELECT ds.id AS subject_id, dp.id AS predicate_id, dobj.id AS object_id \
+             FROM {stg} st \
+             JOIN pgrdf._pgrdf_dictionary ds \
+                  ON ds.term_type = CASE WHEN st.s LIKE '\\_:%' THEN {blank} ELSE {uri} END \
+                 AND ds.lexical_md5 = decode(md5(st.s), 'hex') \
+             JOIN pgrdf._pgrdf_dictionary dp \
+                  ON dp.term_type = {uri} AND dp.lexical_md5 = decode(md5(st.p), 'hex') \
+             JOIN pgrdf._pgrdf_dictionary dobj \
+             LEFT JOIN pgrdf._pgrdf_dictionary ddt ON ddt.id = dobj.datatype_iri_id \
+                  {dobj_on}",
+            dobj_on = resolve_object_join_on()
+        ))
+        .expect("resolve full-key join CTAS");
+
+        // Exactly one quad per staged triple (6) — no loss, no fan-out from the extra ddt LEFT JOIN.
+        let quads: i64 = Spi::get_one("SELECT count(*)::bigint FROM _q_littest")
+            .unwrap()
+            .unwrap();
+        assert_eq!(quads, 6, "every staged triple resolves to exactly one quad");
+
+        // Every object bound to the literal/term whose (value, datatype, language) it actually is —
+        // proves the value-only collision is gone AND URI/blank objects still resolve (their NULL
+        // o_dt/o_lang match via IS NOT DISTINCT FROM). Count rows where the bound object DISAGREES.
+        let wrong: i64 = Spi::get_one(&format!(
+            "SELECT count(*)::bigint FROM {stg} st \
+             JOIN _q_littest q \
+                  ON q.subject_id = ( \
+                       SELECT id FROM pgrdf._pgrdf_dictionary \
+                       WHERE lexical_md5 = decode(md5(st.s),'hex') \
+                         AND term_type = CASE WHEN st.s LIKE '\\_:%' THEN {blank} ELSE {uri} END) \
+             JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id \
+             LEFT JOIN pgrdf._pgrdf_dictionary dt ON dt.id = o.datatype_iri_id \
+             WHERE NOT ( o.lexical_value IS NOT DISTINCT FROM st.o_val \
+                     AND dt.lexical_value IS NOT DISTINCT FROM st.o_dt \
+                     AND o.language_tag  IS NOT DISTINCT FROM st.o_lang )"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            wrong, 0,
+            "each object must resolve to the dict row matching its full identity"
+        );
+
+        // Cleanup the persistent staging fixture (temp tables drop at txn end on their own).
+        Spi::run(&format!("DROP TABLE IF EXISTS {stg}")).ok();
+    }
+
+    /// The staged loader's window parser is LENIENT: a malformed N-Triples line is skipped and COUNTED
+    /// (`parse_skipped`-style), never a panic — the Wikidata control-byte robustness the streaming
+    /// loader has. This exercises [`super::parse_window_par`] (the staged STAGE parser) directly: one
+    /// good triple + one malformed line ⇒ one parsed row, skipped >= 1, no panic.
+    #[pg_test]
+    fn staged_parse_window_lenient_skips_malformed() {
+        let lines = vec![
+            "<http://ex/s> <http://ex/p> <http://ex/o> .".to_string(),
+            "this is not a valid n-triples line at all".to_string(),
+        ];
+        let (rows, skipped) = parse_window_par(&lines);
+        assert_eq!(rows.len(), 1, "the one well-formed triple is parsed");
+        assert!(
+            skipped >= 1,
+            "the malformed line must be counted as skipped (got {skipped}), not panic"
+        );
+    }
 }
