@@ -6,6 +6,41 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.12] — 2026-06-22
+
+> Correctness fix for the staged bulk loader ([0.6.11]'s `load_turtle_staged_run`): distinct RDF
+> literals that share a lexical value are no longer collapsed. The staged loader is **available**
+> (opt-in) and now correct on multilingual / typed data; promoting it to the **default** ingest path
+> follows in 0.6.13 once the RESOLVE phase is memory-adaptive at extreme scale (see Known limitations).
+
+### Fixed — staged loader: literal dictionary keyed on full identity, not lexical value alone ★ headline
+
+The staged loader's `DICT` phase deduplicated literals by lexical **value alone** (`GROUP BY o_val`
+with `max(datatype)`/`max(language)`), collapsing distinct RDF literals that share a value — `"Berlin"@en`,
+`"Berlin"@de`, `"1"^^xsd:integer`, and `"1"` folded into a single dictionary row stamped with an arbitrary
+(max) datatype + language. At Wikidata-`truthy` scale this produced **21,666,575** dictionary rows carrying
+**both** a datatype and a language tag (an impossible RDF term) and silently lost language/datatype
+variants — masked by the `quads == triples` count check, which a value-only collapse still satisfies.
+
+The fix keys the literal dictionary on the **full literal identity** `(lexical_value, datatype, language)`
+(`dict_lit` now `GROUP BY o_val, o_dt, o_lang`), and the `RESOLVE` phase matches literal objects on that
+full key (`lexical_md5` + `language_tag IS NOT DISTINCT FROM` + the datatype IRI, via a dictionary
+self-join), so each distinct literal resolves to its own id. URI and blank-node resolution are unchanged.
+A regression test locks it: `"Berlin"@en` ≠ `"Berlin"@de`, **zero** rows with both a datatype and a
+language, `"1"^^xsd:integer` ≠ `"1"`, and a malformed triple increments `parse_skipped` without a panic.
+Validated by replaying the corrected `DICT` + `RESOLVE` SQL on a PG17 cluster (4 distinct literals / 0
+impossible rows) and by re-running the pre-fix SQL to confirm the collapse reproduces.
+
+No schema change — the fix is internal to the staged loader's set-based SQL (runtime / `.so`).
+
+### Known limitations
+
+- **`RESOLVE` at extreme scale on modest RAM.** The staged loader's `RESOLVE` phase forces all-hash-joins
+  and is not yet memory-adaptive: a full **8.2-billion-triple** load completes on a 1.28 TiB host (E160)
+  but exhausts a 251 GiB host (E32) during `RESOLVE`. Loads in the billions of triples need RAM roughly
+  proportional to the dictionary; smaller loads are unaffected. Making `RESOLVE` spill-tolerant (and
+  promoting the staged loader to the default ingest path) is the **0.6.13** follow-up.
+
 ## [0.6.11] — 2026-06-21
 
 > Delivers what [0.6.10] promised — *"the real STAGE/DICT/RESOLVE/INDEX pipeline

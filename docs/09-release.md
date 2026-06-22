@@ -4,14 +4,59 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is **`v0.6.11`** (`isPrerelease=false`,
-`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.11`, and the
+The current cut is **`v0.6.12`** (`isPrerelease=false`,
+`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.12`, and the
 tagged release carries the binary tarball matrix, the PGXN source
 zip, and an SLSA-attested OCI bundle. The per-release notes below
-cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.11 history
+cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.12 history
 (the parallel bulk loader and its levers) lives in `CHANGELOG.md`,
 which is the authoritative running log — new entries land under
 `[Unreleased]` and move into the next `[N.M.P]` block at tag time.
+
+## v0.6.12 — 2026-06-22
+
+A correctness cut for the staged bulk loader. The staged loader's
+`DICT` phase deduplicated literals by **lexical value alone**
+(`GROUP BY o_val` with `max(datatype)` / `max(language)`), collapsing
+distinct RDF literals that share a value — `"Berlin"@en`, `"Berlin"@de`,
+`"1"^^xsd:integer`, and a plain `"1"` folded into a single dictionary
+row stamped with an arbitrary (max) datatype **and** language (an
+impossible RDF term). At Wikidata-`truthy` scale this produced
+**21,666,575** dictionary rows carrying both a datatype and a language
+tag and silently dropped language / datatype variants, masked by the
+`quads == triples` count check that a value-only collapse still
+satisfies. v0.6.12 keys the literal dictionary on the **full literal
+identity** `(lexical_value, datatype, language)` and the `RESOLVE`
+phase matches literal objects on that full key, so each distinct
+literal resolves to its own id. A regression test locks it. The fix is
+internal to the loader's set-based SQL — **runtime / `.so`, no schema
+change**.
+
+The staged loader (`load_turtle_staged_run`, the 0.6.11 R2.1
+coordinator) stays **opt-in**; it is now correct on multilingual /
+typed data. Promoting it to the **default** ingest path is deferred to
+**0.6.13**, pending the `RESOLVE`-phase memory-adaptivity work (today
+`RESOLVE` forces all-hash-joins and is not spill-tolerant: a full
+8.2-billion-triple load completes on a 1.28 TiB host but exhausts a
+251 GiB host during `RESOLVE`).
+
+### Control-version reconciliation
+
+`Cargo.toml` `version`, `pgrdf.control` `default_version`, `META.json`
+`version`, the `cargo pgrx package` SQL filename, the
+`compose/compose.yml` bind-mount, and Postgres `extversion` are all
+identically `0.6.12`. `00-smoke.out` literals move to `0.6.12`.
+
+### Cut file set
+
+`Cargo.toml` (version only) + `Cargo.lock` (`pgrdf` package entry) +
+`pgrdf.control` (`default_version`) + `META.json` +
+`compose/compose.yml` (the single SQL bind-mount line
+`pgrdf--0.6.12.sql`) + `tests/regression/expected/00-smoke.out`
+(version literals) + `git mv sql/pgrdf--0.5.1--0.6.{11→12}.sql` (the
+upgrade-path is a version-string bump only — no DDL) + `CHANGELOG.md`
+(`[Unreleased]` stays, new `[0.6.12]` block) + `README.md` / guide /
+docs install + version refreshes + `docs/09-release.md` (this section).
 
 ## v0.5.1 — 2026-05-23
 
