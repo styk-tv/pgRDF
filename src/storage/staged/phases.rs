@@ -74,6 +74,101 @@ pub fn staging_table(job_id: i64) -> String {
     format!("pgrdf._pgrdf_stg_{job_id}")
 }
 
+/// **T3 — split the `.nt` file into `n` newline-snapped byte ranges**, one per parallel STAGE worker,
+/// each `[lo, hi)` a WHOLE number of lines so no triple is split across two workers. Returns the
+/// ranges in file order; their union is exactly `[0, file_len)` with no gap and no overlap, so every
+/// byte (hence every line) is staged by exactly ONE worker — the correctness invariant the shared
+/// staging table depends on.
+///
+/// How the snap works (mirrors the contract `stage()` already assumes for `[range_lo, range_hi)`): we
+/// cut the file into `n` roughly-equal pieces, then push each *interior* cut FORWARD to the byte just
+/// past the next `\n`. A worker's range therefore STARTS at the first byte of a line and ENDS one past
+/// a `\n` (a line boundary), so `stage()`'s `seek(lo)` + `read_line` loop reads only whole lines. The
+/// first range always starts at 0; the last always ends at `file_len`. Empty/short files and
+/// `n <= 1` collapse to a single `[0, file_len)` range — byte-identical to the prior single-worker
+/// behaviour.
+///
+/// `find_newline_from(file, off)` returns the offset just past the first `\n` at or after `off`, or
+/// `file_len` if none (the file's final line may be unterminated). Reading is done with small bounded
+/// `pread`-style reads from the SAME open file (no whole-file scan): we only ever read a few KB near
+/// each of the `n-1` interior cuts. Pure file I/O, no SPI — so the splitting decision is made once on
+/// the coordinator before any worker spawns.
+fn snap_byte_ranges(file: &mut File, file_len: u64, n: usize) -> Vec<(u64, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let n = n.max(1);
+    if n == 1 || file_len == 0 {
+        return vec![(0, file_len)];
+    }
+
+    // Find the offset just past the first '\n' at or after `off`. Reads in small bounded chunks from
+    // `off` forward; returns `file_len` if no newline remains (unterminated final line).
+    let find_newline_from = |file: &mut File, off: u64| -> u64 {
+        if off >= file_len {
+            return file_len;
+        }
+        let mut pos = off;
+        let mut buf = [0u8; 64 * 1024];
+        if file.seek(SeekFrom::Start(pos)).is_err() {
+            return file_len;
+        }
+        loop {
+            let want = ((file_len - pos).min(buf.len() as u64)) as usize;
+            if want == 0 {
+                return file_len;
+            }
+            let got = match file.read(&mut buf[..want]) {
+                Ok(0) => return file_len,
+                Ok(k) => k,
+                Err(_) => return file_len,
+            };
+            if let Some(i) = buf[..got].iter().position(|&b| b == b'\n') {
+                return pos + i as u64 + 1; // one past the newline = start of the next line
+            }
+            pos += got as u64;
+            if pos >= file_len {
+                return file_len;
+            }
+        }
+    };
+
+    let mut bounds: Vec<u64> = Vec::with_capacity(n + 1);
+    bounds.push(0);
+    for i in 1..n {
+        let raw = (file_len * i as u64) / n as u64;
+        let prev = *bounds.last().unwrap();
+        // Snap forward to the next line boundary; never go backwards past the previous bound.
+        let snapped = find_newline_from(file, raw).max(prev);
+        bounds.push(snapped.min(file_len));
+    }
+    bounds.push(file_len);
+
+    // Build [lo, hi) ranges, dropping any that collapsed to empty (e.g. fewer line boundaries than
+    // requested workers on a tiny file). Guaranteed non-empty: at least the first range survives.
+    let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(n);
+    for w in bounds.windows(2) {
+        let (lo, hi) = (w[0], w[1]);
+        if hi > lo {
+            ranges.push((lo, hi));
+        }
+    }
+    if ranges.is_empty() {
+        ranges.push((0, file_len));
+    }
+    ranges
+}
+
+/// **T3 coordinator helper** — open the file and compute the `n` newline-snapped STAGE byte ranges.
+/// Thin SPI-free wrapper over [`snap_byte_ranges`] so the coordinator (`pool.rs`) stays declarative;
+/// on a stat/open error it falls back to a single `[0, file_len)` range (the prior single-worker
+/// behaviour) rather than failing the load before it starts.
+pub fn stage_byte_ranges(path: &str, file_len: u64, n: usize) -> Vec<(u64, u64)> {
+    match File::open(path) {
+        Ok(mut f) => snap_byte_ranges(&mut f, file_len, n),
+        Err(_) => vec![(0, file_len)],
+    }
+}
+
 /// Read total host RAM in bytes from Linux `/proc/meminfo` (`MemTotal: <kB> kB`). Returns `None` on
 /// any platform without a readable `/proc/meminfo` (e.g. a macOS dev box) or if the line can't be
 /// parsed — callers then fall back to the previous fixed work-mem behaviour so nothing changes where
@@ -514,14 +609,15 @@ fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64) {
 /// backend process — which is BOTH the writer here (it is an ordinary OS process) and the reader (the
 /// COPY runs in this same backend's transaction) — owns the file, so the server-side COPY can always
 /// read it back; no cross-user permission question arises because there is no second user. The file
-/// name carries `job_id` + a per-window counter so concurrent jobs / windows never collide, and it is
-/// removed on the success path. The COPY runs inside the STAGE worker's transaction (this function is
-/// called from within it), so the staged rows are part of the same per-phase recovery unit.
-fn copy_window(table: &str, job_id: i64, window_idx: u64, rows: &[StagedRow]) {
+/// name carries `job_id` + the worker's `shard` + a per-window counter so concurrent jobs, concurrent
+/// STAGE workers (T3 — N of them stage at once), AND windows never collide on the same temp path, and
+/// it is removed on the success path. The COPY runs inside the STAGE worker's transaction (this
+/// function is called from within it), so the staged rows are part of the same per-phase recovery unit.
+fn copy_window(table: &str, job_id: i64, shard: u16, window_idx: u64, rows: &[StagedRow]) {
     if rows.is_empty() {
         return;
     }
-    let path = format!("/tmp/pgrdf_stg_{job_id}_{window_idx}.tsv");
+    let path = format!("/tmp/pgrdf_stg_{job_id}_{shard}_{window_idx}.tsv");
 
     // Serialize to the TSV. Pre-size generously (~96 B/row is a low-ball for truthy) so the buffer
     // rarely reallocates; a BufWriter keeps the actual disk writes block-sized.
@@ -562,11 +658,14 @@ fn copy_window(table: &str, job_id: i64, window_idx: u64, rows: &[StagedRow]) {
 /// each window across ALL cores with rayon, and load it into the pre-created UNLOGGED staging table
 /// via server-side **COPY** (the fast path).
 ///
-/// The coordinator snapped `[range_lo, range_hi)` to newline boundaries and recorded them in the
-/// [`WorkerSlot`]; today it spawns ONE STAGE worker over the whole file, so the across-cores
-/// parallelism lives INSIDE this worker (rayon over each window) rather than across N table-writing
-/// backends — which deliberately avoids the extension-lock contention that N bgworkers writing one
-/// table caused. The flow per window:
+/// The coordinator snapped `[range_lo, range_hi)` to newline boundaries (`stage_byte_ranges`) and
+/// recorded them in the [`WorkerSlot`]. T3: the coordinator now spawns N STAGE workers, one per
+/// snapped range, all COPYing into the SAME shared UNLOGGED staging table — so the across-cores
+/// parallelism is BOTH inside each worker (rayon over each window) AND across N table-writing backends
+/// (N concurrent COPY backends). PostgreSQL allows concurrent COPY/INSERT into a heap table, so the
+/// shared target with N writers is safe; prep (`prepare_for_load`) ran in a separate `STAGE_PREP`
+/// worker first, so no STAGE worker does DDL. Each worker stages a DISJOINT, whole-line byte range, so
+/// the union is the whole file exactly once. The flow per window:
 ///
 /// 1. **Stream** up to [`STAGE_WINDOW_LINES`] lines from `[lo, hi)` via `File::take(hi-lo)` + a
 ///    `BufReader` (never `read_to_end` — the file is ~1.2 TB; peak RAM is one window, not the range).
@@ -624,7 +723,7 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
         // ── Parse this window across all cores, then COPY it in.
         let (rows, _skipped) = parse_window_par(&window_lines);
         staged += rows.len() as i64;
-        copy_window(&table, job.job_id, window_idx, &rows);
+        copy_window(&table, job.job_id, w.shard, window_idx, &rows);
         window_idx += 1;
 
         if eof {
@@ -1289,7 +1388,10 @@ mod tests {
 /// test` unit test (the `#[pg_schema]` macro only carries `#[pg_test]`s into the in-database harness).
 #[cfg(test)]
 mod unit_tests {
-    use super::{derive_work_mem_kb, resolve_join_strategy_sql, temp_tablespaces_set_fragment};
+    use super::{
+        derive_work_mem_kb, resolve_join_strategy_sql, snap_byte_ranges,
+        temp_tablespaces_set_fragment,
+    };
 
     /// Unit test of the RESOLVE memory-hardening arithmetic ([`super::derive_work_mem_kb`]) — pure,
     /// no Postgres. Five regimes:
@@ -1490,5 +1592,149 @@ mod unit_tests {
             resolve_join_strategy_sql("hash").1,
             "the unknown-value fragment is identical to the hash fragment"
         );
+    }
+
+    /// Unit test of the T3 STAGE byte-range splitter ([`super::snap_byte_ranges`]) — pure, no
+    /// Postgres. This is the load-bearing correctness invariant of multi-backend STAGE: with N writers
+    /// into ONE shared staging table, every LINE of the `.nt` must be staged by EXACTLY one worker, so
+    /// the N snapped ranges must (1) cover `[0, file_len)` with no gap and no overlap, and (2) every
+    /// interior cut must fall on a line boundary (the byte just past a `\n`), so no triple is split.
+    ///
+    /// We build a small in-memory `.nt`-shaped file (lines of varying length, including a final line
+    /// with no trailing newline) in a temp file, snap it K ways, and assert the invariants by REPLAYING
+    /// the split exactly as `stage()` does — seek to `lo`, read whole lines until `hi` — and checking
+    /// the concatenation of every worker's lines equals the original file's lines, in order, once each.
+    #[test]
+    fn snap_byte_ranges_covers_every_line_exactly_once() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        // A file of 1000 lines of varying width; the LAST line has NO trailing '\n' (the unterminated
+        // final-line case `find_newline_from` must handle by snapping to file_len).
+        let mut content = String::new();
+        for i in 0..1000u32 {
+            content.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> \"value number {i}\" .\n"
+            ));
+        }
+        // Drop the final '\n' so the last line is unterminated.
+        assert!(content.ends_with('\n'));
+        content.pop();
+        let bytes = content.into_bytes();
+        let file_len = bytes.len() as u64;
+        let expected_lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("pgrdf_snap_test_{}.nt", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp test file");
+            f.write_all(&bytes).expect("write temp test file");
+            f.flush().expect("flush temp test file");
+        }
+
+        for n in [1usize, 2, 3, 4, 7, 16, 64, 999, 1000, 5000] {
+            let mut f = std::fs::File::open(&path).expect("reopen temp test file");
+            let ranges = snap_byte_ranges(&mut f, file_len, n);
+
+            // (1) Non-empty, in order, contiguous, exactly covering [0, file_len) — no gap/overlap.
+            assert!(!ranges.is_empty(), "n={n}: at least one range");
+            assert_eq!(ranges[0].0, 0, "n={n}: first range starts at 0");
+            assert_eq!(
+                ranges.last().unwrap().1,
+                file_len,
+                "n={n}: last range ends at file_len"
+            );
+            for w in ranges.windows(2) {
+                assert_eq!(
+                    w[0].1, w[1].0,
+                    "n={n}: ranges are contiguous (no gap, no overlap)"
+                );
+            }
+            for &(lo, hi) in &ranges {
+                assert!(hi > lo, "n={n}: every range is non-empty ([{lo},{hi}))");
+            }
+
+            // (2) Replay the split exactly as stage() does and reassemble the lines. Each interior cut
+            // must be on a line boundary, so concatenating every worker's whole lines reproduces the
+            // file's lines in order, once each.
+            let mut got_lines: Vec<Vec<u8>> = Vec::new();
+            for &(lo, hi) in &ranges {
+                let mut rf = std::fs::File::open(&path).expect("reopen for replay");
+                rf.seek(SeekFrom::Start(lo)).expect("seek lo");
+                let mut slice = vec![0u8; (hi - lo) as usize];
+                rf.read_exact(&mut slice).expect("read range slice");
+                // The byte range is a whole number of lines: it must NOT begin mid-line. Since cuts are
+                // snapped to just-past-'\n', the first byte of an interior range is the start of a line;
+                // we verify by reconstructing lines from the concatenated ranges below.
+                for line in slice.split(|&b| b == b'\n') {
+                    // `split` yields a trailing empty element after a terminating '\n'; skip it — the
+                    // next range (or the final unterminated line) carries the real content.
+                    got_lines.push(line.to_vec());
+                }
+            }
+            // Each range that ends on a '\n' contributes a trailing empty `split` element; drop empties
+            // that are pure boundary artefacts, then compare the non-empty content lines.
+            let got_nonempty: Vec<&[u8]> = got_lines
+                .iter()
+                .map(|v| v.as_slice())
+                .filter(|l| !l.is_empty())
+                .collect();
+            let exp_nonempty: Vec<&[u8]> = expected_lines
+                .iter()
+                .copied()
+                .filter(|l| !l.is_empty())
+                .collect();
+            assert_eq!(
+                got_nonempty, exp_nonempty,
+                "n={n}: the union of all workers' whole lines must equal the file's lines, in order, once each"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Edge cases for [`super::snap_byte_ranges`]: `n <= 1` and an empty file both collapse to the
+    /// single `[0, file_len)` range — byte-identical to the prior single-worker STAGE behaviour.
+    #[test]
+    fn snap_byte_ranges_degenerate_cases() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("pgrdf_snap_edge_{}.nt", std::process::id()));
+        let body = b"<a> <b> <c> .\n<d> <e> <f> .\n";
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp");
+            f.write_all(body).expect("write");
+        }
+        let file_len = body.len() as u64;
+
+        let mut f = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            snap_byte_ranges(&mut f, file_len, 1),
+            vec![(0, file_len)],
+            "n=1 is a single whole-file range (the prior single-worker behaviour)"
+        );
+        let mut f = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            snap_byte_ranges(&mut f, file_len, 0),
+            vec![(0, file_len)],
+            "n=0 clamps to a single whole-file range"
+        );
+        // Empty file: a single [0,0) range regardless of n.
+        let mut empty =
+            std::fs::File::create(dir.join(format!("pgrdf_snap_empty_{}.nt", std::process::id())))
+                .unwrap();
+        empty.flush().unwrap();
+        let mut ef =
+            std::fs::File::open(dir.join(format!("pgrdf_snap_empty_{}.nt", std::process::id())))
+                .unwrap();
+        assert_eq!(
+            snap_byte_ranges(&mut ef, 0, 8),
+            vec![(0, 0)],
+            "an empty file is a single [0,0) range"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ =
+            std::fs::remove_file(dir.join(format!("pgrdf_snap_empty_{}.nt", std::process::id())));
     }
 }
