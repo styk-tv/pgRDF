@@ -74,31 +74,108 @@ pub fn staging_table(job_id: i64) -> String {
     format!("pgrdf._pgrdf_stg_{job_id}")
 }
 
+/// Read total host RAM in bytes from Linux `/proc/meminfo` (`MemTotal: <kB> kB`). Returns `None` on
+/// any platform without a readable `/proc/meminfo` (e.g. a macOS dev box) or if the line can't be
+/// parsed — callers then fall back to the previous fixed work-mem behaviour so nothing changes where
+/// we can't measure. Pure I/O + parse, no SPI, so it is cheap to call once per phase.
+fn host_mem_total_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            // Format is `MemTotal:   263456789 kB` — value is in kibibytes.
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+/// Derive `(work_mem_kb, maintenance_work_mem_kb)` for the staged phases as memory HARDENING against
+/// OOM on small-RAM hosts. RETURNS KIBIBYTES (the unit `SET work_mem = '<n>kB'` takes).
+///
+/// **This is hardening, not the definitive fix.** The risk it targets is RESOLVE's 3-way parallel
+/// hash join: its peak hash-table budget is roughly
+///   `work_mem × hash_mem_multiplier(2) × max_parallel_workers_per_gather × 3 joins`
+/// (see [`resolve`], which sets `hash_mem_multiplier = 2` and `max_parallel_workers_per_gather =
+/// nproc`). We size `work_mem` so that product stays ≤ ~50 % of `MemTotal`, then clamp to a sane
+/// range `[64 MB, 2 GB]`. When RAM-per-core is high enough (`MemTotal ≳ 24 GB × nproc`) this pins at
+/// the 2 GB cap — IDENTICAL to the prior fixed value; below that it scales DOWN with the core count
+/// (e.g. ~669 MB on a 251 GiB / 32-core E32, where the OLD fixed 2 GB would have implied a 384 GB
+/// 3-way hash budget — larger than the box). On a small-RAM host it floors at 64 MB and the hash
+/// SPILLS to temp files (batched hash joins spill automatically — we keep `enable_hashjoin = on` and
+/// add nothing that prevents spilling) instead of risking an OOM kill. The *definitive* 8.2 B-scale
+/// RESOLVE fix is DEFERRED pending a real at-scale diagnostic (now obtainable: the staged-worker
+/// panic reporting surfaces the actual `ereport` message — see `pool::panic_message`). Don't read
+/// this as "RESOLVE at 8.2 B is fixed"; it only lowers the OOM risk where RAM is tight.
+///
+/// `mem_total`: host RAM in bytes, or `None` when unmeasured (→ the previous fixed 2 GB / 16 GB, so
+/// behaviour is unchanged where we can't measure). `nproc`: the worker's own parallelism (the
+/// `max_parallel_workers_per_gather` RESOLVE will use). Pure arithmetic, unit-tested below.
+fn derive_work_mem_kb(mem_total: Option<u64>, nproc: usize) -> (u64, u64) {
+    // Clamp bounds, in kibibytes.
+    // work_mem ∈ [64 MB, 2 GB]: the cap equals the prior fixed value (so a high-RAM-per-core host is
+    // unchanged); the floor keeps a tight host workable and from there the hash SPILLS (PG default ~4 MB).
+    const WORK_MEM_MIN_KB: u64 = 64 * 1024; // 64 MB
+    const WORK_MEM_MAX_KB: u64 = 2 * 1024 * 1024; // 2 GB
+                                                  // maintenance_work_mem ∈ [256 MB, 16 GB]: the cap equals the prior fixed value.
+    const MAINT_MIN_KB: u64 = 256 * 1024; // 256 MB
+    const MAINT_MAX_KB: u64 = 16 * 1024 * 1024; // 16 GB
+
+    let mem_total = match mem_total {
+        // Unmeasured (e.g. macOS dev box, no /proc/meminfo): keep the EXACT prior fixed values
+        // (work_mem = 2 GB, maintenance_work_mem = 16 GB) — no behaviour change where we can't measure.
+        None => return (WORK_MEM_MAX_KB, MAINT_MAX_KB),
+        Some(b) => b,
+    };
+    let nproc = nproc.max(1) as u64;
+
+    // Budget for the 3-way parallel hash join must stay ≤ 50 % of RAM:
+    //   work_mem × 2 (hash_mem_multiplier) × nproc (workers/gather) × 3 (joins) ≤ MemTotal / 2
+    // ⇒ work_mem ≤ MemTotal / (2 × 2 × nproc × 3) = MemTotal / (12 × nproc).
+    let mem_total_kb = mem_total / 1024;
+    let work_mem_kb = (mem_total_kb / (12 * nproc)).clamp(WORK_MEM_MIN_KB, WORK_MEM_MAX_KB);
+
+    // maintenance_work_mem scales with the same 50 %-of-RAM headroom but is used by a single
+    // CREATE INDEX build at a time (per INDEX worker), so it is bounded by ~12 % of RAM (≈ half of
+    // RAM / a handful of concurrent builds) and clamped to its own range.
+    let maint_kb = (mem_total_kb / 8).clamp(MAINT_MIN_KB, MAINT_MAX_KB);
+
+    (work_mem_kb, maint_kb)
+}
+
 /// Re-apply the per-session parallel levers (§5) inside the worker's transaction. GUCs are
 /// per-session and a dynamic worker starts with server defaults, so each phase that wants PG's
 /// intra-query parallelism (DICT hash-agg, RESOLVE hash-join, INDEX maintenance) must `SET LOCAL`
 /// them itself. `nproc` is the worker's own `num_cpus`; the staging/dict `parallel_workers`
 /// reloption (set elsewhere) is what actually lifts the per-table worker cap, these GUCs raise the
 /// session ceilings to match. `SET LOCAL` scopes them to this transaction only.
+///
+/// `work_mem` / `maintenance_work_mem` are HARDENED against OOM: instead of the prior FIXED 2 GB /
+/// 16 GB they adapt to host RAM (see [`derive_work_mem_kb`]). On a big-RAM host they land at the
+/// same 2 GB / 16 GB cap (no change); on a small-RAM host they shrink so RESOLVE's 3-way parallel
+/// hash join spills to temp rather than risking OOM. This is hardening only — the definitive
+/// 8.2 B-scale RESOLVE fix is deferred pending an at-scale diagnostic.
 pub fn apply_session_gucs() {
     let nproc = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(8)
         .max(1);
-    let maint = (nproc / 2).max(1);
+    let maint_workers = (nproc / 2).max(1);
+    let (work_mem_kb, maint_mem_kb) = derive_work_mem_kb(host_mem_total_bytes(), nproc);
     // One statement, semicolon-separated: cheaper than N SPI round-trips. All are GUCs that exist on
-    // PG17; `SET LOCAL` confines them to this transaction (auto-reset on commit).
+    // PG17; `SET LOCAL` confines them to this transaction (auto-reset on commit). work_mem /
+    // maintenance_work_mem are set in kB (the smallest GUC unit) so the derived value applies exactly.
     let sql = format!(
         "SET LOCAL max_parallel_workers = {nproc}; \
          SET LOCAL max_parallel_workers_per_gather = {nproc}; \
-         SET LOCAL max_parallel_maintenance_workers = {maint}; \
+         SET LOCAL max_parallel_maintenance_workers = {maint_workers}; \
          SET LOCAL enable_parallel_hash = on; \
          SET LOCAL parallel_setup_cost = 0; \
          SET LOCAL parallel_tuple_cost = 0; \
          SET LOCAL min_parallel_table_scan_size = 0; \
          SET LOCAL min_parallel_index_scan_size = 0; \
-         SET LOCAL work_mem = '2GB'; \
-         SET LOCAL maintenance_work_mem = '16GB';"
+         SET LOCAL work_mem = '{work_mem_kb}kB'; \
+         SET LOCAL maintenance_work_mem = '{maint_mem_kb}kB';"
     );
     Spi::run(&sql).expect("staged phase: apply_session_gucs failed");
 }
@@ -758,7 +835,7 @@ pub fn build_index(_job: &JobSlot, w: &WorkerSlot) {
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
-    use super::{dict_lit_dedup_select, parse_window_par, resolve_object_join_on};
+    use super::{dict_lit_dedup_select, parse_window_par, resolve_object_join_on, STAGE_COLS};
     use crate::storage::dict::term_type;
     use pgrx::prelude::*;
 
@@ -785,7 +862,7 @@ mod tests {
         // so every staged row resolves to exactly one quad. Mirrors STAGE_COLS.
         Spi::run(&format!(
             "DROP TABLE IF EXISTS {stg}; CREATE TABLE {stg} ({cols});",
-            cols = super::STAGE_COLS
+            cols = STAGE_COLS
         ))
         .expect("create staging fixture");
         Spi::run(&format!(
@@ -962,6 +1039,181 @@ mod tests {
         assert!(
             skipped >= 1,
             "the malformed line must be counted as skipped (got {skipped}), not panic"
+        );
+    }
+
+    /// **Local proxy for "RESOLVE degrades to spill, not OOM."** No box is available to reproduce the
+    /// 8.2 B-row failure, so this drives the RESOLVE hash-join SQL DIRECTLY (the same force-hash GUCs +
+    /// `resolve_object_join_on` join `super::resolve` builds — NOT via the bgworker pool, matching the
+    /// v0.6.12 test pattern) under a deliberately TINY `work_mem = '64kB'` over a fixture large enough
+    /// to blow past 64 kB of hash table. PostgreSQL's batched hash join spills to temp files when the
+    /// build side exceeds `work_mem`; the test asserts the join still returns the CORRECT row count
+    /// with NO error — i.e. tight memory makes RESOLVE spill, it does not make it fail.
+    #[pg_test]
+    fn staged_resolve_hashjoin_spills_under_tight_work_mem() {
+        let stg = "pgrdf._pgrdf_stg_spilltest";
+        let uri = term_type::URI as i32;
+        let blank = term_type::BLANK_NODE as i32;
+
+        // N distinct URI triples — each subject/object a distinct URI, one shared predicate. 4000 rows
+        // of ~40-byte keys is ~hundreds of kB of hash table, comfortably exceeding 64 kB so the build
+        // side MUST batch/spill. Distinct subjects ⇒ every staged row resolves to exactly one quad.
+        const N: i64 = 4000;
+        Spi::run(&format!(
+            "DROP TABLE IF EXISTS {stg}; CREATE TABLE {stg} ({cols});",
+            cols = STAGE_COLS
+        ))
+        .expect("create spill staging fixture");
+        Spi::run(&format!(
+            "INSERT INTO {stg}(s,p,o_type,o_val,o_dt,o_lang) \
+             SELECT 'http://ex/s' || g, 'http://ex/p', {uri}, 'http://ex/o' || g, NULL, NULL \
+             FROM generate_series(1, {N}) g"
+        ))
+        .expect("seed spill staging fixture");
+
+        // Intern every term the join probes (subjects, the predicate, objects) into the dictionary so
+        // the 3-way join can resolve every row. row_number() over the distinct union mirrors DICT.
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_dictionary (term_type, lexical_value) \
+             SELECT {uri}, t FROM ( \
+                 SELECT s AS t FROM {stg} \
+                 UNION SELECT p FROM {stg} \
+                 UNION SELECT o_val FROM {stg} \
+             ) d"
+        ))
+        .expect("intern spill dict terms");
+
+        // Force the SAME plan shape RESOLVE uses (parallel-friendly hash joins only) AND clamp work_mem
+        // to 64 kB so the hash build MUST spill. SET LOCAL ⇒ scoped to this test's transaction.
+        // enable_hashjoin stays ON (batched hash joins spill automatically — nothing here prevents it).
+        Spi::run(
+            "SET LOCAL enable_nestloop = off; \
+             SET LOCAL enable_mergejoin = off; \
+             SET LOCAL enable_indexscan = off; \
+             SET LOCAL enable_indexonlyscan = off; \
+             SET LOCAL enable_bitmapscan = off; \
+             SET LOCAL enable_hashjoin = on; \
+             SET LOCAL hash_mem_multiplier = 2; \
+             SET LOCAL work_mem = '64kB';",
+        )
+        .expect("set tight-memory hash-join GUCs");
+
+        // The RESOLVE 3-way join, verbatim shape (ds=subject, dp=predicate, dobj=object + the ddt
+        // LEFT JOIN), built with the production `resolve_object_join_on` predicate. Under 64 kB
+        // work_mem this spills to temp files; it must still complete and resolve every row.
+        Spi::run(&format!(
+            "CREATE TEMP TABLE _q_spilltest AS \
+             SELECT ds.id AS subject_id, dp.id AS predicate_id, dobj.id AS object_id \
+             FROM {stg} st \
+             JOIN pgrdf._pgrdf_dictionary ds \
+                  ON ds.term_type = CASE WHEN st.s LIKE '\\_:%' THEN {blank} ELSE {uri} END \
+                 AND ds.lexical_md5 = decode(md5(st.s), 'hex') \
+             JOIN pgrdf._pgrdf_dictionary dp \
+                  ON dp.term_type = {uri} AND dp.lexical_md5 = decode(md5(st.p), 'hex') \
+             JOIN pgrdf._pgrdf_dictionary dobj \
+             LEFT JOIN pgrdf._pgrdf_dictionary ddt ON ddt.id = dobj.datatype_iri_id \
+                  {dobj_on}",
+            dobj_on = resolve_object_join_on()
+        ))
+        .expect("RESOLVE hash join must SPILL (not error) under 64 kB work_mem");
+
+        // Correct row count: exactly one quad per staged triple — the spill changed performance, not
+        // the result. This is the local stand-in for "RESOLVE degrades to spill, not OOM."
+        let quads: i64 = Spi::get_one("SELECT count(*)::bigint FROM _q_spilltest")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            quads, N,
+            "every staged triple resolves to exactly one quad even when the hash join spills to temp"
+        );
+
+        Spi::run(&format!("DROP TABLE IF EXISTS {stg}")).ok();
+    }
+}
+
+/// Pure (no-Postgres) unit tests. Kept in a plain `#[cfg(test)]` module — NOT the `#[pg_schema]`
+/// block above — so the arithmetic test compiles + runs as an ordinary `cargo test`/`cargo pgrx
+/// test` unit test (the `#[pg_schema]` macro only carries `#[pg_test]`s into the in-database harness).
+#[cfg(test)]
+mod unit_tests {
+    use super::derive_work_mem_kb;
+
+    /// Unit test of the RESOLVE memory-hardening arithmetic ([`super::derive_work_mem_kb`]) — pure,
+    /// no Postgres. Five regimes:
+    ///   * the E32 box (251 GiB, 32 cores) lands work_mem strictly WITHIN bounds and below the 2 GB
+    ///     cap (~669 MB), because the OLD fixed 2 GB would imply a 384 GB 3-way hash budget on a
+    ///     251 GiB box — this is the OOM the hardening removes; the budget now fits within half-RAM;
+    ///   * a TINY-RAM host hits the 64 MB work_mem floor (it can't go lower) — from there the hash
+    ///     SPILLS rather than OOMs (that floor is the only place the half-RAM bound is exceeded);
+    ///   * an UNMEASURED host (`None`, e.g. the macOS dev box with no /proc/meminfo) returns the
+    ///     EXACT prior fixed values (2 GB / 16 GB) so behaviour is unchanged where we can't measure;
+    ///   * a MID-size host scales strictly between the floor and the cap (proves it actually scales);
+    ///   * a HIGH-RAM-per-core host (768 GiB, 32 cores) pins work_mem at the 2 GB cap (unchanged).
+    #[test]
+    fn derive_work_mem_kb_bounds() {
+        const WORK_MIN: u64 = 64 * 1024; // 64 MB in kB
+        const WORK_MAX: u64 = 2 * 1024 * 1024; // 2 GB in kB
+        const MAINT_MIN: u64 = 256 * 1024; // 256 MB in kB
+        const MAINT_MAX: u64 = 16 * 1024 * 1024; // 16 GB in kB
+        let gib = |n: u64| n * 1024 * 1024 * 1024;
+
+        // E32: 251 GiB, 32 cores. work_mem = MemTotal/(12*32) ≈ 669 MB — within bounds, below the cap.
+        let mem_251g = gib(251);
+        let (work, maint) = derive_work_mem_kb(Some(mem_251g), 32);
+        assert!(
+            (WORK_MIN..=WORK_MAX).contains(&work),
+            "a 251 GiB / 32-core host keeps work_mem within [64 MB, 2 GB] (got {work} kB)"
+        );
+        assert!(
+            work < WORK_MAX,
+            "at 251 GiB / 32 cores work_mem scales BELOW the 2 GB cap (got {work} kB) — the OLD fixed \
+             2 GB implied a 384 GB 3-way hash budget on a 251 GiB box (the OOM this removes)"
+        );
+        assert!(
+            (MAINT_MIN..=MAINT_MAX).contains(&maint),
+            "maintenance_work_mem stays within [256 MB, 16 GB] (got {maint} kB)"
+        );
+        // The hardening invariant (holds wherever work_mem is above the floor): the 3-way
+        // parallel-hash budget — work_mem * 2 (hash_mem_multiplier) * 32 (workers) * 3 (joins) — is
+        // ≤ 50 % of RAM, so RESOLVE's hash tables fit in half the box instead of risking OOM.
+        assert!(
+            work * 2 * 32 * 3 <= (mem_251g / 1024) / 2,
+            "the 3-way hash budget must stay within half of host RAM"
+        );
+
+        // Tiny-RAM host: 1 GiB, 8 cores. MemTotal/(12*8) ≈ 10.9 MB < the 64 MB floor ⇒ clamps UP to
+        // the floor (the smallest work_mem we allow; the hash spills from there rather than OOMs).
+        let (work_tiny, maint_tiny) = derive_work_mem_kb(Some(gib(1)), 8);
+        assert_eq!(
+            work_tiny, WORK_MIN,
+            "a 1 GiB host floors work_mem at 64 MB (so RESOLVE's hash spills, not OOMs)"
+        );
+        assert_eq!(
+            maint_tiny, MAINT_MIN,
+            "a 1 GiB host floors maintenance_work_mem at 256 MB"
+        );
+
+        // Unmeasured host (None): the exact prior fixed values, so nothing changes where we can't probe.
+        assert_eq!(
+            derive_work_mem_kb(None, 32),
+            (WORK_MAX, MAINT_MAX),
+            "an unmeasured host keeps the prior fixed work_mem = 2 GB / maintenance_work_mem = 16 GB"
+        );
+
+        // A mid-size host (64 GiB, 16 cores) lands strictly between the floor and the cap, proving the
+        // formula actually scales rather than always pinning to a bound.
+        let (work_mid, _maint_mid) = derive_work_mem_kb(Some(gib(64)), 16);
+        assert!(
+            work_mid > WORK_MIN && work_mid < WORK_MAX,
+            "a 64 GiB / 16-core host scales work_mem strictly between the floor and the cap (got {work_mid} kB)"
+        );
+
+        // A high-RAM-per-core host (768 GiB, 32 cores): MemTotal/(12*32) ≥ 2 GB ⇒ pinned at the cap,
+        // i.e. IDENTICAL to the prior fixed 2 GB where the box is roomy enough to afford it.
+        let (work_big, _maint_big) = derive_work_mem_kb(Some(gib(768)), 32);
+        assert_eq!(
+            work_big, WORK_MAX,
+            "a 768 GiB / 32-core host pins work_mem at the 2 GB cap (unchanged from the fixed value)"
         );
     }
 }

@@ -160,17 +160,95 @@ pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
 
     let (ok, err) = match result {
         Ok(()) => (true, String::new()),
-        Err(panic) => {
-            let msg = panic
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "staged worker: unknown panic".to_string());
-            (false, msg)
-        }
+        // Recover the REAL failure message from the panic payload (see `panic_message`). The most
+        // diagnostically important case is a SQL ERROR (e.g. the 8.2 B-row RESOLVE failure): inside
+        // `BackgroundWorker::transaction`'s `PgTryBuilder` a Postgres ERROR is re-raised as a Rust
+        // panic carrying a pgrx `ErrorReportWithLevel`, NOT a `&str`/`String`, so the old
+        // `&str`/`String`-only downcast always fell through to "unknown panic" — losing the message.
+        Err(panic) => (false, panic_message(panic, w.phase, w.shard, pid)),
     };
     jobctl::report_worker(slot, ok, &err);
     // Returning exits the backend → coordinator's wait_for_shutdown() unblocks.
+}
+
+/// Recover the most specific human-readable message from a worker's caught panic payload, so the
+/// coordinator surfaces the REAL cause (into the `JobSlot` error string → `ingest.json`'s `error`)
+/// instead of the opaque `"staged worker: unknown panic"` an 8.2 B-row RESOLVE failure produced.
+///
+/// The payload type depends on HOW the worker died, and the order here matters (try the richest
+/// pgrx error types first, since they carry the actual `ereport`/SPI message):
+///
+/// * **A Postgres/SQL ERROR** — a SPI failure, `error!()`, an OOM the planner surfaces, etc. Inside
+///   `BackgroundWorker::transaction` (→ pgrx `PgTryBuilder`) such an ERROR is re-raised as a Rust
+///   panic via `panic_any(ErrorReportWithLevel)` (pgrx `submodules/panic.rs`). So the payload is a
+///   [`pgrx::pg_sys::panic::ErrorReportWithLevel`] (or a [`CaughtError`] wrapping one when a guard
+///   already classified it, or a bare [`ErrorReport`]) — NOT a `&str`/`String`. We pull
+///   `ErrorReportWithLevel::message()` (the `ereport` primary message, e.g. the SQL error text),
+///   which is exactly what was missing at scale.
+/// * **A plain Rust `panic!()`** — e.g. our own `panic!("staged STAGE: …")` guards in `phases.rs`.
+///   The payload is a `&str` or a formatted `String`; recover it directly.
+/// * **Genuinely unrecognised payload** — fall back to a message that is still actionable: it names
+///   the failed phase, the worker's shard, and its pid so the failure can be located in the server
+///   log even when the message itself can't be recovered in-process.
+fn panic_message(panic: Box<dyn std::any::Any + Send>, phase: u8, shard: u16, pid: i32) -> String {
+    use pgrx::pg_sys::panic::{CaughtError, ErrorReport, ErrorReportWithLevel};
+
+    // (1) A pgrx-classified caught error (the variant a guard may rethrow). Extract the inner
+    // ereport message for the Postgres/Rust-ereport arms; the RustPanic arm also carries an ereport
+    // built from the original &str/String, so its `.message()` is the panic text.
+    if let Some(caught) = panic.downcast_ref::<CaughtError>() {
+        let m = match caught {
+            CaughtError::PostgresError(e)
+            | CaughtError::ErrorReport(e)
+            | CaughtError::RustPanic { ereport: e, .. } => e.message().to_string(),
+        };
+        if !m.is_empty() {
+            return m;
+        }
+    }
+    // (2) The common SQL-ERROR shape: `panic_any(ErrorReportWithLevel)` from PgTryBuilder. This is
+    // the case that fixes the at-scale RESOLVE "unknown panic" — `.message()` is the ereport text.
+    if let Some(e) = panic.downcast_ref::<ErrorReportWithLevel>() {
+        let m = e.message();
+        if !m.is_empty() {
+            return m.to_string();
+        }
+    }
+    // (3) A bare ErrorReport, if one is ever panicked directly.
+    if let Some(e) = panic.downcast_ref::<ErrorReport>() {
+        let m = e.message();
+        if !m.is_empty() {
+            return m.to_string();
+        }
+    }
+    // (4) A plain Rust panic!(): &str (string literals) or a formatted String.
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = panic.downcast_ref::<String>() {
+        return s.clone();
+    }
+    // (5) Unrecognised payload — keep the fallback as SPECIFIC as we can: phase + shard + pid let the
+    // operator find the worker's own ERROR line in the server log even without the message in-hand.
+    format!(
+        "staged worker: unrecoverable panic (phase={}, shard={shard}, pid={pid}) \
+         — see the worker's ERROR line in the PostgreSQL server log",
+        phase_label(phase)
+    )
+}
+
+/// Human label for a phase ordinal, for the panic fallback message (so it reads `phase=resolve`
+/// rather than `phase=3`). Mirrors [`jobctl::phase`].
+fn phase_label(phase: u8) -> &'static str {
+    match phase {
+        jobctl::phase::PING => "ping",
+        jobctl::phase::STAGE => "stage",
+        jobctl::phase::DICT => "dict",
+        jobctl::phase::RESOLVE => "resolve",
+        jobctl::phase::INDEX => "index",
+        jobctl::phase::DONE => "done",
+        _ => "unknown",
+    }
 }
 
 /// TEST-ONLY coordinator for R2.0 — proves the bgworker pool runs end-to-end. The real
