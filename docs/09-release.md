@@ -4,14 +4,66 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is **`v0.6.12`** (`isPrerelease=false`,
-`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.12`, and the
+The current cut is **`v0.6.13`** (`isPrerelease=false`,
+`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.13`, and the
 tagged release carries the binary tarball matrix, the PGXN source
 zip, and an SLSA-attested OCI bundle. The per-release notes below
-cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.12 history
+cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.13 history
 (the parallel bulk loader and its levers) lives in `CHANGELOG.md`,
 which is the authoritative running log — new entries land under
 `[Unreleased]` and move into the next `[N.M.P]` block at tag time.
+
+## v0.6.13 — 2026-06-23
+
+A diagnostic + memory-hardening cut for the staged bulk loader, ahead
+of the out-of-the-box at-scale work in 0.6.14. Two `.so`-only changes,
+no schema delta.
+
+When a staged-loader background worker died, the coordinator reported
+the opaque `"staged worker: unknown panic"` — useless for diagnosing an
+at-scale failure. A worker that hits a PostgreSQL `ERROR` (an
+out-of-memory or query error during `RESOLVE`) has it re-raised by pgrx
+as an `ErrorReportWithLevel` panic payload, which the old handler —
+downcasting only to `&str` / `String` — never recognised. The worker
+panic handler now downcasts in richness order (`CaughtError` /
+`ErrorReportWithLevel` / `ErrorReport` / `&str` / `String`) and
+surfaces the **real PostgreSQL ERROR text** in the job's `error`,
+falling back to a phase+shard+pid-stamped pointer to the server log
+only for a truly unrecognised payload. A staged failure is now
+diagnosable.
+
+The staged loader also set a fixed `work_mem = '2GB'` /
+`maintenance_work_mem = '16GB'` regardless of host RAM. At scale on a
+smaller-RAM host that is dangerous: `work_mem × hash_mem_multiplier ×
+parallel workers × the 3-way RESOLVE join` implied a ~384 GB
+parallel-hash budget on a 251 GiB host. `work_mem` and
+`maintenance_work_mem` now **scale to host RAM** (read from
+`/proc/meminfo`, with the prior fixed values as the fallback where
+unreadable), bounded so the parallel-hash budget stays within ~half of
+RAM — `RESOLVE` spills to temp instead of risking OOM. This is memory
+**hardening**; the definitive at-scale `RESOLVE` fix and out-of-the-box
+self-tuning of the full ingest are the **0.6.14** follow-up, now
+diagnosable thanks to the panic-reporting above.
+
+### Control-version reconciliation
+
+`Cargo.toml` `version`, `pgrdf.control` `default_version`, `META.json`
+`version`, the `cargo pgrx package` SQL filename, the
+`compose/compose.yml` bind-mount, and Postgres `extversion` are all
+identically `0.6.13`. `00-smoke.out` literals move to `0.6.13`.
+
+### Cut file set
+
+`Cargo.toml` (version only) + `Cargo.lock` (`pgrdf` package entry) +
+`pgrdf.control` (`default_version`) + `META.json` +
+`compose/compose.yml` (the single SQL bind-mount line
+`pgrdf--0.6.13.sql`) + `tests/regression/expected/00-smoke.out`
+(version literals) + `git mv sql/pgrdf--0.5.1--0.6.{12→13}.sql` (the
+upgrade-path is a version-string bump only — no DDL) + `CHANGELOG.md`
+(`[Unreleased]` stays, new `[0.6.13]` block) + `README.md` / guide /
+docs install + version refreshes + `docs/09-release.md` (this section).
+The worker panic-reporting + RESOLVE memory hardening themselves are
+`src/storage/staged/{pool,phases}.rs` (runtime / `.so`, no schema).
 
 ## v0.6.12 — 2026-06-22
 

@@ -6,6 +6,35 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.13] — 2026-06-23
+
+> Diagnostic + memory hardening for the staged loader, ahead of the out-of-the-box at-scale work in
+> 0.6.14. No schema change.
+
+### Fixed — staged-worker failures report the real error, not `unknown panic` ★ headline
+
+When a staged-loader background worker died, the coordinator reported the opaque `"staged worker:
+unknown panic"` — useless for diagnosing an at-scale failure. Cause: a worker that hits a PostgreSQL
+`ERROR` (an out-of-memory or query error during RESOLVE) has it re-raised by pgrx as an
+`ErrorReportWithLevel` panic payload, which the old handler — downcasting only to `&str`/`String` — never
+recognised. The worker panic handler now downcasts in richness order (`CaughtError` /
+`ErrorReportWithLevel` / `ErrorReport` / `&str` / `String`) and surfaces the real PostgreSQL ERROR text
+in the job's `error`, falling back to a phase+shard+pid-stamped pointer to the server log only for a
+truly unrecognised payload. A staged failure is now diagnosable.
+
+### Changed — RESOLVE memory is bounded to the host, not a fixed 2 GB
+
+The staged loader set a fixed `work_mem = '2GB'` / `maintenance_work_mem = '16GB'` regardless of host
+RAM. At scale on a smaller-RAM host that is dangerous: `work_mem × hash_mem_multiplier × parallel workers
+× the 3-way RESOLVE join` implied a ~384 GB parallel-hash budget on a 251 GiB host. `work_mem` and
+`maintenance_work_mem` now scale to host RAM (read from `/proc/meminfo`, with the prior fixed values as
+the fallback where unreadable), bounded so the parallel-hash budget stays within ~half of RAM — RESOLVE
+spills to temp instead of risking OOM. This is **memory hardening**; the definitive at-scale RESOLVE fix
+and out-of-the-box self-tuning of the full ingest are the 0.6.14 follow-up, now diagnosable thanks to the
+panic-reporting above.
+
+No schema change — both are runtime / `.so` changes.
+
 ## [0.6.12] — 2026-06-22
 
 > Correctness fix for the staged bulk loader ([0.6.11]'s `load_turtle_staged_run`): distinct RDF
