@@ -22,6 +22,19 @@ behaviour change where the operator hasn't opted in. The value is validated to a
 
 No schema change — a runtime / `.so` change (a new GUC + the staged loader's session-GUC apply site).
 
+### Changed — `load_turtle` auto-selects the staged loader for N-Triples (format-sniffed)
+
+`pgrdf.load_turtle` now uses the native staged loader automatically when pgRDF is in
+`shared_preload_libraries` AND the input file sniffs as **N-Triples** AND no `base_iri` is given —
+the materially faster path on large files. The format is sniffed from the head of the file (a pure,
+conservative classifier): the staged STAGE phase parses N-Triples only (line-oriented), so **full
+Turtle always uses the full parser** — a Turtle file is never routed to the N-Triples staged path,
+so there is no silent line-skipping / data loss. When the input is Turtle (and pgRDF is preloaded) a
+`NOTICE` recommends N-Triples + preload to unlock the staged path. Explicit `bulk_load => TRUE` and
+the `load_turtle_staged_run` / `load_turtle_staged` opt-ins are unchanged. At-scale stability of the
+staged path still depends on the RESOLVE temp routing / memory reduction — for billion-scale loads
+point `pgrdf.staged_temp_tablespaces` at a roomy mount.
+
 ## [0.6.13] — 2026-06-23
 
 > Diagnostic + memory hardening for the staged loader, ahead of the out-of-the-box at-scale work in

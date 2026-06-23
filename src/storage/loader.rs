@@ -2182,6 +2182,298 @@ fn load_turtle_streaming(
     stats_to_jsonb(&stats)
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// §6 — v0.6.14 format sniff (N-Triples vs Turtle) for the staged dispatch
+// ─────────────────────────────────────────────────────────────────────
+//
+// The staged loader's STAGE phase parses with `oxttl::NTriplesParser` —
+// strictly line-oriented N-Triples. Routing a full Turtle file (one with
+// `@prefix` / `@base` directives, `pfx:name` prefixed names, multi-line
+// `;`/`,` predicate-object lists) through that parser would make it
+// lenient-SKIP every line it can't read as a complete bare-term statement
+// = SILENT DATA LOSS. So `load_turtle` only takes the staged path when it
+// is CONFIDENT the input is N-Triples; everything else falls back to the
+// full `TurtleParser`. The sniff below is the confidence gate, and it is
+// deliberately conservative: any doubt returns `false` (⇒ Turtle, safe).
+
+/// Bytes of the input sampled by [`file_sniffs_as_ntriples`]. 64 KiB is
+/// plenty to classify a line-oriented format from its first records while
+/// staying a single cheap read; capped further by [`SNIFF_MAX_LINES`].
+const SNIFF_SAMPLE_BYTES: usize = 64 * 1024;
+
+/// Maximum non-blank, non-comment lines inspected by [`sniff_is_ntriples`].
+/// Bounds the work on pathological inputs (e.g. one enormous line) and is
+/// the "~first 200 lines" half of the sample budget.
+const SNIFF_MAX_LINES: usize = 200;
+
+/// Per-line phase of [`sniff_is_ntriples`]: classify ONE physical line as
+/// "looks like a complete bare-term N-Triples statement" or not.
+///
+/// Walks the line token-by-token, consuming each TERM as a unit so that a
+/// `:` / `;` / `,` / `@` living INSIDE an `<IRI>` or a `"…"`/`'…'` literal
+/// is never mistaken for Turtle syntax. The terms it accepts are exactly
+/// the bare-term N-Triples vocabulary:
+///
+/// * **IRI** `<…>` — consumed to the first unescaped `>` (`\>` stays
+///   inside; an unterminated `<…` ⇒ not a clean line).
+/// * **blank node** `_:label` — consumed to the next whitespace / term
+///   boundary. A bare `_` not followed by `:` disqualifies.
+/// * **literal** `"…"` / `'…'` — consumed honouring `\` escapes, optionally
+///   decorated by a `@lang` tag (`[A-Za-z0-9-]+`) OR a `^^<datatype>` whose
+///   datatype is itself an absolute `<IRI>`. A long-string opener
+///   (`"""` / `'''`) is Turtle-only ⇒ disqualifies. A `@`/`^` NOT
+///   decorating a just-closed literal disqualifies (catches `@prefix` /
+///   `@base` and a `^^pfx:type` prefixed datatype).
+/// * **terminator** `.` — outside any term; marks the statement complete.
+///
+/// ANY other token ⇒ NOT N-Triples (⇒ Turtle): a bare `:` (a `pfx:name`
+/// prefixed name), `;` / `,` (predicate-object lists), `[` `]` `(` `)`
+/// `{` `}` (blank-node property lists / collections / TriG graph blocks),
+/// or any bare alphanumeric token (the `a` keyword, `true`, a number,
+/// `PREFIX` / `BASE`). A complete statement must also END (after optional
+/// trailing whitespace + a trailing `# comment`) with that `.`; an
+/// unterminated or continued line (the body of a `;` / `,` list, or two
+/// statements on one physical line) fails. Conservative throughout — a
+/// malformed decoration like `"x" @en` (space before `@`) is treated as
+/// Turtle and routed to the full parser, which is the safe direction.
+fn line_is_bare_ntriples(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    // Did we see a statement-terminating `.` outside any IRI/string?
+    let mut terminated = false;
+    // True for exactly one TERM-position after a literal closes, so the
+    // optional `@lang` / `^^<datatype>` that decorates it is accepted (and
+    // consumed) rather than treated as a stray token.
+    let mut after_literal = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b' ' | b'\t' | b'\r' | b'\n' => {
+                i += 1;
+                continue;
+            }
+            // A `#` outside a term begins a trailing comment — the
+            // statement (if any) is complete; stop scanning.
+            b'#' => break,
+            // Anything below is a term/punctuation token at statement
+            // level: nothing legal follows the terminating `.`.
+            _ if terminated => return false,
+            // ── IRI: <…> ───────────────────────────────────────────
+            b'<' => {
+                // Consume to the first unescaped `>`. N-Triples forbids a
+                // raw `<`/`>` inside; `\>` (uchar/echar) stays inside.
+                i += 1;
+                loop {
+                    match bytes.get(i) {
+                        None => return false, // unterminated IRI ⇒ not clean
+                        Some(b'\\') => i += 2,
+                        Some(b'>') => {
+                            i += 1;
+                            break;
+                        }
+                        Some(_) => i += 1,
+                    }
+                }
+                after_literal = false;
+            }
+            // ── Blank node: _:label ────────────────────────────────
+            b'_' if bytes.get(i + 1) == Some(&b':') => {
+                i += 2;
+                // Consume the blank-node label (no whitespace / term
+                // punctuation). A bare `_` not followed by `:` falls to the
+                // catch-all and disqualifies (illegal bare token).
+                while let Some(&b) = bytes.get(i) {
+                    if b.is_ascii_whitespace() || matches!(b, b'.' | b'<' | b'"' | b'\'' | b'#') {
+                        break;
+                    }
+                    i += 1;
+                }
+                after_literal = false;
+            }
+            // ── Literal: "…" or '…' ────────────────────────────────
+            b'"' | b'\'' => {
+                let quote = c;
+                // A long-string opener (""" / ''') is Turtle-only.
+                if bytes.get(i + 1) == Some(&quote) && bytes.get(i + 2) == Some(&quote) {
+                    return false;
+                }
+                i += 1;
+                loop {
+                    match bytes.get(i) {
+                        None => return false, // unterminated string ⇒ not clean
+                        Some(b'\\') => i += 2,
+                        Some(&b) if b == quote => {
+                            i += 1;
+                            break;
+                        }
+                        Some(_) => i += 1,
+                    }
+                }
+                after_literal = true;
+            }
+            // ── @lang tag — only valid decorating a just-closed literal ─
+            b'@' if after_literal => {
+                i += 1;
+                let start = i;
+                while let Some(&b) = bytes.get(i) {
+                    if b.is_ascii_alphanumeric() || b == b'-' {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if i == start {
+                    return false; // bare `@` with no tag body
+                }
+                after_literal = false;
+            }
+            // ── ^^<datatype> — only valid decorating a just-closed literal ─
+            b'^' if after_literal && bytes.get(i + 1) == Some(&b'^') => {
+                i += 2;
+                // The datatype MUST be an absolute `<IRI>` in N-Triples
+                // (a `pfx:type` prefixed datatype is Turtle). Skip optional
+                // whitespace, then require `<`; the loop's `<` arm consumes
+                // the IRI on the next iteration.
+                while matches!(bytes.get(i), Some(b' ') | Some(b'\t')) {
+                    i += 1;
+                }
+                if bytes.get(i) != Some(&b'<') {
+                    return false;
+                }
+                after_literal = false;
+                // Fall through to the next iteration to consume the IRI.
+            }
+            // ── Statement terminator ───────────────────────────────
+            b'.' => {
+                terminated = true;
+                after_literal = false;
+                i += 1;
+            }
+            // ── Everything else is Turtle (or malformed N-Triples) ──
+            // A bare `:` (a `pfx:name` prefixed name), `;`/`,` (predicate-
+            // object lists), `[]`/`()`/`{}` (blank-node / collection / TriG
+            // graph blocks), a stray `@`/`^` not decorating a literal, or
+            // any bare alphanumeric token (`a` keyword, `true`, a number,
+            // `PREFIX`/`BASE`) — none legal in a bare-term N-Triples line.
+            _ => return false,
+        }
+    }
+    // Must have cleanly terminated and not be mid-term.
+    terminated && !after_literal
+}
+
+/// Pure format classifier: does `sample` (the head of a file, as bytes)
+/// look like **N-Triples**? Returns `true` ONLY when confident — every
+/// sampled non-blank, non-comment line is a complete bare-term statement
+/// (see [`line_is_bare_ntriples`]) and the sample held at least one such
+/// line. Anything else — a `@prefix`/`@base` directive, a `pfx:name`
+/// prefixed term, a `;`/`,` predicate-object list, a multi-line /
+/// unterminated statement, an `a`/`PREFIX`/`BASE` keyword, or simply an
+/// empty/comment-only sample — returns `false` (⇒ Turtle, the safe
+/// default that always uses the full parser).
+///
+/// Pure over `&[u8]` so it unit-tests as a plain `#[test]` without the
+/// pgrx harness. A final partial line (the sample boundary cut a line in
+/// half) is dropped rather than judged, so a truncated last line can't
+/// cause a false negative on an otherwise-clean N-Triples head.
+fn sniff_is_ntriples(sample: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(sample);
+    // Drop a trailing partial line only when the sample didn't end on a
+    // newline (i.e. the read boundary split a line). A sample that ends
+    // exactly on `\n` has no partial tail to drop.
+    let ends_clean = text.ends_with('\n');
+    let mut lines: Vec<&str> = text.lines().collect();
+    if !ends_clean && lines.len() > 1 {
+        lines.pop();
+    }
+
+    let mut saw_statement = false;
+    let mut inspected = 0usize;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        inspected += 1;
+        if inspected > SNIFF_MAX_LINES {
+            break;
+        }
+        if !line_is_bare_ntriples(trimmed) {
+            return false;
+        }
+        saw_statement = true;
+    }
+    // Confident N-Triples requires at least one clean statement; an empty
+    // or comment-only sample is NOT confidently N-Triples ⇒ Turtle.
+    saw_statement
+}
+
+/// Read the head of `path` (≤ [`SNIFF_SAMPLE_BYTES`]) and classify it via
+/// [`sniff_is_ntriples`]. Any I/O error ⇒ `false` (⇒ Turtle / the standard
+/// path), which then opens the file itself and surfaces the real open
+/// error with the loader's existing message — the sniff never owns the
+/// failure path.
+fn file_sniffs_as_ntriples(path: &str) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; SNIFF_SAMPLE_BYTES];
+    let mut filled = 0usize;
+    let mut reader = BufReader::new(file);
+    // Fill up to SNIFF_SAMPLE_BYTES across however many short reads it
+    // takes (a single `read` may return fewer bytes than requested).
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return false,
+        }
+    }
+    sniff_is_ntriples(&buf[..filled])
+}
+
+/// v0.6.14 — drive the native STAGED loader (`load_turtle_staged_run`) and
+/// return its triple count, so `load_turtle` can route a confidently
+/// N-Triples file to the fast staged path when pgRDF is preloaded. Invoked
+/// via SPI (`SELECT pgrdf.load_turtle_staged_run($1,$2,$3)`) rather than a
+/// direct Rust call: the coordinator lives in `storage::staged::pool`
+/// (owned by another module, not re-exported), and the SPI route reuses its
+/// exact spawn/wait/gate behaviour unchanged.
+///
+/// `n_workers = 0` ⇒ auto, matching `load_turtle_staged_run`'s own default.
+/// The staged coordinator returns `{ok, triples, …}` on success, or — on a
+/// phase failure — `{ok:false, failed_phase, error, …}` with the staging
+/// table left as the resume point (it does NOT panic). We mirror that: on
+/// `ok:false` raise the staged error so the caller sees the failure (the
+/// resume point persists); on success return the `triples` count.
+fn staged_load_default(path: &str, graph_id: i64) -> i64 {
+    let j: pgrx::JsonB = Spi::get_one_with_args(
+        "SELECT pgrdf.load_turtle_staged_run($1, $2, $3)",
+        &[path.into(), graph_id.into(), 0i32.into()],
+    )
+    .expect("load_turtle: staged coordinator SPI call")
+    .expect("load_turtle: staged coordinator returned NULL");
+
+    let v = &j.0;
+    if v.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        let phase = v
+            .get("failed_phase")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let reason = v
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unspecified");
+        error!(
+            "load_turtle: staged loader aborted in the {phase} phase: {reason} \
+             (staging table left in place as the resume point)"
+        );
+    }
+    v.get("triples")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+}
+
 /// Guard for `load_turtle(..., bulk_load => TRUE)`. The self-assigned-id
 /// fast path is correct ONLY on an empty dictionary: it dedups within
 /// the input (not against existing rows) and `unique_term` is
@@ -2210,10 +2502,34 @@ fn bulk_load_guarded(path: &str, graph_id: i64, base_iri: Option<&str>) -> Loade
 /// Returns the number of triples inserted. `base_iri` resolves
 /// relative IRIs; pass NULL or '' for absolute-IRI-only files.
 ///
+/// **v0.6.14 — format-aware staged dispatch.** When ALL of three hold —
+/// (1) pgRDF is in `shared_preload_libraries` (so the staged worker pool /
+/// jobctl shmem segment is initialised, [`jobctl::is_ready`]), (2) the file
+/// SNIFFS as N-Triples ([`file_sniffs_as_ntriples`]), and (3) no `base_iri`
+/// is given — the default path dispatches to the native STAGED loader
+/// (`load_turtle_staged_run`, `n_workers = 0` auto), which is materially
+/// faster on large files. Otherwise the call uses the standard full-Turtle
+/// `ingest_dispatch` path UNCHANGED.
+///
+/// The sniff is the safety gate: the staged STAGE phase parses with
+/// `oxttl::NTriplesParser` (line-oriented N-Triples only), so a full Turtle
+/// file routed there would be lenient-SKIPPED line-by-line = silent data
+/// loss. We therefore route to staged ONLY when confident the input is
+/// N-Triples; **Turtle ALWAYS uses the full parser** (no silent loss).
+/// A `base_iri` likewise forces the standard path — the N-Triples staged
+/// STAGE has no relative-IRI base. When the input is Turtle (and pgRDF is
+/// preloaded) a `NOTICE` recommends N-Triples + preload for the fast path.
+///
+/// At-scale stability of the staged path depends on the RESOLVE temp
+/// routing / memory reduction — for billion-scale loads point
+/// `pgrdf.staged_temp_tablespaces` at a roomy mount.
+///
 /// `bulk_load => TRUE` selects the v0.6.2 parallel bulk fast path on a
 /// fresh database (line-oriented N-Triples input; see
 /// `ingest_turtle_parallel_bulk`); it transparently falls back to the
-/// default path when the dictionary is already populated.
+/// default path when the dictionary is already populated. It is independent
+/// of the staged dispatch — an explicit opt-in to the older in-backend bulk
+/// path — and is unchanged by v0.6.14.
 ///
 /// SQL: `pgrdf.load_turtle(path TEXT, graph_id BIGINT, base_iri TEXT DEFAULT NULL, bulk_load BOOLEAN DEFAULT FALSE) -> BIGINT`.
 #[search_path(pgrdf, pg_temp)]
@@ -2225,8 +2541,28 @@ fn load_turtle(
     bulk_load: default!(bool, false),
 ) -> i64 {
     let base = base_iri.filter(|s| !s.is_empty());
+    // Explicit opt-in to the v0.6.2 in-backend parallel bulk path is honoured
+    // verbatim — it predates the staged loader and stays the caller's choice.
     if bulk_load {
         return bulk_load_guarded(path, graph_id, base).triples;
+    }
+    // v0.6.14 format-aware dispatch: prefer the native staged loader, but
+    // ONLY when its worker pool is available (pgRDF preloaded), the file is
+    // confidently N-Triples (the staged STAGE phase is N-Triples-only — a
+    // Turtle file would be silently skipped there), AND no base_iri is set
+    // (staged has no relative-IRI base). Any miss ⇒ the standard full-Turtle
+    // path, unchanged.
+    if crate::storage::staged::jobctl::is_ready() && base.is_none() {
+        if file_sniffs_as_ntriples(path) {
+            return staged_load_default(path, graph_id);
+        }
+        // Preloaded but the input is Turtle — the safe full parser runs.
+        // Nudge toward the fast staged path (N-Triples + preload).
+        notice!(
+            "pgrdf.load_turtle: input is Turtle (prefixed/multi-line); using the full \
+             parser. For the faster staged loader, supply N-Triples (one bare-term \
+             statement per line) with pgrdf preloaded"
+        );
     }
     let file =
         File::open(path).unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
@@ -3085,5 +3421,236 @@ mod tests {
         assert_eq!(cq, 3, "quads queryable via the rebuilt indexes");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    // ─── v0.6.14 — format-aware staged dispatch FALLBACK ─────────────
+    //
+    // `load_turtle` routes to the staged loader only when pgRDF is in
+    // `shared_preload_libraries` AND the file sniffs as N-Triples AND no
+    // base_iri is set. The pg_test harness does NOT preload pgRDF, so
+    // `jobctl::is_ready()` is false and the SAFE standard-parser FALLBACK
+    // runs. This pins that a default `load_turtle(path, graph_id)` call
+    // loads a full Turtle fixture (prefixed names + a ;-list — exactly the
+    // input the N-Triples staged path would silently drop) correctly via
+    // the full parser; the preloaded staged route is exercised at scale.
+
+    /// A small Turtle fixture (`@prefix`, prefixed names, a `;`-list — none
+    /// of which the N-Triples staged STAGE phase could read) loads
+    /// correctly through `load_turtle`'s standard-parser fallback: the
+    /// returned triple count, the landed quads, and the decoded-lexical set
+    /// all match. Proves the format-aware dispatch never silently drops
+    /// Turtle (it always uses the full parser unless confidently N-Triples).
+    #[pg_test]
+    fn load_turtle_turtle_fixture_uses_full_parser() {
+        // The harness never preloads pgRDF, so the staged pool is
+        // unavailable and the standard full-Turtle path runs.
+        assert!(
+            !crate::storage::staged::jobctl::is_ready(),
+            "test harness must NOT preload pgRDF — the full-parser fallback is under test"
+        );
+
+        // Full Turtle: a @prefix directive, prefixed names, and a
+        // predicate-object `;`-list — all silently skipped by the
+        // N-Triples staged parser, all correct via the full parser.
+        let ttl = concat!(
+            "@prefix ex:   <http://example.com/> .\n",
+            "@prefix foaf: <http://xmlns.com/foaf/0.1/> .\n",
+            "ex:alice a foaf:Person ;\n",
+            "         foaf:name \"Alice\" ;\n",
+            "         foaf:knows ex:bob .\n",
+            "ex:bob a foaf:Person .\n",
+        );
+        let path = "/tmp/pgrdf_0614_turtle_fallback.ttl";
+        std::fs::write(path, ttl).expect("write temp .ttl");
+
+        // Default arity: no base_iri, no bulk_load → the v0.6.14 dispatch,
+        // which falls back to the full parser when not preloaded.
+        let n: i64 = Spi::get_one_with_args(
+            "SELECT pgrdf.load_turtle($1, $2)",
+            &[path.into(), 7_540i64.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            n, 5,
+            "full Turtle fixture (4 ex:alice + 1 ex:bob) loads via the fallback"
+        );
+
+        let cq: i64 = Spi::get_one_with_args("SELECT pgrdf.count_quads($1)", &[7_540i64.into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(cq, 5, "all 5 quads landed via the full-parser fallback");
+
+        let set_ok: bool = Spi::get_one(
+            "WITH lex AS (
+               SELECT s.lexical_value sl, p.lexical_value pl,
+                      o.lexical_value ol, o.term_type ot
+                 FROM pgrdf._pgrdf_quads q
+                 JOIN pgrdf._pgrdf_dictionary s ON s.id = q.subject_id
+                 JOIN pgrdf._pgrdf_dictionary p ON p.id = q.predicate_id
+                 JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id
+                WHERE q.graph_id = 7540)
+             SELECT count(*) = 5
+                -- prefixed names expanded to absolute IRIs by the parser
+                AND count(*) FILTER (
+                      WHERE sl = 'http://example.com/alice'
+                        AND ol = 'Alice' AND ot = 3) = 1
+                AND count(*) FILTER (
+                      WHERE ol = 'http://example.com/bob' AND ot = 1) = 1
+                AND count(*) FILTER (
+                      WHERE pl = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type') = 2
+               FROM lex",
+        )
+        .unwrap()
+        .unwrap_or(false);
+        assert!(
+            set_ok,
+            "decoded-lexical set matches: prefixed names expanded, ;-list + `a` honoured"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// v0.6.14 — pure format-sniff unit tests (no pgrx harness)
+// ─────────────────────────────────────────────────────────────────────
+//
+// `sniff_is_ntriples` is a pure fn over `&[u8]`, so these are plain
+// `#[test]`s in a NON-`#[pg_schema]` module: they run under `cargo test`
+// without a running Postgres. They pin the conservative boundary — bare
+// absolute-term N-Triples classifies as N-Triples; ANY Turtle feature
+// (`@prefix`/`@base`, a `pfx:name` prefixed term, a `;`/`,` list, a
+// multi-line statement) classifies as Turtle (the safe default).
+#[cfg(test)]
+mod sniff_tests {
+    use super::sniff_is_ntriples;
+
+    /// Real N-Triples — every line a complete statement of bare absolute
+    /// `<IRI>` terms (and a literal with a language tag + a typed literal,
+    /// both legal N-Triples) terminated by ` .` — classifies as N-Triples.
+    #[test]
+    fn real_ntriples_is_ntriples() {
+        let nt = concat!(
+            "<http://ex/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://xmlns.com/foaf/0.1/Person> .\n",
+            "<http://ex/alice> <http://xmlns.com/foaf/0.1/name> \"Alice\" .\n",
+            "<http://ex/alice> <http://xmlns.com/foaf/0.1/knows> _:bob .\n",
+            "<http://ex/alice> <http://ex/label> \"Alice\"@en .\n",
+            "<http://ex/alice> <http://ex/age> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+        );
+        assert!(
+            sniff_is_ntriples(nt.as_bytes()),
+            "bare-term N-Triples must classify as N-Triples"
+        );
+    }
+
+    /// A `@prefix`-led Turtle snippet classifies as Turtle (the directive
+    /// is illegal in N-Triples).
+    #[test]
+    fn prefix_directive_is_turtle() {
+        let ttl = concat!(
+            "@prefix ex: <http://example.com/> .\n",
+            "<http://ex/s> <http://ex/p> <http://ex/o> .\n",
+        );
+        assert!(
+            !sniff_is_ntriples(ttl.as_bytes()),
+            "@prefix directive must classify as Turtle"
+        );
+    }
+
+    /// A `@base` directive likewise classifies as Turtle.
+    #[test]
+    fn base_directive_is_turtle() {
+        let ttl = "@base <http://example.com/> .\n<http://ex/s> <http://ex/p> <http://ex/o> .\n";
+        assert!(
+            !sniff_is_ntriples(ttl.as_bytes()),
+            "@base directive must classify as Turtle"
+        );
+    }
+
+    /// SPARQL-style `PREFIX`/`BASE` (no leading `@`) also classify as
+    /// Turtle — a bare keyword token is illegal in N-Triples.
+    #[test]
+    fn sparql_style_prefix_is_turtle() {
+        let ttl = concat!(
+            "PREFIX ex: <http://example.com/>\n",
+            "<http://ex/s> <http://ex/p> <http://ex/o> .\n",
+        );
+        assert!(
+            !sniff_is_ntriples(ttl.as_bytes()),
+            "SPARQL-style PREFIX must classify as Turtle"
+        );
+    }
+
+    /// A prefixed-name snippet with NO `@prefix` (e.g. `wd:Q42 rdfs:label
+    /// …`) still classifies as Turtle — the bare `:` of a prefixed name is
+    /// the tell, and the N-Triples parser would silently skip these.
+    #[test]
+    fn prefixed_names_without_directive_is_turtle() {
+        let ttl = "wd:Q42 rdfs:label \"Douglas Adams\"@en .\nwd:Q42 wdt:P31 wd:Q5 .\n";
+        assert!(
+            !sniff_is_ntriples(ttl.as_bytes()),
+            "prefixed names (pfx:name) must classify as Turtle even without @prefix"
+        );
+    }
+
+    /// A multi-line `;`-list Turtle statement (predicate-object list across
+    /// lines, comma object list) classifies as Turtle.
+    #[test]
+    fn multiline_predicate_object_list_is_turtle() {
+        let ttl = concat!(
+            "<http://ex/alice>\n",
+            "    <http://ex/name> \"Alice\" ;\n",
+            "    <http://ex/knows> <http://ex/bob> , <http://ex/carol> .\n",
+        );
+        assert!(
+            !sniff_is_ntriples(ttl.as_bytes()),
+            "multi-line ;/, predicate-object list must classify as Turtle"
+        );
+    }
+
+    /// The `a` (rdf:type) keyword is Turtle-only; a line using it is Turtle.
+    #[test]
+    fn a_keyword_is_turtle() {
+        let ttl = "<http://ex/alice> a <http://xmlns.com/foaf/0.1/Person> .\n";
+        assert!(
+            !sniff_is_ntriples(ttl.as_bytes()),
+            "the `a` keyword must classify as Turtle"
+        );
+    }
+
+    /// A `:` that lives INSIDE an IRI or a string literal must NOT trip the
+    /// prefixed-name detector — these stay confident N-Triples.
+    #[test]
+    fn colon_inside_iri_or_literal_stays_ntriples() {
+        let nt = concat!(
+            "<http://ex/s> <http://ex/p> \"a: b; c, d\" .\n",
+            "<http://ex/s2> <http://ex/p2> <urn:isbn:0451450523> .\n",
+        );
+        assert!(
+            sniff_is_ntriples(nt.as_bytes()),
+            "`:`/`;`/`,` inside an IRI or string literal must not force Turtle"
+        );
+    }
+
+    /// An empty or comment-only sample is NOT confidently N-Triples ⇒
+    /// Turtle (the safe default).
+    #[test]
+    fn empty_or_comment_only_is_turtle() {
+        assert!(!sniff_is_ntriples(b""), "empty sample ⇒ Turtle");
+        assert!(
+            !sniff_is_ntriples(b"# just a comment\n# and another\n"),
+            "comment-only sample ⇒ Turtle"
+        );
+    }
+
+    /// Two statements on one physical line is not clean N-Triples ⇒ Turtle.
+    #[test]
+    fn two_statements_one_line_is_turtle() {
+        let s = "<http://ex/s> <http://ex/p> <http://ex/o> . <http://ex/s2> <http://ex/p2> <http://ex/o2> .\n";
+        assert!(
+            !sniff_is_ntriples(s.as_bytes()),
+            "two statements on one line ⇒ Turtle (not a single bare statement)"
+        );
     }
 }
