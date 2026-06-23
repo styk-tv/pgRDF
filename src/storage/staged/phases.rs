@@ -198,6 +198,53 @@ fn is_safe_tablespace_list(s: &str) -> bool {
     })
 }
 
+/// Map `pgrdf.staged_resolve_strategy` to the `SET LOCAL` planner block RESOLVE runs before its 3-way
+/// join CTAS. Returns `(chosen, sql)` where `chosen` is the strategy name actually applied (after any
+/// fallback) and `sql` is the `SET LOCAL …` fragment.
+///
+/// The join OUTPUT is identical for every join method — RESOLVE writes the same rows regardless — so
+/// this is purely a PERFORMANCE knob (the all-hash-join builds a multi-TB temp spill at 8.2 B rows;
+/// the index-nested-loop path stays low-spill). This is split out as a free function so the
+/// strategy → SQL mapping is unit-testable without a live backend.
+///
+/// * `"hash"` — force the all-hash-join (the historical behaviour, the known-safe fallback).
+/// * `"index"` — force the low-spill index-nested-loop path.
+/// * `"auto"` — emit no `enable_*` forcing; let the planner choose with the adaptive `work_mem` + the
+///   dict resolve index + the parallel reloption already in place (still bumps `hash_mem_multiplier`).
+/// * anything else — fall back to the `"hash"` block (known-safe behaviour); `chosen` is then `"hash"`
+///   while the requested strategy was not, which the caller ([`resolve`]) detects to log a warning.
+///
+/// This fn is PURE (no SPI, no `ereport`) so it is unit-testable without a live backend; the
+/// unrecognised-value warning is emitted by the caller, not here.
+fn resolve_join_strategy_sql(strategy: &str) -> (&'static str, String) {
+    // The historical forced all-hash-join block — also the known-safe fallback.
+    const HASH_SQL: &str = "SET LOCAL enable_nestloop = off; \
+         SET LOCAL enable_mergejoin = off; \
+         SET LOCAL enable_indexscan = off; \
+         SET LOCAL enable_indexonlyscan = off; \
+         SET LOCAL enable_bitmapscan = off; \
+         SET LOCAL enable_hashjoin = on; \
+         SET LOCAL hash_mem_multiplier = 2;";
+    // The low-spill index-nested-loop block.
+    const INDEX_SQL: &str = "SET LOCAL enable_hashjoin = off; \
+         SET LOCAL enable_mergejoin = off; \
+         SET LOCAL enable_nestloop = on; \
+         SET LOCAL enable_indexscan = on; \
+         SET LOCAL enable_indexonlyscan = on; \
+         SET LOCAL enable_bitmapscan = on; \
+         SET LOCAL hash_mem_multiplier = 2;";
+    // `auto`: no enable_* forcing — let the planner choose. Still bump hash_mem_multiplier.
+    const AUTO_SQL: &str = "SET LOCAL hash_mem_multiplier = 2;";
+
+    match strategy.trim() {
+        "hash" => ("hash", HASH_SQL.to_string()),
+        "index" => ("index", INDEX_SQL.to_string()),
+        "auto" => ("auto", AUTO_SQL.to_string()),
+        // Unrecognised value: fall back to the known-safe all-hash-join. The caller warns.
+        _ => ("hash", HASH_SQL.to_string()),
+    }
+}
+
 /// Re-apply the per-session parallel levers (§5) inside the worker's transaction. GUCs are
 /// per-session and a dynamic worker starts with server defaults, so each phase that wants PG's
 /// intra-query parallelism (DICT hash-agg, RESOLVE hash-join, INDEX maintenance) must `SET LOCAL`
@@ -224,7 +271,8 @@ pub fn apply_session_gucs() {
         .unwrap_or(8)
         .max(1);
     let maint_workers = (nproc / 2).max(1);
-    let (work_mem_kb, maint_mem_kb) = derive_work_mem_kb(host_mem_total_bytes(), nproc);
+    let mem_total = host_mem_total_bytes();
+    let (work_mem_kb, maint_mem_kb) = derive_work_mem_kb(mem_total, nproc);
 
     // Optional `SET LOCAL temp_tablespaces = '…'` from pgrdf.staged_temp_tablespaces. The value is a
     // tablespace-name list validated to a bare-identifier grammar before it reaches the SQL (see
@@ -242,6 +290,25 @@ pub fn apply_session_gucs() {
                 String::new()
             }
         };
+
+    // T5 instrumentation: surface the self-tuning decision in the PG log so an operator can see what
+    // the staged loader derived for this host (the foundation for later auto-routing). Pure logging —
+    // it reports the values already computed above and changes no tuning math.
+    let mem_total_desc = mem_total
+        .map(|b| format!("{:.1}GiB", b as f64 / (1024.0 * 1024.0 * 1024.0)))
+        .unwrap_or_else(|| "unmeasured".to_string());
+    let configured_temp_ts = crate::query::guc::staged_temp_tablespaces();
+    let temp_ts_desc = if configured_temp_ts.is_empty() {
+        "server-default".to_string()
+    } else {
+        configured_temp_ts
+    };
+    pgrx::log!(
+        "staged self-tune: MemTotal={mem_total_desc} nproc={nproc} work_mem={}MB \
+         maintenance_work_mem={}MB max_parallel_workers={nproc} temp_tablespaces={temp_ts_desc}",
+        work_mem_kb / 1024,
+        maint_mem_kb / 1024
+    );
 
     // One statement, semicolon-separated: cheaper than N SPI round-trips. All are GUCs that exist on
     // PG17; `SET LOCAL` confines them to this transaction (auto-reset on commit). work_mem /
@@ -817,20 +884,22 @@ pub fn resolve(job: &JobSlot, _w: &WorkerSlot) -> i64 {
         .unwrap_or(8)
         .max(1);
 
-    // Force HASH joins for the 3-way resolve + give the parallel hash build more memory. SET LOCAL ⇒
-    // scoped to this worker's transaction. `enable_indexscan` etc. off pushes the planner onto a
-    // parallel hash join (seq-scan the dict, which is what the dict parallel_workers reloption widens)
-    // rather than a serial nested-loop / index probe.
-    Spi::run(
-        "SET LOCAL enable_nestloop = off; \
-         SET LOCAL enable_mergejoin = off; \
-         SET LOCAL enable_indexscan = off; \
-         SET LOCAL enable_indexonlyscan = off; \
-         SET LOCAL enable_bitmapscan = off; \
-         SET LOCAL enable_hashjoin = on; \
-         SET LOCAL hash_mem_multiplier = 2;",
-    )
-    .expect("staged RESOLVE: set hash-join GUCs failed");
+    // Set the planner join strategy for the 3-way resolve from `pgrdf.staged_resolve_strategy`. SET
+    // LOCAL ⇒ scoped to this worker's transaction. The join OUTPUT is identical for any join method
+    // (RESOLVE writes the same rows regardless), so this is a PERFORMANCE knob, not a correctness one:
+    // `hash` forces the historical parallel all-hash-join (which spills multi-TB to temp at 8.2 B
+    // rows); `index` forces the low-spill index-nested-loop path; `auto` (the default) lets the planner
+    // choose using the adaptive work_mem + the dict resolve index + the parallel reloption in place.
+    let requested_strategy = crate::query::guc::staged_resolve_strategy();
+    let (resolve_strategy, resolve_sql) = resolve_join_strategy_sql(&requested_strategy);
+    if resolve_strategy != requested_strategy.trim() {
+        pgrx::warning!(
+            "pgrdf.staged_resolve_strategy = '{requested_strategy}' is not one of auto|hash|index — \
+             falling back to '{resolve_strategy}' (the known-safe all-hash-join)"
+        );
+    }
+    pgrx::log!("staged RESOLVE: join strategy = {resolve_strategy}");
+    Spi::run(&resolve_sql).expect("staged RESOLVE: set join-strategy GUCs failed");
 
     // Take the shared partition-DDL gate (the OUTERMOST lock, same order as add_graph/drop_graph): the
     // standalone CREATE + the ATTACH below escalate to ACCESS EXCLUSIVE on the `_pgrdf_quads` parent,
@@ -1220,7 +1289,7 @@ mod tests {
 /// test` unit test (the `#[pg_schema]` macro only carries `#[pg_test]`s into the in-database harness).
 #[cfg(test)]
 mod unit_tests {
-    use super::{derive_work_mem_kb, temp_tablespaces_set_fragment};
+    use super::{derive_work_mem_kb, resolve_join_strategy_sql, temp_tablespaces_set_fragment};
 
     /// Unit test of the RESOLVE memory-hardening arithmetic ([`super::derive_work_mem_kb`]) — pure,
     /// no Postgres. Five regimes:
@@ -1356,5 +1425,70 @@ mod unit_tests {
                 "unsafe value {bad:?} must be rejected, not interpolated into SET LOCAL"
             );
         }
+    }
+
+    /// Unit test of the RESOLVE join-strategy mapping ([`super::resolve_join_strategy_sql`]) — pure,
+    /// no Postgres. This is the mechanism `pgrdf.staged_resolve_strategy` rides into RESOLVE's planner
+    /// `SET LOCAL` block. The join OUTPUT is identical for any join method, so this only changes which
+    /// plan the forced block steers the planner to. Four regimes:
+    ///   * `"hash"` ⇒ the historical forced all-hash-join (hashjoin on, nestloop off);
+    ///   * `"index"` ⇒ the low-spill index-nested-loop path (hashjoin off, nestloop on);
+    ///   * `"auto"` ⇒ no `enable_*` forcing at all (neither `enable_hashjoin` nor `enable_nestloop`),
+    ///     just `hash_mem_multiplier`, so the planner is left to choose;
+    ///   * an UNKNOWN value ⇒ falls back to the `"hash"` fragment (the known-safe behaviour) and reports
+    ///     `chosen == "hash"` so the caller can detect the fallback.
+    #[test]
+    fn resolve_join_strategy_sql_cases() {
+        // hash: force the all-hash-join.
+        let (chosen, sql) = resolve_join_strategy_sql("hash");
+        assert_eq!(chosen, "hash", "'hash' selects the hash strategy");
+        assert!(
+            sql.contains("enable_hashjoin = on"),
+            "the hash fragment must turn enable_hashjoin on"
+        );
+        assert!(
+            sql.contains("enable_nestloop = off"),
+            "the hash fragment must turn enable_nestloop off"
+        );
+
+        // index: force the low-spill index-nested-loop path.
+        let (chosen, sql) = resolve_join_strategy_sql("index");
+        assert_eq!(chosen, "index", "'index' selects the index strategy");
+        assert!(
+            sql.contains("enable_hashjoin = off"),
+            "the index fragment must turn enable_hashjoin off"
+        );
+        assert!(
+            sql.contains("enable_nestloop = on"),
+            "the index fragment must turn enable_nestloop on"
+        );
+
+        // auto: no enable_* forcing, only hash_mem_multiplier — let the planner choose.
+        let (chosen, sql) = resolve_join_strategy_sql("auto");
+        assert_eq!(chosen, "auto", "'auto' selects the auto strategy");
+        assert!(
+            !sql.contains("enable_hashjoin"),
+            "the auto fragment must NOT force enable_hashjoin"
+        );
+        assert!(
+            !sql.contains("enable_nestloop"),
+            "the auto fragment must NOT force enable_nestloop"
+        );
+        assert!(
+            sql.contains("hash_mem_multiplier"),
+            "the auto fragment must still bump hash_mem_multiplier"
+        );
+
+        // Unknown value ⇒ fall back to the hash fragment (known-safe behaviour).
+        let (chosen, sql) = resolve_join_strategy_sql("bogus");
+        assert_eq!(
+            chosen, "hash",
+            "an unrecognised strategy falls back to the known-safe 'hash'"
+        );
+        assert_eq!(
+            sql,
+            resolve_join_strategy_sql("hash").1,
+            "the unknown-value fragment is identical to the hash fragment"
+        );
     }
 }

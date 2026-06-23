@@ -117,6 +117,31 @@ pub(crate) static DICT_BATCH_SIZE: GucSetting<i32> =
 pub(crate) static STAGED_TEMP_TABLESPACES: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 
+/// `pgrdf.staged_resolve_strategy` — selects the planner join strategy
+/// the staged loader's RESOLVE phase forces. RESOLVE joins the staged
+/// rows against the dictionary; the join OUTPUT is identical for any
+/// join method, so this is purely a PERFORMANCE knob (it does not change
+/// the rows written).
+///
+/// One of `auto` | `hash` | `index`:
+/// * `auto` (default) — emit no `enable_*` forcing; let the planner
+///   choose using the adaptive `work_mem` + the dict resolve index +
+///   the parallel reloption already in place. Still bumps
+///   `hash_mem_multiplier`.
+/// * `hash` — force the all-hash-join (the historical behaviour:
+///   `enable_hashjoin = on`, everything else off). Identical output, but
+///   at 8.2 B rows the hash build spills multi-TB to temp.
+/// * `index` — force the low-spill index-nested-loop path
+///   (`enable_nestloop = on` + index scans on, hash/merge off).
+///
+/// An unrecognised value logs a warning and falls back to `hash`, the
+/// known-safe historical behaviour.
+///
+/// `Userset` context: an operator can `SET` it per session before a
+/// staged load to steer that load's RESOLVE plan.
+pub(crate) static STAGED_RESOLVE_STRATEGY: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"auto"));
+
 /// `pgrdf.shmem_prewarm_on_init` — when on, the shmem dict cache
 /// is auto-prewarmed from `_pgrdf_dictionary` once per backend
 /// before the first ingest call observes it. Default off because
@@ -267,6 +292,22 @@ pub fn register() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    GucRegistry::define_string_guc(
+        c"pgrdf.staged_resolve_strategy",
+        c"Join strategy the staged loader's RESOLVE phase forces.",
+        c"One of 'auto' | 'hash' | 'index'. 'auto' (default) forces no \
+          join method, letting the planner choose with the adaptive \
+          work_mem + dict resolve index already in place (bumps \
+          hash_mem_multiplier only). 'hash' forces the all-hash-join \
+          (the historical behaviour; identical output but spills multi-TB \
+          to temp at 8.2 B rows). 'index' forces the low-spill \
+          index-nested-loop path. The join output is identical for any \
+          method — this is a performance knob, not a correctness one. An \
+          unrecognised value warns and falls back to 'hash'.",
+        &STAGED_RESOLVE_STRATEGY,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
     GucRegistry::define_int_guc(
         c"pgrdf.bulk_defer_index_min",
         c"Triple threshold above which bulk_load defers + rebuilds indexes.",
@@ -353,4 +394,20 @@ pub(crate) fn staged_temp_tablespaces() -> String {
         .map(str::trim)
         .unwrap_or("")
         .to_string()
+}
+
+/// Resolved `pgrdf.staged_resolve_strategy` for this session, trimmed
+/// and lowercased. `None`/blank → `"auto"` (the default). The returned
+/// string is the operator's raw selection; the strategy → SQL-fragment
+/// mapping (and the fallback for an unrecognised value) lives in
+/// [`crate::storage::staged::phases::resolve_join_strategy_sql`], which
+/// the staged loader's RESOLVE phase consults. Reads the GUC the same
+/// way as [`staged_temp_tablespaces`].
+pub(crate) fn staged_resolve_strategy() -> String {
+    let raw = STAGED_RESOLVE_STRATEGY.get();
+    raw.as_ref()
+        .and_then(|c| c.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("auto")
+        .to_ascii_lowercase()
 }
