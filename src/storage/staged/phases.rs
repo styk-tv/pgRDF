@@ -143,6 +143,61 @@ fn derive_work_mem_kb(mem_total: Option<u64>, nproc: usize) -> (u64, u64) {
     (work_mem_kb, maint_kb)
 }
 
+/// Build the `SET LOCAL temp_tablespaces = '<value>';` fragment from the configured
+/// `pgrdf.staged_temp_tablespaces` value, or `None` to emit nothing.
+///
+/// This is the pure (no-SPI) core of routing the staged loader's temp spill (chiefly RESOLVE's forced
+/// parallel 3-way hash join — see [`apply_session_gucs`]) off the PGDATA disk. It is split out as a
+/// free function so it is unit-testable without a live backend.
+///
+/// * Empty / whitespace-only ⇒ `None`: the loader emits no `temp_tablespaces` override and inherits
+///   the server default (the prior behaviour — no change where the operator hasn't opted in).
+/// * Otherwise the value must be a tablespace-NAME LIST: the same comma-separated SQL-identifier list
+///   the core `temp_tablespaces` GUC takes (e.g. `fast_ssd` or `ts_a, ts_b`). We VALIDATE it as such
+///   ([`is_safe_tablespace_list`]) and reject anything that is not — a tablespace name is an
+///   identifier, never a quoted/dotted/`;`-bearing string — so the interpolated value can never break
+///   out of the single-quoted `SET LOCAL` statement. A rejected value ⇒ `Err(reason)`; the caller logs
+///   it and falls back to the server default rather than emitting unsafe SQL.
+///
+/// The validated list is wrapped in single quotes exactly like `temp_tablespaces` expects. Validation
+/// guarantees no `'` is present, so no further escaping is needed.
+fn temp_tablespaces_set_fragment(configured: &str) -> Result<Option<String>, &'static str> {
+    let v = configured.trim();
+    if v.is_empty() {
+        return Ok(None); // inherit the server default — unchanged behaviour
+    }
+    if !is_safe_tablespace_list(v) {
+        return Err(
+            "pgrdf.staged_temp_tablespaces must be a comma-separated list of plain tablespace \
+             identifiers (letters, digits, underscore; no quotes, semicolons, or whitespace within a \
+             name)",
+        );
+    }
+    Ok(Some(format!("SET LOCAL temp_tablespaces = '{v}';")))
+}
+
+/// Is `s` a safe tablespace-name list — a non-empty comma-separated list of plain SQL identifiers,
+/// each `[A-Za-z_][A-Za-z0-9_]*`? Used to gate `pgrdf.staged_temp_tablespaces` before it is
+/// interpolated into a `SET LOCAL` statement (see [`temp_tablespaces_set_fragment`]). Rejects quotes,
+/// semicolons, dots, and any other punctuation, so the value cannot break out of the single-quoted SQL
+/// literal nor smuggle a second statement. Surrounding/separating spaces around a comma are tolerated
+/// (`a, b`), but a space WITHIN a name is not — that keeps the grammar to bare identifiers only
+/// (quoted identifiers, which alone could contain spaces, are deliberately out of scope).
+fn is_safe_tablespace_list(s: &str) -> bool {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.is_empty() {
+        return false;
+    }
+    parts.iter().all(|name| {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false, // empty part (e.g. trailing comma) or bad leading char
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 /// Re-apply the per-session parallel levers (§5) inside the worker's transaction. GUCs are
 /// per-session and a dynamic worker starts with server defaults, so each phase that wants PG's
 /// intra-query parallelism (DICT hash-agg, RESOLVE hash-join, INDEX maintenance) must `SET LOCAL`
@@ -155,6 +210,14 @@ fn derive_work_mem_kb(mem_total: Option<u64>, nproc: usize) -> (u64, u64) {
 /// same 2 GB / 16 GB cap (no change); on a small-RAM host they shrink so RESOLVE's 3-way parallel
 /// hash join spills to temp rather than risking OOM. This is hardening only — the definitive
 /// 8.2 B-scale RESOLVE fix is deferred pending an at-scale diagnostic.
+///
+/// `temp_tablespaces` is routed from `pgrdf.staged_temp_tablespaces` (when set): RESOLVE forces a
+/// parallel all-hash-join (`enable_mergejoin`/`enable_nestloop = off`, see [`resolve`]) whose spill is
+/// roughly the size of the dictionary + the staged data and, at 8.2 B rows, was measured at ~3 TB.
+/// PostgreSQL writes that spill under `base/pgsql_tmp` on the PGDATA disk by default; on a box whose
+/// PGDATA sits on a small (~3.4 TB) volume that filled the disk (`No space left on device`). Emitting
+/// `SET LOCAL temp_tablespaces` here moves EVERY staged phase's spill onto an operator-chosen,
+/// roomier mount. Empty GUC ⇒ nothing emitted ⇒ the server default disk (unchanged).
 pub fn apply_session_gucs() {
     let nproc = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -162,9 +225,29 @@ pub fn apply_session_gucs() {
         .max(1);
     let maint_workers = (nproc / 2).max(1);
     let (work_mem_kb, maint_mem_kb) = derive_work_mem_kb(host_mem_total_bytes(), nproc);
+
+    // Optional `SET LOCAL temp_tablespaces = '…'` from pgrdf.staged_temp_tablespaces. The value is a
+    // tablespace-name list validated to a bare-identifier grammar before it reaches the SQL (see
+    // `temp_tablespaces_set_fragment`), so an unsafe value never lands here — it is logged and dropped,
+    // and the spill falls back to the server default disk rather than emitting unsafe SQL.
+    let temp_ts_sql =
+        match temp_tablespaces_set_fragment(&crate::query::guc::staged_temp_tablespaces()) {
+            Ok(Some(frag)) => frag,
+            Ok(None) => String::new(), // empty GUC: inherit the server default temp tablespace
+            Err(reason) => {
+                pgrx::warning!(
+                    "staged loader: ignoring pgrdf.staged_temp_tablespaces — {reason}; \
+                 temp spill stays on the server default tablespace"
+                );
+                String::new()
+            }
+        };
+
     // One statement, semicolon-separated: cheaper than N SPI round-trips. All are GUCs that exist on
     // PG17; `SET LOCAL` confines them to this transaction (auto-reset on commit). work_mem /
     // maintenance_work_mem are set in kB (the smallest GUC unit) so the derived value applies exactly.
+    // The temp_tablespaces fragment (when set) is appended so every phase's temp spill — chiefly
+    // RESOLVE's forced parallel hash join — lands on the operator-chosen mount, not the PGDATA disk.
     let sql = format!(
         "SET LOCAL max_parallel_workers = {nproc}; \
          SET LOCAL max_parallel_workers_per_gather = {nproc}; \
@@ -175,7 +258,8 @@ pub fn apply_session_gucs() {
          SET LOCAL min_parallel_table_scan_size = 0; \
          SET LOCAL min_parallel_index_scan_size = 0; \
          SET LOCAL work_mem = '{work_mem_kb}kB'; \
-         SET LOCAL maintenance_work_mem = '{maint_mem_kb}kB';"
+         SET LOCAL maintenance_work_mem = '{maint_mem_kb}kB'; \
+         {temp_ts_sql}"
     );
     Spi::run(&sql).expect("staged phase: apply_session_gucs failed");
 }
@@ -1136,7 +1220,7 @@ mod tests {
 /// test` unit test (the `#[pg_schema]` macro only carries `#[pg_test]`s into the in-database harness).
 #[cfg(test)]
 mod unit_tests {
-    use super::derive_work_mem_kb;
+    use super::{derive_work_mem_kb, temp_tablespaces_set_fragment};
 
     /// Unit test of the RESOLVE memory-hardening arithmetic ([`super::derive_work_mem_kb`]) — pure,
     /// no Postgres. Five regimes:
@@ -1215,5 +1299,62 @@ mod unit_tests {
             work_big, WORK_MAX,
             "a 768 GiB / 32-core host pins work_mem at the 2 GB cap (unchanged from the fixed value)"
         );
+    }
+
+    /// Unit test of the temp-spill routing fragment ([`super::temp_tablespaces_set_fragment`]) — pure,
+    /// no Postgres. This is the mechanism `pgrdf.staged_temp_tablespaces` rides into every staged
+    /// phase's session GUCs (the RESOLVE hash-join spill that filled a small PGDATA disk at 8.2 B).
+    /// Three regimes:
+    ///   * a SET value (single tablespace, and a comma list with spaces) ⇒ a `SET LOCAL
+    ///     temp_tablespaces = '<value>';` fragment carrying that exact value;
+    ///   * an EMPTY / whitespace-only value ⇒ `None`, so the loader emits nothing and inherits the
+    ///     server default disk (the prior, unchanged behaviour);
+    ///   * an UNSAFE value (quote / semicolon / dotted name) ⇒ `Err`, so an injection attempt is
+    ///     rejected and never reaches the SQL.
+    #[test]
+    fn temp_tablespaces_set_fragment_cases() {
+        // Set: a single bare identifier ⇒ exactly the SET LOCAL fragment, value verbatim.
+        assert_eq!(
+            temp_tablespaces_set_fragment("fast_ssd"),
+            Ok(Some("SET LOCAL temp_tablespaces = 'fast_ssd';".to_string())),
+            "a configured tablespace name must be emitted as a temp_tablespaces SET LOCAL fragment"
+        );
+        // Set: a comma list with spaces (the temp_tablespaces grammar) is accepted as-is.
+        assert_eq!(
+            temp_tablespaces_set_fragment("  ts_a, ts_b  "),
+            Ok(Some(
+                "SET LOCAL temp_tablespaces = 'ts_a, ts_b';".to_string()
+            )),
+            "a comma-separated tablespace list (trimmed) must be accepted and emitted verbatim"
+        );
+
+        // Empty / whitespace ⇒ None: emit nothing, inherit the server default (no behaviour change).
+        assert_eq!(
+            temp_tablespaces_set_fragment(""),
+            Ok(None),
+            "an empty value emits nothing (inherit the server default temp tablespace)"
+        );
+        assert_eq!(
+            temp_tablespaces_set_fragment("   "),
+            Ok(None),
+            "a whitespace-only value is treated as empty"
+        );
+
+        // Unsafe ⇒ Err: a single quote or a semicolon trying to break out / chain a statement, a dotted
+        // name, and an empty list element (trailing comma) are all rejected before they reach the SQL.
+        for bad in [
+            "fast'; DROP TABLE pgrdf._pgrdf_dictionary; --",
+            "ts'; SELECT 1",
+            "a; b",
+            "schema.ts",
+            "ts_a,",
+            "ts a", // space WITHIN a name (only bare identifiers are allowed)
+            "*",
+        ] {
+            assert!(
+                temp_tablespaces_set_fragment(bad).is_err(),
+                "unsafe value {bad:?} must be rejected, not interpolated into SET LOCAL"
+            );
+        }
     }
 }

@@ -94,6 +94,29 @@ pub(crate) static INGEST_DICT_PATH: GucSetting<Option<CString>> =
 pub(crate) static DICT_BATCH_SIZE: GucSetting<i32> =
     GucSetting::<i32>::new(DEFAULT_DICT_BATCH_SIZE);
 
+/// `pgrdf.staged_temp_tablespaces` — when non-empty, the staged bulk
+/// loader emits `SET LOCAL temp_tablespaces = '<value>'` in every
+/// staged phase's session GUCs (STAGE/DICT/RESOLVE/INDEX), routing
+/// that phase's temp-file spill — dominated by RESOLVE's forced
+/// parallel 3-way hash join, which spilled ~3 TB at 8.2 B rows — off
+/// the PGDATA disk and onto the named tablespace(s). Empty (the
+/// default) emits nothing, so the server's own `temp_tablespaces`
+/// default is inherited (the prior behaviour, unchanged).
+///
+/// The value is a tablespace-name list — a comma-separated list of
+/// SQL identifiers — exactly like the core `temp_tablespaces` GUC. It
+/// is validated as such before interpolation (see
+/// [`crate::storage::staged::phases::temp_tablespaces_set_fragment`]);
+/// anything carrying a quote, semicolon, or other non-identifier
+/// character is rejected so the value can never break out of the
+/// emitted `SET LOCAL` statement.
+///
+/// `Userset` context: an operator can `SET` it per session before a
+/// staged load to steer that load's spill; it never affects another
+/// backend.
+pub(crate) static STAGED_TEMP_TABLESPACES: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+
 /// `pgrdf.shmem_prewarm_on_init` — when on, the shmem dict cache
 /// is auto-prewarmed from `_pgrdf_dictionary` once per backend
 /// before the first ingest call observes it. Default off because
@@ -228,6 +251,22 @@ pub fn register() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    GucRegistry::define_string_guc(
+        c"pgrdf.staged_temp_tablespaces",
+        c"Tablespace(s) the staged bulk loader routes its temp spill to.",
+        c"Empty by default (inherit the server's temp_tablespaces). When set \
+          to a tablespace-name list (the same comma-separated identifier list \
+          temp_tablespaces takes), the staged loader runs every phase \
+          (STAGE/DICT/RESOLVE/INDEX) with SET LOCAL temp_tablespaces = '<value>', \
+          routing temp files — dominated by RESOLVE's forced parallel 3-way hash \
+          join, which spilled ~3 TB at 8.2 B rows — off the PGDATA disk onto the \
+          named tablespace(s). The value must be a plain identifier list (no \
+          quotes/semicolons); an unsafe value is rejected and the spill stays on \
+          the server default.",
+        &STAGED_TEMP_TABLESPACES,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
     GucRegistry::define_int_guc(
         c"pgrdf.bulk_defer_index_min",
         c"Triple threshold above which bulk_load defers + rebuilds indexes.",
@@ -297,4 +336,21 @@ pub(crate) fn shmem_prewarm_on_init() -> bool {
 /// which the parallel bulk loader defers + rebuilds its indexes.
 pub(crate) fn bulk_defer_index_min() -> i32 {
     BULK_DEFER_INDEX_MIN.get()
+}
+
+/// Resolved `pgrdf.staged_temp_tablespaces` for this session, trimmed.
+/// `None`/blank → an empty string (the staged loader then emits no
+/// `temp_tablespaces` override and inherits the server default). The
+/// returned string is the operator's raw list; validation + SQL
+/// fragment construction live in
+/// [`crate::storage::staged::phases::temp_tablespaces_set_fragment`],
+/// which the staged loader consults. Reads the GUC the same way as
+/// [`ingest_dict_path`] (`.get()` → `Option<CString>` → `&str`).
+pub(crate) fn staged_temp_tablespaces() -> String {
+    let raw = STAGED_TEMP_TABLESPACES.get();
+    raw.as_ref()
+        .and_then(|c| c.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string()
 }

@@ -6,6 +6,22 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added — `pgrdf.staged_temp_tablespaces` routes the staged loader's temp spill off the PGDATA disk
+
+The staged loader's RESOLVE phase runs a forced parallel all-hash-join
+(`enable_mergejoin`/`enable_nestloop = off`) whose temp spill is roughly the dictionary + the staged
+data. At 8.2 B rows that spill reached ~3 TB, and a box whose PGDATA sat on a small (~3.4 TB) volume
+filled the disk mid-load (`could not write to file "base/pgsql_tmp/…": No space left on device`) —
+because the loader never set `temp_tablespaces`, so the spill always landed under `base/pgsql_tmp` on
+the PGDATA disk. The new `pgrdf.staged_temp_tablespaces` GUC (TEXT, default empty, `USERSET`) lets an
+operator name a roomier tablespace (or comma-separated list): when set, every staged phase
+(STAGE/DICT/RESOLVE/INDEX) runs with `SET LOCAL temp_tablespaces = '<value>'`, moving the spill onto
+that mount. Empty (the default) emits nothing and inherits the server's `temp_tablespaces` — no
+behaviour change where the operator hasn't opted in. The value is validated to a bare-identifier list
+(no quotes/semicolons) before it reaches the SQL, so it cannot break out of the `SET LOCAL` statement.
+
+No schema change — a runtime / `.so` change (a new GUC + the staged loader's session-GUC apply site).
+
 ## [0.6.13] — 2026-06-23
 
 > Diagnostic + memory hardening for the staged loader, ahead of the out-of-the-box at-scale work in
