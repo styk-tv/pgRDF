@@ -94,6 +94,56 @@ pub(crate) static INGEST_DICT_PATH: GucSetting<Option<CString>> =
 pub(crate) static DICT_BATCH_SIZE: GucSetting<i32> =
     GucSetting::<i32>::new(DEFAULT_DICT_BATCH_SIZE);
 
+/// `pgrdf.staged_temp_tablespaces` — when non-empty, the staged bulk
+/// loader emits `SET LOCAL temp_tablespaces = '<value>'` in every
+/// staged phase's session GUCs (STAGE/DICT/RESOLVE/INDEX), routing
+/// that phase's temp-file spill — dominated by RESOLVE's forced
+/// parallel 3-way hash join, which spilled ~3 TB at 8.2 B rows — off
+/// the PGDATA disk and onto the named tablespace(s). Empty (the
+/// default) emits nothing, so the server's own `temp_tablespaces`
+/// default is inherited (the prior behaviour, unchanged).
+///
+/// The value is a tablespace-name list — a comma-separated list of
+/// SQL identifiers — exactly like the core `temp_tablespaces` GUC. It
+/// is validated as such before interpolation (see
+/// [`crate::storage::staged::phases::temp_tablespaces_set_fragment`]);
+/// anything carrying a quote, semicolon, or other non-identifier
+/// character is rejected so the value can never break out of the
+/// emitted `SET LOCAL` statement.
+///
+/// `Userset` context: an operator can `SET` it per session before a
+/// staged load to steer that load's spill; it never affects another
+/// backend.
+pub(crate) static STAGED_TEMP_TABLESPACES: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+
+/// `pgrdf.staged_resolve_strategy` — selects the planner join strategy
+/// the staged loader's RESOLVE phase forces. RESOLVE joins the staged
+/// rows against the dictionary; the join OUTPUT is identical for any
+/// join method, so this is purely a PERFORMANCE knob (it does not change
+/// the rows written).
+///
+/// One of `auto` | `hash` | `index`:
+/// * `auto` — emit no `enable_*` forcing; let the planner choose using
+///   the adaptive `work_mem` + the dict resolve index + the parallel
+///   reloption already in place. Still bumps `hash_mem_multiplier`.
+/// * `hash` — force the all-hash-join (the historical behaviour:
+///   `enable_hashjoin = on`, everything else off). Identical output, but
+///   at 8.2 B rows the hash build spills multi-TB to temp.
+/// * `index` (default) — force the low-spill index-nested-loop path
+///   (`enable_nestloop = on` + index scans on, hash/merge off). The
+///   at-scale-validated default: an out-of-the-box 8.2 B-triple
+///   Wikidata-truthy load on E64ads_v7 completes with no multi-TB hash
+///   spill / no ENOSPC.
+///
+/// An unrecognised value logs a warning and falls back to `hash`, the
+/// known-safe historical behaviour.
+///
+/// `Userset` context: an operator can `SET` it per session before a
+/// staged load to steer that load's RESOLVE plan.
+pub(crate) static STAGED_RESOLVE_STRATEGY: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"index"));
+
 /// `pgrdf.shmem_prewarm_on_init` — when on, the shmem dict cache
 /// is auto-prewarmed from `_pgrdf_dictionary` once per backend
 /// before the first ingest call observes it. Default off because
@@ -228,6 +278,40 @@ pub fn register() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    GucRegistry::define_string_guc(
+        c"pgrdf.staged_temp_tablespaces",
+        c"Tablespace(s) the staged bulk loader routes its temp spill to.",
+        c"Empty by default (inherit the server's temp_tablespaces). When set \
+          to a tablespace-name list (the same comma-separated identifier list \
+          temp_tablespaces takes), the staged loader runs every phase \
+          (STAGE/DICT/RESOLVE/INDEX) with SET LOCAL temp_tablespaces = '<value>', \
+          routing temp files — dominated by RESOLVE's forced parallel 3-way hash \
+          join, which spilled ~3 TB at 8.2 B rows — off the PGDATA disk onto the \
+          named tablespace(s). The value must be a plain identifier list (no \
+          quotes/semicolons); an unsafe value is rejected and the spill stays on \
+          the server default.",
+        &STAGED_TEMP_TABLESPACES,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"pgrdf.staged_resolve_strategy",
+        c"Join strategy the staged loader's RESOLVE phase forces.",
+        c"One of 'auto' | 'hash' | 'index'. 'auto' forces no \
+          join method, letting the planner choose with the adaptive \
+          work_mem + dict resolve index already in place (bumps \
+          hash_mem_multiplier only). 'hash' forces the all-hash-join \
+          (the historical behaviour; identical output but spills multi-TB \
+          to temp at 8.2 B rows). 'index' (default) forces the low-spill \
+          index-nested-loop path — the at-scale-validated default \
+          (out-of-the-box 8.2 B-triple load, no ENOSPC). The join output \
+          is identical for any method — this is a performance knob, not a \
+          correctness one. An unrecognised value warns and falls back to \
+          'hash'.",
+        &STAGED_RESOLVE_STRATEGY,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
     GucRegistry::define_int_guc(
         c"pgrdf.bulk_defer_index_min",
         c"Triple threshold above which bulk_load defers + rebuilds indexes.",
@@ -297,4 +381,41 @@ pub(crate) fn shmem_prewarm_on_init() -> bool {
 /// which the parallel bulk loader defers + rebuilds its indexes.
 pub(crate) fn bulk_defer_index_min() -> i32 {
     BULK_DEFER_INDEX_MIN.get()
+}
+
+/// Resolved `pgrdf.staged_temp_tablespaces` for this session, trimmed.
+/// `None`/blank → an empty string (the staged loader then emits no
+/// `temp_tablespaces` override and inherits the server default). The
+/// returned string is the operator's raw list; validation + SQL
+/// fragment construction live in
+/// [`crate::storage::staged::phases::temp_tablespaces_set_fragment`],
+/// which the staged loader consults. Reads the GUC the same way as
+/// [`ingest_dict_path`] (`.get()` → `Option<CString>` → `&str`).
+pub(crate) fn staged_temp_tablespaces() -> String {
+    let raw = STAGED_TEMP_TABLESPACES.get();
+    raw.as_ref()
+        .and_then(|c| c.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Resolved `pgrdf.staged_resolve_strategy` for this session, trimmed
+/// and lowercased. The GucSetting default is `"index"` (the
+/// at-scale-validated low-spill path); a `None`/blank value — only
+/// reachable if an operator explicitly `RESET`s/clears it — falls back
+/// to `"auto"` here, which the mapping fn then renders as no forcing.
+/// The returned
+/// string is the operator's raw selection; the strategy → SQL-fragment
+/// mapping (and the fallback for an unrecognised value) lives in
+/// [`crate::storage::staged::phases::resolve_join_strategy_sql`], which
+/// the staged loader's RESOLVE phase consults. Reads the GUC the same
+/// way as [`staged_temp_tablespaces`].
+pub(crate) fn staged_resolve_strategy() -> String {
+    let raw = STAGED_RESOLVE_STRATEGY.get();
+    raw.as_ref()
+        .and_then(|c| c.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("auto")
+        .to_ascii_lowercase()
 }

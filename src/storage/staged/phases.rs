@@ -74,6 +74,101 @@ pub fn staging_table(job_id: i64) -> String {
     format!("pgrdf._pgrdf_stg_{job_id}")
 }
 
+/// **T3 — split the `.nt` file into `n` newline-snapped byte ranges**, one per parallel STAGE worker,
+/// each `[lo, hi)` a WHOLE number of lines so no triple is split across two workers. Returns the
+/// ranges in file order; their union is exactly `[0, file_len)` with no gap and no overlap, so every
+/// byte (hence every line) is staged by exactly ONE worker — the correctness invariant the shared
+/// staging table depends on.
+///
+/// How the snap works (mirrors the contract `stage()` already assumes for `[range_lo, range_hi)`): we
+/// cut the file into `n` roughly-equal pieces, then push each *interior* cut FORWARD to the byte just
+/// past the next `\n`. A worker's range therefore STARTS at the first byte of a line and ENDS one past
+/// a `\n` (a line boundary), so `stage()`'s `seek(lo)` + `read_line` loop reads only whole lines. The
+/// first range always starts at 0; the last always ends at `file_len`. Empty/short files and
+/// `n <= 1` collapse to a single `[0, file_len)` range — byte-identical to the prior single-worker
+/// behaviour.
+///
+/// `find_newline_from(file, off)` returns the offset just past the first `\n` at or after `off`, or
+/// `file_len` if none (the file's final line may be unterminated). Reading is done with small bounded
+/// `pread`-style reads from the SAME open file (no whole-file scan): we only ever read a few KB near
+/// each of the `n-1` interior cuts. Pure file I/O, no SPI — so the splitting decision is made once on
+/// the coordinator before any worker spawns.
+fn snap_byte_ranges(file: &mut File, file_len: u64, n: usize) -> Vec<(u64, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let n = n.max(1);
+    if n == 1 || file_len == 0 {
+        return vec![(0, file_len)];
+    }
+
+    // Find the offset just past the first '\n' at or after `off`. Reads in small bounded chunks from
+    // `off` forward; returns `file_len` if no newline remains (unterminated final line).
+    let find_newline_from = |file: &mut File, off: u64| -> u64 {
+        if off >= file_len {
+            return file_len;
+        }
+        let mut pos = off;
+        let mut buf = [0u8; 64 * 1024];
+        if file.seek(SeekFrom::Start(pos)).is_err() {
+            return file_len;
+        }
+        loop {
+            let want = ((file_len - pos).min(buf.len() as u64)) as usize;
+            if want == 0 {
+                return file_len;
+            }
+            let got = match file.read(&mut buf[..want]) {
+                Ok(0) => return file_len,
+                Ok(k) => k,
+                Err(_) => return file_len,
+            };
+            if let Some(i) = buf[..got].iter().position(|&b| b == b'\n') {
+                return pos + i as u64 + 1; // one past the newline = start of the next line
+            }
+            pos += got as u64;
+            if pos >= file_len {
+                return file_len;
+            }
+        }
+    };
+
+    let mut bounds: Vec<u64> = Vec::with_capacity(n + 1);
+    bounds.push(0);
+    for i in 1..n {
+        let raw = (file_len * i as u64) / n as u64;
+        let prev = *bounds.last().unwrap();
+        // Snap forward to the next line boundary; never go backwards past the previous bound.
+        let snapped = find_newline_from(file, raw).max(prev);
+        bounds.push(snapped.min(file_len));
+    }
+    bounds.push(file_len);
+
+    // Build [lo, hi) ranges, dropping any that collapsed to empty (e.g. fewer line boundaries than
+    // requested workers on a tiny file). Guaranteed non-empty: at least the first range survives.
+    let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(n);
+    for w in bounds.windows(2) {
+        let (lo, hi) = (w[0], w[1]);
+        if hi > lo {
+            ranges.push((lo, hi));
+        }
+    }
+    if ranges.is_empty() {
+        ranges.push((0, file_len));
+    }
+    ranges
+}
+
+/// **T3 coordinator helper** — open the file and compute the `n` newline-snapped STAGE byte ranges.
+/// Thin SPI-free wrapper over [`snap_byte_ranges`] so the coordinator (`pool.rs`) stays declarative;
+/// on a stat/open error it falls back to a single `[0, file_len)` range (the prior single-worker
+/// behaviour) rather than failing the load before it starts.
+pub fn stage_byte_ranges(path: &str, file_len: u64, n: usize) -> Vec<(u64, u64)> {
+    match File::open(path) {
+        Ok(mut f) => snap_byte_ranges(&mut f, file_len, n),
+        Err(_) => vec![(0, file_len)],
+    }
+}
+
 /// Read total host RAM in bytes from Linux `/proc/meminfo` (`MemTotal: <kB> kB`). Returns `None` on
 /// any platform without a readable `/proc/meminfo` (e.g. a macOS dev box) or if the line can't be
 /// parsed — callers then fall back to the previous fixed work-mem behaviour so nothing changes where
@@ -143,6 +238,108 @@ fn derive_work_mem_kb(mem_total: Option<u64>, nproc: usize) -> (u64, u64) {
     (work_mem_kb, maint_kb)
 }
 
+/// Build the `SET LOCAL temp_tablespaces = '<value>';` fragment from the configured
+/// `pgrdf.staged_temp_tablespaces` value, or `None` to emit nothing.
+///
+/// This is the pure (no-SPI) core of routing the staged loader's temp spill (chiefly RESOLVE's forced
+/// parallel 3-way hash join — see [`apply_session_gucs`]) off the PGDATA disk. It is split out as a
+/// free function so it is unit-testable without a live backend.
+///
+/// * Empty / whitespace-only ⇒ `None`: the loader emits no `temp_tablespaces` override and inherits
+///   the server default (the prior behaviour — no change where the operator hasn't opted in).
+/// * Otherwise the value must be a tablespace-NAME LIST: the same comma-separated SQL-identifier list
+///   the core `temp_tablespaces` GUC takes (e.g. `fast_ssd` or `ts_a, ts_b`). We VALIDATE it as such
+///   ([`is_safe_tablespace_list`]) and reject anything that is not — a tablespace name is an
+///   identifier, never a quoted/dotted/`;`-bearing string — so the interpolated value can never break
+///   out of the single-quoted `SET LOCAL` statement. A rejected value ⇒ `Err(reason)`; the caller logs
+///   it and falls back to the server default rather than emitting unsafe SQL.
+///
+/// The validated list is wrapped in single quotes exactly like `temp_tablespaces` expects. Validation
+/// guarantees no `'` is present, so no further escaping is needed.
+fn temp_tablespaces_set_fragment(configured: &str) -> Result<Option<String>, &'static str> {
+    let v = configured.trim();
+    if v.is_empty() {
+        return Ok(None); // inherit the server default — unchanged behaviour
+    }
+    if !is_safe_tablespace_list(v) {
+        return Err(
+            "pgrdf.staged_temp_tablespaces must be a comma-separated list of plain tablespace \
+             identifiers (letters, digits, underscore; no quotes, semicolons, or whitespace within a \
+             name)",
+        );
+    }
+    Ok(Some(format!("SET LOCAL temp_tablespaces = '{v}';")))
+}
+
+/// Is `s` a safe tablespace-name list — a non-empty comma-separated list of plain SQL identifiers,
+/// each `[A-Za-z_][A-Za-z0-9_]*`? Used to gate `pgrdf.staged_temp_tablespaces` before it is
+/// interpolated into a `SET LOCAL` statement (see [`temp_tablespaces_set_fragment`]). Rejects quotes,
+/// semicolons, dots, and any other punctuation, so the value cannot break out of the single-quoted SQL
+/// literal nor smuggle a second statement. Surrounding/separating spaces around a comma are tolerated
+/// (`a, b`), but a space WITHIN a name is not — that keeps the grammar to bare identifiers only
+/// (quoted identifiers, which alone could contain spaces, are deliberately out of scope).
+fn is_safe_tablespace_list(s: &str) -> bool {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    if parts.is_empty() {
+        return false;
+    }
+    parts.iter().all(|name| {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false, // empty part (e.g. trailing comma) or bad leading char
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Map `pgrdf.staged_resolve_strategy` to the `SET LOCAL` planner block RESOLVE runs before its 3-way
+/// join CTAS. Returns `(chosen, sql)` where `chosen` is the strategy name actually applied (after any
+/// fallback) and `sql` is the `SET LOCAL …` fragment.
+///
+/// The join OUTPUT is identical for every join method — RESOLVE writes the same rows regardless — so
+/// this is purely a PERFORMANCE knob (the all-hash-join builds a multi-TB temp spill at 8.2 B rows;
+/// the index-nested-loop path stays low-spill). This is split out as a free function so the
+/// strategy → SQL mapping is unit-testable without a live backend.
+///
+/// * `"hash"` — force the all-hash-join (the historical behaviour, the known-safe fallback).
+/// * `"index"` — force the low-spill index-nested-loop path.
+/// * `"auto"` — emit no `enable_*` forcing; let the planner choose with the adaptive `work_mem` + the
+///   dict resolve index + the parallel reloption already in place (still bumps `hash_mem_multiplier`).
+/// * anything else — fall back to the `"hash"` block (known-safe behaviour); `chosen` is then `"hash"`
+///   while the requested strategy was not, which the caller ([`resolve`]) detects to log a warning.
+///
+/// This fn is PURE (no SPI, no `ereport`) so it is unit-testable without a live backend; the
+/// unrecognised-value warning is emitted by the caller, not here.
+fn resolve_join_strategy_sql(strategy: &str) -> (&'static str, String) {
+    // The historical forced all-hash-join block — also the known-safe fallback.
+    const HASH_SQL: &str = "SET LOCAL enable_nestloop = off; \
+         SET LOCAL enable_mergejoin = off; \
+         SET LOCAL enable_indexscan = off; \
+         SET LOCAL enable_indexonlyscan = off; \
+         SET LOCAL enable_bitmapscan = off; \
+         SET LOCAL enable_hashjoin = on; \
+         SET LOCAL hash_mem_multiplier = 2;";
+    // The low-spill index-nested-loop block.
+    const INDEX_SQL: &str = "SET LOCAL enable_hashjoin = off; \
+         SET LOCAL enable_mergejoin = off; \
+         SET LOCAL enable_nestloop = on; \
+         SET LOCAL enable_indexscan = on; \
+         SET LOCAL enable_indexonlyscan = on; \
+         SET LOCAL enable_bitmapscan = on; \
+         SET LOCAL hash_mem_multiplier = 2;";
+    // `auto`: no enable_* forcing — let the planner choose. Still bump hash_mem_multiplier.
+    const AUTO_SQL: &str = "SET LOCAL hash_mem_multiplier = 2;";
+
+    match strategy.trim() {
+        "hash" => ("hash", HASH_SQL.to_string()),
+        "index" => ("index", INDEX_SQL.to_string()),
+        "auto" => ("auto", AUTO_SQL.to_string()),
+        // Unrecognised value: fall back to the known-safe all-hash-join. The caller warns.
+        _ => ("hash", HASH_SQL.to_string()),
+    }
+}
+
 /// Re-apply the per-session parallel levers (§5) inside the worker's transaction. GUCs are
 /// per-session and a dynamic worker starts with server defaults, so each phase that wants PG's
 /// intra-query parallelism (DICT hash-agg, RESOLVE hash-join, INDEX maintenance) must `SET LOCAL`
@@ -155,16 +352,64 @@ fn derive_work_mem_kb(mem_total: Option<u64>, nproc: usize) -> (u64, u64) {
 /// same 2 GB / 16 GB cap (no change); on a small-RAM host they shrink so RESOLVE's 3-way parallel
 /// hash join spills to temp rather than risking OOM. This is hardening only — the definitive
 /// 8.2 B-scale RESOLVE fix is deferred pending an at-scale diagnostic.
+///
+/// `temp_tablespaces` is routed from `pgrdf.staged_temp_tablespaces` (when set): RESOLVE forces a
+/// parallel all-hash-join (`enable_mergejoin`/`enable_nestloop = off`, see [`resolve`]) whose spill is
+/// roughly the size of the dictionary + the staged data and, at 8.2 B rows, was measured at ~3 TB.
+/// PostgreSQL writes that spill under `base/pgsql_tmp` on the PGDATA disk by default; on a box whose
+/// PGDATA sits on a small (~3.4 TB) volume that filled the disk (`No space left on device`). Emitting
+/// `SET LOCAL temp_tablespaces` here moves EVERY staged phase's spill onto an operator-chosen,
+/// roomier mount. Empty GUC ⇒ nothing emitted ⇒ the server default disk (unchanged).
 pub fn apply_session_gucs() {
     let nproc = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(8)
         .max(1);
     let maint_workers = (nproc / 2).max(1);
-    let (work_mem_kb, maint_mem_kb) = derive_work_mem_kb(host_mem_total_bytes(), nproc);
+    let mem_total = host_mem_total_bytes();
+    let (work_mem_kb, maint_mem_kb) = derive_work_mem_kb(mem_total, nproc);
+
+    // Optional `SET LOCAL temp_tablespaces = '…'` from pgrdf.staged_temp_tablespaces. The value is a
+    // tablespace-name list validated to a bare-identifier grammar before it reaches the SQL (see
+    // `temp_tablespaces_set_fragment`), so an unsafe value never lands here — it is logged and dropped,
+    // and the spill falls back to the server default disk rather than emitting unsafe SQL.
+    let temp_ts_sql =
+        match temp_tablespaces_set_fragment(&crate::query::guc::staged_temp_tablespaces()) {
+            Ok(Some(frag)) => frag,
+            Ok(None) => String::new(), // empty GUC: inherit the server default temp tablespace
+            Err(reason) => {
+                pgrx::warning!(
+                    "staged loader: ignoring pgrdf.staged_temp_tablespaces — {reason}; \
+                 temp spill stays on the server default tablespace"
+                );
+                String::new()
+            }
+        };
+
+    // T5 instrumentation: surface the self-tuning decision in the PG log so an operator can see what
+    // the staged loader derived for this host (the foundation for later auto-routing). Pure logging —
+    // it reports the values already computed above and changes no tuning math.
+    let mem_total_desc = mem_total
+        .map(|b| format!("{:.1}GiB", b as f64 / (1024.0 * 1024.0 * 1024.0)))
+        .unwrap_or_else(|| "unmeasured".to_string());
+    let configured_temp_ts = crate::query::guc::staged_temp_tablespaces();
+    let temp_ts_desc = if configured_temp_ts.is_empty() {
+        "server-default".to_string()
+    } else {
+        configured_temp_ts
+    };
+    pgrx::log!(
+        "staged self-tune: MemTotal={mem_total_desc} nproc={nproc} work_mem={}MB \
+         maintenance_work_mem={}MB max_parallel_workers={nproc} temp_tablespaces={temp_ts_desc}",
+        work_mem_kb / 1024,
+        maint_mem_kb / 1024
+    );
+
     // One statement, semicolon-separated: cheaper than N SPI round-trips. All are GUCs that exist on
     // PG17; `SET LOCAL` confines them to this transaction (auto-reset on commit). work_mem /
     // maintenance_work_mem are set in kB (the smallest GUC unit) so the derived value applies exactly.
+    // The temp_tablespaces fragment (when set) is appended so every phase's temp spill — chiefly
+    // RESOLVE's forced parallel hash join — lands on the operator-chosen mount, not the PGDATA disk.
     let sql = format!(
         "SET LOCAL max_parallel_workers = {nproc}; \
          SET LOCAL max_parallel_workers_per_gather = {nproc}; \
@@ -175,7 +420,8 @@ pub fn apply_session_gucs() {
          SET LOCAL min_parallel_table_scan_size = 0; \
          SET LOCAL min_parallel_index_scan_size = 0; \
          SET LOCAL work_mem = '{work_mem_kb}kB'; \
-         SET LOCAL maintenance_work_mem = '{maint_mem_kb}kB';"
+         SET LOCAL maintenance_work_mem = '{maint_mem_kb}kB'; \
+         {temp_ts_sql}"
     );
     Spi::run(&sql).expect("staged phase: apply_session_gucs failed");
 }
@@ -363,14 +609,15 @@ fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64) {
 /// backend process — which is BOTH the writer here (it is an ordinary OS process) and the reader (the
 /// COPY runs in this same backend's transaction) — owns the file, so the server-side COPY can always
 /// read it back; no cross-user permission question arises because there is no second user. The file
-/// name carries `job_id` + a per-window counter so concurrent jobs / windows never collide, and it is
-/// removed on the success path. The COPY runs inside the STAGE worker's transaction (this function is
-/// called from within it), so the staged rows are part of the same per-phase recovery unit.
-fn copy_window(table: &str, job_id: i64, window_idx: u64, rows: &[StagedRow]) {
+/// name carries `job_id` + the worker's `shard` + a per-window counter so concurrent jobs, concurrent
+/// STAGE workers (T3 — N of them stage at once), AND windows never collide on the same temp path, and
+/// it is removed on the success path. The COPY runs inside the STAGE worker's transaction (this
+/// function is called from within it), so the staged rows are part of the same per-phase recovery unit.
+fn copy_window(table: &str, job_id: i64, shard: u16, window_idx: u64, rows: &[StagedRow]) {
     if rows.is_empty() {
         return;
     }
-    let path = format!("/tmp/pgrdf_stg_{job_id}_{window_idx}.tsv");
+    let path = format!("/tmp/pgrdf_stg_{job_id}_{shard}_{window_idx}.tsv");
 
     // Serialize to the TSV. Pre-size generously (~96 B/row is a low-ball for truthy) so the buffer
     // rarely reallocates; a BufWriter keeps the actual disk writes block-sized.
@@ -411,11 +658,14 @@ fn copy_window(table: &str, job_id: i64, window_idx: u64, rows: &[StagedRow]) {
 /// each window across ALL cores with rayon, and load it into the pre-created UNLOGGED staging table
 /// via server-side **COPY** (the fast path).
 ///
-/// The coordinator snapped `[range_lo, range_hi)` to newline boundaries and recorded them in the
-/// [`WorkerSlot`]; today it spawns ONE STAGE worker over the whole file, so the across-cores
-/// parallelism lives INSIDE this worker (rayon over each window) rather than across N table-writing
-/// backends — which deliberately avoids the extension-lock contention that N bgworkers writing one
-/// table caused. The flow per window:
+/// The coordinator snapped `[range_lo, range_hi)` to newline boundaries (`stage_byte_ranges`) and
+/// recorded them in the [`WorkerSlot`]. T3: the coordinator now spawns N STAGE workers, one per
+/// snapped range, all COPYing into the SAME shared UNLOGGED staging table — so the across-cores
+/// parallelism is BOTH inside each worker (rayon over each window) AND across N table-writing backends
+/// (N concurrent COPY backends). PostgreSQL allows concurrent COPY/INSERT into a heap table, so the
+/// shared target with N writers is safe; prep (`prepare_for_load`) ran in a separate `STAGE_PREP`
+/// worker first, so no STAGE worker does DDL. Each worker stages a DISJOINT, whole-line byte range, so
+/// the union is the whole file exactly once. The flow per window:
 ///
 /// 1. **Stream** up to [`STAGE_WINDOW_LINES`] lines from `[lo, hi)` via `File::take(hi-lo)` + a
 ///    `BufReader` (never `read_to_end` — the file is ~1.2 TB; peak RAM is one window, not the range).
@@ -473,7 +723,7 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
         // ── Parse this window across all cores, then COPY it in.
         let (rows, _skipped) = parse_window_par(&window_lines);
         staged += rows.len() as i64;
-        copy_window(&table, job.job_id, window_idx, &rows);
+        copy_window(&table, job.job_id, w.shard, window_idx, &rows);
         window_idx += 1;
 
         if eof {
@@ -733,20 +983,22 @@ pub fn resolve(job: &JobSlot, _w: &WorkerSlot) -> i64 {
         .unwrap_or(8)
         .max(1);
 
-    // Force HASH joins for the 3-way resolve + give the parallel hash build more memory. SET LOCAL ⇒
-    // scoped to this worker's transaction. `enable_indexscan` etc. off pushes the planner onto a
-    // parallel hash join (seq-scan the dict, which is what the dict parallel_workers reloption widens)
-    // rather than a serial nested-loop / index probe.
-    Spi::run(
-        "SET LOCAL enable_nestloop = off; \
-         SET LOCAL enable_mergejoin = off; \
-         SET LOCAL enable_indexscan = off; \
-         SET LOCAL enable_indexonlyscan = off; \
-         SET LOCAL enable_bitmapscan = off; \
-         SET LOCAL enable_hashjoin = on; \
-         SET LOCAL hash_mem_multiplier = 2;",
-    )
-    .expect("staged RESOLVE: set hash-join GUCs failed");
+    // Set the planner join strategy for the 3-way resolve from `pgrdf.staged_resolve_strategy`. SET
+    // LOCAL ⇒ scoped to this worker's transaction. The join OUTPUT is identical for any join method
+    // (RESOLVE writes the same rows regardless), so this is a PERFORMANCE knob, not a correctness one:
+    // `hash` forces the historical parallel all-hash-join (which spills multi-TB to temp at 8.2 B
+    // rows); `index` forces the low-spill index-nested-loop path; `auto` (the default) lets the planner
+    // choose using the adaptive work_mem + the dict resolve index + the parallel reloption in place.
+    let requested_strategy = crate::query::guc::staged_resolve_strategy();
+    let (resolve_strategy, resolve_sql) = resolve_join_strategy_sql(&requested_strategy);
+    if resolve_strategy != requested_strategy.trim() {
+        pgrx::warning!(
+            "pgrdf.staged_resolve_strategy = '{requested_strategy}' is not one of auto|hash|index — \
+             falling back to '{resolve_strategy}' (the known-safe all-hash-join)"
+        );
+    }
+    pgrx::log!("staged RESOLVE: join strategy = {resolve_strategy}");
+    Spi::run(&resolve_sql).expect("staged RESOLVE: set join-strategy GUCs failed");
 
     // Take the shared partition-DDL gate (the OUTERMOST lock, same order as add_graph/drop_graph): the
     // standalone CREATE + the ATTACH below escalate to ACCESS EXCLUSIVE on the `_pgrdf_quads` parent,
@@ -1136,7 +1388,10 @@ mod tests {
 /// test` unit test (the `#[pg_schema]` macro only carries `#[pg_test]`s into the in-database harness).
 #[cfg(test)]
 mod unit_tests {
-    use super::derive_work_mem_kb;
+    use super::{
+        derive_work_mem_kb, resolve_join_strategy_sql, snap_byte_ranges,
+        temp_tablespaces_set_fragment,
+    };
 
     /// Unit test of the RESOLVE memory-hardening arithmetic ([`super::derive_work_mem_kb`]) — pure,
     /// no Postgres. Five regimes:
@@ -1215,5 +1470,271 @@ mod unit_tests {
             work_big, WORK_MAX,
             "a 768 GiB / 32-core host pins work_mem at the 2 GB cap (unchanged from the fixed value)"
         );
+    }
+
+    /// Unit test of the temp-spill routing fragment ([`super::temp_tablespaces_set_fragment`]) — pure,
+    /// no Postgres. This is the mechanism `pgrdf.staged_temp_tablespaces` rides into every staged
+    /// phase's session GUCs (the RESOLVE hash-join spill that filled a small PGDATA disk at 8.2 B).
+    /// Three regimes:
+    ///   * a SET value (single tablespace, and a comma list with spaces) ⇒ a `SET LOCAL
+    ///     temp_tablespaces = '<value>';` fragment carrying that exact value;
+    ///   * an EMPTY / whitespace-only value ⇒ `None`, so the loader emits nothing and inherits the
+    ///     server default disk (the prior, unchanged behaviour);
+    ///   * an UNSAFE value (quote / semicolon / dotted name) ⇒ `Err`, so an injection attempt is
+    ///     rejected and never reaches the SQL.
+    #[test]
+    fn temp_tablespaces_set_fragment_cases() {
+        // Set: a single bare identifier ⇒ exactly the SET LOCAL fragment, value verbatim.
+        assert_eq!(
+            temp_tablespaces_set_fragment("fast_ssd"),
+            Ok(Some("SET LOCAL temp_tablespaces = 'fast_ssd';".to_string())),
+            "a configured tablespace name must be emitted as a temp_tablespaces SET LOCAL fragment"
+        );
+        // Set: a comma list with spaces (the temp_tablespaces grammar) is accepted as-is.
+        assert_eq!(
+            temp_tablespaces_set_fragment("  ts_a, ts_b  "),
+            Ok(Some(
+                "SET LOCAL temp_tablespaces = 'ts_a, ts_b';".to_string()
+            )),
+            "a comma-separated tablespace list (trimmed) must be accepted and emitted verbatim"
+        );
+
+        // Empty / whitespace ⇒ None: emit nothing, inherit the server default (no behaviour change).
+        assert_eq!(
+            temp_tablespaces_set_fragment(""),
+            Ok(None),
+            "an empty value emits nothing (inherit the server default temp tablespace)"
+        );
+        assert_eq!(
+            temp_tablespaces_set_fragment("   "),
+            Ok(None),
+            "a whitespace-only value is treated as empty"
+        );
+
+        // Unsafe ⇒ Err: a single quote or a semicolon trying to break out / chain a statement, a dotted
+        // name, and an empty list element (trailing comma) are all rejected before they reach the SQL.
+        for bad in [
+            "fast'; DROP TABLE pgrdf._pgrdf_dictionary; --",
+            "ts'; SELECT 1",
+            "a; b",
+            "schema.ts",
+            "ts_a,",
+            "ts a", // space WITHIN a name (only bare identifiers are allowed)
+            "*",
+        ] {
+            assert!(
+                temp_tablespaces_set_fragment(bad).is_err(),
+                "unsafe value {bad:?} must be rejected, not interpolated into SET LOCAL"
+            );
+        }
+    }
+
+    /// Unit test of the RESOLVE join-strategy mapping ([`super::resolve_join_strategy_sql`]) — pure,
+    /// no Postgres. This is the mechanism `pgrdf.staged_resolve_strategy` rides into RESOLVE's planner
+    /// `SET LOCAL` block. The join OUTPUT is identical for any join method, so this only changes which
+    /// plan the forced block steers the planner to. Four regimes:
+    ///   * `"hash"` ⇒ the historical forced all-hash-join (hashjoin on, nestloop off);
+    ///   * `"index"` ⇒ the low-spill index-nested-loop path (hashjoin off, nestloop on);
+    ///   * `"auto"` ⇒ no `enable_*` forcing at all (neither `enable_hashjoin` nor `enable_nestloop`),
+    ///     just `hash_mem_multiplier`, so the planner is left to choose;
+    ///   * an UNKNOWN value ⇒ falls back to the `"hash"` fragment (the known-safe behaviour) and reports
+    ///     `chosen == "hash"` so the caller can detect the fallback.
+    #[test]
+    fn resolve_join_strategy_sql_cases() {
+        // hash: force the all-hash-join.
+        let (chosen, sql) = resolve_join_strategy_sql("hash");
+        assert_eq!(chosen, "hash", "'hash' selects the hash strategy");
+        assert!(
+            sql.contains("enable_hashjoin = on"),
+            "the hash fragment must turn enable_hashjoin on"
+        );
+        assert!(
+            sql.contains("enable_nestloop = off"),
+            "the hash fragment must turn enable_nestloop off"
+        );
+
+        // index: force the low-spill index-nested-loop path.
+        let (chosen, sql) = resolve_join_strategy_sql("index");
+        assert_eq!(chosen, "index", "'index' selects the index strategy");
+        assert!(
+            sql.contains("enable_hashjoin = off"),
+            "the index fragment must turn enable_hashjoin off"
+        );
+        assert!(
+            sql.contains("enable_nestloop = on"),
+            "the index fragment must turn enable_nestloop on"
+        );
+
+        // auto: no enable_* forcing, only hash_mem_multiplier — let the planner choose.
+        let (chosen, sql) = resolve_join_strategy_sql("auto");
+        assert_eq!(chosen, "auto", "'auto' selects the auto strategy");
+        assert!(
+            !sql.contains("enable_hashjoin"),
+            "the auto fragment must NOT force enable_hashjoin"
+        );
+        assert!(
+            !sql.contains("enable_nestloop"),
+            "the auto fragment must NOT force enable_nestloop"
+        );
+        assert!(
+            sql.contains("hash_mem_multiplier"),
+            "the auto fragment must still bump hash_mem_multiplier"
+        );
+
+        // Unknown value ⇒ fall back to the hash fragment (known-safe behaviour).
+        let (chosen, sql) = resolve_join_strategy_sql("bogus");
+        assert_eq!(
+            chosen, "hash",
+            "an unrecognised strategy falls back to the known-safe 'hash'"
+        );
+        assert_eq!(
+            sql,
+            resolve_join_strategy_sql("hash").1,
+            "the unknown-value fragment is identical to the hash fragment"
+        );
+    }
+
+    /// Unit test of the T3 STAGE byte-range splitter ([`super::snap_byte_ranges`]) — pure, no
+    /// Postgres. This is the load-bearing correctness invariant of multi-backend STAGE: with N writers
+    /// into ONE shared staging table, every LINE of the `.nt` must be staged by EXACTLY one worker, so
+    /// the N snapped ranges must (1) cover `[0, file_len)` with no gap and no overlap, and (2) every
+    /// interior cut must fall on a line boundary (the byte just past a `\n`), so no triple is split.
+    ///
+    /// We build a small in-memory `.nt`-shaped file (lines of varying length, including a final line
+    /// with no trailing newline) in a temp file, snap it K ways, and assert the invariants by REPLAYING
+    /// the split exactly as `stage()` does — seek to `lo`, read whole lines until `hi` — and checking
+    /// the concatenation of every worker's lines equals the original file's lines, in order, once each.
+    #[test]
+    fn snap_byte_ranges_covers_every_line_exactly_once() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        // A file of 1000 lines of varying width; the LAST line has NO trailing '\n' (the unterminated
+        // final-line case `find_newline_from` must handle by snapping to file_len).
+        let mut content = String::new();
+        for i in 0..1000u32 {
+            content.push_str(&format!(
+                "<http://ex/s{i}> <http://ex/p> \"value number {i}\" .\n"
+            ));
+        }
+        // Drop the final '\n' so the last line is unterminated.
+        assert!(content.ends_with('\n'));
+        content.pop();
+        let bytes = content.into_bytes();
+        let file_len = bytes.len() as u64;
+        let expected_lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("pgrdf_snap_test_{}.nt", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp test file");
+            f.write_all(&bytes).expect("write temp test file");
+            f.flush().expect("flush temp test file");
+        }
+
+        for n in [1usize, 2, 3, 4, 7, 16, 64, 999, 1000, 5000] {
+            let mut f = std::fs::File::open(&path).expect("reopen temp test file");
+            let ranges = snap_byte_ranges(&mut f, file_len, n);
+
+            // (1) Non-empty, in order, contiguous, exactly covering [0, file_len) — no gap/overlap.
+            assert!(!ranges.is_empty(), "n={n}: at least one range");
+            assert_eq!(ranges[0].0, 0, "n={n}: first range starts at 0");
+            assert_eq!(
+                ranges.last().unwrap().1,
+                file_len,
+                "n={n}: last range ends at file_len"
+            );
+            for w in ranges.windows(2) {
+                assert_eq!(
+                    w[0].1, w[1].0,
+                    "n={n}: ranges are contiguous (no gap, no overlap)"
+                );
+            }
+            for &(lo, hi) in &ranges {
+                assert!(hi > lo, "n={n}: every range is non-empty ([{lo},{hi}))");
+            }
+
+            // (2) Replay the split exactly as stage() does and reassemble the lines. Each interior cut
+            // must be on a line boundary, so concatenating every worker's whole lines reproduces the
+            // file's lines in order, once each.
+            let mut got_lines: Vec<Vec<u8>> = Vec::new();
+            for &(lo, hi) in &ranges {
+                let mut rf = std::fs::File::open(&path).expect("reopen for replay");
+                rf.seek(SeekFrom::Start(lo)).expect("seek lo");
+                let mut slice = vec![0u8; (hi - lo) as usize];
+                rf.read_exact(&mut slice).expect("read range slice");
+                // The byte range is a whole number of lines: it must NOT begin mid-line. Since cuts are
+                // snapped to just-past-'\n', the first byte of an interior range is the start of a line;
+                // we verify by reconstructing lines from the concatenated ranges below.
+                for line in slice.split(|&b| b == b'\n') {
+                    // `split` yields a trailing empty element after a terminating '\n'; skip it — the
+                    // next range (or the final unterminated line) carries the real content.
+                    got_lines.push(line.to_vec());
+                }
+            }
+            // Each range that ends on a '\n' contributes a trailing empty `split` element; drop empties
+            // that are pure boundary artefacts, then compare the non-empty content lines.
+            let got_nonempty: Vec<&[u8]> = got_lines
+                .iter()
+                .map(|v| v.as_slice())
+                .filter(|l| !l.is_empty())
+                .collect();
+            let exp_nonempty: Vec<&[u8]> = expected_lines
+                .iter()
+                .copied()
+                .filter(|l| !l.is_empty())
+                .collect();
+            assert_eq!(
+                got_nonempty, exp_nonempty,
+                "n={n}: the union of all workers' whole lines must equal the file's lines, in order, once each"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Edge cases for [`super::snap_byte_ranges`]: `n <= 1` and an empty file both collapse to the
+    /// single `[0, file_len)` range — byte-identical to the prior single-worker STAGE behaviour.
+    #[test]
+    fn snap_byte_ranges_degenerate_cases() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("pgrdf_snap_edge_{}.nt", std::process::id()));
+        let body = b"<a> <b> <c> .\n<d> <e> <f> .\n";
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp");
+            f.write_all(body).expect("write");
+        }
+        let file_len = body.len() as u64;
+
+        let mut f = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            snap_byte_ranges(&mut f, file_len, 1),
+            vec![(0, file_len)],
+            "n=1 is a single whole-file range (the prior single-worker behaviour)"
+        );
+        let mut f = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            snap_byte_ranges(&mut f, file_len, 0),
+            vec![(0, file_len)],
+            "n=0 clamps to a single whole-file range"
+        );
+        // Empty file: a single [0,0) range regardless of n.
+        let mut empty =
+            std::fs::File::create(dir.join(format!("pgrdf_snap_empty_{}.nt", std::process::id())))
+                .unwrap();
+        empty.flush().unwrap();
+        let mut ef =
+            std::fs::File::open(dir.join(format!("pgrdf_snap_empty_{}.nt", std::process::id())))
+                .unwrap();
+        assert_eq!(
+            snap_byte_ranges(&mut ef, 0, 8),
+            vec![(0, 0)],
+            "an empty file is a single [0,0) range"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ =
+            std::fs::remove_file(dir.join(format!("pgrdf_snap_empty_{}.nt", std::process::id())));
     }
 }

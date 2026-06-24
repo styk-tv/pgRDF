@@ -42,6 +42,13 @@ pub mod phase {
     pub const RESOLVE: u8 = 3; // C — parallel hash-join → quads
     pub const INDEX: u8 = 4; // D — hexastore indexes (concurrent workers)
     pub const DONE: u8 = 5;
+    /// T3 — the one-time STAGE prep sub-step (defer indexes + `CREATE UNLOGGED` staging table), run by
+    /// a SINGLE worker BEFORE the N parallel STAGE workers so the prep DDL can never race across the
+    /// pool. This is a worker DISPATCH label only, NOT a high-water mark: the coordinator records the
+    /// STAGE high-water mark (`phase::STAGE`) once prep + all STAGE workers succeed, so the resumable
+    /// ordering (STAGE=1 < DICT=2 < …) is unchanged. Its ordinal is intentionally OUTSIDE the 1..5
+    /// high-water range so it can never be mistaken for one.
+    pub const STAGE_PREP: u8 = 6;
     /// R2.0 pool-proof sentinel — the `load_turtle_staged_ping` worker body (a marker INSERT), kept
     /// as a standalone regression test of the spawn/wait/report machinery distinct from the real
     /// phases. Never a real high-water mark; only set on the ping coordinator's worker slots.

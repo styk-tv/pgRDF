@@ -133,13 +133,21 @@ pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
                 )
                 .expect("staged worker: ping INSERT failed");
             }
+            jobctl::phase::STAGE_PREP => {
+                phases::apply_session_gucs();
+                // T3: Phase-A prep (defer indexes, create the UNLOGGED staging table) is its OWN
+                // single worker, run BEFORE the N parallel STAGE workers. It runs HERE in a committed
+                // worker transaction — never the coordinator's — so its ACCESS EXCLUSIVE locks release
+                // before STAGE/DICT/RESOLVE/INDEX run (see `phases::prepare_for_load`). Splitting prep
+                // out is what lets STAGE go N-way without the `bulk_drop_indexes` / `CREATE TABLE IF
+                // NOT EXISTS` DDL racing across the pool.
+                phases::prepare_for_load(&job);
+            }
             jobctl::phase::STAGE => {
                 phases::apply_session_gucs();
-                // Phase-A prep (defer indexes, ensure partition, create the UNLOGGED staging table)
-                // runs HERE in the STAGE worker's committed transaction — never the coordinator's —
-                // so its ACCESS EXCLUSIVE locks release before DICT/RESOLVE/INDEX run (see
-                // `phases::prepare_for_load`). R2.1 STAGE is a single worker, so this also can't race.
-                phases::prepare_for_load(&job);
+                // T3: a pure STAGE worker — prep already ran in the STAGE_PREP worker, so this one only
+                // parses its newline-snapped byte range and COPYs into the SHARED staging table. N of
+                // these run concurrently, each its own COPY-issuing backend (the multi-backend win).
                 let _ = phases::stage(&job, &w);
             }
             jobctl::phase::DICT => {
@@ -242,6 +250,7 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>, phase: u8, shard: u16, pi
 fn phase_label(phase: u8) -> &'static str {
     match phase {
         jobctl::phase::PING => "ping",
+        jobctl::phase::STAGE_PREP => "stage-prep",
         jobctl::phase::STAGE => "stage",
         jobctl::phase::DICT => "dict",
         jobctl::phase::RESOLVE => "resolve",
@@ -497,11 +506,14 @@ fn run_phase(job_idx: usize, phase: u8, specs: &[WorkerSpec]) -> PhaseOutcome {
 /// transaction), gating on every phase, and returns load stats as JSONB.
 ///
 /// Pipeline (`_WIP/SPEC.STAGED-LOADER-R2.bgworker-design.md` §3.3/§6):
-/// * **A STAGE** — 1 worker: defer indexes + create the UNLOGGED staging table
-///   (`phases::prepare_for_load`), then parse the whole `.nt` leniently and bulk-insert it
-///   (`phases::stage`). Multi-stream byte-ranged COPY is the documented R2.1-followup micro-opt;
-///   correctness-first here is a single STAGE worker (the design blesses single-worker-per-phase).
-///   The destination partition is NOT created here — RESOLVE owns it (standalone CTAS → ATTACH).
+/// * **A STAGE** (T3 — multi-backend) — split into two sub-steps: ONE `STAGE_PREP` worker defers
+///   indexes + creates the UNLOGGED staging table (`phases::prepare_for_load`), then N `STAGE` workers
+///   each parse a newline-snapped byte range of the `.nt` leniently and COPY it into the SAME shared
+///   staging table (`phases::stage`) — N concurrent COPY-issuing backends. Splitting prep into its own
+///   single worker is what keeps the prep DDL from racing across the pool; the staged column layout,
+///   lenient skip, windowing, and per-line output are unchanged, so DICT/RESOLVE see byte-identical
+///   staged data regardless of N. The destination partition is NOT created here — RESOLVE owns it
+///   (standalone CTAS → ATTACH).
 /// * **B DICT** — 1 worker: parallel `CREATE TABLE … AS SELECT … row_number()` dedup, then ONE
 ///   `INSERT … OVERRIDING SYSTEM VALUE` into `_pgrdf_dictionary` (pre-assigned ids, no per-row
 ///   `nextval`); also builds the `(term_type, lexical_md5)` join index + widens the dict's
@@ -538,14 +550,20 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
         );
     }
 
-    // R2.1: STAGE/DICT/RESOLVE are a single worker each (their parallelism is PG's intra-query
-    // parallel hash-agg / hash-join); INDEX is one worker per DDL. n_workers is recorded for the
-    // result + a future multi-stream STAGE; 0 ⇒ auto. INDEX width is fixed by index_ddls().len().
-    let n_index = jobctl::index_ddls().len();
+    // T3: STAGE now runs N concurrent COPY backends (`requested` width); DICT/RESOLVE stay a single
+    // worker each (their parallelism is PG's intra-query parallel hash-agg / hash-join); INDEX is one
+    // worker per DDL. `n_workers > 0` ⇒ that explicit STAGE width; `0` ⇒ AUTO = the host core count,
+    // bounded to a sane ceiling so a very-high-core box can't exhaust `max_worker_processes` /
+    // jobctl `MAX_SLOTS` (the phases are sequential, so STAGE and INDEX never hold slots at once).
+    // INDEX width is fixed by index_ddls().len().
+    const STAGE_WORKERS_AUTO_CAP: usize = 32;
     let requested = if n_workers > 0 {
-        n_workers as usize
+        (n_workers as usize).min(jobctl::MAX_SLOTS)
     } else {
-        n_index
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8)
+            .clamp(1, STAGE_WORKERS_AUTO_CAP)
     };
 
     // The file length bounds the (single) STAGE worker's byte range [0, len). Read BEFORE creating
@@ -579,11 +597,30 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
         pgrx::JsonB(out)
     };
 
-    // ── PHASE A — STAGE (prep + parse + load), single worker over the whole file ────────────────
+    // ── PHASE A — STAGE ──────────────────────────────────────────────────────────────────────────
+    // T3: prep + parse/COPY are split into TWO sub-steps so STAGE can go N-way without the prep DDL
+    // racing across the pool:
+    //   A0  STAGE_PREP — ONE worker: defer indexes + create the UNLOGGED staging table.
+    //   A1  STAGE      — N workers : each parses its own newline-snapped byte range of the .nt and
+    //                    COPYs into the SAME shared staging table (N concurrent COPY backends).
+    // Both phases write only their own committed transactions, so the coordinator holds no lock.
     let t = Instant::now();
     if let PhaseOutcome::Failed(reason) =
-        run_phase(job_idx, jobctl::phase::STAGE, &[(0u16, 0u64, file_len)])
+        run_phase(job_idx, jobctl::phase::STAGE_PREP, &[(0u16, 0u64, 0u64)])
     {
+        return abort("stage", reason);
+    }
+    // N newline-snapped byte ranges, one per STAGE worker. `requested` is the pool width; each range
+    // is a WHOLE number of lines and their union is exactly [0, file_len) (see `stage_byte_ranges`),
+    // so every line is staged by exactly one worker — no split triple, no gap, no overlap. A single
+    // range (tiny file / requested == 1) is byte-identical to the prior single-worker behaviour.
+    let ranges = phases::stage_byte_ranges(path, file_len, requested);
+    let stage_specs: Vec<WorkerSpec> = ranges
+        .iter()
+        .enumerate()
+        .map(|(i, &(lo, hi))| (i as u16, lo, hi))
+        .collect();
+    if let PhaseOutcome::Failed(reason) = run_phase(job_idx, jobctl::phase::STAGE, &stage_specs) {
         return abort("stage", reason);
     }
     let stage_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -610,6 +647,7 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
     jobctl::advance_phase(job_idx, jobctl::phase::RESOLVE);
 
     // ── PHASE D — INDEX (the 5 index_ddls, one worker each, built simultaneously) ────────────────
+    let n_index = jobctl::index_ddls().len();
     let index_specs: Vec<WorkerSpec> = (0..n_index).map(|i| (i as u16, 0u64, 0u64)).collect();
     let t = Instant::now();
     if let PhaseOutcome::Failed(reason) = run_phase(job_idx, jobctl::phase::INDEX, &index_specs) {

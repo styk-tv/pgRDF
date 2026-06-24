@@ -4,21 +4,13 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![pgrx](https://img.shields.io/badge/pgrx-0.16-cc6633?logo=rust&logoColor=white)](https://github.com/pgcentralfoundation/pgrx)
-[![Rust](https://img.shields.io/badge/rust-stable-cc6633?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/status-v0.6.13%20%E2%80%94%20native%20staged%20bulk%20loader%20%E2%80%94%20LUBM--100%20full%20pass%20%E2%80%94%20SPARQL%201.1%20%2F%20SHACL%20%2F%20OWL-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
-[![Tests](https://img.shields.io/badge/tests-294%20pgrx%20%2B%2093%20regression%20%2B%2051%20W3C%20%2B%2025%20SHACL%20%2B%203%20LUBM-brightgreen)](#tests)
-[![LUBM-100](https://img.shields.io/badge/LUBM--100-28%2F28%20queries%20%E2%89%A4%205s%20%C2%B7%2013.9M%20triples%20%C2%B7%20zero%20tuning-brightgreen)](tests/perf/lubm/RESULTS.m4-join-order.md)
-[![Scale](https://img.shields.io/badge/scale-LUBM--500%20%C2%B7%20112M%20quads%20materialized-blue)](#proven-at-scale-lubm-10-to-lubm-500)
-[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20ASK%20%2F%20CONSTRUCT%20%2F%20DESCRIBE%20%2F%20UPDATE%20%2F%20PATHS%20%2F%20GRAPH%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
-[![ShmemCache](https://img.shields.io/badge/shmem%20dict%20cache-LLD%20%C2%A74.1-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
-[![PlanCache](https://img.shields.io/badge/prepared%20plan%20cache-LLD%20%C2%A74.2-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
-[![BulkIngest](https://img.shields.io/badge/bulk%20ingest-LLD%20%C2%A74.3%20phase%20A-yellow)](specs/SPEC.pgRDF.LLD.v0.3.md)
-[![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20via%20reasonable-success)](specs/SPEC.pgRDF.LLD.v0.3.md)
-[![Validation](https://img.shields.io/badge/SHACL%20validate-SHACL%20Core%20via%20shacl%200.3.2-success)](docs/05-validation.md)
+[![Status](https://img.shields.io/badge/status-v0.6.14%20%E2%80%94%20native%20staged%20bulk%20loader%20%E2%80%94%20LUBM--100%20full%20pass-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
 [![CI](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml/badge.svg)](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml)
-[![W3C](https://img.shields.io/badge/W3C%20SPARQL%201.1-51%20shape%20tests-blue)](tests/w3c-sparql/)
-[![W3C SHACL](https://img.shields.io/badge/W3C%20SHACL%20Core-25%2F25-blue)](docs/05-validation.md)
+[![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20ASK%20%2F%20CONSTRUCT%20%2F%20DESCRIBE%20%2F%20UPDATE%20%2F%20PATHS%20%2F%20GRAPH%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
+[![SHACL](https://img.shields.io/badge/W3C%20SHACL%20Core-25%2F25-blue)](docs/05-validation.md)
+[![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20%2B%20RDFS-success)](docs/04-inference.md)
+[![LUBM-500](https://img.shields.io/badge/LUBM--500-112M%20quads%20materialized%20%C2%B7%20load%E2%86%92reason%E2%86%92query-blue)](#benchmarks)
+[![Wikidata scale](https://img.shields.io/badge/scale-Wikidata%20truthy%208.2B%20triples%20ingested-blueviolet)](#benchmarks)
 
 **A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
@@ -30,114 +22,18 @@ pgRDF turns a single PostgreSQL instance into a complete semantic-web
 engine — dictionary-encoded hexastore storage, a SPARQL 1.1 query **and**
 update engine, a W3C-conformant SHACL Core validator, and an OWL 2 RL
 reasoner — with no sidecar triple store and no second system to operate.
-It began as a SELECT/ASK triple store and grew, release over release, into
-the full SPARQL 1.1 surface (CONSTRUCT, DESCRIBE, property paths,
-aggregates, named graphs, the complete UPDATE algebra), genuine W3C SHACL
-Core conformance (25/25), OWL 2 RL **and** RDFS materialisation, and a
-benchmark record running from LUBM-10 to a **112-million-quad** materialised
-LUBM-500 closure — every release CI-built and signed with SLSA Build
+It grew, release over release, into the full SPARQL 1.1 surface (CONSTRUCT,
+DESCRIBE, property paths, aggregates, named graphs, the complete UPDATE
+algebra), genuine W3C SHACL Core conformance (25/25), and OWL 2 RL **and**
+RDFS materialisation — every release CI-built and signed with SLSA Build
 Provenance v1.
 
-## The LUBM-100 milestone
-
-pgRDF now completes the **full LUBM-100 benchmark** — the standard,
-generator-verified benchmark for RDF stores ([Lehigh University
-Benchmark](https://swat.cse.lehigh.edu/projects/lubm/), 100 universities,
-14 reference queries) — on ordinary hardware with **zero database tuning**:
-
-| Measured | Result |
-|---|---|
-| Load 13,879,970 triples (Turtle) | **3 min 29 s** |
-| OWL 2 RL reasoning → 22.5M facts, statistics refreshed automatically | **4 min 54 s** |
-| All 14 queries on the loaded graph | **each ≤ 3 s** |
-| All 14 queries after reasoning | **each ≤ 5 s** |
-
-Environment: a laptop — Apple-silicon VM (8 vCPU / 32 GiB), stock
-`postgres:17.4-bookworm` in Docker, **default PostgreSQL configuration**.
-No manual indexes, no `ANALYZE`, no planner hints, no extension settings.
-Full per-query tables and methodology:
-[tests/perf/lubm/RESULTS.m4-join-order.md](tests/perf/lubm/RESULTS.m4-join-order.md).
-
-Two engine changes close the gap from "minutes-to-timeout" to "seconds"
-(shipped v0.5.45 + v0.5.46, both automatic):
-
-- **Connected join ordering** — SPARQL graph patterns are lowered to SQL
-  in a connected, selectivity-aware order and the plan is pinned, so
-  multi-hop joins can never degrade into cross-product plans
-  (benchmark query Q2: **649 s → 3 s** on 13.9M triples).
-- **Automatic statistics after reasoning** — `pgrdf.materialize`
-  refreshes planner statistics when it writes the inference closure
-  (`pgrdf.auto_analyze`, default on), so queries stay fast on the
-  enlarged graph (Q2 after reasoning: **timeout → 5 s**).
-- **Batched closure write-back** (v0.6.1) — `materialize` writes its
-  8.6M-triple inference closure in bulk batches rather than row-at-a-time,
-  cutting the reasoning step **10 min 8 s → 4 min 54 s** at LUBM-100.
-
-The result holds end-to-end: load a real-scale graph, reason over it,
-and query it interactively — in one PostgreSQL instance, with the
-operational surface (backups, monitoring, access control) you already
-run. Verification bar at this cut: 294 integration + 93 regression +
-51 W3C SPARQL + 25 W3C SHACL Core tests green, releases signed with
-SLSA Build Provenance v1, three install paths (tarball / OCI / PGXN).
-
-## Proven at scale: LUBM-10 to LUBM-500
-
-Beyond the single-laptop LUBM-100 milestone above, pgRDF has been run end
-to end across the full LUBM ladder on a dedicated 32-vCPU / 256 GiB box
-(Azure `Standard_E32as_v7`, native PostgreSQL 17) — load → index → OWL-RL
-materialise → SPARQL — with **every result correctness-gated against the
-known LUBM answer counts**:
-
-| LUBM-N | base triples | ingest | index | materialize (OWL-RL) * | total quads (closure) |
-|---|---|---|---|---|---|
-| 10  | 1.32M | 3s   | 1s  | 15s     | 2.13M |
-| 100 | 13.9M | 34s  | 8s  | 4m 37s  | 22.46M |
-| 250 | 34.5M | 105s | 15s | 10m 9s  | 55.88M |
-| 500 | 69.1M | 192s | 47s | ~43m    | **111.83M** |
-
-LUBM-500 builds a full materialised closure of **111.8 million quads** on a
-single box (peak 146 / 256 GiB RAM) — load, reason, and query in one
-PostgreSQL instance, no sharding.
-
-<sub>\* OWL-RL materialisation is the dominant cost at scale and is single-thread-bound upstream — tracked in [#1](https://github.com/styk-tv/pgRDF/issues/1) (proposal: [gtfierro/reasonable#57](https://github.com/gtfierro/reasonable/issues/57)).</sub>
-
-### Parallel bulk ingest — landing in the v0.6.x line
-
-The ingest column above uses the new **parallel bulk loader** (landing in
-v0.6.2). Profiling the serial loader on the 32-vCPU box showed it pinned to
-~1 core, with **66–74% of ingest spent in dictionary resolution** — an
-anti-join `INSERT … WHERE NOT EXISTS` plus a lookup `JOIN` over a *growing*
-term index, super-linear and untouched by any config knob. The rewrite
-parses across all cores (rayon), resolves triple→id in memory, and — on a
-fresh load — assigns dictionary ids in Rust and bulk-inserts them, so both
-heavy SQL statements **disappear from the query profile**:
-
-| dataset | triples | serial ingest | parallel ingest | speed-up |
-|---|---|---|---|---|
-| LUBM-100 | 13.9M | 74–183s | **34s** | up to 5× |
-| LUBM-250 | 34.5M | 240s | **105s** | 2.3× |
-| LUBM-500 | 69.1M | 667s | **192s** | **3.5×** |
-
-The advantage **grows with scale**: per-triple ingest stays near-linear
-(~2.3–3.0 µs from LUBM-10 to 500) where the serial path was super-linear
-(5.3 → 9.65 µs). It ships as a one-flag option —
-`pgrdf.load_turtle(path, graph, bulk_load => true)` — with a safe automatic
-fallback to the standard path whenever the dictionary is already populated.
-At scale (above `pgrdf.bulk_defer_index_min`, v0.6.3) the same flag also
-defers the hexastore + dictionary indexes and rebuilds them in parallel after
-the heap-only load — the separate `index` column in the table above.
-
-For datasets beyond RAM, **`pgrdf.load_turtle_streaming`** (v0.6.8) reads the file
-in bounded windows — peak memory is one window plus the dictionary, regardless of
-file size. For the largest loads, **`pgrdf.load_turtle_staged_run`** (v0.6.11)
-drives a native, multi-backend **staged** pipeline over a background-worker pool —
-parse → `UNLOGGED` staging → set-based parallel hash-aggregate dedup (disk-spilling,
-so dictionary RAM stays bounded) → parallel hash-join resolve → concurrent index —
-**committing per phase** so a failure leaves a resume point instead of rolling back
-the whole load. That monolithic-transaction rollback is what lost an
-**8.2-billion-triple** Wikidata-`truthy` load at the final index rebuild (v0.6.10
-fixed the 2704-byte btree key that triggered it); the staged path is benchmarked on
-a 160-vCPU box at Wikidata-scale.
+Two headline proofs bracket what one Postgres box can hold. At raw scale,
+pgRDF ingests the **complete 8.2-billion-triple Wikidata `truthy` dump**
+into a single instance (dictionary-encoded, full hexastore, ~2.0 TB on
+disk). For the full semantic pipeline, it runs load → OWL-RL reason → query
+end to end up to a **112-million-quad materialised LUBM-500 closure**. See
+[Benchmarks](#benchmarks).
 
 ## Capabilities
 
@@ -182,8 +78,8 @@ Dictionary-encoded terms over a LIST-partitioned hexastore (SPO / POS / OSP cove
 | | |
 |---|---|
 | **PostgreSQL** | 14 · 15 · 16 · 17 (PG 18 deferred — pgrx 0.16 pin; [ERRATA E-006](specs/ERRATA.v0.2.md)) |
-| **Install** | **OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.13` (public, zero-cred; every digest SLSA-attested, verify with `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`) · **tarballs** (pg14–17 × amd64/arm64) · **PGXN** — `pgxn install pgrdf`. See [INSTALL.md](INSTALL.md). |
-| **Current release** | **v0.6.13** — [LATEST.md](./LATEST.md) is authoritative at audit time |
+| **Install** | **OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.14` (public, zero-cred; every digest SLSA-attested, verify with `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`) · **tarballs** (pg14–17 × amd64/arm64) · **PGXN** — `pgxn install pgrdf`. See [INSTALL.md](INSTALL.md). |
+| **Current release** | **v0.6.14** — [LATEST.md](./LATEST.md) is authoritative at audit time |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
 
 ## What you can do today
@@ -318,6 +214,96 @@ operator-facing observability — `pgrdf.stats()`,
 `pgrdf.shmem_reset()`, `pgrdf.plan_cache_clear()` — see
 [`docs/02-storage.md`](docs/02-storage.md).
 
+## Benchmarks
+
+Two complementary proofs of what a single PostgreSQL instance can hold:
+**raw ingest at scale** (the full Wikidata dump) and the **full semantic
+pipeline** (load → reason → query, across the LUBM ladder).
+
+### Scale — the full Wikidata `truthy` dump, 8.2 billion triples (pure ingest)
+
+The native staged loader **`pgrdf.load_turtle_staged_run`** loads the
+COMPLETE Wikidata `truthy` N-Triples dump — **8,199,708,346 triples** (0
+dropped) — into a single PostgreSQL instance: dictionary-encoded
+(**1,801,847,593** distinct terms), full SPO/POS/OSP hexastore, ~**2.0 TB**
+on disk (heap 729 GB + indexes 1448 GB). It runs a native multi-backend
+background-worker pipeline, **committing per phase** (parse → `UNLOGGED`
+staging → parallel hash-aggregate dedup → resolve → concurrent index) so a
+failure leaves a resume point instead of rolling back the whole load.
+
+| host | cores / RAM | engine | ingest | rate |
+|---|---|---|---|---|
+| Azure E128ads_v7 | 128 vCPU / 1 TiB | v0.6.13 | **6 h 41 m** | **340.7 K triples/s** |
+| Azure E64ads_v7 | 64 vCPU / 503 GiB · 3.4 TB disk | v0.6.14 | ~10.3 h | ~221 K triples/s |
+
+The 128-core run is the published flagship — **340.7 K triples/s**, peak 673 GB
+RAM (of 1 TiB) and 8.7 GB/s disk write (per-phase: STAGE 1 h 41 m · DICT 1 h 51 m ·
+RESOLVE 1 h 11 m all-hash · INDEX 1 h 43 m). The 64-core run proves the *same*
+full load completes **out-of-the-box on half the cores and a 3.4 TB disk**: the
+v0.6.14 loader self-tunes `work_mem`/parallelism to the host and adds a tunable
+resolve strategy (`index|hash|auto`, default `index`), temp-spill routing,
+parallel STAGE COPY, and adaptive self-tuning — so it finishes with no `ENOSPC`
+where the old all-hash resolve would have spilled multi-TB.
+
+**This is raw ingest at scale — it does NOT include reasoning or
+materialization** (`truthy` statements are already-asserted direct claims,
+nothing to infer). For the full load → reason → query pipeline, see the
+LUBM benchmark below.
+
+### Semantic pipeline — LUBM-10 → LUBM-500 (load → OWL-RL reason → query)
+
+This is the proof of the **full semantic pipeline** — the
+reasoning/materialization step the raw Wikidata ingest deliberately omits.
+
+pgRDF completes the **full LUBM-100 benchmark** — the standard,
+generator-verified benchmark for RDF stores ([Lehigh University
+Benchmark](https://swat.cse.lehigh.edu/projects/lubm/), 100 universities,
+14 reference queries) — on a laptop with **zero database tuning**:
+
+| Measured | Result |
+|---|---|
+| Load 13,879,970 triples (Turtle) | **3 min 29 s** |
+| OWL 2 RL reasoning → 22.5M facts, statistics refreshed automatically | **4 min 54 s** |
+| All 14 queries on the loaded graph | **each ≤ 3 s** |
+| All 14 queries after reasoning | **each ≤ 5 s** |
+
+Environment: an Apple-silicon VM (8 vCPU / 32 GiB), stock
+`postgres:17.4-bookworm` in Docker, **default PostgreSQL configuration** —
+no manual indexes, no `ANALYZE`, no planner hints, no extension settings.
+Full per-query tables and methodology:
+[tests/perf/lubm/RESULTS.m4-join-order.md](tests/perf/lubm/RESULTS.m4-join-order.md).
+
+Run end to end across the full LUBM ladder on a dedicated 32-vCPU / 256 GiB
+box (Azure `Standard_E32as_v7`, native PostgreSQL 17) — load → index →
+OWL-RL materialise → SPARQL — with **every result correctness-gated against
+the known LUBM answer counts**:
+
+| LUBM-N | base triples | ingest | index | materialize (OWL-RL) * | total quads (closure) |
+|---|---|---|---|---|---|
+| 10  | 1.32M | 3s   | 1s  | 15s     | 2.13M |
+| 100 | 13.9M | 34s  | 8s  | 4m 37s  | 22.46M |
+| 250 | 34.5M | 105s | 15s | 10m 9s  | 55.88M |
+| 500 | 69.1M | 192s | 47s | ~43m    | **111.83M** |
+
+LUBM-500 builds a full materialised closure of **111.83 million quads** on a
+single box (peak 146 / 256 GiB RAM) — load, reason, and query in one
+PostgreSQL instance, no sharding.
+
+<sub>\* OWL-RL materialisation is the dominant cost at scale and is single-thread-bound upstream — tracked in [#1](https://github.com/styk-tv/pgRDF/issues/1) (proposal: [gtfierro/reasonable#57](https://github.com/gtfierro/reasonable/issues/57)).</sub>
+
+#### The loader family
+
+The ingest column above rides a loader family that evolved release over
+release. The **parallel bulk loader** (v0.6.2,
+`pgrdf.load_turtle(…, bulk_load => true)`) parses across all cores and
+resolves triple→id in memory, delivering **2.3–3.5×** over the serial path
+(LUBM-250 240s → 105s, LUBM-500 667s → 192s) with per-triple cost staying
+near-linear where the serial path was super-linear. For datasets beyond RAM,
+**`pgrdf.load_turtle_streaming`** (v0.6.8) reads the file in bounded windows
+(peak memory is one window plus the dictionary). For the largest loads,
+**`pgrdf.load_turtle_staged_run`** (v0.6.11) drives the native, commit-per-phase
+staged pipeline used for the Wikidata-scale run above.
+
 ## Quickstart for users
 
 Full walkthrough lives under [`guide/`](guide/). Five-minute path:
@@ -331,7 +317,7 @@ just psql             # opens a psql shell to the pgrdf database
 # 2. Inside psql
 pgrdf=# CREATE EXTENSION pgrdf;
 pgrdf=# SELECT pgrdf.version();
-        --  → 0.6.13   (whatever LATEST.md currently advertises)
+        --  → 0.6.14   (whatever LATEST.md currently advertises)
 pgrdf=# SELECT pgrdf.parse_turtle('@prefix ex: <http://e.com/> . ex:a ex:p ex:b .', 1);
         --  → 1
 ```
