@@ -3423,31 +3423,29 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    // ─── v0.6.14 — format-aware staged dispatch FALLBACK ─────────────
+    // ─── v0.6.14 — format-aware staged dispatch: Turtle always uses the full parser ───
     //
     // `load_turtle` routes to the staged loader only when pgRDF is in
     // `shared_preload_libraries` AND the file sniffs as N-Triples AND no
-    // base_iri is set. The pg_test harness does NOT preload pgRDF, so
-    // `jobctl::is_ready()` is false and the SAFE standard-parser FALLBACK
-    // runs. This pins that a default `load_turtle(path, graph_id)` call
-    // loads a full Turtle fixture (prefixed names + a ;-list — exactly the
-    // input the N-Triples staged path would silently drop) correctly via
-    // the full parser; the preloaded staged route is exercised at scale.
+    // base_iri is set. A Turtle fixture (`@prefix` / prefixed names / a `;`-list)
+    // sniffs as NOT N-Triples, so it ALWAYS takes the full parser — whether or
+    // not pgRDF is preloaded (so this test is robust to either harness config).
+    // This pins that the format-aware dispatch never silently drops Turtle
+    // (exactly the input the N-Triples staged path would skip); the preloaded
+    // N-Triples staged route is exercised at scale.
 
     /// A small Turtle fixture (`@prefix`, prefixed names, a `;`-list — none
     /// of which the N-Triples staged STAGE phase could read) loads
-    /// correctly through `load_turtle`'s standard-parser fallback: the
-    /// returned triple count, the landed quads, and the decoded-lexical set
-    /// all match. Proves the format-aware dispatch never silently drops
-    /// Turtle (it always uses the full parser unless confidently N-Triples).
+    /// correctly through `load_turtle`: the returned triple count, the landed
+    /// quads, and the decoded-lexical set all match. Proves the format-aware
+    /// dispatch never silently drops Turtle (it always uses the full parser
+    /// unless the file is confidently N-Triples — independent of preload).
     #[pg_test]
     fn load_turtle_turtle_fixture_uses_full_parser() {
-        // The harness never preloads pgRDF, so the staged pool is
-        // unavailable and the standard full-Turtle path runs.
-        assert!(
-            !crate::storage::staged::jobctl::is_ready(),
-            "test harness must NOT preload pgRDF — the full-parser fallback is under test"
-        );
+        // A Turtle file sniffs as NOT N-Triples, so `load_turtle` uses the full
+        // parser regardless of whether the staged pool is available — that is
+        // the no-silent-Turtle-loss guarantee under test, and it holds whether
+        // or not the harness preloads pgRDF.
 
         // Full Turtle: a @prefix directive, prefixed names, and a
         // predicate-object `;`-list — all silently skipped by the
