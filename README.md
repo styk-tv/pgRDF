@@ -231,17 +231,19 @@ background-worker pipeline, **committing per phase** (parse → `UNLOGGED`
 staging → parallel hash-aggregate dedup → resolve → concurrent index) so a
 failure leaves a resume point instead of rolling back the whole load.
 
-| host | cores / RAM | ingest | rate |
-|---|---|---|---|
-| Azure E128ads_v7 | 128 vCPU / 1 TiB | ~6.5 h | ~353 k triples/s |
-| Azure E64ads_v7 | 64 vCPU / 503 GiB (3.4 TB disk) | ~10.3 h | ~221 k triples/s |
+| host | cores / RAM | engine | ingest | rate |
+|---|---|---|---|---|
+| Azure E128ads_v7 | 128 vCPU / 1 TiB | v0.6.13 | **6 h 41 m** | **340.7 K triples/s** |
+| Azure E64ads_v7 | 64 vCPU / 503 GiB · 3.4 TB disk | v0.6.14 | ~10.3 h | ~221 K triples/s |
 
-Both runs are **out-of-the-box** — no hand-tuned `postgresql.conf`. The
-loader self-tunes `work_mem`/parallelism to the host and routes its
-resolve/index spill (a tunable resolve strategy `index|hash|auto` defaulting
-to `index`, temp-spill routing, parallel STAGE COPY, and adaptive
-self-tuning landed in the v0.6.14 line), so even a 64-core box with a 3.4 TB
-disk completes the full load with no `ENOSPC`.
+The 128-core run is the published flagship — **340.7 K triples/s**, peak 673 GB
+RAM (of 1 TiB) and 8.7 GB/s disk write (per-phase: STAGE 1 h 41 m · DICT 1 h 51 m ·
+RESOLVE 1 h 11 m all-hash · INDEX 1 h 43 m). The 64-core run proves the *same*
+full load completes **out-of-the-box on half the cores and a 3.4 TB disk**: the
+v0.6.14 loader self-tunes `work_mem`/parallelism to the host and adds a tunable
+resolve strategy (`index|hash|auto`, default `index`), temp-spill routing,
+parallel STAGE COPY, and adaptive self-tuning — so it finishes with no `ENOSPC`
+where the old all-hash resolve would have spilled multi-TB.
 
 **This is raw ingest at scale — it does NOT include reasoning or
 materialization** (`truthy` statements are already-asserted direct claims,
