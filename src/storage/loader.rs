@@ -3470,14 +3470,14 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(
-            n, 5,
-            "full Turtle fixture (4 ex:alice + 1 ex:bob) loads via the fallback"
+            n, 4,
+            "full Turtle fixture (3 ex:alice triples + 1 ex:bob = 4) loads via the fallback"
         );
 
         let cq: i64 = Spi::get_one_with_args("SELECT pgrdf.count_quads($1)", &[7_540i64.into()])
             .unwrap()
             .unwrap();
-        assert_eq!(cq, 5, "all 5 quads landed via the full-parser fallback");
+        assert_eq!(cq, 4, "all 4 quads landed via the full-parser fallback");
 
         let set_ok: bool = Spi::get_one(
             "WITH lex AS (
@@ -3488,7 +3488,7 @@ mod tests {
                  JOIN pgrdf._pgrdf_dictionary p ON p.id = q.predicate_id
                  JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id
                 WHERE q.graph_id = 7540)
-             SELECT count(*) = 5
+             SELECT count(*) = 4
                 -- prefixed names expanded to absolute IRIs by the parser
                 AND count(*) FILTER (
                       WHERE sl = 'http://example.com/alice'
