@@ -2409,14 +2409,14 @@ fn sniff_is_ntriples(sample: &[u8]) -> bool {
 }
 
 /// Read the head of `path` (≤ [`SNIFF_SAMPLE_BYTES`]) and classify it via
-/// [`sniff_is_ntriples`]. Any I/O error ⇒ `false` (⇒ Turtle / the standard
-/// path), which then opens the file itself and surfaces the real open
-/// error with the loader's existing message — the sniff never owns the
-/// failure path.
-fn file_sniffs_as_ntriples(path: &str) -> bool {
-    let Ok(file) = File::open(path) else {
-        return false;
-    };
+/// [`sniff_is_ntriples`]. Returns `Some(true)` for N-Triples, `Some(false)`
+/// for a readable Turtle file, and `None` on any I/O error (a missing /
+/// unreadable file). `None` lets the caller emit NO Turtle NOTICE and fall
+/// through to the standard path, whose own `File::open` surfaces the real
+/// `failed to open` error — the sniff never owns the failure path nor nudges
+/// about a file that isn't there.
+fn file_sniffs_as_ntriples(path: &str) -> Option<bool> {
+    let file = File::open(path).ok()?;
     let mut buf = vec![0u8; SNIFF_SAMPLE_BYTES];
     let mut filled = 0usize;
     let mut reader = BufReader::new(file);
@@ -2426,10 +2426,10 @@ fn file_sniffs_as_ntriples(path: &str) -> bool {
         match reader.read(&mut buf[filled..]) {
             Ok(0) => break,
             Ok(n) => filled += n,
-            Err(_) => return false,
+            Err(_) => return None,
         }
     }
-    sniff_is_ntriples(&buf[..filled])
+    Some(sniff_is_ntriples(&buf[..filled]))
 }
 
 /// v0.6.14 — drive the native STAGED loader (`load_turtle_staged_run`) and
@@ -2553,16 +2553,21 @@ fn load_turtle(
     // (staged has no relative-IRI base). Any miss ⇒ the standard full-Turtle
     // path, unchanged.
     if crate::storage::staged::jobctl::is_ready() && base.is_none() {
-        if file_sniffs_as_ntriples(path) {
-            return staged_load_default(path, graph_id);
+        match file_sniffs_as_ntriples(path) {
+            Some(true) => return staged_load_default(path, graph_id),
+            Some(false) => {
+                // Preloaded + a READABLE Turtle file — the safe full parser runs.
+                // Nudge toward the fast staged path (N-Triples + preload).
+                notice!(
+                    "pgrdf.load_turtle: input is Turtle (prefixed/multi-line); using the full \
+                     parser. For the faster staged loader, supply N-Triples (one bare-term \
+                     statement per line) with pgrdf preloaded"
+                );
+            }
+            // None ⇒ missing/unreadable file: emit NO notice, fall through so the
+            // standard path's File::open below surfaces the real `failed to open`.
+            None => {}
         }
-        // Preloaded but the input is Turtle — the safe full parser runs.
-        // Nudge toward the fast staged path (N-Triples + preload).
-        notice!(
-            "pgrdf.load_turtle: input is Turtle (prefixed/multi-line); using the full \
-             parser. For the faster staged loader, supply N-Triples (one bare-term \
-             statement per line) with pgrdf preloaded"
-        );
     }
     let file =
         File::open(path).unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
