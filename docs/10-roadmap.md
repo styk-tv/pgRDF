@@ -3,7 +3,7 @@
 > **Historical phase map (v0.3 era).** This page tracks the original
 > v0.3 LLD phase numbering verbatim and is kept as a development
 > record; for the *current* shipped status see `CHANGELOG.md`,
-> `README.md`, and the v0.6-forward LLD. As of v0.6.13: validation is
+> `README.md`, and the v0.6-forward LLD. As of v0.6.14: validation is
 > real (SHACL Core full-pass + native SHACL-SPARQL), the parallel
 > bulk loader has shipped, releases are SLSA-attested, and the LUBM
 > benchmarks (10→500) are real. The v0.3 phase snapshot below —

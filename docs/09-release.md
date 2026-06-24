@@ -4,14 +4,62 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is **`v0.6.13`** (`isPrerelease=false`,
-`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.13`, and the
+The current cut is **`v0.6.14`** (`isPrerelease=false`,
+`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.14`, and the
 tagged release carries the binary tarball matrix, the PGXN source
 zip, and an SLSA-attested OCI bundle. The per-release notes below
-cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.13 history
+cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.14 history
 (the parallel bulk loader and its levers) lives in `CHANGELOG.md`,
 which is the authoritative running log — new entries land under
 `[Unreleased]` and move into the next `[N.M.P]` block at tag time.
+
+## v0.6.14 — 2026-06-24
+
+The out-of-the-box at-scale staged-ingest cut. Five tuning levers
+(T1–T5) make a full Wikidata-truthy load complete on stock PostgreSQL
+with no custom server config. `.so` + GUC changes only, no schema
+delta. Validated by a full **8.2 B-triple** Wikidata-truthy
+out-of-the-box load on **E64ads_v7** (64c / 503 GiB / 3.4 T PGDATA):
+quads == triples == **8,199,708,346**, dict **1.80 B** terms, **no
+ENOSPC**.
+
+- **T1 — `pgrdf.staged_temp_tablespaces`.** Routes the RESOLVE phase's
+  temp spill to an operator-named tablespace (off the PGDATA volume) so
+  a multi-TB hash build does not exhaust PGDATA.
+- **T2 — `pgrdf.staged_resolve_strategy` (`hash` | `index` | `auto`),
+  DEFAULT NOW `index`.** Forces the RESOLVE join method. The new
+  `index` default is the at-scale-validated low-spill
+  index-nested-loop path: at 8.2 B rows the historical all-hash join
+  spills multi-TB to temp, while `index` completes with no multi-TB
+  spill / no ENOSPC. The join output is identical for any method — a
+  performance knob, not a correctness one.
+- **T3 — parallel multi-backend STAGE COPY.** The STAGE phase fans the
+  COPY across the staged-loader background-worker pool.
+- **T4 — format-aware staged dispatch.** The staged loader dispatches
+  on the input RDF format.
+- **T5 — adaptive self-tune + self-tune log.** `work_mem` /
+  `maintenance_work_mem` adapt to host RAM and the chosen strategy,
+  with a self-tune log recording the resolved settings.
+
+### Control-version reconciliation
+
+`Cargo.toml` `version`, `pgrdf.control` `default_version`, `META.json`
+`version`, the `cargo pgrx package` SQL filename, the
+`compose/compose.yml` bind-mount, and Postgres `extversion` are all
+identically `0.6.14`. `00-smoke.out` literals move to `0.6.14`.
+
+### Cut file set
+
+`Cargo.toml` (version only) + `Cargo.lock` (`pgrdf` package entry) +
+`pgrdf.control` (`default_version`) + `META.json` +
+`compose/compose.yml` (the single SQL bind-mount line
+`pgrdf--0.6.14.sql`) + `tests/regression/expected/00-smoke.out`
+(version literals) + `git mv sql/pgrdf--0.5.1--0.6.{13→14}.sql` (the
+upgrade-path is a version-string bump only — no DDL) + `CHANGELOG.md`
+(`[Unreleased]` stays, new `[0.6.14]` block) + `README.md` / guide /
+docs install + version refreshes + `docs/09-release.md` (this section).
+The T1–T5 levers themselves are `src/query/guc.rs` +
+`src/storage/staged/*` (runtime / GUC / `.so`, no schema).
 
 ## v0.6.13 — 2026-06-23
 

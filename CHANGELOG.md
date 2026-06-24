@@ -6,23 +6,44 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-### Added — `pgrdf.staged_temp_tablespaces` routes the staged loader's temp spill off the PGDATA disk
+## [0.6.14] — 2026-06-24
 
-The staged loader's RESOLVE phase runs a forced parallel all-hash-join
-(`enable_mergejoin`/`enable_nestloop = off`) whose temp spill is roughly the dictionary + the staged
-data. At 8.2 B rows that spill reached ~3 TB, and a box whose PGDATA sat on a small (~3.4 TB) volume
-filled the disk mid-load (`could not write to file "base/pgsql_tmp/…": No space left on device`) —
-because the loader never set `temp_tablespaces`, so the spill always landed under `base/pgsql_tmp` on
-the PGDATA disk. The new `pgrdf.staged_temp_tablespaces` GUC (TEXT, default empty, `USERSET`) lets an
-operator name a roomier tablespace (or comma-separated list): when set, every staged phase
-(STAGE/DICT/RESOLVE/INDEX) runs with `SET LOCAL temp_tablespaces = '<value>'`, moving the spill onto
-that mount. Empty (the default) emits nothing and inherits the server's `temp_tablespaces` — no
-behaviour change where the operator hasn't opted in. The value is validated to a bare-identifier list
-(no quotes/semicolons) before it reaches the SQL, so it cannot break out of the `SET LOCAL` statement.
+> Out-of-the-box at-scale staged ingest. Five tuning levers (T1–T5) make a full Wikidata-truthy load
+> complete on **stock PostgreSQL** with no custom server config. `.so` + GUC changes only, no schema
+> change. Validated by a full **8.2 B-triple** Wikidata-truthy out-of-the-box load on **E64ads_v7**
+> (64c / 503 GiB / 3.4 T PGDATA): quads == triples == **8,199,708,346**, dict **1.80 B** terms, **no
+> ENOSPC**.
 
-No schema change — a runtime / `.so` change (a new GUC + the staged loader's session-GUC apply site).
+### Added — T1 · `pgrdf.staged_temp_tablespaces` routes the staged loader's temp spill off the PGDATA disk
 
-### Changed — `load_turtle` auto-selects the staged loader for N-Triples (format-sniffed)
+The staged loader's RESOLVE phase's temp spill is roughly the dictionary + the staged data. At 8.2 B
+rows that spill reached ~3 TB, and a box whose PGDATA sat on a small (~3.4 TB) volume filled the disk
+mid-load (`could not write to file "base/pgsql_tmp/…": No space left on device`) — because the loader
+never set `temp_tablespaces`, so the spill always landed under `base/pgsql_tmp` on the PGDATA disk.
+The new `pgrdf.staged_temp_tablespaces` GUC (TEXT, default empty, `USERSET`) lets an operator name a
+roomier tablespace (or comma-separated list): when set, every staged phase (STAGE/DICT/RESOLVE/INDEX)
+runs with `SET LOCAL temp_tablespaces = '<value>'`, moving the spill onto that mount. Empty (the
+default) emits nothing and inherits the server's `temp_tablespaces` — no behaviour change where the
+operator hasn't opted in. The value is validated to a bare-identifier list (no quotes/semicolons)
+before it reaches the SQL, so it cannot break out of the `SET LOCAL` statement.
+
+### Added — T2 · `pgrdf.staged_resolve_strategy` (`hash` | `index` | `auto`), DEFAULT `index` ★ headline
+
+A new `USERSET` GUC selects the join method the staged loader's RESOLVE phase forces. RESOLVE joins
+the staged rows against the dictionary; the join *output* is identical for any join method, so this is
+a pure performance knob. `hash` forces the all-hash-join (the historical behaviour) which at 8.2 B rows
+spills multi-TB to temp; `auto` emits no `enable_*` forcing and lets the planner choose; `index` (the
+**new default**) forces the low-spill index-nested-loop path. `index` is the at-scale-validated
+default: the 8.2 B out-of-the-box load completes under it with no multi-TB hash spill / no ENOSPC,
+where the historical hash default risked exhausting temp. An unrecognised value warns and falls back
+to `hash`.
+
+### Added — T3 · parallel multi-backend STAGE COPY
+
+The STAGE phase fans its COPY across the staged-loader background-worker pool, so ingest parses and
+stages in parallel across backends instead of a single COPY stream.
+
+### Changed — T4 · `load_turtle` auto-selects the staged loader for N-Triples (format-sniffed)
 
 `pgrdf.load_turtle` now uses the native staged loader automatically when pgRDF is in
 `shared_preload_libraries` AND the input file sniffs as **N-Triples** AND no `base_iri` is given —
@@ -31,9 +52,16 @@ conservative classifier): the staged STAGE phase parses N-Triples only (line-ori
 Turtle always uses the full parser** — a Turtle file is never routed to the N-Triples staged path,
 so there is no silent line-skipping / data loss. When the input is Turtle (and pgRDF is preloaded) a
 `NOTICE` recommends N-Triples + preload to unlock the staged path. Explicit `bulk_load => TRUE` and
-the `load_turtle_staged_run` / `load_turtle_staged` opt-ins are unchanged. At-scale stability of the
-staged path still depends on the RESOLVE temp routing / memory reduction — for billion-scale loads
-point `pgrdf.staged_temp_tablespaces` at a roomy mount.
+the `load_turtle_staged_run` / `load_turtle_staged` opt-ins are unchanged.
+
+### Changed — T5 · adaptive self-tune of `work_mem` / `maintenance_work_mem` + self-tune log
+
+The staged loader's per-phase `work_mem` / `maintenance_work_mem` adapt to host RAM and the chosen
+resolve strategy (rather than a fixed budget), and the resolved settings are emitted to a self-tune
+log so an at-scale run is observable and reproducible. With T2's `index` default the RESOLVE budget no
+longer needs to size a multi-TB parallel-hash build.
+
+No schema change — every lever is a GUC + runtime / `.so` change.
 
 ## [0.6.13] — 2026-06-23
 
