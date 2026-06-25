@@ -1,7 +1,0 @@
-# pgRDF.SOURCE
-
-The pgRDF extension this Console targets is the repository this `web/` folder
-lives in (../  — styk-tv/pgRDF). Build it from the repo root; do NOT vendor a
-copy here. Reunited 2026-06-25 from the sibling project-azure-pgRDF (sku/pgrdf/v0.1,
-2026-05-27 — the pgRDF Console: SPARQL editor -> translated-SQL view -> graph
-browser/canvas/sidebar, FastAPI + React).
