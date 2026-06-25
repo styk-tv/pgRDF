@@ -39,7 +39,7 @@ and teach us where they are** — and each release improves on the last: a compl
 **8.2-billion-triple Wikidata `truthy` dump** ingested into one instance, and the
 full **load → reason → query** pipeline run end to end to a **112-million-quad
 materialised LUBM-500 closure**. But the typical deployment is a right-sized graph
-you reason and validate on a laptop. See [Benchmarks](#benchmarks).
+you reason and validate in a single local container. See [Benchmarks](#benchmarks).
 
 ## Capabilities
 
@@ -234,7 +234,7 @@ database** — load, reason, validate, and query a right-sized graph in place,
 exactly as you already do with `materialize` and `validate`, with no separate
 service. Two complementary proofs frame the envelope: **raw ingest at scale**
 (the full Wikidata dump, on a server) and the **full semantic pipeline** (load →
-reason → query across the LUBM ladder, down to a laptop).
+reason → query across the LUBM ladder, down to a single local container).
 
 ### Scale — the full Wikidata `truthy` dump, 8.2 billion triples (pure ingest)
 
@@ -276,7 +276,7 @@ reasoning/materialization step the raw Wikidata ingest deliberately omits.
 pgRDF completes the **full LUBM-100 benchmark** — the standard,
 generator-verified benchmark for RDF stores ([Lehigh University
 Benchmark](https://swat.cse.lehigh.edu/projects/lubm/), 100 universities,
-14 reference queries) — on a laptop with **zero database tuning**:
+14 reference queries) — in a local container with **zero database tuning**:
 
 | Measured | Result |
 |---|---|
@@ -285,16 +285,16 @@ Benchmark](https://swat.cse.lehigh.edu/projects/lubm/), 100 universities,
 | All 14 queries on the loaded graph | **each ≤ 3 s** |
 | All 14 queries after reasoning | **each ≤ 5 s** |
 
-Environment: a **MacBook M2 laptop** — pgRDF runs inside a stock
-`postgres:17.4-bookworm` **Docker container** (8 vCPU / 32 GiB allotted to the
-Docker VM), **default PostgreSQL configuration** — no manual indexes, no
+Environment: a **local** stock `postgres:17.4-bookworm` **Docker container**
+(8 vCPU / 32 GiB), **default PostgreSQL configuration** — no manual indexes, no
 `ANALYZE`, no planner hints, no extension settings. That contrast is the point:
 the **load → reason → query** semantic pipeline — OWL 2 RL materialisation plus
-all 14 LUBM queries, each result correctness-gated — completes on **everyday
-laptop hardware**, a categorically different proof from the raw 8.2-billion-triple
-Wikidata ingest above (a pure *load* test that scales out to a 128-core server).
-Reasoning and validation are laptop-class; only billion-scale ingest needs the
-big box. Full per-query tables and methodology:
+all 14 LUBM queries, each result correctness-gated — completes in a **single
+local container** on everyday hardware, a categorically different proof from the
+raw 8.2-billion-triple Wikidata ingest above (a pure *load* test that scales out
+to a 128-core server). Reasoning and validation run comfortably in a local
+container; only billion-scale ingest needs the big box. Full per-query tables
+and methodology:
 [tests/perf/lubm/RESULTS.m4-join-order.md](tests/perf/lubm/RESULTS.m4-join-order.md).
 
 Run end to end across the full LUBM ladder on a dedicated 32-vCPU / 256 GiB
