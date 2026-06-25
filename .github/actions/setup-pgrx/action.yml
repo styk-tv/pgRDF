@@ -45,7 +45,27 @@ runs:
       # Cargo.toml (`pgrx = "0.16"`). The default fallback (0.17)
       # diverges from the runtime version and ICEs at init time
       # (see specs/ERRATA.v0.2.md E-006 for pgrx 0.17+ status).
-      run: cargo install cargo-pgrx --locked --version "^${PGRX_VERSION:-0.16}"
+      #
+      # The crates.io index fetch intermittently fails with
+      # `curl ... [16] Error in the HTTP2 framing layer` on GitHub
+      # runners (a transient HTTP/2 flake, not a real error). Forcing
+      # HTTP/1.1 sidesteps that class; CARGO_NET_RETRY + the outer loop
+      # cover any residual transient. Mirrors the postgres-image pull
+      # retry already used in ci.yml's regression job.
+      env:
+        CARGO_HTTP_MULTIPLEXING: "false"
+        CARGO_NET_RETRY: "5"
+      run: |
+        set -euo pipefail
+        for i in 1 2 3 4 5; do
+          if cargo install cargo-pgrx --locked --version "^${PGRX_VERSION:-0.16}"; then
+            exit 0
+          fi
+          echo "cargo install cargo-pgrx attempt $i failed; retrying after backoff"
+          sleep $((i * 10))
+        done
+        echo "::error::cargo install cargo-pgrx failed after 5 attempts"
+        exit 1
 
     - name: cargo pgrx init
       shell: bash
