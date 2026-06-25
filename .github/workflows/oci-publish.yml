@@ -41,6 +41,83 @@ permissions:
 
 jobs:
   # ────────────────────────────────────────────────────────────────
+  # PRE-ATTEST BOOT+VERSION GATE (PROVENANCE.md Rule 7).
+  #
+  # Boot a clean postgres:17.4-bookworm and install the EXACT release-
+  # tarball bytes the leaf job is about to push, then assert the running
+  # extension reports the tag version. This job is a hard prerequisite
+  # of the leaf publish+attest job (`leaf: needs: gate`), so NO
+  # attestation is ever issued unless a container started and
+  # pgrdf.version() matched the tag. Fail here ⇒ nothing pushed, nothing
+  # attested, the GitHub release stays a draft, LATEST.md never advances.
+  # bookworm is the contractual base (NOTIFY: pgrdf-owns-pg-base-release).
+  # ────────────────────────────────────────────────────────────────
+  gate:
+    name: pre-attest boot+version gate (pg17-amd64)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Resolve tag/version
+        id: v
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name || github.event.client_payload.tag || github.event.inputs.tag }}"
+          case "$TAG" in
+            v*) ;;
+            *) echo "oci-publish gate: '$TAG' is not a release tag; aborting"; exit 1 ;;
+          esac
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release tarball (pg17-amd64)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER="${{ steps.v.outputs.ver }}"
+          mkdir -p gate/dl && cd gate/dl
+          gh release download "${{ steps.v.outputs.tag }}" \
+            --repo styk-tv/pgRDF \
+            --pattern "pgrdf-${VER}-pg17-glibc-amd64.tar.gz"
+
+      - name: Boot postgres + assert CREATE EXTENSION + version match
+        run: |
+          set -euo pipefail
+          VER="${{ steps.v.outputs.ver }}"
+          tar -xzf gate/dl/*.tar.gz -C gate/
+          EXTRACT="gate/pgrdf-${VER}-pg17-glibc-amd64"
+          [ -d "${EXTRACT}" ] || { echo "::error::extract dir ${EXTRACT} missing"; ls -la gate/ || true; exit 1; }
+
+          docker run --rm -d --name gate-pg \
+            -e POSTGRES_PASSWORD=v -e POSTGRES_USER=v -e POSTGRES_DB=v \
+            postgres:17.4-bookworm
+          for i in $(seq 1 15); do
+            docker exec gate-pg pg_isready -U v >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          docker cp "${EXTRACT}/lib/pgrdf.so"                  gate-pg:/usr/lib/postgresql/17/lib/pgrdf.so
+          docker cp "${EXTRACT}/share/extension/pgrdf.control" gate-pg:/usr/share/postgresql/17/extension/pgrdf.control
+          for f in "${EXTRACT}"/share/extension/*.sql; do
+            docker cp "${f}" "gate-pg:/usr/share/postgresql/17/extension/$(basename "${f}")"
+          done
+
+          set +e
+          docker exec gate-pg psql -U v -d v -v ON_ERROR_STOP=1 -c \
+            "CREATE EXTENSION pgrdf VERSION '${VER}';" 2>&1 | tee gate-create.log
+          CREATE_RC=$?
+          set -e
+          EXT_VER=$(docker exec gate-pg psql -U v -d v -A -t -c \
+            "SELECT extversion FROM pg_extension WHERE extname='pgrdf';" 2>&1 || true)
+          FN_VER=$(docker exec gate-pg psql -U v -d v -A -t -c \
+            "SELECT pgrdf.version();" 2>&1 || true)
+          docker rm -f gate-pg >/dev/null 2>&1 || true
+
+          [ "${CREATE_RC}" -eq 0 ] || { echo "::error::CREATE EXTENSION pgrdf VERSION '${VER}' FAILED — refusing to attest."; exit 1; }
+          [ "${EXT_VER}" = "${VER}" ] || { echo "::error::extversion='${EXT_VER}' != '${VER}' — refusing to attest."; exit 1; }
+          [ "${FN_VER}" = "${VER}" ] || { echo "::error::pgrdf.version()='${FN_VER}' != '${VER}' — refusing to attest."; exit 1; }
+          echo "✓ boot+version gate passed: extversion=${EXT_VER}, pgrdf.version()=${FN_VER} — attestation may proceed."
+
+  # ────────────────────────────────────────────────────────────────
   # Per-PG×arch leaf publish + attestation. Matrix-shaped so each
   # (pg, arch) is its own job — that's the only clean way to attach
   # an SLSA Build Provenance v1 attestation per artifact via
@@ -49,6 +126,9 @@ jobs:
   # ────────────────────────────────────────────────────────────────
   leaf:
     name: leaf (pg${{ matrix.pg }}-${{ matrix.arch }})
+    # Attestation gateway: the leaf job pushes AND attests, so it must
+    # not start until the boot+version gate above has passed.
+    needs: gate
     strategy:
       fail-fast: false
       matrix:

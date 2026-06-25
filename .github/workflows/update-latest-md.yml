@@ -211,3 +211,25 @@ jobs:
           } > /tmp/commit-msg.txt
           git commit -F /tmp/commit-msg.txt
           git push origin main
+
+      # ────────────────────────────────────────────────────────────
+      # Advertise the release — the FINAL gate. Only now, after the OCI
+      # bundle is pushed, boot+version-gated (oci-publish `gate` job),
+      # attested, attestation-verified above, and recorded in LATEST.md,
+      # do we flip the GitHub release from draft to public + mark it
+      # Latest. release.yml creates it as a draft; any upstream failure
+      # ⇒ it stays a draft and is never advertised. So a visible GitHub
+      # release ⇔ a verified, advertised OCI bundle.
+      #
+      # `gh release edit --draft=false` via GITHUB_TOKEN does NOT cascade
+      # to re-trigger oci-publish's `release: [published]` listener —
+      # the same GITHUB_TOKEN boundary the rest of the chain relies on.
+      # ────────────────────────────────────────────────────────────
+      - name: Advertise the GitHub release (draft -> latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.head.outputs.ver }}
+        run: |
+          set -euo pipefail
+          gh release edit "v${VER}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest
+          echo "✓ Advertised v${VER}: draft cleared, marked Latest."
