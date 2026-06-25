@@ -262,6 +262,18 @@ jobs:
             artifacts/SHA256SUMS
           body_path: /tmp/release_body.md
           generate_release_notes: true
+          # Hold the release as a DRAFT until the OCI bundle is pushed,
+          # boot+version-gated (oci-publish `gate` job), attested,
+          # attestation-verified, and recorded in LATEST.md.
+          # update-latest-md.yml flips it live (`gh release edit
+          # --draft=false --latest`) as its final step. A code release is
+          # therefore NEVER publicly advertised without a matching,
+          # verified OCI bundle behind it. Draft assets stay downloadable
+          # by the workflow token, so oci-publish's `gh release download`
+          # keeps working; drafts don't fire `release: published`, and the
+          # chain runs on repository_dispatch anyway.
+          draft: true
+          make_latest: false
       # Chain oci-publish.yml via repository_dispatch.
       #
       # The `release: [published]` event does NOT fire downstream
