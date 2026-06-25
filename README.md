@@ -28,12 +28,18 @@ algebra), genuine W3C SHACL Core conformance (25/25), and OWL 2 RL **and**
 RDFS materialisation — every release CI-built and signed with SLSA Build
 Provenance v1.
 
-Two headline proofs bracket what one Postgres box can hold. At raw scale,
-pgRDF ingests the **complete 8.2-billion-triple Wikidata `truthy` dump**
-into a single instance (dictionary-encoded, full hexastore, ~2.0 TB on
-disk). For the full semantic pipeline, it runs load → OWL-RL reason → query
-end to end up to a **112-million-quad materialised LUBM-500 closure**. See
-[Benchmarks](#benchmarks).
+The everyday win is a **compact semantic knowledge base that never leaves
+PostgreSQL**: load RDF, then **reason over it, validate it, and query it in
+place** — composable semantic action chains, each a single function call, with
+the same in-database ergonomics you already use for `materialize` and
+`validate`. No sidecar triple store, no ETL, no second service to operate.
+
+Scale is the ceiling, not the price of entry. The benchmarks **push the limits
+and teach us where they are** — and each release improves on the last: a complete
+**8.2-billion-triple Wikidata `truthy` dump** ingested into one instance, and the
+full **load → reason → query** pipeline run end to end to a **112-million-quad
+materialised LUBM-500 closure**. But the typical deployment is a right-sized graph
+you reason and validate on a laptop. See [Benchmarks](#benchmarks).
 
 ## Capabilities
 
@@ -80,9 +86,14 @@ Dictionary-encoded terms over a LIST-partitioned hexastore (SPO / POS / OSP cove
 | **PostgreSQL** | 14 · 15 · 16 · 17 (PG 18 deferred — pgrx 0.16 pin; [ERRATA E-006](specs/ERRATA.v0.2.md)) |
 | **Install** | **OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.14` (public, zero-cred; every digest SLSA-attested, verify with `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`) · **tarballs** (pg14–17 × amd64/arm64) · **PGXN** — `pgxn install pgrdf`. See [INSTALL.md](INSTALL.md). |
 | **Current release** | **v0.6.14** — [LATEST.md](./LATEST.md) is authoritative at audit time |
+| **Docs** | [pgrdf.styk.tv](https://pgrdf.styk.tv) — full v0.6.14 guide: the four pillars plus scale, process, and roadmap |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
 
 ## What you can do today
+
+The four pillars compose into **semantic action chains** — not just import /
+store / retrieve, but `load → reason → validate → query`, each step a single
+function call, all inside one PostgreSQL session:
 
 ```sql
 -- One-time install
@@ -216,9 +227,14 @@ operator-facing observability — `pgrdf.stats()`,
 
 ## Benchmarks
 
-Two complementary proofs of what a single PostgreSQL instance can hold:
-**raw ingest at scale** (the full Wikidata dump) and the **full semantic
-pipeline** (load → reason → query, across the LUBM ladder).
+These runs **push the limits and teach us at scale** — they map the ceiling and
+drive each release's gains, but they are **not** the typical deployment. Most
+users want a **compact semantic knowledge base, operational directly inside the
+database** — load, reason, validate, and query a right-sized graph in place,
+exactly as you already do with `materialize` and `validate`, with no separate
+service. Two complementary proofs frame the envelope: **raw ingest at scale**
+(the full Wikidata dump, on a server) and the **full semantic pipeline** (load →
+reason → query across the LUBM ladder, down to a laptop).
 
 ### Scale — the full Wikidata `truthy` dump, 8.2 billion triples (pure ingest)
 
@@ -233,12 +249,14 @@ failure leaves a resume point instead of rolling back the whole load.
 
 | host | cores / RAM | engine | ingest | rate |
 |---|---|---|---|---|
-| Azure E128ads_v7 | 128 vCPU / 1 TiB | v0.6.13 | **6 h 41 m** | **340.7 K triples/s** |
+| Azure E128ads_v7 | 128 vCPU / 1 TiB | v0.6.14 | **4 h 53 m** | **466 K triples/s** |
 | Azure E64ads_v7 | 64 vCPU / 503 GiB · 3.4 TB disk | v0.6.14 | ~10.3 h | ~221 K triples/s |
 
-The 128-core run is the published flagship — **340.7 K triples/s**, peak 673 GB
-RAM (of 1 TiB) and 8.7 GB/s disk write (per-phase: STAGE 1 h 41 m · DICT 1 h 51 m ·
-RESOLVE 1 h 11 m all-hash · INDEX 1 h 43 m). The 64-core run proves the *same*
+The 128-core run is the published flagship — **466 K triples/s** (per-phase:
+STAGE 13.8 m · DICT 1 h 51 m · RESOLVE 2 h 00 m `index` · INDEX 31.9 m) — **37 %
+faster than the v0.6.13 all-hash baseline** (6 h 41 m / 340.7 K), the gain from
+the T3 parallel STAGE COPY (13.8 m vs 1 h 41 m, 7.3× on 32 workers) and the
+concurrent index build (31.9 m vs 1 h 43 m). The 64-core run proves the *same*
 full load completes **out-of-the-box on half the cores and a 3.4 TB disk**: the
 v0.6.14 loader self-tunes `work_mem`/parallelism to the host and adds a tunable
 resolve strategy (`index|hash|auto`, default `index`), temp-spill routing,
@@ -267,10 +285,16 @@ Benchmark](https://swat.cse.lehigh.edu/projects/lubm/), 100 universities,
 | All 14 queries on the loaded graph | **each ≤ 3 s** |
 | All 14 queries after reasoning | **each ≤ 5 s** |
 
-Environment: an Apple-silicon VM (8 vCPU / 32 GiB), stock
-`postgres:17.4-bookworm` in Docker, **default PostgreSQL configuration** —
-no manual indexes, no `ANALYZE`, no planner hints, no extension settings.
-Full per-query tables and methodology:
+Environment: a **MacBook M2 laptop** — pgRDF runs inside a stock
+`postgres:17.4-bookworm` **Docker container** (8 vCPU / 32 GiB allotted to the
+Docker VM), **default PostgreSQL configuration** — no manual indexes, no
+`ANALYZE`, no planner hints, no extension settings. That contrast is the point:
+the **load → reason → query** semantic pipeline — OWL 2 RL materialisation plus
+all 14 LUBM queries, each result correctness-gated — completes on **everyday
+laptop hardware**, a categorically different proof from the raw 8.2-billion-triple
+Wikidata ingest above (a pure *load* test that scales out to a 128-core server).
+Reasoning and validation are laptop-class; only billion-scale ingest needs the
+big box. Full per-query tables and methodology:
 [tests/perf/lubm/RESULTS.m4-join-order.md](tests/perf/lubm/RESULTS.m4-join-order.md).
 
 Run end to end across the full LUBM ladder on a dedicated 32-vCPU / 256 GiB
