@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>pgRDF Console</title>
+  <meta name="viewport" content="width=1440, initial-scale=1"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="styles.css"/>
+  <template id="__bundler_thumbnail">
+    <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+      <rect width="200" height="200" fill="#fafafa"/>
+      <circle cx="70" cy="80" r="18" fill="none" stroke="#0e0e0e" stroke-width="2" stroke-dasharray="5 3"/>
+      <circle cx="130" cy="80" r="18" fill="#0e0e0e"/>
+      <circle cx="100" cy="140" r="18" fill="none" stroke="#0e0e0e" stroke-width="2"/>
+      <line x1="88" y1="80" x2="112" y2="80" stroke="#0e0e0e" stroke-width="1.5"/>
+      <line x1="80" y1="95" x2="92" y2="125" stroke="#0e0e0e" stroke-width="1.5"/>
+      <line x1="120" y1="95" x2="108" y2="125" stroke="#0e0e0e" stroke-width="1.5"/>
+      <text x="100" y="180" text-anchor="middle" font-family="ui-monospace,monospace" font-size="14" font-weight="600" fill="#0e0e0e">pgRDF</text>
+    </svg>
+  </template>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <!-- Dev loader: fetch each module with cache:no-store + a build token so
+       .jsx edits always show on reload, Babel-transform, then inject as an
+       inline <script> (runs in global scope, same as type="text/babel"). -->
+  <script>
+  (async function loadModules() {
+    const BUILD = Date.now();
+    const mods = [
+      "data.jsx", "tweaks-panel.jsx",
+      "components/topbar.jsx", "components/sidebar.jsx", "components/canvas.jsx",
+      "components/bottom.jsx", "components/browser.jsx", "app.jsx"
+    ];
+    for (const m of mods) {
+      let src;
+      try {
+        src = await fetch(m + "?b=" + BUILD, { cache: "no-store" }).then(r => r.text());
+      } catch (e) { console.error("load failed:", m, e); return; }
+      let out;
+      try {
+        out = Babel.transform(src, { presets: ["react"], filename: m }).code;
+      } catch (e) { console.error("babel transform failed:", m, e); return; }
+      const s = document.createElement("script");
+      s.dataset.module = m;
+      s.textContent = out;
+      document.body.appendChild(s);
+    }
+  })();
+  </script>
+</body>
+</html>
