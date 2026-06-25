@@ -32,6 +32,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy }
+      # CI-only build cache (cargo registry + ./target + the cargo-pgrx
+      # binary), keyed per PG major. Placed before setup-pgrx so its
+      # `cargo install cargo-pgrx` becomes a fast no-op on a cache hit.
+      # The release.yml build matrix is deliberately LEFT UNCACHED so the
+      # attested release bytes always come from a clean-room compile.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: "pg${{ matrix.pg }}"
+          cache-on-failure: true
       - uses: ./.github/actions/setup-pgrx
         with: { pg: "${{ matrix.pg }}" }
       - run: cargo clippy --no-default-features --features pg${{ matrix.pg }} -- -D warnings
@@ -50,6 +59,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # CI-only build cache (see the clippy job for rationale). Release
+      # build matrix stays uncached.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: "pg${{ matrix.pg }}"
+          cache-on-failure: true
       - uses: ./.github/actions/setup-pgrx
         with: { pg: "${{ matrix.pg }}" }
       - run: cargo pgrx test --no-default-features --features pg${{ matrix.pg }} pg${{ matrix.pg }}
@@ -78,13 +93,23 @@ jobs:
           DOCKER_BUILDKIT: "1"
         run: |
           set -euo pipefail
+          # CI-only GitHub Actions layer cache (type=gha). The builder's
+          # pre-`COPY . .` layers — apt deps, `cargo install cargo-pgrx`,
+          # `cargo pgrx init` — are reused across pushes; the final
+          # `cargo pgrx package` still re-runs when source changes (its
+          # cargo cache mount is build-scoped, not exported). Release
+          # build artifacts are produced by release.yml, which is NOT
+          # cached, so attested bytes stay clean-room.
           docker build --target builder \
             -t pgrdf-builder-rust:pg17 \
             --build-arg PG_MAJOR=17 \
+            --cache-from type=gha,scope=pgrdf-builder-pg17 \
             -f compose/builder.Containerfile .
           docker build \
             -t pgrdf-builder:pg17 \
             --build-arg PG_MAJOR=17 \
+            --cache-from type=gha,scope=pgrdf-builder-pg17 \
+            --cache-to type=gha,mode=max,scope=pgrdf-builder-pg17 \
             -f compose/builder.Containerfile .
           rm -rf compose/extensions/lib compose/extensions/share
           mkdir -p compose/extensions/lib compose/extensions/share/extension
