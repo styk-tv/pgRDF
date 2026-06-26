@@ -6,6 +6,36 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Fixed — staged loader corrupted a second load into an already-populated dictionary (#8)
+
+The staged loader (the default `load_turtle` path for N-Triples when pgrdf is in
+`shared_preload_libraries`) silently corrupted any load *after the first* into the same database. Its
+DICT phase deduplicates terms only *within the staging set* and self-assigns fresh ids; it never
+anti-joins against rows already in `_pgrdf_dictionary`. So a second load re-inserted every term as a
+byte-identical duplicate row, the RESOLVE join (`IS NOT DISTINCT FROM`) then multi-matched each of
+subject/predicate/object, and the quad build cross-produced them — a cubic (N³) explosion of
+fabricated-but-distinct triples — while `load_turtle` still *returned* the correct count, masking it.
+A first load into a fresh database was always exact; the corruption only surfaced from the second load
+into a shared dictionary (the multi-file / graph-carving path).
+
+The staged fast path is correct **only on an empty dictionary** — the same precondition the bulk and
+streaming fast paths already enforce. The guard is now made in the staged STAGE_PREP worker, in its
+own committed transaction (so it holds no lock the later INDEX phase's `ALTER TABLE` would deadlock
+against): a populated dictionary makes the load fall back to the always-correct combined path, which
+anti-joins every term. The empty-dictionary fast path — the billion-scale ingest path — is byte-for-byte
+unchanged, so parallel ingest velocity is preserved. Regression: `136-staged-multiload-dedup`
+(RED 64 quads / 28 dict rows → GREEN 8 / 14; real-data 1hop + 2hop multiload clean).
+
+### Added — graph-carve query-pattern groundwork (#6)
+
+First step of the v0.6.n graph-carve chain: locked the supported, complete SPARQL patterns the carve
+will emit over a real subclass hierarchy. `pgrdf.materialize` writes the type/subclass entailments as
+direct edges, after which **inclusion** is a plain `?x rdf:type <Class>` and **exclusion** a plain
+`MINUS { ?x rdf:type <Class> }` — both complete and using only supported SPARQL. Surface constraints
+documented (`FILTER NOT EXISTS` is untranslatable; a `MINUS` right side must be a plain BGP). Verified
+on a tracked LUBM fixture so a larger real subset swaps into the same load path. Regression:
+`135-type-closure-lubm-patterns`. Carve-out UDF (`pgrdf.carve_graph`) tracked as #10.
+
 ## [0.6.14] — 2026-06-24
 
 > Out-of-the-box at-scale staged ingest. Five tuning levers (T1–T5) make a full Wikidata-truthy load
