@@ -61,6 +61,14 @@ pub mod state {
     pub const RUNNING: u8 = 1;
     pub const FAILED: u8 = 2;
     pub const DONE: u8 = 3;
+    /// Cross-load guard (issue #8): the STAGE_PREP worker found a NON-empty
+    /// dictionary, so the staged fast path (which self-assigns dict ids and
+    /// can't dedup against existing rows) would corrupt. The worker sets this
+    /// — in its own committed transaction, having done NO prep — and the
+    /// coordinator returns a `fallback` sentinel so the caller uses the
+    /// always-correct combined path. NOT a failure: nothing went wrong, the
+    /// input simply isn't eligible for the staged fast path.
+    pub const FALLBACK: u8 = 4;
 }
 
 /// One staged-load job. Addressed by job index `0..MAX_JOBS`; `job_id` is the monotonic public id
@@ -311,6 +319,19 @@ pub fn mark_job_done(idx: usize) {
     let mut jobs = JOBS.exclusive();
     jobs[idx].state = state::DONE;
     jobs[idx].phase = phase::DONE;
+}
+
+/// Cross-load guard (issue #8): the STAGE_PREP worker calls this when it finds a NON-empty
+/// dictionary, flagging the job so the coordinator returns a `fallback` sentinel (→ combined path)
+/// instead of running the corrupting staged DICT/RESOLVE on a populated dict. Set from the worker's
+/// own committed transaction; `report_worker(ok=true)` does NOT touch `state`, so this survives to
+/// the coordinator's read. No-op when not ready.
+pub fn request_fallback(idx: usize) {
+    if !is_ready() {
+        return;
+    }
+    let mut jobs = JOBS.exclusive();
+    jobs[idx].state = state::FALLBACK;
 }
 
 /// Advance the job's `phase` high-water mark after a phase's workers have all succeeded. This is the

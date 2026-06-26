@@ -2455,6 +2455,29 @@ fn staged_load_default(path: &str, graph_id: i64) -> i64 {
     .expect("load_turtle: staged coordinator returned NULL");
 
     let v = &j.0;
+    // Cross-load safety (issue #8). The staged DICT phase
+    // (`storage::staged::phases::dict`) dedups only WITHIN the staging set and
+    // self-assigns fresh ids (`row_number()` offset from `base = MAX(id)`); it
+    // does NOT anti-join against rows already in the dictionary. On a POPULATED
+    // dict it would re-insert every term as a byte-identical duplicate row — the
+    // RESOLVE join (`IS NOT DISTINCT FROM`) then multi-matches each of s/p/o and
+    // the quad CTAS cross-products them (N^3 fabricated-but-distinct triples).
+    // The staged fast path is therefore correct ONLY on an empty dict — the same
+    // precondition `bulk_load_guarded` / `streaming_load_guarded` enforce. We
+    // can NOT probe the dict here in the coordinator's backend: a `SELECT … FROM
+    // _pgrdf_dictionary` would hold an AccessShare lock across the staged run,
+    // and the INDEX phase's `ALTER TABLE … ADD CONSTRAINT` (run in a worker)
+    // would deadlock against it (the coordinator must hold no dict lock while
+    // workers run — pool.rs). So the staged loader detects the populated dict in
+    // its FIRST committed worker (STAGE_PREP) — whose lock releases before later
+    // phases — and returns `fallback: true` WITHOUT prepping (no index drop, no
+    // staging table). Honour it: run the always-correct combined
+    // `ingest_dispatch`, which anti-joins every term (slower, cross-load safe).
+    if v.get("fallback").and_then(serde_json::Value::as_bool) == Some(true) {
+        let file = File::open(path)
+            .unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
+        return ingest_dispatch(BufReader::new(file), graph_id, None).triples;
+    }
     if v.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         let phase = v
             .get("failed_phase")
