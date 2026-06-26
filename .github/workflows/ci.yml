@@ -1,8 +1,27 @@
 name: ci
 on:
+  # Docs-only changes skip CI entirely — a markdown / docs / license edit must
+  # not trigger the full fmt + clippy + test + ~9-min regression build. main is
+  # not branch-protected (CI is advisory), so a skipped run does not block merge.
+  # A PR that touches ANY non-ignored path (code, SQL, compose, Cargo*, etc.)
+  # still runs the full suite — so release PRs keep their boot+version gate.
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'guide/**'
+      - 'specs/**'
+      - 'LICENSE'
+      - '.gitignore'
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'guide/**'
+      - 'specs/**'
+      - 'LICENSE'
+      - '.gitignore'
 
 env:
   CARGO_TERM_COLOR: always
