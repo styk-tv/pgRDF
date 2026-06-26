@@ -2,7 +2,7 @@
 
 Each `sql/NN-<topic>.sql` is piped to `psql` against a freshly-installed
 extension; its stdout is diffed against the matching `expected/NN-<topic>.out`.
-Any unexpected diff fails CI. **94 tests, 94 goldens, 1:1 — no orphans, no
+Any unexpected diff fails CI. **95 tests, 95 goldens, 1:1 — no orphans, no
 un-baselined files.**
 
 ```
@@ -59,12 +59,12 @@ one capability). Several sweeps span non-contiguous numbers (`dict`, `caching`,
 | [`named-graphs`](#named-graphs) | 8 | 73–79, 87 | `GRAPH {}` query surface + IRI↔id mapping UDFs |
 | [`graph-lifecycle`](#graph-lifecycle) | 6 | 88–92, 118 | drop/clear/copy/move + integration + IRI overloads |
 | [`sparql-update`](#sparql-update) | 7 | 93–99 | INSERT/DELETE DATA/WHERE + lifecycle algebra |
-| [`inference`](#inference) | 5 | 60–62, 117, 134 | `materialize` OWL-RL + RDFS profiles + owl:TransitiveProperty type closure |
+| [`inference`](#inference) | 6 | 60–62, 117, 134–135 | `materialize` OWL-RL + RDFS profiles + type-closure inclusion/exclusion patterns |
 | [`validation`](#validation) | 3 | 70–71, 122 | SHACL Core + SHACL-SPARQL modes |
 | [`caching`](#caching) | 4 | 50–51, 63–64 | shmem dict cache + per-backend plan cache |
 | [`contracts`](#contracts) | 3 | 80–81, 127 | stable error prefixes + failure modes + search-path discipline |
 
-Total: **94**. Every test belongs to exactly one sweep above.
+Total: **95**. Every test belongs to exactly one sweep above.
 
 ## The index
 
@@ -202,6 +202,7 @@ its oracle.
 | 62 | [materialize-empty](sql/62-materialize-empty.sql) · [out](expected/62-materialize-empty.out) | `materialize` on an empty graph — no panic, well-formed stats, idempotent |
 | 117 | [materialize-rdfs](sql/117-materialize-rdfs.sql) · [out](expected/117-materialize-rdfs.out) | `materialize(g,'rdfs')` profile (rdfs2/3/5/7/9/11 subset); unknown-profile error |
 | 134 | [wikidata-type-closure-materialise](sql/134-wikidata-type-closure-materialise.sql) · [out](expected/134-wikidata-type-closure-materialise.out) | K-7 (§8): `wdt:P279 a owl:TransitiveProperty` + `materialize` → subclass closure as direct edges; plain `?s wdt:P31 ?t . ?t wdt:P279 X` recovers subclass-typed instances (depth-cap-free) |
+| 135 | [type-closure-lubm-patterns](sql/135-type-closure-lubm-patterns.sql) · [out](expected/135-type-closure-lubm-patterns.out) | carve groundwork over the real LUBM hierarchy (tracked `.nt` fixture): direct anchor omits subclass-typed entities; `materialize` → plain `rdf:type` inclusion + `MINUS` exclusion, both complete (`FILTER NOT EXISTS` / `MINUS`-with-path are unsupported) |
 
 ### validation
 | # | Test | Verifies |
