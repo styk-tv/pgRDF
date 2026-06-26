@@ -4,14 +4,41 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is **`v0.6.14`** (`isPrerelease=false`,
-`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.14`, and the
+The current cut is **`v0.6.15`** (`isPrerelease=false`,
+`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.15`, and the
 tagged release carries the binary tarball matrix, the PGXN source
 zip, and an SLSA-attested OCI bundle. The per-release notes below
 cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.14 history
 (the parallel bulk loader and its levers) lives in `CHANGELOG.md`,
 which is the authoritative running log — new entries land under
 `[Unreleased]` and move into the next `[N.M.P]` block at tag time.
+
+## v0.6.15 — 2026-06-26
+
+A correctness cut: the staged loader no longer corrupts a second load into an
+already-populated dictionary (#8) — the STAGE_PREP worker detects a non-empty
+dict and falls back to the combined path. `.so`-only, **no schema delta**; the
+`0.5.1 → 0.6.15` upgrade path is a version-string rename of
+`sql/pgrdf--0.5.1--0.6.15.sql`.
+
+### Control-version reconciliation
+
+`Cargo.toml` `version`, `Cargo.lock` (`pgrdf` entry), `pgrdf.control`
+`default_version`, `META.json` `version`, the `cargo pgrx package` SQL filename,
+the `compose/compose.yml` bind-mount, and Postgres `extversion` are all
+identically `0.6.15`. `00-smoke.out` literals move to `0.6.15`.
+
+### Cut file set
+
+`Cargo.toml` + `Cargo.lock` + `pgrdf.control` + `META.json` +
+`compose/compose.yml` (the single `pgrdf--0.6.15.sql` bind-mount line) +
+`tests/regression/expected/00-smoke.out` + `git mv sql/pgrdf--0.5.1--0.6.{14→15}.sql`
+(no DDL) + `CHANGELOG.md` (`[Unreleased]` stays, new `[0.6.15]` block) + README /
+guide / `compose/README.md` install version refreshes (the bench-table data points
+stay at the v0.6.14 run) + this section. Also lands the first graph-carve
+query-pattern groundwork (#6, regression `135-type-closure-lubm-patterns`). The
+fix itself is `src/storage/staged/{pool,jobctl}.rs` + `src/storage/loader.rs`
+(runtime / `.so`, no schema).
 
 ## v0.6.14 — 2026-06-24
 
