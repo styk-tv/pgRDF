@@ -135,13 +135,34 @@ pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
             }
             jobctl::phase::STAGE_PREP => {
                 phases::apply_session_gucs();
-                // T3: Phase-A prep (defer indexes, create the UNLOGGED staging table) is its OWN
-                // single worker, run BEFORE the N parallel STAGE workers. It runs HERE in a committed
-                // worker transaction — never the coordinator's — so its ACCESS EXCLUSIVE locks release
-                // before STAGE/DICT/RESOLVE/INDEX run (see `phases::prepare_for_load`). Splitting prep
-                // out is what lets STAGE go N-way without the `bulk_drop_indexes` / `CREATE TABLE IF
-                // NOT EXISTS` DDL racing across the pool.
-                phases::prepare_for_load(&job);
+                // Cross-load guard (issue #8). The staged DICT phase self-assigns dict ids and dedups
+                // only within the staging set — it can NOT dedup against rows already in the dictionary,
+                // so on a POPULATED dict it fabricates duplicate dict rows → RESOLVE multi-matches →
+                // cubic quad inflation. The staged fast path is correct ONLY on an empty dict. We MUST
+                // make this check HERE, in the STAGE_PREP worker's own committed transaction: its
+                // AccessShare lock on `_pgrdf_dictionary` releases when this worker commits, BEFORE the
+                // DICT/INDEX phases take their ACCESS EXCLUSIVE locks. (The check can't live in the
+                // coordinator's backend — a lingering AccessShare there would deadlock the INDEX phase's
+                // `ALTER TABLE … ADD CONSTRAINT`.) Non-empty ⇒ flag the job for fallback and do NOTHING
+                // ELSE — no index drop, no staging table — so the existing dict is untouched and the
+                // coordinator can cleanly hand the load to the combined path.
+                let empty = Spi::get_one::<bool>(
+                    "SELECT NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_dictionary)",
+                )
+                .ok()
+                .flatten()
+                .unwrap_or(false);
+                if empty {
+                    // T3: Phase-A prep (defer indexes, create the UNLOGGED staging table) is its OWN
+                    // single worker, run BEFORE the N parallel STAGE workers. It runs HERE in a committed
+                    // worker transaction — never the coordinator's — so its ACCESS EXCLUSIVE locks
+                    // release before STAGE/DICT/RESOLVE/INDEX run (see `phases::prepare_for_load`).
+                    // Splitting prep out is what lets STAGE go N-way without the `bulk_drop_indexes` /
+                    // `CREATE TABLE IF NOT EXISTS` DDL racing across the pool.
+                    phases::prepare_for_load(&job);
+                } else {
+                    jobctl::request_fallback(w.job_idx as usize);
+                }
             }
             jobctl::phase::STAGE => {
                 phases::apply_session_gucs();
@@ -609,6 +630,23 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
         run_phase(job_idx, jobctl::phase::STAGE_PREP, &[(0u16, 0u64, 0u64)])
     {
         return abort("stage", reason);
+    }
+    // Cross-load guard (issue #8): STAGE_PREP flags the job for fallback when it finds a NON-empty
+    // dictionary (the staged DICT phase can't dedup against existing rows → cubic corruption). It did
+    // NO prep in that case (no index drop, no staging table), so there is nothing to clean up: release
+    // the job and return a `fallback` sentinel. The caller (`loader::staged_load_default`) then runs
+    // the always-correct combined path. This is NOT a failure — the input is simply not eligible for
+    // the staged fast path.
+    if jobctl::read_job(job_idx).state == jobctl::state::FALLBACK {
+        jobctl::release_job(job_idx);
+        return pgrx::JsonB(json!({
+            "job_id": job_id,
+            "ok": false,
+            "fallback": true,
+            "reason": "dictionary already populated — staged loader requires an empty dict; \
+                       caller should use the combined path",
+            "n_workers": requested,
+        }));
     }
     // N newline-snapped byte ranges, one per STAGE worker. `requested` is the pool width; each range
     // is a WHOLE number of lines and their union is exactly [0, file_len) (see `stage_byte_ranges`),

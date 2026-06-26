@@ -177,9 +177,14 @@ pub(crate) fn put_terms_batch(terms: &[(i16, String, Option<i64>, Option<String>
     // PG-level deadlocks under pgrx parallel test execution (see
     // `_WIP/DECISION.TA-NEW-W.nulls-not-distinct-deferred.md` for
     // the incident analysis); shipping it requires a retry-loop on
-    // `ERRCODE_T_R_DEADLOCK_DETECTED` (SQLSTATE 40P01) which is
-    // designed for v0.7+. Until then the `WHERE NOT EXISTS` form
-    // stays.
+    // `ERRCODE_T_R_DEADLOCK_DETECTED` (SQLSTATE 40P01). That
+    // hardening is a scheduled 0.6.n follow-up; until then the
+    // `WHERE NOT EXISTS` form stays. NOTE: this concerns the
+    // (latent) CONCURRENT-backend race only — this single-backend
+    // batched path dedups correctly cross-load. The cubic-inflation
+    // corruption of issue #8 was a SEPARATE bug (the staged DICT
+    // phase skipping the empty-dict precondition its siblings
+    // enforce), fixed in `loader::staged_load_default`, not here.
     Spi::run_with_args(
         "INSERT INTO pgrdf._pgrdf_dictionary
              (term_type, lexical_value, datatype_iri_id, language_tag)
