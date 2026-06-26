@@ -774,6 +774,123 @@ fn carve_graph(src: i64, predicate: &str, dst: i64) -> i64 {
     count
 }
 
+/// Neighbourhood carve — the §4b.1 "common case" of the carve chain
+/// (`_WIP/SPEC.pgRDF.CARVE.md`): carve the K-hop neighbourhood of a seed set into
+/// a new graph in the SAME database (shared dictionary, no decode). The
+/// array-overload of `pgrdf.carve_graph`: resolve each `seeds` IRI to its dict
+/// node-id, then carve every quad of `src` whose subject OR object is within
+/// `max_hops` graph-steps of a seed. **Pure id-space** — a recursive CTE over
+/// `src`'s own partition (so it is naturally `src`-scoped), never the SPARQL
+/// executor. Subject↔object are the traversal edges; predicates are edge labels,
+/// not traversal nodes.
+///
+/// `is_inferred` carries forward; the dictionary is **untouched** (the slice
+/// shares the source term space). `max_hops = 0` carves just the seeds' own
+/// quads; each hop expands the frontier by one graph-step. Seeds not interned as
+/// URI terms resolve to nothing; if NONE resolve the carve is empty and returns 0
+/// without creating `dst`. Returns the number of distinct quads carved.
+///
+/// SQL: `pgrdf.carve_graph(src_graph BIGINT, seeds TEXT[], dst_graph BIGINT, max_hops INT DEFAULT 1) -> BIGINT`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern(name = "carve_graph")]
+fn carve_graph_neighbourhood(
+    src: i64,
+    seeds: Vec<Option<String>>,
+    dst: i64,
+    max_hops: default!(i32, 1),
+) -> i64 {
+    if src < 0 || dst < 0 {
+        panic!("carve_graph: graph_id must be >= 0, got src={src}, dst={dst}");
+    }
+    if src == dst {
+        panic!("carve_graph: src and dst must differ (both = {src})");
+    }
+    let hops = max_hops.max(0);
+
+    acquire_partition_ddl_gate();
+
+    // Source partition existence — idempotent miss returns 0.
+    let src_name = format!("_pgrdf_quads_g{src}");
+    let src_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                       WHERE c.relname = $1 AND n.nspname = 'pgrdf')",
+        &[src_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("carve_graph: src existence check failed: {e}"))
+    .unwrap_or(false);
+    if !src_exists {
+        return 0;
+    }
+
+    // Resolve seed IRIs → URI dict node-ids. Drop SQL NULLs; if no seed is
+    // interned at all, there is nothing to carve — return 0 before creating dst.
+    let seed_iris: Vec<String> = seeds.into_iter().flatten().collect();
+    if seed_iris.is_empty() {
+        return 0;
+    }
+    let resolved: i64 = Spi::get_one_with_args(
+        "SELECT count(*)::bigint FROM pgrdf._pgrdf_dictionary \
+          WHERE term_type = 1 AND lexical_value = ANY($1)",
+        &[seed_iris.clone().into()],
+    )
+    .unwrap_or_else(|e| panic!("carve_graph: seed resolution failed: {e}"))
+    .unwrap_or(0);
+    if resolved == 0 {
+        return 0;
+    }
+
+    // Destination partition auto-create (idempotent), gated as in `copy_graph`.
+    let dst_name = format!("_pgrdf_quads_g{dst}");
+    let dst_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                       WHERE c.relname = $1 AND n.nspname = 'pgrdf')",
+        &[dst_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("carve_graph: dst existence check failed: {e}"))
+    .unwrap_or(false);
+    if !dst_exists {
+        Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[dst.into()])
+            .unwrap_or_else(|e| panic!("carve_graph: dst partition creation failed: {e}"));
+    }
+
+    // BFS the node frontier to `hops` over src's quads (UNION ⇒ dedup ⇒ terminate),
+    // then INSERT every src quad touching the frontier into dst. One set-based
+    // statement; the data-modifying `ins` CTE's RETURNING feeds the inserted count.
+    // Partition names are derived from validated non-negative BIGINTs.
+    let count: i64 = Spi::get_one_with_args(
+        &format!(
+            "WITH RECURSIVE frontier(node_id, hop) AS ( \
+                 SELECT id, 0 FROM pgrdf._pgrdf_dictionary \
+                  WHERE term_type = 1 AND lexical_value = ANY($1) \
+               UNION \
+                 SELECT CASE WHEN q.subject_id = f.node_id THEN q.object_id ELSE q.subject_id END, \
+                        f.hop + 1 \
+                 FROM frontier f \
+                 JOIN pgrdf.{src_name} q \
+                   ON (q.subject_id = f.node_id OR q.object_id = f.node_id) \
+                 WHERE f.hop < $2 \
+             ), nodes AS (SELECT DISTINCT node_id FROM frontier), \
+             ins AS ( \
+                 INSERT INTO pgrdf.{dst_name} \
+                     (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+                 SELECT DISTINCT q.subject_id, q.predicate_id, q.object_id, {dst}::bigint, q.is_inferred \
+                 FROM pgrdf.{src_name} q \
+                 WHERE q.subject_id IN (SELECT node_id FROM nodes) \
+                    OR q.object_id  IN (SELECT node_id FROM nodes) \
+                 RETURNING 1 \
+             ) \
+             SELECT count(*)::bigint FROM ins"
+        ),
+        &[seed_iris.into(), hops.into()],
+    )
+    .unwrap_or_else(|e| panic!("carve_graph: neighbourhood carve failed: {e}"))
+    .unwrap_or(0);
+
+    count
+}
+
 // ─── v0.5-FUTURE §7 — IRI-keyed overloads for the lifecycle UDFs ──
 //
 // v0.4 §5 ships the four lifecycle UDFs with `BIGINT graph_id`

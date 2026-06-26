@@ -6,6 +6,24 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.17] — 2026-06-26
+
+> Carve by *query*: `carve_graph` gains a neighbourhood overload — the K-hop slice of a seed set.
+> `.so`-only, no schema delta.
+
+### Added — `pgrdf.carve_graph(src, seeds[], dst, max_hops)` — neighbourhood carve (#30)
+
+The §4b.1 "common case" of the carve chain, and the completion of C1's carve-by-query: an
+**array-overload** of `carve_graph` (PostgreSQL dispatches on `text` vs `text[]`) that carves the
+**K-hop neighbourhood of a seed set** into a new graph. It resolves each seed IRI to its dictionary
+node-id, then a **recursive-CTE BFS over the source partition** (subject↔object edges; `UNION` ⇒ dedup
+⇒ terminate) expands the frontier `max_hops` graph-steps and inserts every quad touching it into `dst`
+— **pure id-space, naturally `src`-scoped, one set-based statement**, never the SPARQL executor. The
+dictionary is untouched (shared term space); `is_inferred` carries forward; `max_hops = 0` carves just
+the seeds' own quads; an unbound seed set carves nothing and returns 0. This is *the* carve use-case
+("the 89 M-triple closure around N seed entities"). Regression: `138-carve-graph-neighbourhood`. The
+general BGP / `CONSTRUCT` carve (needs id-space membership from the translator) is a later increment.
+
 ## [0.6.16] — 2026-06-26
 
 > First increment of the graph-carve chain: `pgrdf.carve_graph` — a query-defined subgraph slice as a

@@ -4,14 +4,25 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is **`v0.6.16`** (`isPrerelease=false`,
-`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.16`, and the
+The current cut is **`v0.6.17`** (`isPrerelease=false`,
+`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.17`, and the
 tagged release carries the binary tarball matrix, the PGXN source
 zip, and an SLSA-attested OCI bundle. The per-release notes below
 cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.14 history
 (the parallel bulk loader and its levers) lives in `CHANGELOG.md`,
 which is the authoritative running log — new entries land under
 `[Unreleased]` and move into the next `[N.M.P]` block at tag time.
+
+## v0.6.17 — 2026-06-26
+
+Carve by query — the neighbourhood overload: `pgrdf.carve_graph(src, seeds[],
+dst, max_hops)` carves the K-hop neighbourhood of a seed set into a new graph
+(shared dictionary, id-space recursive-CTE BFS over the source partition).
+`.so`-only, **no schema delta**; the new function overload ships in the base
+`pgrdf--0.6.17.sql` (the `0.5.1 → 0.6.17` migration is a version-string rename,
+no DDL). Reconciliation across the Rule 7 source set → `0.6.17`; CHANGELOG
+`[Unreleased]` → `[0.6.17]`; install docs refreshed. Regression
+`138-carve-graph-neighbourhood`. Code: `src/storage/graphs.rs`.
 
 ## v0.6.16 — 2026-06-26
 
