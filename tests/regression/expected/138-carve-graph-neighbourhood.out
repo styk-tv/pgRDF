@@ -1,0 +1,17 @@
+
+0
+t
+8
+src_quads_8: true
+carve_0hop_returns_3: true
+dst201_quads_3: true
+carve_1hop_returns_6: true
+dst202_quads_6: true
+carve_2hop_returns_8: true
+carve_unknown_returns_0: true
+carve_multiseed_returns_6: true
+carve_default_hop_returns_6: true
+src_unchanged_8: true
+dict_unchanged_14: true
+
+0

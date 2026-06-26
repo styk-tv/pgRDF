@@ -1,7 +1,7 @@
--- pgrdf--0.5.1--0.6.16.sql
+-- pgrdf--0.5.1--0.6.17.sql
 --
--- Upgrade-path declaration from v0.5.1 (the earliest installable version) to v0.6.16. PostgreSQL
--- requires this file to exist for `ALTER EXTENSION pgrdf UPDATE TO '0.6.16'` to be a valid path.
+-- Upgrade-path declaration from v0.5.1 (the earliest installable version) to v0.6.17. PostgreSQL
+-- requires this file to exist for `ALTER EXTENSION pgrdf UPDATE TO '0.6.17'` to be a valid path.
 --
 -- Most v0.5.1 -> v0.6.x deltas are runtime / `.so` changes (the M4 join-order pin, auto-ANALYZE after
 -- materialize, the batched materialize write-back, the v0.6.2 parallel bulk loader, the v0.6.3/v0.6.4
@@ -9,7 +9,7 @@
 -- v0.6.7 concurrency-safe id reservation, v0.6.8 streaming/windowed loader + lenient parse).
 --
 -- The 0.6.x line's first real SCHEMA change landed in v0.6.10 (R1 + R2 below); this cumulative 0.5.1
--- -> 0.6.16 path carries that DDL. v0.6.11 (R2.1) adds only the `load_turtle_staged_run` coordinator
+-- -> 0.6.17 path carries that DDL. v0.6.11 (R2.1) adds only the `load_turtle_staged_run` coordinator
 -- FUNCTION (+ the CALL-able `load_turtle_staged` wrapper), v0.6.12 only corrects that loader's
 -- literal-dictionary keying, v0.6.13 only hardens the staged worker's panic-reporting + RESOLVE
 -- memory, and v0.6.14 only adds the out-of-the-box staged-ingest tuning levers (T1–T5: temp routing,
@@ -61,7 +61,12 @@
 --   (shared dictionary, no decode) — a new FUNCTION that ships in the base `.so` SQL, carrying no DDL
 --   (the same way the v0.6.11 staged-loader coordinator function above ships with no DDL).
 --
--- The authoritative full surface ships in the base install script `pgrdf--0.6.16.sql`, which a fresh
+--   v0.6.17 (the carve_graph neighbourhood overload, issue #30) — NO schema delta. `pgrdf.carve_graph(
+--   src, seeds[], dst, max_hops)` carves the K-hop neighbourhood of a seed set into a new graph
+--   (shared dictionary, id-space BFS over the source partition) — a new FUNCTION overload that ships in
+--   the base `.so` SQL, carrying no DDL.
+--
+-- The authoritative full surface ships in the base install script `pgrdf--0.6.17.sql`, which a fresh
 -- `CREATE EXTENSION pgrdf` installs. Tables here use unqualified names (the extension schema is in
 -- search_path during ALTER EXTENSION UPDATE), matching `sql/schema_v0_2_0.sql`.
 
