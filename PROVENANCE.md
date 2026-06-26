@@ -84,15 +84,38 @@ A successful verify means:
 - The signature is recorded in Sigstore's Rekor transparency log
 - The subject digest matches the artifact you pulled
 
+## Development & tracking rituals
+
+These keep the public trail self-documenting and the branch list clean. They are not provenance-critical (a release is valid without them) but they are the standing convention for **every** change on this repo.
+
+### Issues & PRs — the trail is the documentation
+
+- **Every change is a GitHub issue + a PR — features as well as fixes,** not only the "negatives." The issue states scope (what + why, with refs to the spec / tracking issue); the PR states what changed, the root cause or design, the verification (tests RED→GREEN, suite green), and cross-links the issue (`Fixes #N` closes it on merge, `Refs #N` links it). The merged PR and its commits are the permanent record — browsable forever at `/pull/<n>`.
+- **GitHub uses ONE shared number counter for issues AND PRs.** A gap in the PR list (e.g. `#11 → #24`) is issue numbers, NOT deleted PRs — issues and PRs interleave in the same sequence, and nothing is ever removed from history. (Unlike GitLab, where issues and MRs have independent counters — a common source of "where did my MRs go?" confusion.)
+
+### Labels — so the tracker reads as a roadmap, not a pile of bugs
+
+- **Type:** `feature` · `bug` · `enhancement` · `test` · `tracking` · `release` · `documentation`. **Area:** `carve` · `loader` · `query`.
+- Every issue and PR carries one type label and, where it applies, one area label. `is:issue label:feature` is the roadmap; `label:bug` is the (rare) defect list.
+
+### Milestones — the version roadmap
+
+- **Every issue/PR carries a version milestone** = the release it targets (`v0.6.16`, `v0.6.17`, … `v0.7.0`). The milestone list IS the roadmap.
+- **One code merge → one version.** Each code/artifact MR carries its own version bump (the Rule 7 source set) and produces a release; a **pure-documentation MR** (PROVENANCE, README, or the release PR's own CHANGELOG flip) merges with **no** version bump and **no** release. An urgent fix inserted into the sequence shifts the later milestones forward — version-number gaps are fine, never reuse a number, count forward (`only-forward-never-revert`).
+
+### Branch hygiene — delete after merge
+
+- **After a PR merges, delete the branch — remote AND local.** The merge commit copies every one of the branch's commits onto `main`, so the branch ref is redundant; deleting it removes only the pointer, **never history**. `gh pr merge --delete-branch` handles the remote; prune the local with `git branch -d <branch>`, or `git worktree remove <path>` if the branch lived in a worktree. This keeps the branch list to in-flight work only — the PR and its commits stay permanently browsable.
+
 ## Cutting a release (the only allowed flow)
 
-The release-cutting flow is simpler than pgCK's because pgRDF's version source is the git tag — there's no per-release file bump.
+pgRDF cuts each release as a **PR** (so the version bump + CHANGELOG flip are reviewed before the tag), then an annotated tag on the merge commit drives the attested pipeline. The version source is the four-way Rule 7 reconciliation, NOT the bare tag.
 
 1. Confirm the previous release shows up in `LATEST.md` (Rule 4 — strict from v0.5.14 onward).
-2. Update `CHANGELOG.md` with the per-task entries that close the release.
-3. Commit.
-4. Tag: `git tag -a v<new> -F <annotated-message-file>`.
-5. Push the tag: `git push origin v<new>`.
+2. On a `release-v<new>` branch off `main`, reconcile the version across the **Rule 7 source set** (`Cargo.toml` + the `Cargo.lock` `pgrdf` entry + `pgrdf.control` `default_version` + `META.json` + the `compose/compose.yml` bind-mount + `tests/regression/expected/00-smoke.out`), and `git mv sql/pgrdf--0.5.1--<old>.sql sql/pgrdf--0.5.1--<new>.sql` (version-string rename; the upgrade path carries no DDL unless a schema change shipped).
+3. Flip `CHANGELOG.md` `[Unreleased]` → `[<new>]` with the per-task entries that close the release — **at the cut, in this PR; never a separate post-merge changelog PR.** Refresh README / guide / compose install version refs (leave historical bench / feature attributions at their original version).
+4. Open the release PR — label `release`, milestone `v<new>`. CI is the boot+version reconciliation gate (the regression suite asserts `pgrdf.version() == <new>`). Merge on green (the merge is a human gate).
+5. Tag the merge commit (tagger `Peter Styk <peter@styk.tv>`): `git tag -a v<new> -F <annotated-message-file> <merge-sha>`; `git push origin v<new>`. Then delete the merged `release-v<new>` branch (branch-hygiene ritual above).
 
 GitHub Actions takes over:
 
