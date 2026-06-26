@@ -4,14 +4,25 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
-The current cut is **`v0.6.15`** (`isPrerelease=false`,
-`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.15`, and the
+The current cut is **`v0.6.16`** (`isPrerelease=false`,
+`isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.16`, and the
 tagged release carries the binary tarball matrix, the PGXN source
 zip, and an SLSA-attested OCI bundle. The per-release notes below
 cover the v0.5.x line and earlier; the full v0.6.0 → v0.6.14 history
 (the parallel bulk loader and its levers) lives in `CHANGELOG.md`,
 which is the authoritative running log — new entries land under
 `[Unreleased]` and move into the next `[N.M.P]` block at tag time.
+
+## v0.6.16 — 2026-06-26
+
+First increment of the graph-carve chain: `pgrdf.carve_graph(src, predicate,
+dst)` — a predicated slice of a graph carved into a new graph in the same
+database (shared dictionary). `.so`-only, **no schema delta**; the new function
+ships in the base `pgrdf--0.6.16.sql` (the `0.5.1 → 0.6.16` migration is a
+version-string rename carrying no DDL, exactly as the v0.6.11 staged-loader
+coordinator function did). Reconciliation across the Rule 7 source set →
+`0.6.16`; CHANGELOG `[Unreleased]` → `[0.6.16]`; README / guide / compose install
+refs refreshed. Regression `137-carve-graph-subview`. Code: `src/storage/graphs.rs`.
 
 ## v0.6.15 — 2026-06-26
 

@@ -670,6 +670,110 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
     count
 }
 
+/// Carve a query-defined slice of `src` into `dst` as a new graph in the SAME
+/// database (shared dictionary, no decode) — the §5.A fast sub-view of the carve
+/// chain (`_WIP/SPEC.pgRDF.CARVE.md`; C1, issue #10). This MVP form is a
+/// **predicated `copy_graph`**: every quad of `src` whose predicate is the URI
+/// `predicate` is copied into `dst` (auto-created), `is_inferred` carried
+/// forward. The dictionary is **untouched** — the slice shares the source term
+/// space, so this is a fast in-place sub-view (no RAM reduction; that is C2's
+/// re-encode). Returns the number of quads carved.
+///
+/// An unbound `predicate` (not interned in the dictionary, or not used in `src`)
+/// carves nothing and returns 0 **without** creating `dst` — a miss has no side
+/// effect. Richer membership (BGP / `CONSTRUCT`, neighbourhood + hops) and the
+/// re-encoding file modes are later carve-chain increments (issues #19 / #12-#14).
+///
+/// SQL: `pgrdf.carve_graph(src_graph BIGINT, predicate TEXT, dst_graph BIGINT) -> BIGINT`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn carve_graph(src: i64, predicate: &str, dst: i64) -> i64 {
+    if src < 0 || dst < 0 {
+        panic!("carve_graph: graph_id must be >= 0, got src={src}, dst={dst}");
+    }
+    if src == dst {
+        panic!("carve_graph: src and dst must differ (both = {src})");
+    }
+
+    // Partition-DDL gate first — same lock order (`advisory -> {graphs,quads}`)
+    // as `copy_graph` and the rest of the partition-affecting lifecycle UDFs.
+    acquire_partition_ddl_gate();
+
+    // Source partition existence — idempotent miss returns 0 (LLD v0.4 §5.2).
+    let src_name = format!("_pgrdf_quads_g{src}");
+    let src_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                       WHERE c.relname = $1 AND n.nspname = 'pgrdf')",
+        &[src_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("carve_graph: src existence check failed: {e}"))
+    .unwrap_or(false);
+    if !src_exists {
+        return 0;
+    }
+
+    // Resolve the predicate URI -> dict id. A predicate is always a plain URI
+    // (term_type = 1, NULL datatype/language), so the lookup is exact. An
+    // unbound predicate carves nothing — return BEFORE auto-creating `dst` so a
+    // miss leaves no empty graph behind.
+    let pred_id: Option<i64> = Spi::get_one_with_args(
+        "SELECT (SELECT id FROM pgrdf._pgrdf_dictionary \
+                  WHERE term_type = 1 AND lexical_value = $1 \
+                    AND datatype_iri_id IS NULL AND language_tag IS NULL LIMIT 1)",
+        &[predicate.into()],
+    )
+    .unwrap_or_else(|e| panic!("carve_graph: predicate resolution failed: {e}"));
+    let pred_id = match pred_id {
+        Some(id) => id,
+        None => return 0,
+    };
+
+    // Matched-quad count up-front (the return value). Zero matches ⇒ nothing to
+    // carve, no `dst` created.
+    let count: i64 = Spi::get_one_with_args(
+        &format!("SELECT count(*)::bigint FROM pgrdf.{src_name} WHERE predicate_id = $1"),
+        &[pred_id.into()],
+    )
+    .unwrap_or_else(|e| panic!("carve_graph: count failed: {e}"))
+    .unwrap_or(0);
+    if count == 0 {
+        return 0;
+    }
+
+    // Destination partition auto-create (idempotent), gated as in `copy_graph`.
+    let dst_name = format!("_pgrdf_quads_g{dst}");
+    let dst_exists: bool = Spi::get_one_with_args(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                       WHERE c.relname = $1 AND n.nspname = 'pgrdf')",
+        &[dst_name.as_str().into()],
+    )
+    .unwrap_or_else(|e| panic!("carve_graph: dst existence check failed: {e}"))
+    .unwrap_or(false);
+    if !dst_exists {
+        Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[dst.into()])
+            .unwrap_or_else(|e| panic!("carve_graph: dst partition creation failed: {e}"));
+    }
+
+    // The carve — `INSERT … SELECT` with the predicate filter, `graph_id`
+    // rebound to `dst`. `is_inferred` carries forward (no discrimination), same
+    // as `copy_graph`. Partition names are derived from validated non-negative
+    // BIGINTs (no user input in identifier position); the predicate is bound.
+    Spi::run_with_args(
+        &format!(
+            "INSERT INTO pgrdf.{dst_name} \
+                (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+             SELECT subject_id, predicate_id, object_id, {dst}::bigint, is_inferred \
+               FROM pgrdf.{src_name} WHERE predicate_id = $1"
+        ),
+        &[pred_id.into()],
+    )
+    .unwrap_or_else(|e| panic!("carve_graph: INSERT INTO ... SELECT failed: {e}"));
+
+    count
+}
+
 // ─── v0.5-FUTURE §7 — IRI-keyed overloads for the lifecycle UDFs ──
 //
 // v0.4 §5 ships the four lifecycle UDFs with `BIGINT graph_id`

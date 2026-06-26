@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Status](https://img.shields.io/badge/status-v0.6.15%20%E2%80%94%20native%20staged%20bulk%20loader%20%E2%80%94%20LUBM--100%20full%20pass-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
+[![Status](https://img.shields.io/badge/status-v0.6.16%20%E2%80%94%20native%20staged%20bulk%20loader%20%E2%80%94%20LUBM--100%20full%20pass-brightgreen)](docs/10-roadmap.md) [![LATEST.md](https://img.shields.io/badge/LATEST.md-current%20advertised%20version-blue)](./LATEST.md)
 [![CI](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml/badge.svg)](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml)
 [![SPARQL](https://img.shields.io/badge/SPARQL-SELECT%20%2F%20ASK%20%2F%20CONSTRUCT%20%2F%20DESCRIBE%20%2F%20UPDATE%20%2F%20PATHS%20%2F%20GRAPH%20%2F%20FILTER%20%2F%20OPTIONAL%20%2F%20UNION%20%2F%20MINUS%20%2F%20AGGREGATES-blue)](guide/03-querying.md)
 [![SHACL](https://img.shields.io/badge/W3C%20SHACL%20Core-25%2F25-blue)](docs/05-validation.md)
@@ -84,9 +84,9 @@ Dictionary-encoded terms over a LIST-partitioned hexastore (SPO / POS / OSP cove
 | | |
 |---|---|
 | **PostgreSQL** | 14 · 15 · 16 · 17 (PG 18 deferred — pgrx 0.16 pin; [ERRATA E-006](specs/ERRATA.v0.2.md)) |
-| **Install** | **OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.15` (public, zero-cred; every digest SLSA-attested, verify with `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`) · **tarballs** (pg14–17 × amd64/arm64) · **PGXN** — `pgxn install pgrdf`. See [INSTALL.md](INSTALL.md). |
-| **Current release** | **v0.6.15** — [LATEST.md](./LATEST.md) is authoritative at audit time |
-| **Docs** | [pgrdf.styk.tv](https://pgrdf.styk.tv) — full v0.6.15 guide: the four pillars plus scale, process, and roadmap |
+| **Install** | **OCI** — `oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.16` (public, zero-cred; every digest SLSA-attested, verify with `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:<tag> --repo styk-tv/pgRDF`) · **tarballs** (pg14–17 × amd64/arm64) · **PGXN** — `pgxn install pgrdf`. See [INSTALL.md](INSTALL.md). |
+| **Current release** | **v0.6.16** — [LATEST.md](./LATEST.md) is authoritative at audit time |
+| **Docs** | [pgrdf.styk.tv](https://pgrdf.styk.tv) — full v0.6.16 guide: the four pillars plus scale, process, and roadmap |
 | **Repo** | [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF) |
 
 ## What you can do today
@@ -341,7 +341,7 @@ just psql             # opens a psql shell to the pgrdf database
 # 2. Inside psql
 pgrdf=# CREATE EXTENSION pgrdf;
 pgrdf=# SELECT pgrdf.version();
-        --  → 0.6.15   (whatever LATEST.md currently advertises)
+        --  → 0.6.16   (whatever LATEST.md currently advertises)
 pgrdf=# SELECT pgrdf.parse_turtle('@prefix ex: <http://e.com/> . ex:a ex:p ex:b .', 1);
         --  → 1
 ```

@@ -6,6 +6,25 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.16] — 2026-06-26
+
+> First increment of the graph-carve chain: `pgrdf.carve_graph` — a query-defined subgraph slice as a
+> new graph. `.so`-only, no schema delta.
+
+### Added — `pgrdf.carve_graph(src_graph, predicate, dst_graph)` — the carve subview MVP (#10)
+
+The first carve-out UDF (carve chain C1; design `_WIP/SPEC.pgRDF.CARVE.md` §5.A). `carve_graph` carves a
+**predicated slice** of `src_graph` — every quad whose predicate is the given URI — into a **new graph
+`dst_graph` in the same database**, sharing the source dictionary (no decode, no re-encode). It is a
+predicated `copy_graph`: the destination partition is auto-created, `is_inferred` carries forward, and
+the **dictionary is untouched** (the slice shares the source term space). An unbound predicate carves
+nothing and returns 0 without creating `dst`. Returns the number of quads carved.
+
+This is the fast in-place sub-view — the building block the richer carve modes compose. Follow-on
+increments (each its own issue): BGP / `CONSTRUCT` membership and neighbourhood + hops (the
+type-filter completeness, #12–#14), then C2 re-encode into a fresh small dictionary (#19) and C3 the
+full hexastore + `pg_trgm` string index (#20). Regression: `137-carve-graph-subview`.
+
 ## [0.6.15] — 2026-06-26
 
 > A correctness cut. The staged loader — the default `load_turtle` path for N-Triples when pgrdf is
