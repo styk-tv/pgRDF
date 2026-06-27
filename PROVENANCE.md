@@ -107,6 +107,18 @@ These keep the public trail self-documenting and the branch list clean. They are
 
 - **After a PR merges, delete the branch — remote AND local.** The merge commit copies every one of the branch's commits onto `main`, so the branch ref is redundant; deleting it removes only the pointer, **never history**. `gh pr merge --delete-branch` handles the remote; prune the local with `git branch -d <branch>`, or `git worktree remove <path>` if the branch lived in a worktree. This keeps the branch list to in-flight work only — the PR and its commits stay permanently browsable.
 
+### Disclosure discipline — this is a PUBLIC repo
+
+**Everything in an issue, PR, comment, commit, or doc here is permanent and world-readable. Be deliberate about what you disclose.** Never put operator/internal detail into any public surface:
+
+- **Infrastructure & accounts** — internal cluster/project/workspace names, resource-group / subscription / tenant identifiers, cloud storage-account or bucket names, registry org paths beyond the public package itself.
+- **Hosts, network & credentials** — VM names / hostnames, private IPs, SSH users/keys, and **any secret** (tokens, account keys, SAS, connection strings — these live only in the operator's auth store, never in a file).
+- **Filesystem & private content** — operator/home paths, and anything from private working areas or other private repos.
+
+**Safe to share** (these describe pgRDF, not the operator): pgRDF behaviour, versions, measured performance/scale numbers, hardware *class* (describe the *capability* — "a 160-vCPU box", "network-attached SSD" — not a *named asset*), and the already-public artifact identifiers (the GHCR package, release tags, `gh attestation verify` commands).
+
+**Rule of thumb:** if a detail could let a reader find or touch operator infrastructure, or it names a private asset, it does not belong in a public surface. Cross-repo NOTIFY messages targeting a public repo are scrubbed to capabilities + pgRDF facts before sending (the private NOTIFY pattern is the operator-side half of this same discipline).
+
 ## Cutting a release (the only allowed flow)
 
 pgRDF cuts each release as a **PR** (so the version bump + CHANGELOG flip are reviewed before the tag), then an annotated tag on the merge commit drives the attested pipeline. The version source is the four-way Rule 7 reconciliation, NOT the bare tag.
