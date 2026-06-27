@@ -115,6 +115,19 @@ jobs:
           [ "${CREATE_RC}" -eq 0 ] || { echo "::error::CREATE EXTENSION pgrdf VERSION '${VER}' FAILED — refusing to attest."; exit 1; }
           [ "${EXT_VER}" = "${VER}" ] || { echo "::error::extversion='${EXT_VER}' != '${VER}' — refusing to attest."; exit 1; }
           [ "${FN_VER}" = "${VER}" ] || { echo "::error::pgrdf.version()='${FN_VER}' != '${VER}' — refusing to attest."; exit 1; }
+          # MANIFEST.json cross-check (#37): the bundle's self-described runtime
+          # value must equal the version the booted .so ACTUALLY reports — i.e.
+          # validate the manifest against the artifact, not the source. Present
+          # on every release cut after the manifest landed; if absent (older
+          # tarball) the check is skipped so re-runs of historical tags still pass.
+          MAN="${EXTRACT}/MANIFEST.json"
+          if [ -f "${MAN}" ]; then
+            MAN_RT=$(jq -r '.runtime.value' "${MAN}")
+            [ "${MAN_RT}" = "${FN_VER}" ] || { echo "::error::MANIFEST.json runtime.value='${MAN_RT}' != booted pgrdf.version()='${FN_VER}' — refusing to attest."; exit 1; }
+            echo "✓ MANIFEST.json runtime cross-check: ${MAN_RT} == pgrdf.version()"
+          else
+            echo "note: no MANIFEST.json in this tarball (pre-#37 release) — skipping manifest cross-check."
+          fi
           echo "✓ boot+version gate passed: extversion=${EXT_VER}, pgrdf.version()=${FN_VER} — attestation may proceed."
 
   # ────────────────────────────────────────────────────────────────

@@ -120,6 +120,34 @@ jobs:
             cp sql/pgrdf--*--*.sql "${OUT}/share/extension/"
           fi
           cp LICENSE "${OUT}/"
+          # versions MANIFEST.json (#37) — a self-describing record of every
+          # version-bearing fact, built from the ACTUAL repacked artifact
+          # (control `default_version` + SQL filenames read back), so the
+          # manifest can never disagree with what shipped. A consumer
+          # (oci-germination's versions.yaml, a downstream bundle) reads ONE
+          # file instead of grepping filenames / pinning by hand — the gap
+          # that let the consumer pin rot. `runtime.value` == the tag:
+          # `pgrdf.version()` is `env!(CARGO_PKG_VERSION)` (compile-time,
+          # asserted == tag in the pre-build step), and oci-publish's gate
+          # boots + asserts `pgrdf.version() == tag` before any attestation.
+          CTL_DEFAULT=$(grep -E '^default_version' "${OUT}/share/extension/pgrdf.control" | head -1 | cut -d"'" -f2)
+          INSTALL_SQL=$(cd "${OUT}/share/extension" && ls "pgrdf--${VER}.sql" 2>/dev/null | head -1)
+          UPGRADE_SQL=$(cd "${OUT}/share/extension" && ls pgrdf--*--"${VER}.sql" 2>/dev/null | head -1)
+          BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > "${OUT}/MANIFEST.json" <<JSON
+          {
+            "component": "pgrdf",
+            "version": "${VER}",
+            "extversion": "${CTL_DEFAULT}",
+            "runtime": { "fn": "pgrdf.version()", "value": "${VER}", "source": "env!(CARGO_PKG_VERSION) compile-time; asserted == tag pre-build + boot-gated in oci-publish" },
+            "install_sql": "${INSTALL_SQL}",
+            "upgrade_sql": "${UPGRADE_SQL}",
+            "platform": { "pg_major": "${{ matrix.pg }}", "arch": "${{ matrix.arch }}", "base": "postgres:17.4-bookworm (glibc)" },
+            "build": { "tag": "${GITHUB_REF_NAME}", "git_sha": "${GITHUB_SHA}", "built": "${BUILT}" },
+            "integrity": "SHA256SUMS (sibling file)"
+          }
+          JSON
+          # SHA256SUMS hashes every file INCLUDING MANIFEST.json (covers it for integrity).
           ( cd "${OUT}" && find . -type f ! -name SHA256SUMS -print0 | xargs -0 sha256sum > SHA256SUMS )
           tar czf "${OUT}.tar.gz" "${OUT}"
           echo "tarball=${OUT}.tar.gz" >> "$GITHUB_OUTPUT"
@@ -154,6 +182,18 @@ jobs:
           fi
           echo "✓ SQL file: ${SQL_FILE}"
           echo "✓ default_version: ${DEFAULT_VER}"
+          # MANIFEST.json coherence (#37): version/extversion/runtime must all == tag,
+          # and the SQL filenames it records must exist in the layout.
+          MAN="${OUT}/MANIFEST.json"
+          [ -f "${MAN}" ] || { echo "::error::MANIFEST.json missing from tarball layout."; exit 1; }
+          jq -e . "${MAN}" >/dev/null || { echo "::error::MANIFEST.json is not valid JSON."; exit 1; }
+          for k in version extversion .runtime.value; do
+            key="${k#.}"; mv=$(jq -r ".${key}" "${MAN}")
+            [ "${mv}" = "${VER}" ] || { echo "::error::MANIFEST.json .${key}=${mv}, expected ${VER}."; exit 1; }
+          done
+          MAN_INSTALL=$(jq -r .install_sql "${MAN}")
+          [ -f "${OUT}/share/extension/${MAN_INSTALL}" ] || { echo "::error::MANIFEST.json install_sql=${MAN_INSTALL} not in layout."; exit 1; }
+          echo "✓ MANIFEST.json: version=$(jq -r .version "${MAN}") extversion=$(jq -r .extversion "${MAN}") runtime=$(jq -r .runtime.value "${MAN}")"
 
       - uses: actions/upload-artifact@v4
         with:
