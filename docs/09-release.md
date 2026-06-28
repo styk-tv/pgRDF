@@ -4,6 +4,20 @@ Tag-based. Push a tag matching `v*` to trigger
 `.github/workflows/release.yml`, which produces the release artifact
 matrix specified in INSTALL spec §3.
 
+## Distribution channels (and what each needs)
+
+Three places carry pgRDF; only the GitHub release + OCI bundle are fully automated:
+
+| Channel | What ships | Automated? |
+|---|---|---|
+| **GitHub release** | the per-PG×arch tarballs + the PGXN source zip (`make dist`) + SHA256SUMS | ✅ `release.yml` |
+| **OCI bundle** (GHCR) | the attested `pgrdf-bundle` (`oras pull`) | ✅ `oci-publish.yml` (boot+version gated, attested) |
+| **PGXN** (`pgxn.org/dist/pgrdf`) | the same `make dist` zip, rendered from **`README.pgxn.md`** | ⚠️ **manual upload** |
+| **crates.io** (`crates.io/crates/pgrdf`) | the Rust source crate | ⛔ **blocked** (see below) |
+
+- **PGXN — manual upload.** `release.yml` *builds* the dist zip (`make dist` → `pgrdf-<ver>.zip`, attached to the GitHub release) but does **not** upload it. To publish a version: log in to **PGXN Manager** (`manager.pgxn.org`) and upload `pgrdf-<ver>.zip` (the GitHub release asset, or `make dist` locally on the tagged commit). PGXN renders **`README.pgxn.md`** as the package page — keep that README current (it mirrors the project README and is version-resilient so it does not need a per-release bump). *We do not auto-wire PGXN upload into every release (deliberate — push when we choose).*
+- **crates.io — blocked, not forgotten.** `Cargo.toml` carries a `[patch]` **git** dependency on the `reasonable` fork (`branch = rdf12-passthrough`) for RDF 1.2 passthrough. `cargo publish` rejects crates with `[patch]` git deps, so `publish-crate.yml` is **`.disabled`**. crates.io stays at the last pre-fork version until `gtfierro/reasonable` merges the RDF-12 PR and we pin `reasonable = "0.4.x"` (ERRATA E-011 / `gtfierro/reasonable#57`). Re-enable `publish-crate.yml` then.
+
 The current cut is **`v0.6.17`** (`isPrerelease=false`,
 `isLatest=true`); Cargo.toml + `pgrdf.control` read `0.6.17`, and the
 tagged release carries the binary tarball matrix, the PGXN source

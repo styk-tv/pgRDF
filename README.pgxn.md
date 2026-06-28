@@ -1,73 +1,136 @@
 # pgRDF
 
-`pgRDF 0.5.1` is a Rust-native PostgreSQL extension for RDF storage,
-SPARQL 1.1 query and update, SHACL Core validation, and OWL 2 RL or
-RDFS materialization inside PostgreSQL.
+**A Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning.**
 
-## Current package
+pgRDF turns a single PostgreSQL instance into a complete semantic-web engine —
+dictionary-encoded hexastore storage, a SPARQL 1.1 query **and** update engine,
+a W3C-conformant SHACL Core validator, and an OWL 2 RL / RDFS reasoner — with no
+sidecar triple store and no second system to operate. Load Turtle, then **reason
+over it, validate it, and query it in place**, each step a single function call,
+all inside one PostgreSQL session. Every release is CI-built and signed with SLSA
+Build Provenance v1.
 
-- PGXN package version: `0.5.1`
-- PostgreSQL support: `14`, `15`, `16`, `17`
-- License: `MIT`
-- Full documentation: <https://pgrdf.styk.tv/>
+- **Current version & full docs:** <https://pgrdf.styk.tv/> (authoritative at any time)
+- **Source & releases:** <https://github.com/styk-tv/pgRDF>
+- **PostgreSQL:** 14 · 15 · 16 · 17
+- **License:** MIT
 
-## Feature summary
+> The PGXN package tracks the GitHub release line; the live version is shown at
+> the links above. This README mirrors the project README — see GitHub for badges,
+> benchmark tables, and the full guide.
 
-- RDF storage inside PostgreSQL, including named-graph support
-- Turtle, TriG, and N-Quads ingest
-- SPARQL 1.1 query and update
-- `SELECT`, `ASK`, `CONSTRUCT`, `DESCRIBE`
-- FILTER, OPTIONAL, UNION, MINUS, VALUES, BIND, aggregates, named
-  graphs, property paths
-- SHACL Core validation via `pgrdf.validate(data, shapes [, mode])`
-- RDFS and OWL 2 RL materialization via
-  `pgrdf.materialize(graph_id, profile)`
+## Capabilities
 
-## Install model
+Everything below runs inside one PostgreSQL instance, addressable from any client
+— no sidecar store, no ETL.
 
-This PGXN package is the source distribution for `pgrdf`. `pgxn install`
-builds the extension locally via `cargo pgrx package`, so the target
-machine needs:
+### Query — SPARQL 1.1
+`SELECT` / `ASK` over N-pattern basic graph patterns, lowered to SQL joins on a
+pinned, cross-product-proof plan.
 
-- PostgreSQL development files for the target major
-- `pg_config` for the target PostgreSQL installation
-- Rust `1.91` or newer
-- `cargo-pgrx` `0.16`
-- a one-time `cargo pgrx init`
+- **Filters** — identity, boolean composition, term-type tests, `REGEX`, numeric & typed comparison
+- **Modifiers** — `DISTINCT`, `LIMIT` / `OFFSET`, type-aware `ORDER BY`
+- **Patterns** — multi-triple `OPTIONAL`, `UNION`, `MINUS`, `VALUES`, downstream `BIND`
+- **Aggregates** — `COUNT` / `SUM` / `AVG` / `MIN` / `MAX` / `GROUP_CONCAT` / `SAMPLE` with `GROUP BY` / `HAVING`
+- **CONSTRUCT** and **DESCRIBE** (W3C §16.4 Concise Bounded Description)
+- **Property paths** — `^` `+` `*` `?` `|`, with a materialised-closure no-CTE fast path and a depth guard
+- **Named graphs** — `GRAPH <iri>` and `GRAPH ?g`, composed across OPTIONAL / UNION / MINUS
 
-See `INSTALL.md` for the exact setup and build commands.
+### Update — SPARQL 1.1 UPDATE
+`INSERT` / `DELETE DATA`, `INSERT` / `DELETE WHERE`, `DELETE`+`INSERT WHERE`,
+`WITH <iri>` scoping, and the graph lifecycle algebra (`DROP` / `CLEAR` /
+`CREATE GRAPH` × `DEFAULT` / `NAMED` / `ALL`).
+
+### Storage
+Dictionary-encoded terms over a LIST-partitioned hexastore (SPO / POS / OSP
+covering indexes).
+
+- **Ingest** — Turtle, TriG, N-Quads (`parse_turtle` / `parse_trig` / `parse_nquads`), plus a **parallel bulk loader** (`load_turtle(…, bulk_load => true)`) and a native staged loader for billion-scale `.nt`
+- **Per-graph lifecycle** — `drop` / `clear` / `copy` / `move_graph`, with BIGINT and IRI overloads
+- **Performance** — cross-backend shared-memory dictionary cache, prepared-plan cache, prepared bulk-INSERT
+
+### Inference — OWL 2 RL + RDFS
+`pgrdf.materialize(graph, profile)` forward-chains the closure (`owl-rl` or
+`rdfs`), refreshes planner statistics automatically so queries stay fast on the
+enlarged graph, and is idempotent across calls.
+
+### Validation — W3C SHACL Core
+`pgrdf.validate(data, shapes, mode)` returns a real `sh:ValidationReport` as
+JSONB — genuine W3C SHACL Core conformance (25 / 25).
 
 ## Install
 
-Typical install flow:
+**From PGXN:**
 
 ```bash
-pgxn install pgrdf --pg_config /path/to/pg_config
-psql -d yourdb -c 'CREATE EXTENSION pgrdf;'
+pgxn install pgrdf
 ```
 
-For best performance, add `pgrdf` to `shared_preload_libraries` and
-restart PostgreSQL before creating the extension. Without preload, the
-extension still works, but the shared-memory dictionary cache stays off.
+This builds the extension from source (Rust + `cargo-pgrx` toolchain required).
 
-## Prebuilt binaries
+**Pre-built, attested artifacts** (no build): the project also publishes an
+SLSA-attested OCI bundle and per-PG×arch tarballs on GitHub — see
+[INSTALL.md](https://github.com/styk-tv/pgRDF/blob/main/INSTALL.md). Every
+published digest carries a verifiable SLSA Build Provenance v1 attestation.
 
-PGXN is the source-install path. Prebuilt binaries remain on GitHub
-Releases.
+After installing the extension files into your PostgreSQL:
 
-The current release asset set is:
+```sql
+CREATE EXTENSION pgrdf;
+SELECT pgrdf.version();
+```
 
-- `pgrdf-0.5.1.zip` (PGXN source archive)
-- `pgrdf-0.5.1-pg14-glibc-amd64.tar.gz`
-- `pgrdf-0.5.1-pg14-glibc-arm64.tar.gz`
-- `pgrdf-0.5.1-pg15-glibc-amd64.tar.gz`
-- `pgrdf-0.5.1-pg15-glibc-arm64.tar.gz`
-- `pgrdf-0.5.1-pg16-glibc-amd64.tar.gz`
-- `pgrdf-0.5.1-pg16-glibc-arm64.tar.gz`
-- `pgrdf-0.5.1-pg17-glibc-amd64.tar.gz`
-- `pgrdf-0.5.1-pg17-glibc-arm64.tar.gz`
-- `SHA256SUMS`
+### Required `postgresql.conf`
+pgRDF MUST be in `shared_preload_libraries` so `_PG_init()` runs in the postmaster
+context (it registers the shared-memory dictionary cache + plan-cache stats).
+Without it, the first pgRDF call panics with `PgAtomic was not initialized`.
 
-Project repository, issues, release assets, and OCI artifacts:
+```ini
+shared_preload_libraries = 'pgrdf'
+```
 
-- <https://github.com/styk-tv/pgRDF>
+A server **restart** (not a reload) is required after editing this. Verify:
+
+```sql
+SHOW shared_preload_libraries;   -- must contain 'pgrdf'
+```
+
+## Quickstart
+
+```sql
+-- One-time install
+CREATE EXTENSION pgrdf;
+
+-- Load a Turtle file from the server-side filesystem into graph 100
+SELECT pgrdf.load_turtle('/path/to/foaf.ttl', 100);
+
+-- Query it with SPARQL 1.1
+SELECT * FROM pgrdf.sparql($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  SELECT ?name WHERE { ?p foaf:name ?name } LIMIT 10
+$$);
+
+-- Reason over it (OWL 2 RL forward-chaining closure)
+SELECT pgrdf.materialize(100, 'owl-rl');
+```
+
+## Documentation
+
+- **Guide (using pgRDF):** <https://pgrdf.styk.tv/> and
+  [`guide/`](https://github.com/styk-tv/pgRDF/tree/main/guide) — install, loading
+  RDF, querying, and client recipes (Python, Rust, Node.js/TypeScript, Go).
+- **Engineering docs:**
+  [`docs/`](https://github.com/styk-tv/pgRDF/tree/main/docs) — architecture,
+  storage, query, inference, validation, release, roadmap.
+
+## Honest scope
+
+A few surfaces are gated on upstream crates, not defects: RDF 1.2 triple terms +
+the crates.io publish path are gated on the `reasonable` reasoner's RDF-1.2
+support landing upstream (ERRATA E-011 · `gtfierro/reasonable`); SHACL-SPARQL
+constraint execution is gated on `rudof`. The shipped surfaces are honest about
+what they cover.
+
+## License
+
+MIT — see [LICENSE](https://github.com/styk-tv/pgRDF/blob/main/LICENSE).
