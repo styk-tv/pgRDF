@@ -1,11 +1,18 @@
 name: ci
 on:
-  # Docs-only changes skip CI entirely — a markdown / docs / license edit must
-  # not trigger the full fmt + clippy + test + ~9-min regression build. main is
-  # not branch-protected (CI is advisory), so a skipped run does not block merge.
-  # A PR that touches ANY non-ignored path (code, SQL, compose, Cargo*, etc.)
-  # still runs the full suite — so release PRs keep their boot+version gate.
+  # Two cost controls keep CI cheap until it needs to be thorough:
+  #  1. Docs-only changes skip CI entirely (paths-ignore below) — a markdown /
+  #     docs / license edit must not trigger the fmt + clippy + test + ~9-min
+  #     regression build. main is not branch-protected (CI is advisory), so a
+  #     skipped run does not block merge.
+  #  2. Draft PRs run only the light between-commit checks (fmt + clippy). The
+  #     heavy `test` + `regression` jobs are gated (see their `if:`) to run only
+  #     when the PR is marked Ready for review, or on a push to main. Flipping a
+  #     draft to Ready re-triggers CI via the `ready_for_review` type below and
+  #     kicks off the full suite. A non-docs Ready PR (code, SQL, compose,
+  #     Cargo*, …) runs everything — so release PRs keep their boot+version gate.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
@@ -66,6 +73,9 @@ jobs:
 
   test:
     runs-on: ubuntu-22.04
+    # Heavy job — runs on pushes to main and on Ready (non-draft) PRs only.
+    # Draft PRs skip it and get fmt + clippy as the between-commit signal.
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
@@ -101,6 +111,8 @@ jobs:
   regression:
     runs-on: ubuntu-22.04
     needs: test
+    # Same draft gate as `test` (which it needs) — Ready PRs + main pushes only.
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     env:
       PGRDF_CONTAINER: pgrdf-pgrdf-postgres
     steps:
