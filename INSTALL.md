@@ -36,7 +36,6 @@ cargo pgrx init --pg17 /path/to/pg_config
 
 ```bash
 pgxn install pgrdf --pg_config /path/to/pg_config
-psql -d yourdb -c 'CREATE EXTENSION pgrdf;'
 ```
 
 If you prefer to build directly from the unpacked PGXN source archive:
@@ -44,8 +43,39 @@ If you prefer to build directly from the unpacked PGXN source archive:
 ```bash
 make PG_CONFIG=/path/to/pg_config
 make PG_CONFIG=/path/to/pg_config install
-psql -d yourdb -c 'CREATE EXTENSION pgrdf;'
 ```
+
+Either path installs the extension files (`pgrdf.so`, `pgrdf.control`, the SQL).
+**Do not run `CREATE EXTENSION pgrdf` yet** — first complete the required
+configuration below.
+
+## Required PostgreSQL configuration
+
+pgRDF **must** be in `shared_preload_libraries`: its `_PG_init()` registers the
+shared-memory dictionary cache and plan-cache atomics in the postmaster, which
+only happens at server startup. **Without this, `CREATE EXTENSION` succeeds but
+the first pgRDF function call panics with `PgAtomic was not initialized`.**
+
+1. Add `pgrdf` to `shared_preload_libraries` in `postgresql.conf`:
+
+   ```ini
+   shared_preload_libraries = 'pgrdf'
+   ```
+
+2. **Restart** the server (a reload is not enough — preload happens at postmaster
+   startup):
+
+   ```bash
+   pg_ctl restart -D /path/to/your/PGDATA      # or: systemctl restart postgresql
+   ```
+
+3. Verify, then create the extension:
+
+   ```bash
+   psql -d yourdb -c "SHOW shared_preload_libraries;"   -- must contain 'pgrdf'
+   psql -d yourdb -c 'CREATE EXTENSION pgrdf;'
+   psql -d yourdb -c "SELECT pgrdf.version();"
+   ```
 
 ## Maintainer release artifact
 
