@@ -855,21 +855,31 @@ fn carve_graph_neighbourhood(
             .unwrap_or_else(|e| panic!("carve_graph: dst partition creation failed: {e}"));
     }
 
-    // BFS the node frontier to `hops` over src's quads (UNION ⇒ dedup ⇒ terminate),
-    // then INSERT every src quad touching the frontier into dst. One set-based
-    // statement; the data-modifying `ins` CTE's RETURNING feeds the inserted count.
-    // Partition names are derived from validated non-negative BIGINTs.
+    // BFS the node frontier to `hops` over src's quads, then INSERT every src
+    // quad touching the frontier into dst. #32: BOTH the hop-expansion join and
+    // the final EXTRACT are INDEX-ONLY split unions, never an `OR`. An `OR` over
+    // (subject_id, object_id) forces a Bitmap Heap Scan — random heap reads,
+    // ~25 min on a 120 M-edge supernode; splitting it lets each arm ride its
+    // covering hexastore index (SPO for the subject side, OSP for the object
+    // side) as an Index-Only Scan (~42 s — ~35x at 8.2 B). The hop-expansion
+    // treats src as bidirectional edges via ONE frontier self-reference (a
+    // recursive CTE allows only one); the `subject_id NOT IN (frontier)` arm
+    // keeps the final UNION ALL exact (no double-count of edges with both
+    // endpoints in the frontier). One set-based statement; the data-modifying
+    // `ins` CTE's RETURNING feeds the inserted count. Result is identical to the
+    // prior OR form (regression 137/138/139); only the plan changes.
     let count: i64 = Spi::get_one_with_args(
         &format!(
             "WITH RECURSIVE frontier(node_id, hop) AS ( \
                  SELECT id, 0 FROM pgrdf._pgrdf_dictionary \
                   WHERE term_type = 1 AND lexical_value = ANY($1) \
                UNION \
-                 SELECT CASE WHEN q.subject_id = f.node_id THEN q.object_id ELSE q.subject_id END, \
-                        f.hop + 1 \
+                 SELECT e.to_node, f.hop + 1 \
                  FROM frontier f \
-                 JOIN pgrdf.{src_name} q \
-                   ON (q.subject_id = f.node_id OR q.object_id = f.node_id) \
+                 JOIN ( SELECT subject_id AS from_node, object_id AS to_node FROM pgrdf.{src_name} \
+                        UNION ALL \
+                        SELECT object_id AS from_node, subject_id AS to_node FROM pgrdf.{src_name} ) e \
+                   ON e.from_node = f.node_id \
                  WHERE f.hop < $2 \
              ), nodes AS (SELECT DISTINCT node_id FROM frontier), \
              ins AS ( \
@@ -878,7 +888,11 @@ fn carve_graph_neighbourhood(
                  SELECT DISTINCT q.subject_id, q.predicate_id, q.object_id, {dst}::bigint, q.is_inferred \
                  FROM pgrdf.{src_name} q \
                  WHERE q.subject_id IN (SELECT node_id FROM nodes) \
-                    OR q.object_id  IN (SELECT node_id FROM nodes) \
+               UNION ALL \
+                 SELECT DISTINCT q.subject_id, q.predicate_id, q.object_id, {dst}::bigint, q.is_inferred \
+                 FROM pgrdf.{src_name} q \
+                 WHERE q.object_id IN (SELECT node_id FROM nodes) \
+                   AND q.subject_id NOT IN (SELECT node_id FROM nodes) \
                  RETURNING 1 \
              ) \
              SELECT count(*)::bigint FROM ins"
