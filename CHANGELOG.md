@@ -6,6 +6,44 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.18] — 2026-06-30
+
+> Carve hardening + a `pg_dump` data-loss fix. The regression bar around the
+> carve chain is materially stronger; one DDL delta (the dictionary `pg_dump`
+> registration). `.so` + test + a single config-dump line.
+
+### Fixed — `pg_dump` silently omitted `_pgrdf_dictionary` (#35)
+
+`_pgrdf_dictionary` is an extension-member table but was never registered via
+`pg_extension_config_dump`, so a plain `pg_dump` skipped its **row data** — and
+because the runtime `add_graph` quad partitions are standalone tables that dump
+normally, a restore rebuilt every quad pointing at an **empty dictionary**
+(silent corruption; only the dict was lost). Registered it the same way as
+`_pgrdf_graphs` (O(1), no rewrite), in the base install **and** the
+`0.5.1 → 0.6.18` upgrade path. New `tests/regression/scripts/pg-dump-dict-roundtrip.sh`
+(dict canary + fresh-DB restore: dict/quads survive, zero orphan subjects),
+wired into CI's regression job.
+
+### Changed — index-only carve EXTRACT, never `OR` (#32)
+
+The neighbourhood `carve_graph` hop-expansion join and final EXTRACT used
+`(subject_id = node OR object_id = node)`, forcing a Bitmap Heap Scan (~25 min
+on a 120 M-edge supernode at 8.2 B scale). Both are now **index-only split
+unions** — the hop-expansion via a bidirectional-edges subquery (one recursive
+self-reference), the EXTRACT as `subject_id IN (frontier) UNION ALL object_id IN
+(frontier) AND subject_id NOT IN (frontier)` — flipping the plan to Index-Only
+Scans. **Result-identical** (137/138/139 green); measured ~42.7 s vs ~25 min
+(~35×) at scale (E160 trial).
+
+### Added — carve guard + edge-case regression coverage (#33)
+
+`139-carve-guards.sql` (+ a blank-node fixture) locks the carve guards the code
+already implements so the #32 rewrite (and future refactors) can't silently
+regress them: `src == dst` / negative `graph_id` panics, absent-src → 0 with no
+dst created, already-populated dst appends, `max_hops` ≫ diameter terminates,
+`is_inferred` carries into the slice, and blank-node frontier traversal — both
+`carve_graph` overloads.
+
 ## [0.6.17] — 2026-06-26
 
 > Carve by *query*: `carve_graph` gains a neighbourhood overload — the K-hop slice of a seed set.
