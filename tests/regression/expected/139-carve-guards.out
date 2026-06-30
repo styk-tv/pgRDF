@@ -1,0 +1,30 @@
+
+0
+t
+8
+src_quads_8: true
+pred_self_rejected: t
+nbhd_self_rejected: t
+pred_neg_dst_rejected: t
+nbhd_neg_src_rejected: t
+pred_absent_src_0: true
+pred_absent_no_dst_310: true
+nbhd_absent_src_0: true
+nbhd_absent_no_dst_311: true
+pred_knows_into_320_is_2: true
+dst320_after_first_2: true
+pred_knows_into_320_again_2: true
+dst320_appended_to_4: true
+nbhd_overhops_99_stable_8: true
+src_unchanged_8: true
+dict_unchanged_14: true
+src300_now_9: true
+pred_knows_with_inferred_3: true
+inferred_carried_to_slice_1: true
+t
+2
+blanknode_src_2: true
+nbhd_blanknode_1hop_2: true
+blanknode_slice_has_y: true
+
+1
