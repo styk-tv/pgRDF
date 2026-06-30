@@ -1,0 +1,2 @@
+<http://example.org/x> <http://example.org/link> _:b0 .
+_:b0 <http://example.org/link> <http://example.org/y> .
