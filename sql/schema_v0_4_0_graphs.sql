@@ -34,3 +34,14 @@ ON CONFLICT (graph_id) DO NOTHING;
 -- The empty filter string includes all rows. Slice 110 verifies the
 -- end-to-end round trip via tests/regression/scripts/pg-dump-roundtrip.sh.
 SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', '');
+
+-- #35: `_pgrdf_dictionary` is also an extension member, but was UNregistered —
+-- so a plain `pg_dump` skipped its row data and a restore rebuilt quads that
+-- point at an EMPTY dictionary (silent corruption: the runtime `add_graph`
+-- quad partitions are standalone tables and dump normally, so only the dict
+-- was lost). Register it the same way. O(1) — appends the table OID to the
+-- extension's `extconfig` array, no data movement / no rewrite of the dict
+-- heap. The dict table is created in `schema_v0_2_0` (loaded first via
+-- `extension_sql_file!`), so its OID is resolvable here. Round-trip covered by
+-- `tests/regression/scripts/pg-dump-roundtrip.sh`.
+SELECT pg_catalog.pg_extension_config_dump('_pgrdf_dictionary', '');
