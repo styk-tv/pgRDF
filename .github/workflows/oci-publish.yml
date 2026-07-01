@@ -90,8 +90,14 @@ jobs:
           docker run --rm -d --name gate-pg \
             -e POSTGRES_PASSWORD=v -e POSTGRES_USER=v -e POSTGRES_DB=v \
             postgres:17.4-bookworm
-          for i in $(seq 1 15); do
-            docker exec gate-pg pg_isready -U v >/dev/null 2>&1 && break
+          # Wait on a real query against db `v`, NOT bare pg_isready:
+          # pg_isready can report "ready" against the initdb bootstrap server,
+          # which then shuts down before the real server accepts CREATE EXTENSION
+          # ("FATAL: the database system is shutting down" — the v0.6.18 gate
+          # flake). A successful `SELECT 1` on db `v` only lands on the final,
+          # queryable server (the bootstrap server has no `v` role/db).
+          for i in $(seq 1 30); do
+            docker exec gate-pg psql -U v -d v -tAc "SELECT 1" >/dev/null 2>&1 && break
             sleep 1
           done
 
@@ -341,8 +347,10 @@ jobs:
           docker run --rm -d --name smoke-pg \
             -e POSTGRES_PASSWORD=v -e POSTGRES_USER=v -e POSTGRES_DB=v \
             postgres:17.4-bookworm
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            docker exec smoke-pg pg_isready -U v >/dev/null 2>&1 && break
+          # Same readiness fix as the boot gate — wait on a real SELECT 1 so we
+          # never race the initdb bootstrap-server shutdown window.
+          for i in $(seq 1 30); do
+            docker exec smoke-pg psql -U v -d v -tAc "SELECT 1" >/dev/null 2>&1 && break
             sleep 1
           done
 
