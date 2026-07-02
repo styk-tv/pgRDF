@@ -2191,8 +2191,16 @@ struct AggregateSpec {
     synth_aliases: Vec<String>,
     func: AggregateFn,
     distinct: bool,
-    /// The aggregate's argument variable. `None` only for `COUNT(*)`.
+    /// The aggregate's argument variable — the fast path (dict-id /
+    /// text-lane column reference). `None` for `COUNT(*)` and for
+    /// expression arguments.
     arg_var: Option<String>,
+    /// Issue #50: a non-variable argument expression — `SUM(?a * ?b)`,
+    /// `AVG(?v / 2)`, `COUNT(IF(…))`, or a BIND output the
+    /// substitution pass rewrote in. Lowered through the expression
+    /// translators at SELECT-build time. Mutually exclusive with
+    /// `arg_var`.
+    arg_expr: Option<Expression>,
 }
 
 #[derive(Clone)]
@@ -2640,11 +2648,37 @@ fn substitute_binds(
         } => {
             // Binds BELOW a Group feed the grouped rows; recurse so a
             // `Group { inner: <…BIND…> }` still substitutes. The
-            // aggregates/group-vars themselves are synthetic — leave.
+            // group-var names themselves are synthetic — leave. The
+            // aggregate ARGUMENTS, however, are bind consumers like
+            // any downstream position (issue #50 wall 2): the walk
+            // into `inner` has already accumulated the in-scope bind
+            // map, so `BIND(?w * ?d AS ?x) … SUM(?x)` rewrites to
+            // `SUM(?w * ?d)` here — chained BINDs resolve
+            // transitively because the map carries fully-substituted
+            // expressions.
+            let new_inner = substitute_binds(inner, binds, agg_synth);
+            let new_aggregates = aggregates
+                .iter()
+                .map(|(v, agg)| {
+                    let new_agg = match agg {
+                        AggregateExpression::FunctionCall {
+                            name,
+                            expr,
+                            distinct,
+                        } => AggregateExpression::FunctionCall {
+                            name: name.clone(),
+                            expr: subst_expr(expr, binds),
+                            distinct: *distinct,
+                        },
+                        AggregateExpression::CountSolutions { .. } => agg.clone(),
+                    };
+                    (v.clone(), new_agg)
+                })
+                .collect();
             GraphPattern::Group {
-                inner: Box::new(substitute_binds(inner, binds, agg_synth)),
+                inner: Box::new(new_inner),
                 variables: variables.clone(),
-                aggregates: aggregates.clone(),
+                aggregates: new_aggregates,
             }
         }
         // Values / Service / lifecycle leaves — nothing to rewrite.
@@ -2898,9 +2932,11 @@ fn expression_references_any(e: &Expression, names: &[String]) -> bool {
 }
 
 /// Lower a spargebra `AggregateExpression` into our AggregateSpec.
-/// Supported: COUNT(*), COUNT(?v) [DISTINCT], SUM(?v) [DISTINCT],
-/// AVG(?v), MIN(?v), MAX(?v), GROUP_CONCAT(?v [; SEPARATOR = "…"]),
-/// SAMPLE(?v). Custom IRI aggregates panic.
+/// Supported: COUNT(*), COUNT/SUM/AVG/MIN/MAX/GROUP_CONCAT/SAMPLE
+/// over a plain variable (the fast column-reference path) OR over an
+/// arbitrary expression (issue #50 — SPARQL 1.1 §18.2.4.1 allows any
+/// expression as the aggregate argument; lowered through the
+/// expression translators). Custom IRI aggregates panic.
 fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec {
     match agg {
         AggregateExpression::CountSolutions { distinct } => AggregateSpec {
@@ -2909,17 +2945,16 @@ fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec 
             func: AggregateFn::Count,
             distinct: *distinct,
             arg_var: None,
+            arg_expr: None,
         },
         AggregateExpression::FunctionCall {
             name,
             expr,
             distinct,
         } => {
-            let arg_var = match expr {
-                Expression::Variable(v) => v.as_str().to_string(),
-                other => panic!(
-                    "sparql: aggregate over non-variable expression not supported yet (got {other:?})"
-                ),
+            let (arg_var, arg_expr) = match expr {
+                Expression::Variable(v) => (Some(v.as_str().to_string()), None),
+                other => (None, Some(other.clone())),
             };
             let func = match name {
                 AggregateFunction::Count => AggregateFn::Count,
@@ -2940,7 +2975,8 @@ fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec 
                 synth_aliases: vec![synth_var.to_string()],
                 func,
                 distinct: *distinct,
-                arg_var: Some(arg_var),
+                arg_var,
+                arg_expr,
             }
         }
     }
@@ -4351,6 +4387,11 @@ fn translate_aggregate_lanes(
     anchors: &HashMap<String, (usize, &'static str)>,
     text_lane_vars: &HashSet<String>,
 ) -> String {
+    // Issue #50: a non-variable argument routes through the
+    // expression translators instead of the column-reference lanes.
+    if let Some(expr) = &agg.arg_expr {
+        return translate_aggregate_over_expression(agg, expr, anchors, text_lane_vars);
+    }
     let distinct = if agg.distinct { "DISTINCT " } else { "" };
     let lex_subselect = |var: &str| {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
@@ -4431,6 +4472,90 @@ fn translate_aggregate_lanes(
         }
         (AggregateFn::Sample, Some(var)) => format!("MIN({})", lex_subselect(var)),
         (_, None) => panic!("sparql: aggregate over `*` only supported for COUNT"),
+    }
+}
+
+/// Issue #50 — lower an aggregate whose argument is an arbitrary
+/// expression (`SUM(?a * ?b)`, `AVG(?v / 2)`, `COUNT(IF(…))`, a
+/// substituted BIND output) through the expression translators. The
+/// anchors the aggregate SELECT list sees are the same anchors a
+/// FILTER in the same query sees, so `expr_to_numeric_sql` /
+/// `expr_to_lexical_sql` apply directly — per-row NULL (a SPARQL
+/// type error / unbound) is skipped by the SQL aggregate, matching
+/// the plain-variable lanes' semantics.
+///
+/// Unlike a variable (whose per-row datatype varies, needing the
+/// numeric/lexical COALESCE dance), an expression has a static value
+/// lane: numeric when the numeric translator accepts it, else
+/// lexical. Numeric is preferred for MIN/MAX (§17.4 natural order).
+fn translate_aggregate_over_expression(
+    agg: &AggregateSpec,
+    expr: &Expression,
+    anchors: &HashMap<String, (usize, &'static str)>,
+    text_lane_vars: &HashSet<String>,
+) -> String {
+    // v1 deferral (documented in #50, NOT silently wrong): the
+    // expression translators are dict-id-lane only. A §8 UNION
+    // graph-text-lane variable inside an expression argument would
+    // read a TEXT column as a dict id — fail loudly instead.
+    let mut vars: HashSet<String> = HashSet::new();
+    collect_expr_vars(expr, &mut vars);
+    if let Some(v) = vars.iter().find(|v| text_lane_vars.contains(*v)) {
+        panic!(
+            "sparql: aggregate over an expression referencing the \
+             UNION graph-text-lane variable ?{v} not supported yet"
+        );
+    }
+    let distinct = if agg.distinct { "DISTINCT " } else { "" };
+    let numeric = expr_to_numeric_sql(expr, anchors);
+    let lexical = expr_to_lexical_sql(expr, anchors);
+    let numeric_or_panic = |lane: Option<String>, fn_name: &str| {
+        lane.unwrap_or_else(|| {
+            panic!("sparql: {fn_name} over expression not numerically translatable: {expr:?}")
+        })
+    };
+    match &agg.func {
+        AggregateFn::Count => {
+            // COUNT(expr) counts rows where the expression evaluates
+            // without error — either lane's NULL encodes the error.
+            let arg = numeric.or(lexical).unwrap_or_else(|| {
+                panic!("sparql: COUNT over expression not translatable: {expr:?}")
+            });
+            format!("COUNT({distinct}{arg})")
+        }
+        AggregateFn::Sum => format!("SUM({distinct}{})", numeric_or_panic(numeric, "SUM")),
+        AggregateFn::Avg => format!("AVG({distinct}{})", numeric_or_panic(numeric, "AVG")),
+        AggregateFn::Min => match (&numeric, &lexical) {
+            (Some(n), _) => format!("MIN({distinct}{n})::text"),
+            (None, Some(l)) => format!("MIN({distinct}{l})"),
+            (None, None) => {
+                panic!("sparql: MIN over expression not translatable: {expr:?}")
+            }
+        },
+        AggregateFn::Max => match (&numeric, &lexical) {
+            (Some(n), _) => format!("MAX({distinct}{n})::text"),
+            (None, Some(l)) => format!("MAX({distinct}{l})"),
+            (None, None) => {
+                panic!("sparql: MAX over expression not translatable: {expr:?}")
+            }
+        },
+        AggregateFn::GroupConcat { separator } => {
+            let arg = lexical
+                .or(numeric.map(|n| format!("({n})::text")))
+                .unwrap_or_else(|| {
+                    panic!("sparql: GROUP_CONCAT over expression not translatable: {expr:?}")
+                });
+            let escaped = separator.replace('\'', "''");
+            format!("STRING_AGG({distinct}{arg}, '{escaped}')")
+        }
+        AggregateFn::Sample => {
+            let arg = lexical
+                .or(numeric.map(|n| format!("({n})::text")))
+                .unwrap_or_else(|| {
+                    panic!("sparql: SAMPLE over expression not translatable: {expr:?}")
+                });
+            format!("MIN({arg})")
+        }
     }
 }
 
@@ -4713,6 +4838,21 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
         if let Some(av) = &a.arg_var {
             if !needed.contains(av) {
                 needed.push(av.clone());
+            }
+        }
+        // Issue #50: an expression argument needs every variable it
+        // references carried into the vK pool. Sorted so the column
+        // assignment (and therefore the generated SQL / plan-cache
+        // key) is deterministic across runs.
+        if let Some(e) = &a.arg_expr {
+            let mut vs: HashSet<String> = HashSet::new();
+            collect_expr_vars(e, &mut vs);
+            let mut vs: Vec<String> = vs.into_iter().collect();
+            vs.sort();
+            for v in vs {
+                if !needed.contains(&v) {
+                    needed.push(v);
+                }
             }
         }
     }
@@ -13909,5 +14049,166 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(sqrt_neg, 1, "sqrt(-4) is unbound, no SQL error");
+    }
+
+    // ── Issue #50: aggregates over expressions + BIND-produced vars ──
+
+    /// SUM over an inline arithmetic expression (§18.2.4.1).
+    #[pg_test]
+    fn agg_sum_over_expression() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:o1 ex:price 12 ; ex:qty 2 . \
+             ex:o2 ex:price 5 ; ex:qty 3 .', 0)",
+        )
+        .unwrap();
+        let total: String = Spi::get_one(
+            "SELECT j->>'total' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (SUM(?price * ?qty) AS ?total) \
+                  WHERE { ?o ex:price ?price ; ex:qty ?qty }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(total.parse::<f64>().unwrap(), 39.0, "12*2 + 5*3 = 39");
+    }
+
+    /// The BIND-then-aggregate form must give the same result as the
+    /// inline form (issue #50 acceptance): the substitution pass
+    /// rewrites the aggregate argument.
+    #[pg_test]
+    fn agg_sum_over_bind_var() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:o1 ex:price 12 ; ex:qty 2 . \
+             ex:o2 ex:price 5 ; ex:qty 3 .', 0)",
+        )
+        .unwrap();
+        let total: String = Spi::get_one(
+            "SELECT j->>'total' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (SUM(?line) AS ?total) \
+                  WHERE { ?o ex:price ?price ; ex:qty ?qty . \
+                          BIND(?price * ?qty AS ?line) }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            total.parse::<f64>().unwrap(),
+            39.0,
+            "BIND(expr) + SUM(?x) must equal the inline SUM(expr)"
+        );
+    }
+
+    /// AVG over an expression with division.
+    #[pg_test]
+    fn agg_avg_over_expression() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 10 . ex:b ex:v 30 .', 0)",
+        )
+        .unwrap();
+        let avg: String = Spi::get_one(
+            "SELECT j->>'a' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (AVG(?v / 2) AS ?a) WHERE { ?s ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(avg.parse::<f64>().unwrap(), 10.0, "avg(5, 15) = 10");
+    }
+
+    /// COUNT over an expression counts only rows where it evaluates —
+    /// a non-numeric value yields NULL (type error) and is skipped.
+    #[pg_test]
+    fn agg_count_over_expression_skips_errors() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 10 . ex:b ex:v \"oops\" .', 0)",
+        )
+        .unwrap();
+        let n: String = Spi::get_one(
+            "SELECT j->>'n' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (COUNT(?v * 1) AS ?n) WHERE { ?s ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            n, "1",
+            "the string row errors out of ?v * 1 and is not counted"
+        );
+    }
+
+    /// MIN/MAX over a numeric expression.
+    #[pg_test]
+    fn agg_min_max_over_expression() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 3 . ex:b ex:v 7 .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (MIN(?v * 2) AS ?lo) (MAX(?v * 2) AS ?hi) \
+                  WHERE { ?s ex:v ?v }') AS s(j)
+              WHERE (j->>'lo')::numeric = 6 AND (j->>'hi')::numeric = 14",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// GROUP_CONCAT over a lexical-lane expression (IF with string
+    /// branches) — the else-lane routing of the expression argument.
+    #[pg_test]
+    fn agg_group_concat_over_if_expression() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 10 .', 0)",
+        )
+        .unwrap();
+        let g: String = Spi::get_one(
+            "SELECT j->>'g' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (GROUP_CONCAT(IF(?v > 5, \"hi\", \"lo\")) AS ?g) \
+                  WHERE { ?s ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(g, "hi");
+    }
+
+    /// The scoring-loop shape end-to-end (estate GOAL, Motion A.5):
+    /// per-concept decayed weighted sum with a HAVING band — the
+    /// exact query pgCK's ε-materialize computes host-side today.
+    /// c1: 2·e⁰ + 1·e⁻¹ ≈ 2.36788; c2: 1·e⁰ = 1. HAVING > 2 → c1.
+    #[pg_test]
+    fn agg_scoring_shape_weighted_decay_with_having() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:s1 ex:concept ex:c1 ; ex:w 2 ; ex:age 0 . \
+             ex:s2 ex:concept ex:c1 ; ex:w 1 ; ex:age 10 . \
+             ex:s3 ex:concept ex:c2 ; ex:w 1 ; ex:age 0 .', 0)",
+        )
+        .unwrap();
+        let (c, score): (Option<String>, Option<String>) = Spi::get_two(
+            "SELECT j->>'c', j->>'score' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT ?c (SUM(?w * math:exp(-?age / 10.0)) AS ?score) \
+                  WHERE { ?sig ex:concept ?c ; ex:w ?w ; ex:age ?age } \
+                  GROUP BY ?c \
+                  HAVING(?score > 2)') AS s(j)",
+        )
+        .unwrap();
+        assert_eq!(c.unwrap(), "http://ex/c1", "only c1 clears the > 2 band");
+        let val: f64 = score.unwrap().parse().unwrap();
+        let expected = 2.0 + (-1.0f64).exp();
+        assert!(
+            (val - expected).abs() < 1e-9,
+            "score should be 2 + e^-1 ≈ {expected}, got {val}"
+        );
     }
 }
