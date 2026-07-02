@@ -451,6 +451,20 @@ Concrete shape:
       `xsd:numeric`, lex fallback), `GROUP_CONCAT`, `SAMPLE` with
       `GROUP BY` — over a single BGP **or over a UNION** (Phase F
       group F2; see "Aggregates over UNION" below)
+- ✅ Aggregates over **expressions** and over **BIND-produced
+      variables** (issue #50; SPARQL 1.1 §18.2.4.1) —
+      `SUM(?price * ?qty)`, `AVG(?v / 2)`, `COUNT(IF(…))`, and the
+      `BIND(expr AS ?x) … SUM(?x)` form (the substitution pass
+      rewrites the aggregate argument, so both forms lower
+      identically). The expression routes through the same
+      numeric/lexical translators a FILTER uses; per-row type
+      errors evaluate to NULL and are skipped by the SQL aggregate,
+      matching the plain-variable lanes. Composes with `DISTINCT`,
+      `HAVING`, and the `math:` extension tier — the decayed
+      weighted sum `SUM(?w * math:exp(-?age/?tau))` is a single
+      in-plan aggregate. One documented deferral: an expression
+      argument referencing a UNION *graph-text-lane* variable
+      (§8 case 1) fails loudly rather than mis-reading the lane.
 - ✅ `HAVING` — both by aggregate alias (`HAVING(?total > c)`)
       AND inline (`HAVING(SUM(?v) > c)`); also over an
       aggregate-of-UNION

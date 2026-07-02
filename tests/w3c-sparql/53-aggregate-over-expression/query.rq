@@ -1,0 +1,4 @@
+PREFIX ex: <http://example.org/>
+SELECT ?cust (SUM(?price * ?qty) AS ?total)
+WHERE { ?o ex:cust ?cust ; ex:price ?price ; ex:qty ?qty }
+GROUP BY ?cust

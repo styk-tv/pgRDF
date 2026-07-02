@@ -1,0 +1,5 @@
+@prefix ex: <http://example.org/> .
+
+ex:o1 ex:cust ex:alice ; ex:price 12 ; ex:qty 2 .
+ex:o2 ex:cust ex:alice ; ex:price 5  ; ex:qty 3 .
+ex:o3 ex:cust ex:bob   ; ex:price 7  ; ex:qty 1 .
