@@ -1,0 +1,1 @@
+known-divergence: #55 — HAVING resolves the SELECT alias (SQL-style); strict §18.2.4.4 algebra Extends after the HAVING filter, leaving the alias unbound
