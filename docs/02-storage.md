@@ -96,8 +96,17 @@ Three covering indexes (`INCLUDE (is_inferred)`):
 - `_pgrdf_idx_pos (predicate_id, object_id, subject_id)`
 - `_pgrdf_idx_osp (object_id, subject_id, predicate_id)`
 
-SOP / PSO / OPS join the index set in v0.3 once we measure the
-trade-off against ingestion write amplification.
+**Why three, not six.** These three cover all eight bound/unbound
+triple-pattern combinations (SPO serves S- and SP-bound, POS serves
+P- and PO-bound, OSP serves O- and OS-bound; any prefix is a range
+scan) — SOP / PSO / OPS would be redundant for coverage. What the
+missing three would buy is **sort order**: every join direction
+getting a leading-column index, so merge joins and `ORDER BY` never
+need a residual sort. At full-graph scale each extra permutation is
+another full-size index plus ingest write amplification, so they are
+deliberately not built here; the carve chain builds the full six-way
+hexastore **per carved graph**, where it is cheap (C3,
+[#20](https://github.com/styk-tv/pgRDF/issues/20)).
 
 `pgrdf.add_graph(g)` creates the LIST partition for graph `g`
 idempotently. `pgrdf.count_quads(g)` is a partition-pruning count.
