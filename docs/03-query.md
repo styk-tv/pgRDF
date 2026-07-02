@@ -270,6 +270,30 @@ path the guard actually cut bumps it); it may benignly over-count
 when the cut node was already reached by a shorter path (LLD v0.4
 §7.2 explicitly permits this).
 
+**`pgrdf.on_path_truncation` GUC — fail-closed truncation (#14).**
+String, `GucContext::Userset`, one of `'count' | 'warn' | 'error'`,
+default **`warn`**. The counter above is cumulative and
+cross-backend, so on its own a truncated walk is invisible to the
+caller that ran it; this GUC upgrades the per-query signal:
+
+* `count` — bump the counter only (the pre-#14 silent behaviour).
+* `warn` (default) — counter **plus a client-visible `WARNING`** per
+  truncated walk: a partial result is never silent.
+* `error` — **fail the query** (stable prefix `sparql: property path
+  truncated at pgrdf.path_max_depth=N`) instead of returning a
+  depth-truncated result. The fail-closed mode for closure queries —
+  e.g. an un-materialised `rdfs:subClassOf*` type-closure walk whose
+  under-collection would silently propagate into a carve slice.
+
+An unrecognised value warns and behaves as `warn` (a typo never
+*loosens* the policy to silent). Companion carve-side report: the
+neighbourhood `carve_graph` counts the **boundary** (distinct nodes
+one edge beyond the `max_hops` rim that the cap kept out of the
+slice) in the same statement and reports a non-zero boundary via
+`NOTICE` — `max_hops` legitimately *defines* the slice, so a
+continuing neighbourhood is a report, not an error. Regression
+`140-truncation-fail-closed.sql` locks all four behaviours.
+
 **`|` alternation (E4).** `?s (a|b) ?o` is the union of the
 per-predicate scans — equivalently a single scan over the predicate
 **set** (`predicate_id IN (a, b)`). It is a **non-reflexive single

@@ -63,10 +63,12 @@ http://example.org/c
 
 11
 0
+WARNING:  sparql: property path truncated at pgrdf.path_max_depth=3 — longer paths are missing from this result; raise pgrdf.path_max_depth, or SET pgrdf.on_path_truncation = 'error' to forbid partial results
 http://example.org/c1
 http://example.org/c2
 http://example.org/c3
 http://example.org/c4
+WARNING:  sparql: property path truncated at pgrdf.path_max_depth=3 — longer paths are missing from this result; raise pgrdf.path_max_depth, or SET pgrdf.on_path_truncation = 'error' to forbid partial results
 4
 t
 

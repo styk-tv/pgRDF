@@ -3,13 +3,18 @@
 t
 8
 src_quads_8: true
+NOTICE:  carve_graph: neighbourhood continues beyond max_hops=0 — 3 adjacent node(s) were not expanded; the slice is the requested 0-hop ball, not a closed component (raise max_hops to widen)
 carve_0hop_returns_3: true
 dst201_quads_3: true
+NOTICE:  carve_graph: neighbourhood continues beyond max_hops=1 — 3 adjacent node(s) were not expanded; the slice is the requested 1-hop ball, not a closed component (raise max_hops to widen)
 carve_1hop_returns_6: true
 dst202_quads_6: true
+NOTICE:  carve_graph: neighbourhood continues beyond max_hops=2 — 2 adjacent node(s) were not expanded; the slice is the requested 2-hop ball, not a closed component (raise max_hops to widen)
 carve_2hop_returns_8: true
 carve_unknown_returns_0: true
+NOTICE:  carve_graph: neighbourhood continues beyond max_hops=0 — 5 adjacent node(s) were not expanded; the slice is the requested 0-hop ball, not a closed component (raise max_hops to widen)
 carve_multiseed_returns_6: true
+NOTICE:  carve_graph: neighbourhood continues beyond max_hops=1 — 3 adjacent node(s) were not expanded; the slice is the requested 1-hop ball, not a closed component (raise max_hops to widen)
 carve_default_hop_returns_6: true
 src_unchanged_8: true
 dict_unchanged_14: true

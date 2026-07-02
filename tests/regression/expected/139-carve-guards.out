@@ -24,6 +24,7 @@ inferred_carried_to_slice_1: true
 t
 2
 blanknode_src_2: true
+NOTICE:  carve_graph: neighbourhood continues beyond max_hops=1 — 1 adjacent node(s) were not expanded; the slice is the requested 1-hop ball, not a closed component (raise max_hops to widen)
 nbhd_blanknode_1hop_2: true
 blanknode_slice_has_y: true
 

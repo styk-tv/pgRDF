@@ -51,9 +51,20 @@ for sql in "${tests[@]}"; do
 
   # `-X` skips ~/.psqlrc; `-A` unaligned; `-t` tuples-only; `-q` quiet;
   # `-v ON_ERROR_STOP=1` so first error halts the script for that file.
-  actual="$("${RUNTIME}" exec -i "${CONTAINER}" \
-    psql -U "${PSQL_USER}" -d "${PSQL_DB}" \
-    -X -A -t -q -v ON_ERROR_STOP=1 < "${sql}" 2>&1)" || true
+  #
+  # Message-vs-row ordering (#14): goldens capture NOTICE/WARNING lines,
+  # so their position must be deterministic. Two raciness sources fixed
+  # here: (1) `2>&1` must happen INSIDE the container — `docker exec`
+  # carries stdout and stderr as separately-multiplexed streams, so a
+  # host-side merge interleaves them in arrival order (observed flapping,
+  # even mid-line); (2) `stdbuf -o0 -e0` write-through, since psql's
+  # stdout is block-buffered into a pipe while stderr is not. Merged
+  # in-container and unbuffered, the order is psql's program order:
+  # a statement's messages print during result consumption, BEFORE its
+  # rows.
+  actual="$("${RUNTIME}" exec -i "${CONTAINER}" sh -c \
+    "stdbuf -o0 -e0 psql -U '${PSQL_USER}' -d '${PSQL_DB}' \
+     -X -A -t -q -v ON_ERROR_STOP=1 2>&1" < "${sql}")" || true
 
   if [ ! -f "${expected}" ] || [ "${ACCEPT}" = "1" ]; then
     printf '%s\n' "${actual}" > "${expected}"
