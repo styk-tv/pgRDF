@@ -1,0 +1,6 @@
+PREFIX ex: <http://example.org/>
+SELECT ?item
+       (IF(?price > 20, "premium", "standard") AS ?tier)
+       (ROUND(?price) AS ?rounded)
+       (ABS(?price) AS ?magnitude)
+WHERE { ?item ex:price ?price }

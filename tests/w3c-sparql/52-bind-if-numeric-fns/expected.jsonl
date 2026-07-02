@@ -1,0 +1,3 @@
+{"item": "http://example.org/gadget", "tier": "standard", "rounded": "12", "magnitude": "12.4"}
+{"item": "http://example.org/gizmo", "tier": "standard", "rounded": "-3", "magnitude": "3.5"}
+{"item": "http://example.org/widget", "tier": "premium", "rounded": "26", "magnitude": "25.5"}
