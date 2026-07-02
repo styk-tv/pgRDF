@@ -6871,6 +6871,25 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
                 .unwrap_or(0);
             if hit != 0 {
                 crate::storage::shmem_cache::note_path_depth_truncation();
+                // Issue #14 — fail-closed truncation. The counter is
+                // cumulative and cross-backend, so on its own a
+                // truncated walk is invisible to the caller that ran
+                // it; `pgrdf.on_path_truncation` upgrades the signal.
+                match crate::query::guc::on_path_truncation() {
+                    crate::query::guc::OnPathTruncation::Count => {}
+                    crate::query::guc::OnPathTruncation::Warn => pgrx::warning!(
+                        "sparql: property path truncated at pgrdf.path_max_depth={} — \
+                         longer paths are missing from this result; raise \
+                         pgrdf.path_max_depth, or SET pgrdf.on_path_truncation = 'error' \
+                         to forbid partial results",
+                        crate::query::guc::path_max_depth()
+                    ),
+                    crate::query::guc::OnPathTruncation::Error => panic!(
+                        "sparql: property path truncated at pgrdf.path_max_depth={} \
+                         (pgrdf.on_path_truncation=error forbids partial results)",
+                        crate::query::guc::path_max_depth()
+                    ),
+                }
             }
         }
         rows
@@ -12970,6 +12989,63 @@ mod tests {
              (got {trunc_after})"
         );
         Spi::run("RESET pgrdf.path_max_depth").unwrap();
+    }
+
+    /// Issue #14 — `pgrdf.on_path_truncation = 'error'` fails the
+    /// query instead of returning a depth-truncated partial result
+    /// (the fail-closed mode for closure walks feeding a carve).
+    #[pg_test(
+        error = "sparql: property path truncated at pgrdf.path_max_depth=2 (pgrdf.on_path_truncation=error forbids partial results)"
+    )]
+    fn path_truncation_error_mode_fails_closed() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:t1 ex:sub ex:t2 . ex:t2 ex:sub ex:t3 .
+                 ex:t3 ex:sub ex:t4 . ex:t4 ex:sub ex:t5 .',
+                9203)",
+        )
+        .unwrap();
+        Spi::run("SET pgrdf.path_max_depth = 2").unwrap();
+        Spi::run("SET pgrdf.on_path_truncation = 'error'").unwrap();
+        Spi::run(
+            "SELECT count(*) FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?o WHERE { ex:t1 ex:sub+ ?o }')",
+        )
+        .unwrap();
+    }
+
+    /// Issue #14 — `'count'` restores the pre-#14 silent behaviour:
+    /// truncated rows come back, only the counter moves. Locks the
+    /// GUC parse arm and that `error` mode is genuinely opt-in.
+    #[pg_test]
+    fn path_truncation_count_mode_returns_truncated_rows() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:u1 ex:sub ex:u2 . ex:u2 ex:sub ex:u3 .
+                 ex:u3 ex:sub ex:u4 . ex:u4 ex:sub ex:u5 .',
+                9204)",
+        )
+        .unwrap();
+        Spi::run("SET pgrdf.path_max_depth = 2").unwrap();
+        Spi::run("SET pgrdf.on_path_truncation = 'count'").unwrap();
+        Spi::run("SELECT pgrdf.shmem_reset()").unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> \
+                  SELECT ?o WHERE { ex:u1 ex:sub+ ?o }')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 2, "cap 2 over a length-4 chain → u2, u3 only");
+        let trunc: i64 = Spi::get_one("SELECT (pgrdf.stats()->>'path_depth_truncations')::bigint")
+            .unwrap()
+            .unwrap();
+        assert!(trunc > 0, "count mode still bumps the counter");
+        Spi::run("RESET pgrdf.path_max_depth").unwrap();
+        Spi::run("RESET pgrdf.on_path_truncation").unwrap();
     }
 
     /// E3 invariant A in miniature — `*` is the reflexive-transitive

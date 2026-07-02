@@ -868,7 +868,16 @@ fn carve_graph_neighbourhood(
     // endpoints in the frontier). One set-based statement; the data-modifying
     // `ins` CTE's RETURNING feeds the inserted count. Result is identical to the
     // prior OR form (regression 137/138/139); only the plan changes.
-    let count: i64 = Spi::get_one_with_args(
+    // Issue #14 (§4b.3 "report what it dropped"): the same statement also
+    // counts the BOUNDARY — distinct nodes one edge past the hop-cap rim
+    // that the cap kept out of the slice. Computed from the `frontier`
+    // rows at `hop = $2` with the same split-union index-only edge
+    // expansion as the hop walk (never an `OR`), so it costs one extra
+    // rim expansion, not a second BFS. A non-zero boundary is REPORTED
+    // via NOTICE — `max_hops` legitimately *defines* the slice (a K-hop
+    // ball), so a continuing neighbourhood is not an error; a silent
+    // partial closure is.
+    let (count, boundary): (Option<i64>, Option<i64>) = Spi::get_two_with_args(
         &format!(
             "WITH RECURSIVE frontier(node_id, hop) AS ( \
                  SELECT id, 0 FROM pgrdf._pgrdf_dictionary \
@@ -894,13 +903,31 @@ fn carve_graph_neighbourhood(
                  WHERE q.object_id IN (SELECT node_id FROM nodes) \
                    AND q.subject_id NOT IN (SELECT node_id FROM nodes) \
                  RETURNING 1 \
+             ), \
+             boundary AS ( \
+                 SELECT count(DISTINCT e.to_node)::bigint AS n \
+                 FROM (SELECT node_id FROM frontier WHERE hop = $2) rim \
+                 JOIN ( SELECT subject_id AS from_node, object_id AS to_node FROM pgrdf.{src_name} \
+                        UNION ALL \
+                        SELECT object_id AS from_node, subject_id AS to_node FROM pgrdf.{src_name} ) e \
+                   ON e.from_node = rim.node_id \
+                 WHERE e.to_node NOT IN (SELECT node_id FROM nodes) \
              ) \
-             SELECT count(*)::bigint FROM ins"
+             SELECT (SELECT count(*)::bigint FROM ins), (SELECT n FROM boundary)"
         ),
         &[seed_iris.into(), hops.into()],
     )
-    .unwrap_or_else(|e| panic!("carve_graph: neighbourhood carve failed: {e}"))
-    .unwrap_or(0);
+    .unwrap_or_else(|e| panic!("carve_graph: neighbourhood carve failed: {e}"));
+    let count = count.unwrap_or(0);
+    let boundary = boundary.unwrap_or(0);
+
+    if boundary > 0 {
+        pgrx::notice!(
+            "carve_graph: neighbourhood continues beyond max_hops={hops} — {boundary} adjacent \
+             node(s) were not expanded; the slice is the requested {hops}-hop ball, not a closed \
+             component (raise max_hops to widen)"
+        );
+    }
 
     count
 }
@@ -1976,6 +2003,40 @@ mod tests {
         let _ = Spi::get_one::<i64>(
             "SELECT pgrdf.move_graph('http://example.org/missing-src', \
                                      'http://example.org/g7-mv-dst')",
+        );
+    }
+
+    /// Issue #14 — the boundary-report CTE must not change carve
+    /// results. Chain a—b—c: a 1-hop carve from `a` reaches nodes
+    /// {a,b}, extracts BOTH edges (b→c rides its subject), and has a
+    /// boundary of exactly {c} (reported via NOTICE — text locked by
+    /// regression 140); a 2-hop carve closes the component (boundary
+    /// 0, no NOTICE) with the same quad count.
+    #[pg_test]
+    fn carve_neighbourhood_boundary_report_count_invariant() {
+        Spi::run("SELECT pgrdf.add_graph(9310)").unwrap();
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:a ex:p ex:b . ex:b ex:p ex:c .',
+                9310)",
+        )
+        .unwrap();
+        let one_hop: i64 =
+            Spi::get_one("SELECT pgrdf.carve_graph(9310, ARRAY['http://example.com/a'], 9311, 1)")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            one_hop, 2,
+            "1-hop ball {{a,b}} extracts both edges (b→c via its subject)"
+        );
+        let two_hop: i64 =
+            Spi::get_one("SELECT pgrdf.carve_graph(9310, ARRAY['http://example.com/a'], 9312, 2)")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            two_hop, 2,
+            "2-hop closes the component — same quads, boundary 0"
         );
     }
 }

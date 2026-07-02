@@ -1,0 +1,14 @@
+NOTICE:  extension "pgrdf" already exists, skipping
+t
+4
+warn
+WARNING:  sparql: property path truncated at pgrdf.path_max_depth=2 — longer paths are missing from this result; raise pgrdf.path_max_depth, or SET pgrdf.on_path_truncation = 'error' to forbid partial results
+warn_rows_2: true
+error_mode_fails_closed: t
+error_mode_undercap_ok_4: true
+count_rows_2: true
+t
+2
+NOTICE:  carve_graph: neighbourhood continues beyond max_hops=1 — 1 adjacent node(s) were not expanded; the slice is the requested 1-hop ball, not a closed component (raise max_hops to widen)
+carve_1hop_2: true
+carve_2hop_2: true

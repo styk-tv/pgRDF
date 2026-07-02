@@ -35,6 +35,28 @@ pub(crate) const MAX_PATH_MAX_DEPTH: i32 = 1024;
 /// affects that session's query plans, never another backend).
 pub(crate) static PATH_MAX_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_PATH_MAX_DEPTH);
 
+/// `pgrdf.on_path_truncation` — what a query does when a recursive
+/// property-path walk (`+` / `*`) actually hits `pgrdf.path_max_depth`
+/// (issue #14, fail-closed truncation; detected by the per-`+`
+/// truncation probe, so a cycle that terminates naturally never
+/// triggers it):
+///
+/// * `count` — the pre-#14 behaviour: bump the cumulative
+///   `pgrdf.stats().path_depth_truncations` counter and return the
+///   (depth-limited) rows silently.
+/// * `warn` (default) — `count` plus a client-visible WARNING per
+///   truncated walk, so a partial result is never silent.
+/// * `error` — fail the query with a stable-prefix error instead of
+///   returning a partial result. The fail-closed mode for closure
+///   queries (e.g. an un-materialised `rdfs:subClassOf*` type-closure
+///   walk feeding a carve) where under-collection would silently
+///   propagate into a curated slice.
+///
+/// An unrecognised value logs a warning and behaves as `warn` (the
+/// default — honest but non-fatal).
+pub(crate) static ON_PATH_TRUNCATION: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"warn"));
+
 // ─────────────────────────────────────────────────────────────────────
 // TA-7 — dict-path GUCs
 // ─────────────────────────────────────────────────────────────────────
@@ -224,6 +246,21 @@ pub fn register() {
         GucFlags::default(),
     );
     GucRegistry::define_string_guc(
+        c"pgrdf.on_path_truncation",
+        c"Behaviour when a property-path walk hits pgrdf.path_max_depth.",
+        c"One of 'count' | 'warn' | 'error'. 'count' silently bumps \
+          pgrdf.stats().path_depth_truncations (the pre-#14 \
+          behaviour); 'warn' (default) additionally raises a \
+          client-visible WARNING per truncated walk so a partial \
+          result is never silent; 'error' fails the query instead of \
+          returning a depth-truncated result — the fail-closed mode \
+          for closure queries feeding a carve. An unrecognised value \
+          logs a warning and behaves as 'warn'.",
+        &ON_PATH_TRUNCATION,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
         c"pgrdf.ingest_dict_path",
         c"Dict-resolution path used by parse_turtle / load_turtle.",
         c"One of 'baseline' | 'batched' | 'shmem_warm' | 'combined'. \
@@ -358,6 +395,36 @@ pub(crate) fn ingest_dict_path() -> IngestDictPath {
 /// `ANALYZE` after writing inferred triples (M1; default on).
 pub(crate) fn auto_analyze() -> bool {
     AUTO_ANALYZE.get()
+}
+
+/// Parsed `pgrdf.on_path_truncation` policy (issue #14).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum OnPathTruncation {
+    /// Bump `path_depth_truncations` only (silent; pre-#14 behaviour).
+    Count,
+    /// Counter + a client-visible WARNING per truncated walk.
+    Warn,
+    /// Fail the query rather than return a depth-truncated result.
+    Error,
+}
+
+/// Resolved `pgrdf.on_path_truncation` for this session. An
+/// unrecognised value warns (once per read) and behaves as `Warn` —
+/// the default is already the honest mode, so a typo never *loosens*
+/// the policy to silent.
+pub(crate) fn on_path_truncation() -> OnPathTruncation {
+    let raw = ON_PATH_TRUNCATION.get();
+    match raw.as_ref().and_then(|c| c.to_str().ok()) {
+        Some("count") => OnPathTruncation::Count,
+        Some("warn") | None => OnPathTruncation::Warn,
+        Some("error") => OnPathTruncation::Error,
+        Some(other) => {
+            pgrx::warning!(
+                "pgrdf.on_path_truncation: unrecognised value '{other}' — behaving as 'warn'"
+            );
+            OnPathTruncation::Warn
+        }
+    }
 }
 
 /// Resolved `pgrdf.dict_batch_size` for this call. Returns at least
