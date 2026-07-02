@@ -143,6 +143,16 @@ SELECT * FROM pgrdf.sparql(
              FILTER(?age >= 30 && REGEX(?n, "^A", "i")) }'
 );
 
+-- Derived measures in-plan: IF, ROUND/ABS/CEIL/FLOOR, and the XPath
+-- math extension namespace (math:exp / math:log / math:sqrt / math:pow)
+SELECT * FROM pgrdf.sparql(
+  'PREFIX ex:   <http://example.com/>
+   PREFIX math: <http://www.w3.org/2005/xpath-functions/math#>
+   SELECT ?s (IF(?age > 28, "senior", "junior") AS ?band)
+          (math:exp(-?age / 10.0) AS ?decay)
+     WHERE { ?s ex:age ?age }'
+);
+
 -- OPTIONAL — mbox stays NULL when the person has no foaf:mbox
 SELECT * FROM pgrdf.sparql(
   'PREFIX foaf: <http://xmlns.com/foaf/0.1/>

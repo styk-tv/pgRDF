@@ -2768,7 +2768,9 @@ fn scope_var_name(scope: &Option<GraphScope>) -> Option<String> {
 /// Supported today:
 ///   * Literal / NamedNode / Variable (text form).
 ///   * STR / LANG / DATATYPE / UCASE / LCASE / STRLEN-as-text.
-///   * Arithmetic, cast to text.
+///   * IF(cond, then, else) — string- or numeric-valued branches.
+///   * Arithmetic, ABS / ROUND / CEIL / FLOOR / RAND, and the
+///     math# extension tier (exp / log / sqrt / pow), cast to text.
 ///   * CONCAT(?a, ?b, …) → Postgres `concat`.
 /// Anything else returns None (translator panics with a clear
 /// "BIND expression not translatable" message).
@@ -6038,14 +6040,108 @@ fn expr_to_numeric_sql(
         )),
         Expression::UnaryMinus(a) => Some(format!("(-{})", expr_to_numeric_sql(a, anchors)?)),
         Expression::UnaryPlus(a) => expr_to_numeric_sql(a, anchors),
+        // IF(cond, then, else) — SPARQL 1.1 §17.4.1.2, numeric-valued
+        // branches. Lowered as the *simple* CASE form `CASE (cond)
+        // WHEN TRUE … WHEN FALSE … END` (no ELSE): a NULL condition —
+        // our encoding of a SPARQL type error — matches neither arm
+        // and yields NULL/unbound. The searched `CASE WHEN cond THEN
+        // … ELSE …` form would silently route an errored condition
+        // into the else branch, which §17.4.1.2 forbids (an errored
+        // condition errors the whole IF).
+        Expression::If(cond, then_e, else_e) => {
+            let c = translate_filter(cond, anchors)?;
+            let t = expr_to_numeric_sql(then_e, anchors)?;
+            let e = expr_to_numeric_sql(else_e, anchors)?;
+            Some(format!(
+                "(CASE ({c}) WHEN TRUE THEN {t} WHEN FALSE THEN {e} END)"
+            ))
+        }
         // STRLEN(?v) → length of lexical_value
         Expression::FunctionCall(Function::StrLen, args) if args.len() == 1 => {
             let lex = expr_to_lexical_sql(&args[0], anchors)?;
             Some(format!("length({lex})::numeric"))
         }
+        // SPARQL 1.1 §17.4.4 numeric functions over the numeric lane.
+        Expression::FunctionCall(Function::Abs, args) if args.len() == 1 => {
+            let x = expr_to_numeric_sql(&args[0], anchors)?;
+            Some(format!("abs({x})"))
+        }
+        Expression::FunctionCall(Function::Ceil, args) if args.len() == 1 => {
+            let x = expr_to_numeric_sql(&args[0], anchors)?;
+            Some(format!("ceil({x})"))
+        }
+        Expression::FunctionCall(Function::Floor, args) if args.len() == 1 => {
+            let x = expr_to_numeric_sql(&args[0], anchors)?;
+            Some(format!("floor({x})"))
+        }
+        // fn:round rounds half toward POSITIVE INFINITY (ROUND(-2.5)
+        // = -2); Postgres round() is half-away-from-zero (→ -3).
+        // floor(x + 0.5) implements the XPath rule for both signs.
+        Expression::FunctionCall(Function::Round, args) if args.len() == 1 => {
+            let x = expr_to_numeric_sql(&args[0], anchors)?;
+            Some(format!("floor({x} + 0.5)"))
+        }
+        // RAND() → a double in [0,1). Nondeterministic by construction
+        // — golden / differential-oracle fixtures must not assert its
+        // value, only its range.
+        Expression::FunctionCall(Function::Rand, args) if args.is_empty() => {
+            Some("random()::numeric".to_string())
+        }
+        // Extension tier: the XPath math namespace
+        // (http://www.w3.org/2005/xpath-functions/math#), the vendor
+        // surface other engines expose for these functions, so queries
+        // stay portable. XPath math ops are xs:double ops, hence the
+        // float8 round-trip. Domain violations (log of ≤0, sqrt of
+        // negative, 0^negative, exp overflow) yield NULL — SPARQL
+        // "type error → unbound" — never a SQL abort. Unknown math#
+        // locals fall through to None and fail loudly upstream.
+        Expression::FunctionCall(Function::Custom(iri), args)
+            if iri.as_str().starts_with(XPATH_MATH_NS) =>
+        {
+            let local = &iri.as_str()[XPATH_MATH_NS.len()..];
+            match (local, args.len()) {
+                ("exp", 1) => {
+                    let x = expr_to_numeric_sql(&args[0], anchors)?;
+                    // float8 exp overflows above ln(f64::MAX) ≈ 709.78.
+                    Some(format!(
+                        "(CASE WHEN {x} <= 709 THEN exp(({x})::float8)::numeric END)"
+                    ))
+                }
+                // math:log is the NATURAL logarithm (XPath F&O §4.8.3).
+                ("log", 1) => {
+                    let x = expr_to_numeric_sql(&args[0], anchors)?;
+                    Some(format!(
+                        "(CASE WHEN {x} > 0 THEN ln(({x})::float8)::numeric END)"
+                    ))
+                }
+                ("sqrt", 1) => {
+                    let x = expr_to_numeric_sql(&args[0], anchors)?;
+                    Some(format!(
+                        "(CASE WHEN {x} >= 0 THEN sqrt(({x})::float8)::numeric END)"
+                    ))
+                }
+                ("pow", 2) => {
+                    let x = expr_to_numeric_sql(&args[0], anchors)?;
+                    let y = expr_to_numeric_sql(&args[1], anchors)?;
+                    Some(format!(
+                        "(CASE WHEN ({x}) = 0 AND ({y}) < 0 THEN NULL \
+                               WHEN ({x}) < 0 AND ({y}) <> floor({y}) THEN NULL \
+                               ELSE power(({x})::float8, ({y})::float8)::numeric END)"
+                    ))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
+
+/// The XPath math function namespace — pgRDF's extension-function
+/// tier (issue #51 tier 2). Chosen over an invented vendor IRI
+/// because it is what other SPARQL engines expose for the same
+/// functions, keeping queries portable. Supported locals: `exp`,
+/// `log` (natural), `sqrt`, `pow`.
+const XPATH_MATH_NS: &str = "http://www.w3.org/2005/xpath-functions/math#";
 
 fn translate_numeric_cmp(
     a: &Expression,
@@ -6151,6 +6247,19 @@ fn expr_to_lexical_sql(
         Expression::FunctionCall(Function::LCase, inner) if inner.len() == 1 => {
             let s = expr_to_lexical_sql(&inner[0], anchors)?;
             Some(format!("lower({s})"))
+        }
+        // IF(cond, then, else) with string-valued branches — same
+        // simple-CASE lowering as the numeric arm (see
+        // expr_to_numeric_sql): a NULL (errored) condition matches
+        // neither TRUE nor FALSE and yields NULL/unbound, per
+        // SPARQL 1.1 §17.4.1.2.
+        Expression::If(cond, then_e, else_e) => {
+            let c = translate_filter(cond, anchors)?;
+            let t = expr_to_lexical_sql(then_e, anchors)?;
+            let els = expr_to_lexical_sql(else_e, anchors)?;
+            Some(format!(
+                "(CASE ({c}) WHEN TRUE THEN {t} WHEN FALSE THEN {els} END)"
+            ))
         }
         _ => None,
     }
@@ -13532,5 +13641,273 @@ mod tests {
             len, 11,
             "DISTINCT dedups books×2 → 'books|tools' (len 11), not 'books|books|tools'"
         );
+    }
+
+    // ── Issue #51: expression surface — IF, §17.4.4 numeric fns, math# tier ──
+
+    /// IF with string-valued branches in BIND (§17.4.1.2).
+    #[pg_test]
+    fn bind_if_string_branches() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:alice ex:age 30 . ex:bob ex:age 25 .', 0)",
+        )
+        .unwrap();
+        let band: String = Spi::get_one(
+            "SELECT j->>'band' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT ?s (IF(?age > 28, \"senior\", \"junior\") AS ?band) \
+                  WHERE { ?s ex:age ?age } ORDER BY ?s') AS s(j) LIMIT 1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(band, "senior", "alice (30) crosses the > 28 band");
+    }
+
+    /// IF with numeric-valued branches — routed through the numeric
+    /// lane, emitted as text like every other BIND output.
+    #[pg_test]
+    fn bind_if_numeric_branches() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 10 . ex:b ex:v 2 .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (IF(?v > 5, ?v * 2, 0) AS ?x) WHERE { ?s ex:v ?v }') AS s(j)
+              WHERE (j->>'x')::numeric IN (20, 0)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 2, "10 → 20 (then-branch), 2 → 0 (else-branch)");
+    }
+
+    /// §17.4.1.2: an errored condition errors the whole IF → the
+    /// bound variable is UNBOUND, not silently the else branch. A
+    /// plain string compared numerically is our NULL-encoded type
+    /// error; the simple-CASE lowering must yield NULL.
+    #[pg_test]
+    fn bind_if_errored_condition_is_unbound() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:name \"Alice\" .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (IF(?name > 5, \"a\", \"b\") AS ?x) \
+                  WHERE { ?s ex:name ?name }') AS s(j)
+              WHERE j->>'x' IS NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            n, 1,
+            "errored IF condition must yield unbound, not the else branch"
+        );
+    }
+
+    /// ABS in FILTER (§17.4.4.1) — the numeric lane serves FILTER
+    /// comparisons directly.
+    #[pg_test]
+    fn filter_abs() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v -10 . ex:b ex:v 3 .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT ?s WHERE { ?s ex:v ?v FILTER(ABS(?v) > 5) }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1, "only |-10| = 10 clears > 5");
+    }
+
+    /// fn:round rounds half toward POSITIVE infinity: ROUND(2.5) = 3
+    /// but ROUND(-2.5) = -2 (Postgres round() would give -3 — the
+    /// exact divergence the floor(x + 0.5) lowering exists for).
+    #[pg_test]
+    fn bind_round_half_toward_positive_infinity() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:pos ex:v 2.5 . ex:neg ex:v -2.5 .', 0)",
+        )
+        .unwrap();
+        let neg: String = Spi::get_one(
+            "SELECT j->>'r' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (ROUND(?v) AS ?r) WHERE { ex:neg ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            neg.parse::<f64>().unwrap(),
+            -2.0,
+            "ROUND(-2.5) is -2 per XPath fn:round, not Postgres' -3"
+        );
+        let pos: String = Spi::get_one(
+            "SELECT j->>'r' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (ROUND(?v) AS ?r) WHERE { ex:pos ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(pos.parse::<f64>().unwrap(), 3.0);
+    }
+
+    /// CEIL / FLOOR (§17.4.4.2/.3) in projection expressions.
+    #[pg_test]
+    fn bind_ceil_floor() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 2.2 .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (CEIL(?v) AS ?c) (FLOOR(?v) AS ?f) \
+                  WHERE { ?s ex:v ?v }') AS s(j)
+              WHERE (j->>'c')::numeric = 3 AND (j->>'f')::numeric = 2",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// RAND() (§17.4.4.4) — nondeterministic; assert only the [0,1)
+    /// contract, never a value.
+    #[pg_test]
+    fn bind_rand_in_range() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 1 .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  SELECT (RAND() AS ?r) WHERE { ?s ex:v ?v }') AS s(j)
+              WHERE (j->>'r')::numeric >= 0 AND (j->>'r')::numeric < 1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1, "RAND() must land in [0,1)");
+    }
+
+    /// math:exp — the extension tier's headline (the scoring-loop
+    /// decay factor). exp(0) = 1 exactly; exp(1) = e within float8.
+    #[pg_test]
+    fn bind_math_exp() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:zero ex:v 0 . ex:one ex:v 1 .', 0)",
+        )
+        .unwrap();
+        let e: String = Spi::get_one(
+            "SELECT j->>'y' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:exp(?v) AS ?y) WHERE { ex:one ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        let val: f64 = e.parse().unwrap();
+        assert!(
+            (val - std::f64::consts::E).abs() < 1e-9,
+            "math:exp(1) should be e, got {val}"
+        );
+    }
+
+    /// The scoring-loop shape end-to-end at the expression level: a
+    /// time-decay factor exp(-age/tau) as a pure in-plan derivation.
+    /// (The SUM over it lands with #50.)
+    #[pg_test]
+    fn bind_math_exp_decay_shape() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:sig ex:age 10 .', 0)",
+        )
+        .unwrap();
+        let d: String = Spi::get_one(
+            "SELECT j->>'decay' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:exp(-?age / 10.0) AS ?decay) \
+                  WHERE { ?s ex:age ?age }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        let val: f64 = d.parse().unwrap();
+        assert!(
+            (val - (-1.0f64).exp()).abs() < 1e-9,
+            "exp(-10/10) should be e^-1 ≈ 0.36788, got {val}"
+        );
+    }
+
+    /// math:sqrt and math:pow in FILTER and projection.
+    #[pg_test]
+    fn math_sqrt_pow() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 16 . ex:b ex:v 9 .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT ?s WHERE { ?s ex:v ?v FILTER(math:sqrt(?v) >= 4) }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1, "sqrt(16)=4 passes, sqrt(9)=3 drops");
+        let sq: String = Spi::get_one(
+            "SELECT j->>'sq' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:pow(?v, 2) AS ?sq) WHERE { ex:a ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(sq.parse::<f64>().unwrap(), 256.0);
+    }
+
+    /// Domain violations yield UNBOUND (SPARQL type error → NULL),
+    /// never a SQL abort: log of zero, sqrt of a negative.
+    #[pg_test]
+    fn math_domain_violation_is_unbound() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:z ex:v 0 . ex:neg ex:v -4 .', 0)",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:log(?v) AS ?l) (math:sqrt(?v) AS ?r) \
+                  WHERE { ?s ex:v ?v }') AS s(j)
+              WHERE j->>'l' IS NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 2, "log(0) and log(-4) are both unbound, no SQL error");
+        let sqrt_neg: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:sqrt(?v) AS ?r) WHERE { ex:neg ex:v ?v }') AS s(j)
+              WHERE j->>'r' IS NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(sqrt_neg, 1, "sqrt(-4) is unbound, no SQL error");
     }
 }

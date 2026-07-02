@@ -390,7 +390,9 @@ Concrete shape:
 - ✅ `SELECT` (explicit projection or `SELECT *`); `ASK`
 - ✅ FILTER — identity, boolean, term-type, BOUND, numeric
       ordering, REGEX, IN, STR, LANG, DATATYPE, UCASE, LCASE,
-      STRLEN, CONTAINS, STRSTARTS, STRENDS, arithmetic
+      STRLEN, CONTAINS, STRSTARTS, STRENDS, arithmetic, IF,
+      ABS / ROUND / CEIL / FLOOR / RAND (§17.4.4), and the
+      `math:` extension tier (see the BIND entry below)
 - ✅ Solution modifiers — DISTINCT, REDUCED, LIMIT, OFFSET, ORDER BY
 - ✅ OPTIONAL — single AND multi-triple groups, chained, nested
       (Phase F group F1). The whole N-triple right side emits as a
@@ -454,9 +456,29 @@ Concrete shape:
       aggregate-of-UNION
 - ✅ `BIND(expr AS ?v)` — projection (Literal / NamedNode /
       Variable, STR / LANG / DATATYPE / UCASE / LCASE / STRLEN,
-      arithmetic, CONCAT) **and downstream** (Phase F group F2; the
-      v0.3 projection-only limitation is lifted — see "Downstream
-      BIND" below)
+      arithmetic, CONCAT, `IF(cond, then, else)` with string- or
+      numeric-valued branches, ABS / ROUND / CEIL / FLOOR / RAND)
+      **and downstream** (Phase F group F2; the v0.3
+      projection-only limitation is lifted — see "Downstream BIND"
+      below). `IF` lowers as the simple-CASE form `CASE (cond)
+      WHEN TRUE … WHEN FALSE … END` so an errored (NULL) condition
+      yields UNBOUND per §17.4.1.2 — never the else branch.
+      `ROUND` follows XPath `fn:round`
+      (half-toward-positive-infinity: `ROUND(-2.5)` = `-2`),
+      lowered as `floor(x + 0.5)` because Postgres `round()` is
+      half-away-from-zero.
+- ✅ Extension functions (issue #51 tier 2) — the XPath math
+      namespace `http://www.w3.org/2005/xpath-functions/math#`,
+      chosen because it is what other SPARQL engines expose for
+      the same functions, so queries stay portable. Supported:
+      `math:exp`, `math:log` (natural), `math:sqrt`,
+      `math:pow(x, y)` — each lowered onto the native Postgres
+      float8 function (XPath math ops are `xs:double` ops). Domain
+      violations (`log` of ≤ 0, `sqrt` of a negative,
+      `0^negative`, `exp` overflow) yield UNBOUND (SPARQL type
+      error → NULL), never a SQL abort. Unknown `math:` locals and
+      any other custom-IRI function keep failing loudly — no
+      silent NULL.
 - ✅ Downstream `BIND` (Phase F group F2) — a `BIND`-introduced
       variable is usable in a textually-later FILTER, a later
       triple's variable position (BGP join key), and a chained BIND
