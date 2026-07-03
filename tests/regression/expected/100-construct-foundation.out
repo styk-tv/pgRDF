@@ -3,7 +3,7 @@
 4
 1
 iri|http://example.com/t1|iri|http://example.com/t2|literal|x|http://www.w3.org/2001/XMLSchema#string
-3
+1
 1
 literal|42|http://www.w3.org/2001/XMLSchema#integer
 0
