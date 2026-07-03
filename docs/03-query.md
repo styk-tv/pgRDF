@@ -491,7 +491,18 @@ Concrete shape:
       (§8 case 1) fails loudly rather than mis-reading the lane.
 - ✅ `HAVING` — both by aggregate alias (`HAVING(?total > c)`)
       AND inline (`HAVING(SUM(?v) > c)`); also over an
-      aggregate-of-UNION
+      aggregate-of-UNION. **The alias form is a deliberate pgRDF
+      extension** (issue #55, SQL affinity): strict W3C SPARQL 1.1
+      §18.2.4.4 evaluates `HAVING` on the algebra *before* the
+      SELECT `AS ?total` Extend binds, so a strict engine leaves
+      `?total` unbound and returns zero rows — pgRDF resolves the
+      alias and returns the intended rows. It is a strict
+      **superset**: every spec-legal query (the inline
+      `HAVING(SUM(?v) > c)` form) behaves identically here and in a
+      strict engine, so the **inline form is the portable choice**.
+      The W3C differential oracle (#17) reports this as a tracked
+      `known-divergence` on fixture `08-aggregates-having` — a
+      documented, intended difference, not a defect.
 - ✅ `BIND(expr AS ?v)` — projection (Literal / NamedNode /
       Variable, STR / LANG / DATATYPE / UCASE / LCASE / STRLEN,
       arithmetic, CONCAT, `IF(cond, then, else)` with string- or
