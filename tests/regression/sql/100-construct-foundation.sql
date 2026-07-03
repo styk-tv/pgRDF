@@ -21,9 +21,11 @@
 --
 --   A. Constant-only template, single solution — one row carrying
 --      the constant template, structured shape verified.
---   B. Constant-only template, N solutions — N identical rows (one
---      per solution per W3C 1.1 §16.2's "solution sequence is the
---      BGP's; multiplicity matters").
+--   B. Constant-only template, N solutions — ONE triple (#54). A
+--      CONSTRUCT result is an RDF graph (a set), so N identical
+--      triples from N solutions collapse to one; the solution
+--      sequence's multiplicity does not survive into the graph
+--      (W3C 1.1 §16.2).
 --   C. Multi-position constant types — IRI subject, IRI predicate,
 --      typed-literal object (xsd:integer). Datatype IRI surfaces
 --      verbatim in the term cell.
@@ -101,15 +103,18 @@ FROM pgrdf.construct(
   'WHERE { <http://example.com/s> <http://example.com/p> <http://example.com/o> }'
 ) AS s(j);
 
--- ─── Invariant B: constant template, three solutions, three rows ─
+-- ─── Invariant B: constant template, three solutions → ONE triple ─
+-- §16.2 set semantics (#54): the WHERE matches three solutions, but
+-- the constant template yields the SAME triple each time, so the
+-- output graph holds it once. b_row_count is 1, not 3.
 SELECT count(*)::bigint AS b_row_count
   FROM pgrdf.construct(
     'CONSTRUCT { <http://example.com/tag> <http://example.com/k> "v" } '
     'WHERE { ?s <http://example.com/k> ?o }'
   ) AS s(j);
 
--- All three rows must carry the same constant template payload —
--- verify by counting distinct row shapes.
+-- The single surviving row carries the constant template payload —
+-- b_distinct_rows equals b_row_count (both 1) after set dedup.
 SELECT count(DISTINCT j)::bigint AS b_distinct_rows
   FROM pgrdf.construct(
     'CONSTRUCT { <http://example.com/tag> <http://example.com/k> "v" } '
