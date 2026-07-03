@@ -93,7 +93,16 @@ pub fn run(cfg: &Config) -> Result<Totals, String> {
         let test_dir = cfg.fixtures_dir.join(name);
         let gid = graph_id_for(name);
         let sql = assemble_sql(&test_dir, &gid).map_err(|e| format!("{name}: {e}"))?;
-        let raw = engine(&cfg.engine_cmd, &sql)?;
+        let (raw, engine_ok) = engine(&cfg.engine_cmd, &sql)?;
+        if !engine_ok {
+            // psql exited non-zero under ON_ERROR_STOP=1 — the fixture's
+            // SQL errored. Hard FAIL regardless of golden/oracle (never
+            // baseline it either): otherwise an erroring zero-result
+            // fixture matches an empty golden and reads as green.
+            println!("  {RED}FAIL{RESET}     {name} (engine SQL error — psql exited non-zero; see stderr)");
+            t.fail += 1;
+            continue;
+        }
         let actual = normalize(&raw);
 
         // Differential oracle pass. BEFORE the baseline branch on
@@ -239,12 +248,15 @@ fn assemble_sql(test_dir: &Path, gid: &str) -> Result<String, String> {
     Ok(sql)
 }
 
-/// Pipe the SQL stream to the engine command's stdin, return stdout.
-/// The engine's exit status is deliberately ignored (matching the
-/// bash harness): a psql SQL error yields partial output that the
-/// golden diff then reports — the failure surfaces where the
-/// evidence is.
-fn engine(engine_cmd: &str, sql: &str) -> Result<String, String> {
+/// Pipe the SQL stream to the engine command's stdin; return its stdout
+/// and whether psql exited 0. The exit status matters: run.sh drives
+/// psql with `ON_ERROR_STOP=1`, so a SQL error (e.g. a fixture query
+/// that panics in the engine) makes psql exit non-zero with empty
+/// stdout. If the caller ignored that, an erroring *zero-result*
+/// fixture would produce empty output that matches an empty golden and
+/// pass silently — defeating the harness. The caller treats a non-zero
+/// exit as a hard fixture failure.
+fn engine(engine_cmd: &str, sql: &str) -> Result<(String, bool), String> {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(engine_cmd)
@@ -261,7 +273,10 @@ fn engine(engine_cmd: &str, sql: &str) -> Result<String, String> {
     let out = child
         .wait_with_output()
         .map_err(|e| format!("engine wait: {e}"))?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    ))
 }
 
 /// Normalize raw engine output into canonical golden lines: keep only
@@ -278,23 +293,30 @@ fn normalize(raw: &str) -> Vec<String> {
     lines
 }
 
-/// Textual `"elapsed_ms": <number>` → `"elapsed_ms": 0`. Textual on
+/// Textual `"elapsed_ms": <number>` → `"elapsed_ms": 0`, for EVERY
+/// occurrence on the line (the removed bash normalizer used a global
+/// `sed s/.../g`; a single-occurrence replace would leave a second
+/// timing value in the row and flap the golden run-to-run). Textual on
 /// purpose: goldens are byte-compared against psql's jsonb rendering,
 /// so a parse → re-serialize round-trip would perturb formatting.
 fn zero_elapsed_ms(line: &str) -> String {
     const KEY: &str = "\"elapsed_ms\": ";
-    let Some(start) = line.find(KEY) else {
-        return line.to_string();
-    };
-    let num_start = start + KEY.len();
-    let rest = &line[num_start..];
-    let num_len = rest
-        .find(|c: char| !(c.is_ascii_digit() || "eE.+-".contains(c)))
-        .unwrap_or(rest.len());
-    if num_len == 0 {
-        return line.to_string();
+    let mut parts = line.split(KEY);
+    let mut out = String::from(parts.next().unwrap_or(""));
+    for seg in parts {
+        out.push_str(KEY);
+        // `seg` begins with the number that followed this KEY.
+        let num_len = seg
+            .find(|c: char| !(c.is_ascii_digit() || "eE.+-".contains(c)))
+            .unwrap_or(seg.len());
+        if num_len == 0 {
+            out.push_str(seg); // KEY not followed by a number — leave as-is
+        } else {
+            out.push('0');
+            out.push_str(&seg[num_len..]);
+        }
     }
-    format!("{}0{}", &line[..num_start], &rest[num_len..])
+    out
 }
 
 fn read_lines(path: &Path) -> Result<Vec<String>, String> {
@@ -437,6 +459,15 @@ mod tests {
         // SELECT rows untouched.
         let row = r#"{"s": "x", "n": "elapsed_ms is data here"}"#;
         assert_eq!(zero_elapsed_ms(row), row);
+        // EVERY occurrence is zeroed (global, matching the old sed -g),
+        // not just the first.
+        assert_eq!(
+            zero_elapsed_ms(r#"{"elapsed_ms": 7, "b": 1, "elapsed_ms": 42}"#),
+            r#"{"elapsed_ms": 0, "b": 1, "elapsed_ms": 0}"#
+        );
+        // Key with no following number is left intact.
+        let no_num = r#"{"elapsed_ms": "x"}"#;
+        assert_eq!(zero_elapsed_ms(no_num), no_num);
     }
 
     #[test]

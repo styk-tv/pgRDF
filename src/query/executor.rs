@@ -523,7 +523,9 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
             let params = params_take();
             let solutions = execute_count_only(&probe, &params);
             let rows = expand_template_per_solution(&template_rows, solutions);
-            return SetOfIterator::new(rows.into_iter());
+            // §16.2 set semantics (#54): a constant template over N
+            // solutions yields N identical triples → one in the graph.
+            return SetOfIterator::new(dedup_construct_rows(rows).into_iter());
         }
         let sql = build_bgp_sql(&ps);
         let truncation_probes = collect_truncation_probes(&ps);
@@ -535,7 +537,7 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
         };
         let solutions = execute(&plan).len();
         let rows = expand_template_per_solution(&template_rows, solutions);
-        return SetOfIterator::new(rows.into_iter());
+        return SetOfIterator::new(dedup_construct_rows(rows).into_iter());
     }
 
     // Per-solution path. Used whenever any template position needs
@@ -549,7 +551,10 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // positions of the same solution resolves to the same fresh
     // label (within-solution sameness per SPARQL 1.1 §16.2).
     let rows = execute_construct_per_solution_path(&ps, &slots, &template_vars);
-    SetOfIterator::new(rows.into_iter())
+    // §16.2 set semantics (#54): distinct solutions that produce the
+    // SAME ground triple collapse to one; minted-bnode rows across
+    // solutions differ in their fresh labels and correctly survive.
+    SetOfIterator::new(dedup_construct_rows(rows).into_iter())
 }
 
 /// Build + run the per-solution path. Mirrors the INSERT-WHERE
@@ -1464,6 +1469,37 @@ fn expand_template_per_solution(template_rows: &[Value], n_solutions: usize) -> 
     for _ in 0..n_solutions {
         for row in template_rows {
             out.push(pgrx::JsonB(row.clone()));
+        }
+    }
+    out
+}
+
+/// §16.2 set semantics (issue #54). A CONSTRUCT result is an RDF
+/// **graph** — a *set* of triples — so identical triples produced by
+/// different solutions collapse to one; the solution sequence's
+/// multiplicity does NOT survive into the output graph. Row-level
+/// dedup is exactly right here: a template blank node mints a **fresh
+/// label per solution** (see `construct` / `BNodeMinter`), so two
+/// rows for the "same" template triple across solutions differ in
+/// their minted labels and are genuinely distinct triples (§16.2.1) —
+/// they do not collapse. Only byte-identical rows (ground triples, or
+/// within-solution repeats) dedup. First-occurrence order is
+/// preserved for a deterministic result (the harness sorts anyway).
+fn dedup_construct_rows(rows: Vec<pgrx::JsonB>) -> Vec<pgrx::JsonB> {
+    // Nothing to collapse below two rows — skip the serialize+hash pass.
+    if rows.len() <= 1 {
+        return rows;
+    }
+    let mut seen: HashSet<String> = HashSet::with_capacity(rows.len());
+    let mut out: Vec<pgrx::JsonB> = Vec::with_capacity(rows.len());
+    for row in rows {
+        // The encoder builds every row's JSON with the same key
+        // insertion order (subject/predicate/object, then
+        // type/value/datatype/language), so the serialized string is
+        // a stable set key across rows.
+        let key = row.0.to_string();
+        if seen.insert(key) {
+            out.push(row);
         }
     }
     out
@@ -6150,10 +6186,32 @@ fn expr_to_numeric_sql(
                 return None;
             }
             let v = l.value();
-            if v.parse::<f64>().is_err() {
-                return None;
+            let parsed: f64 = match v.parse() {
+                Ok(f) => f,
+                Err(_) => return None,
+            };
+            // XSD admits INF / -INF / NaN as xsd:double / xsd:float
+            // lexemes, and Rust f64::parse accepts them — but the raw
+            // token would emit an unquoted `INF::numeric`, which
+            // Postgres reads as a column reference and aborts the whole
+            // query. Map the non-finite cases to Postgres' quoted
+            // numeric special-value literals (PG14+ numeric supports
+            // Infinity / -Infinity / NaN). Finite values keep their
+            // (safe, unchanged) unquoted lexical form.
+            if parsed.is_nan() {
+                Some("'NaN'::numeric".to_string())
+            } else if parsed.is_infinite() {
+                Some(
+                    if parsed > 0.0 {
+                        "'Infinity'::numeric"
+                    } else {
+                        "'-Infinity'::numeric"
+                    }
+                    .to_string(),
+                )
+            } else {
+                Some(format!("{v}::numeric"))
             }
-            Some(format!("{v}::numeric"))
         }
         // Arithmetic — both sides cast to numeric. NULL propagation
         // means a non-numeric operand drops the row (SPARQL "type
@@ -6242,9 +6300,11 @@ fn expr_to_numeric_sql(
             match (local, args.len()) {
                 ("exp", 1) => {
                     let x = expr_to_numeric_sql(&args[0], anchors)?;
-                    // float8 exp overflows above ln(f64::MAX) ≈ 709.78.
+                    // float8 exp overflows above ln(f64::MAX) ≈ 709.7827;
+                    // guard at 709.78 (exp(709.78) is representable) so
+                    // in-range inputs in (709, 709.78] still evaluate.
                     Some(format!(
-                        "(CASE WHEN {x} <= 709 THEN exp(({x})::float8)::numeric END)"
+                        "(CASE WHEN {x} <= 709.78 THEN exp(({x})::float8)::numeric END)"
                     ))
                 }
                 // math:log is the NATURAL logarithm (XPath F&O §4.8.3).
@@ -6263,9 +6323,17 @@ fn expr_to_numeric_sql(
                 ("pow", 2) => {
                     let x = expr_to_numeric_sql(&args[0], anchors)?;
                     let y = expr_to_numeric_sql(&args[1], anchors)?;
+                    // Guards, in order: 0^negative (undefined), negative
+                    // base to a non-integer exponent (complex result), and
+                    // the OVERFLOW guard — |x|^y overflows float8 when
+                    // y·ln|x| > ln(f64::MAX) ≈ 709.78. Without the last
+                    // arm `power(1e200, 2)` aborts the whole query,
+                    // contradicting this tier's "never a SQL abort"
+                    // contract (the `x <> 0` predicate keeps ln() off 0).
                     Some(format!(
                         "(CASE WHEN ({x}) = 0 AND ({y}) < 0 THEN NULL \
                                WHEN ({x}) < 0 AND ({y}) <> floor({y}) THEN NULL \
+                               WHEN ({x}) <> 0 AND ({y}) * ln(abs(({x})::float8)) > 709.78 THEN NULL \
                                ELSE power(({x})::float8, ({y})::float8)::numeric END)"
                     ))
                 }
@@ -11991,11 +12059,12 @@ mod tests {
         );
     }
 
-    /// Multi-solution path — 3 matches, constant template emits 3
-    /// identical rows (one burst per solution per W3C 1.1 §16.2's
-    /// "solution sequence is the BGP's; multiplicity matters").
+    /// §16.2 set semantics (#54) — a CONSTRUCT result is an RDF graph,
+    /// so a constant template over 3 solutions yields ONE triple, not
+    /// three. The solution sequence's multiplicity does not survive
+    /// into the output graph (a graph cannot hold a triple twice).
     #[pg_test]
-    fn construct_constant_template_three_solutions() {
+    fn construct_constant_template_dedups_to_set() {
         Spi::run(
             "SELECT pgrdf.parse_turtle(
                 '@prefix ex: <http://example.com/> .
@@ -12014,8 +12083,54 @@ mod tests {
         .unwrap()
         .unwrap_or(0);
         assert_eq!(
-            n, 3,
-            "three solutions × one template triple → three identical rows"
+            n, 1,
+            "three solutions × one constant template triple → ONE triple in the graph (§16.2 set)"
+        );
+    }
+
+    /// §16.2 set semantics (#54), the subtle half — distinct solutions
+    /// producing the SAME ground triple collapse to one, but a
+    /// template blank node mints a fresh label per solution, so its
+    /// rows stay distinct (§16.2.1). Here two subjects both map to the
+    /// same constant object triple (collapses) while the bnode arm
+    /// yields one fresh bnode per solution (survives).
+    #[pg_test]
+    fn construct_dedup_collapses_ground_keeps_bnodes() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:s1 ex:p ex:shared .
+                 ex:s2 ex:p ex:shared .',
+                9111)",
+        )
+        .unwrap();
+
+        // Ground triple `?o ex:seen true` — both solutions bind ?o to
+        // ex:shared, so the same ground triple twice → ONE.
+        let ground: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { ?o <http://example.com/seen> \"true\" } \
+                 WHERE { ?s <http://example.com/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            ground, 1,
+            "same ground triple from 2 solutions collapses to 1"
+        );
+
+        // Blank-node subject `_:b ex:for ?o` — a fresh bnode per
+        // solution → 2 genuinely-distinct triples, no collapse.
+        let bnodes: i64 = Spi::get_one(
+            "SELECT count(*)::BIGINT FROM pgrdf.construct(
+               'CONSTRUCT { _:b <http://example.com/for> ?o } \
+                 WHERE { ?s <http://example.com/p> ?o }')",
+        )
+        .unwrap()
+        .unwrap_or(0);
+        assert_eq!(
+            bnodes, 2,
+            "fresh bnode per solution → distinct triples survive dedup"
         );
     }
 
@@ -14125,6 +14240,107 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(sqrt_neg, 1, "sqrt(-4) is unbound, no SQL error");
+    }
+
+    /// Review hardening — `math:pow` overflow must yield UNBOUND, never
+    /// abort the query (the tier's "never a SQL abort" contract).
+    /// `pow(1e200, 2) = 1e400` overflows float8.
+    #[pg_test]
+    fn math_pow_overflow_is_unbound_not_abort() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:big ex:v 1e200 . ex:ok ex:v 3 .', 0)",
+        )
+        .unwrap();
+        // The whole query must evaluate (no abort); the overflow row is
+        // unbound, the in-range row is bound.
+        let unbound: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:pow(?v, 2) AS ?p) WHERE { ?s ex:v ?v }') AS s(j)
+              WHERE j->>'p' IS NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            unbound, 1,
+            "pow(1e200,2) overflows → unbound, not a SQL abort"
+        );
+        let ok: String = Spi::get_one(
+            "SELECT j->>'p' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:pow(?v, 2) AS ?p) WHERE { ex:ok ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ok.parse::<f64>().unwrap(),
+            9.0,
+            "in-range pow still evaluates"
+        );
+    }
+
+    /// Review hardening — `math:exp` guard must admit in-range inputs
+    /// up to ~709.78 (ln(f64::MAX)); the old `<= 709` cut off
+    /// representable values like exp(709.5).
+    #[pg_test]
+    fn math_exp_guard_admits_representable() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 709.5 . ex:over ex:v 710 .', 0)",
+        )
+        .unwrap();
+        let bound: String = Spi::get_one(
+            "SELECT j->>'y' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:exp(?v) AS ?y) WHERE { ex:a ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            bound.parse::<f64>().unwrap() > 1.0e307,
+            "exp(709.5) ≈ 1.2e308 is representable and must be bound, got {bound}"
+        );
+        // Genuinely-overflowing input (exp(710) > f64::MAX) is unbound,
+        // not an abort.
+        let over: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:exp(?v) AS ?y) WHERE { ex:over ex:v ?v }') AS s(j)
+              WHERE j->>'y' IS NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(over, 1, "exp(710) overflows → unbound");
+    }
+
+    /// Review hardening — an `INF` / `-INF` / `NaN` xsd:double constant
+    /// literal in the numeric lane must not abort the query with a
+    /// bogus 'column does not exist' (unquoted `INF::numeric`). A
+    /// finite value compared against `"INF"^^xsd:double` evaluates.
+    #[pg_test]
+    fn numeric_special_double_literal_does_not_abort() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 5 .', 0)",
+        )
+        .unwrap();
+        // ?v < INF is true for every finite ?v → the row survives the
+        // FILTER (and, critically, the query does not abort).
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex:  <http://ex/> \
+                  PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+                  SELECT ?s WHERE { ?s ex:v ?v \
+                     FILTER(?v < \"INF\"^^xsd:double) }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1, "?v < INF holds for finite ?v; no SQL abort");
     }
 
     // ── Issue #50: aggregates over expressions + BIND-produced vars ──
