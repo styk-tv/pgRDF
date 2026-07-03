@@ -1,0 +1,25 @@
+[package]
+name = "pgrdf-oracle"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "W3C SPARQL differential oracle for the pgRDF w3c-sparql harness (issue #17). Evaluates fixture queries with spareval (Oxigraph's SPARQL 1.1 evaluator) over an in-memory oxrdf dataset and compares against pgRDF engine output — canonicalization + blank-node isomorphism live here, where per-row text diffing cannot express them."
+
+# Standalone on purpose: the oracle must be buildable and runnable
+# without compiling the pgrx extension (the differential mode of
+# tests/w3c-sparql/run.sh is opt-in and out-of-band; see the design
+# on issue #17). Versions align with the root crate's oxrdf/oxttl/
+# spargebra pins; spareval 0.2 is the same build the root Cargo.lock
+# already carries transitively via oxigraph.
+
+[dependencies]
+oxrdf = "0.3"
+oxttl = "0.2"
+spargebra = "0.4"
+spareval = "0.2"
+serde_json = "1"
+sha1 = "0.11.0"
+
+[profile.release]
+opt-level = 2

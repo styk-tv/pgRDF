@@ -1,0 +1,1 @@
+known-divergence: #54 — CONSTRUCT emits one row per solution×template pair; W3C §16.2 defines the result as a graph (set semantics)

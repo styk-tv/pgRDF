@@ -194,15 +194,32 @@ jobs:
         # quads pointing at an empty dictionary. pg_dump is a separate binary, so
         # this is a shell harness, not a SQL golden.
         run: bash tests/regression/scripts/pg-dump-dict-roundtrip.sh
-      - name: Run W3C-shape SPARQL harness
+      - uses: dtolnay/rust-toolchain@stable
+        # The w3c harness is orchestrated by the standalone
+        # `pgrdf-oracle` binary (tests/oracle/ — issue #17); run.sh
+        # cargo-builds it host-side. Small crate (spareval + oxrdf,
+        # no pgrx), cached below.
+      - name: Cache pgrdf-oracle build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            tests/oracle/target
+          key: pgrdf-oracle-${{ runner.os }}-${{ hashFiles('tests/oracle/Cargo.lock') }}
+      - name: Run W3C-shape SPARQL harness (golden + differential oracle)
         env:
           PGRDF_RUNTIME: docker
-        # 51 hand-authored W3C-shape fixtures covering W3C SPARQL 1.1
+        # 53 hand-authored W3C-shape fixtures covering W3C SPARQL 1.1
         # SELECT / ASK / GRAPH / UPDATE / CONSTRUCT / DESCRIBE /
         # property-path / type-aware-ORDER-BY patterns + the Phase G
         # surface (48-51: RDFS/OWL-RL reasoning-profile-sensitive
-        # queries, TriG- and N-Quads-loaded GRAPH-scoped queries).
-        # See the `kind` / `setup.sql` conventions in
+        # queries, TriG- and N-Quads-loaded GRAPH-scoped queries) +
+        # expression/aggregate fixtures (52-53). Golden gate PLUS the
+        # #17 differential oracle: eligible fixtures are additionally
+        # evaluated with spareval and diffed under canonicalization +
+        # bnode isomorphism; an eligible divergence fails the job
+        # (known divergences are marker-tracked: #54, #55). See the
+        # `kind` / `setup.sql` / `oracle` conventions in
         # tests/w3c-sparql/README.md.
         run: bash tests/w3c-sparql/run.sh
       - name: Run W3C SHACL Core manifest gate
