@@ -13,8 +13,41 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 > extension tier — and aggregates now take an **arbitrary expression** or a
 > BIND-produced variable, so a decayed weighted sum is one in-plan query.
 > Truncated property-path walks stop being silent, and a **W3C differential
-> oracle** now stands guard over the whole SPARQL suite. `.so` + test-harness
-> only — **no schema delta**.
+> oracle** now stands guard over the whole SPARQL suite — and caught two real
+> conformance divergences on its first run (one fixed, one documented). `.so` +
+> test-harness only — **no schema delta**.
+
+### Fixed — CONSTRUCT result is a set, not a bag (#54)
+
+CONSTRUCT emitted one row per (solution × template-triple), so a template
+producing the same triple across N solutions returned it N times. W3C §16.2
+defines the result as an RDF **graph** — a set — which cannot hold a triple
+twice. Row-level dedup at the return; a template blank node mints a fresh label
+per solution (§16.2.1) so those rows correctly survive, only byte-identical
+ground triples collapse. Surfaced by the new differential oracle (#17) on its
+first run.
+
+### Fixed — expression-lane robustness (pre-ship review hardening)
+
+Caught by the pre-release code review, before the tag:
+- **`math:pow` overflow** (`power(1e200, 2)`) aborted the whole query, violating
+  the tier's "never a SQL abort" contract; now guarded (`y·ln|x| > 709.78 →`
+  UNBOUND) like `math:exp`.
+- **`INF` / `-INF` / `NaN` xsd:double literals** lowered to an unquoted
+  `INF::numeric` (a column reference → query abort on a valid SPARQL literal);
+  now mapped to Postgres' `'Infinity'` / `'-Infinity'` / `'NaN'` numeric
+  special-values.
+- **`math:exp`** guard widened `709 → 709.78` (ln(f64::MAX)) so representable
+  inputs like `exp(709.5)` evaluate instead of returning unbound.
+
+### Documented — `HAVING` alias resolution is an intentional pgRDF extension (#55)
+
+The oracle also surfaced that pgRDF resolves a SELECT alias inside `HAVING`
+(SQL-style) whereas strict §18.2.4.4 leaves it unbound. Resolved as a documented
+extension: it is a strict **superset** (the inline `HAVING(SUM(?v) > c)` form is
+portable and behaves identically), the more-useful behavior for pgRDF's
+SQL-minded audience, and never a wrong answer. Documented in `docs/03-query.md`;
+the oracle tracks it as a working-as-intended `known-divergence`.
 
 ### Added — SPARQL expression surface: `IF`, numeric functions, `math#` tier (#51)
 
@@ -65,8 +98,9 @@ isomorphism. All harness orchestration moved out of bash into the binary
 in CI: an `eligible` divergence fails the job, and every `ACCEPT`-regenerated
 golden is second-opinioned at generation time — closing the blind spot where an
 engine bug can be frozen into a passing golden. Its first run surfaced two
-executor behaviours goldens had codified as correct, now marker-tracked
-(#54 CONSTRUCT set-semantics, #55 HAVING alias resolution).
+executor behaviours goldens had codified as correct: #54 (CONSTRUCT set
+semantics) — **fixed** in this release — and #55 (HAVING alias) — **documented**
+as an intentional extension.
 
 ### Changed — hexastore docs: why three permutations, not six (#49, docs-only)
 
