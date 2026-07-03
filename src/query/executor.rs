@@ -1486,6 +1486,10 @@ fn expand_template_per_solution(template_rows: &[Value], n_solutions: usize) -> 
 /// within-solution repeats) dedup. First-occurrence order is
 /// preserved for a deterministic result (the harness sorts anyway).
 fn dedup_construct_rows(rows: Vec<pgrx::JsonB>) -> Vec<pgrx::JsonB> {
+    // Nothing to collapse below two rows — skip the serialize+hash pass.
+    if rows.len() <= 1 {
+        return rows;
+    }
     let mut seen: HashSet<String> = HashSet::with_capacity(rows.len());
     let mut out: Vec<pgrx::JsonB> = Vec::with_capacity(rows.len());
     for row in rows {
@@ -6182,10 +6186,32 @@ fn expr_to_numeric_sql(
                 return None;
             }
             let v = l.value();
-            if v.parse::<f64>().is_err() {
-                return None;
+            let parsed: f64 = match v.parse() {
+                Ok(f) => f,
+                Err(_) => return None,
+            };
+            // XSD admits INF / -INF / NaN as xsd:double / xsd:float
+            // lexemes, and Rust f64::parse accepts them — but the raw
+            // token would emit an unquoted `INF::numeric`, which
+            // Postgres reads as a column reference and aborts the whole
+            // query. Map the non-finite cases to Postgres' quoted
+            // numeric special-value literals (PG14+ numeric supports
+            // Infinity / -Infinity / NaN). Finite values keep their
+            // (safe, unchanged) unquoted lexical form.
+            if parsed.is_nan() {
+                Some("'NaN'::numeric".to_string())
+            } else if parsed.is_infinite() {
+                Some(
+                    if parsed > 0.0 {
+                        "'Infinity'::numeric"
+                    } else {
+                        "'-Infinity'::numeric"
+                    }
+                    .to_string(),
+                )
+            } else {
+                Some(format!("{v}::numeric"))
             }
-            Some(format!("{v}::numeric"))
         }
         // Arithmetic — both sides cast to numeric. NULL propagation
         // means a non-numeric operand drops the row (SPARQL "type
@@ -6274,9 +6300,11 @@ fn expr_to_numeric_sql(
             match (local, args.len()) {
                 ("exp", 1) => {
                     let x = expr_to_numeric_sql(&args[0], anchors)?;
-                    // float8 exp overflows above ln(f64::MAX) ≈ 709.78.
+                    // float8 exp overflows above ln(f64::MAX) ≈ 709.7827;
+                    // guard at 709.78 (exp(709.78) is representable) so
+                    // in-range inputs in (709, 709.78] still evaluate.
                     Some(format!(
-                        "(CASE WHEN {x} <= 709 THEN exp(({x})::float8)::numeric END)"
+                        "(CASE WHEN {x} <= 709.78 THEN exp(({x})::float8)::numeric END)"
                     ))
                 }
                 // math:log is the NATURAL logarithm (XPath F&O §4.8.3).
@@ -6295,9 +6323,17 @@ fn expr_to_numeric_sql(
                 ("pow", 2) => {
                     let x = expr_to_numeric_sql(&args[0], anchors)?;
                     let y = expr_to_numeric_sql(&args[1], anchors)?;
+                    // Guards, in order: 0^negative (undefined), negative
+                    // base to a non-integer exponent (complex result), and
+                    // the OVERFLOW guard — |x|^y overflows float8 when
+                    // y·ln|x| > ln(f64::MAX) ≈ 709.78. Without the last
+                    // arm `power(1e200, 2)` aborts the whole query,
+                    // contradicting this tier's "never a SQL abort"
+                    // contract (the `x <> 0` predicate keeps ln() off 0).
                     Some(format!(
                         "(CASE WHEN ({x}) = 0 AND ({y}) < 0 THEN NULL \
                                WHEN ({x}) < 0 AND ({y}) <> floor({y}) THEN NULL \
+                               WHEN ({x}) <> 0 AND ({y}) * ln(abs(({x})::float8)) > 709.78 THEN NULL \
                                ELSE power(({x})::float8, ({y})::float8)::numeric END)"
                     ))
                 }
@@ -14204,6 +14240,107 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(sqrt_neg, 1, "sqrt(-4) is unbound, no SQL error");
+    }
+
+    /// Review hardening — `math:pow` overflow must yield UNBOUND, never
+    /// abort the query (the tier's "never a SQL abort" contract).
+    /// `pow(1e200, 2) = 1e400` overflows float8.
+    #[pg_test]
+    fn math_pow_overflow_is_unbound_not_abort() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:big ex:v 1e200 . ex:ok ex:v 3 .', 0)",
+        )
+        .unwrap();
+        // The whole query must evaluate (no abort); the overflow row is
+        // unbound, the in-range row is bound.
+        let unbound: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:pow(?v, 2) AS ?p) WHERE { ?s ex:v ?v }') AS s(j)
+              WHERE j->>'p' IS NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            unbound, 1,
+            "pow(1e200,2) overflows → unbound, not a SQL abort"
+        );
+        let ok: String = Spi::get_one(
+            "SELECT j->>'p' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:pow(?v, 2) AS ?p) WHERE { ex:ok ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            ok.parse::<f64>().unwrap(),
+            9.0,
+            "in-range pow still evaluates"
+        );
+    }
+
+    /// Review hardening — `math:exp` guard must admit in-range inputs
+    /// up to ~709.78 (ln(f64::MAX)); the old `<= 709` cut off
+    /// representable values like exp(709.5).
+    #[pg_test]
+    fn math_exp_guard_admits_representable() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 709.5 . ex:over ex:v 710 .', 0)",
+        )
+        .unwrap();
+        let bound: String = Spi::get_one(
+            "SELECT j->>'y' FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:exp(?v) AS ?y) WHERE { ex:a ex:v ?v }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            bound.parse::<f64>().unwrap() > 1.0e307,
+            "exp(709.5) ≈ 1.2e308 is representable and must be bound, got {bound}"
+        );
+        // Genuinely-overflowing input (exp(710) > f64::MAX) is unbound,
+        // not an abort.
+        let over: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex: <http://ex/> \
+                  PREFIX math: <http://www.w3.org/2005/xpath-functions/math#> \
+                  SELECT (math:exp(?v) AS ?y) WHERE { ex:over ex:v ?v }') AS s(j)
+              WHERE j->>'y' IS NULL",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(over, 1, "exp(710) overflows → unbound");
+    }
+
+    /// Review hardening — an `INF` / `-INF` / `NaN` xsd:double constant
+    /// literal in the numeric lane must not abort the query with a
+    /// bogus 'column does not exist' (unquoted `INF::numeric`). A
+    /// finite value compared against `"INF"^^xsd:double` evaluates.
+    #[pg_test]
+    fn numeric_special_double_literal_does_not_abort() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('@prefix ex: <http://ex/> . \
+             ex:a ex:v 5 .', 0)",
+        )
+        .unwrap();
+        // ?v < INF is true for every finite ?v → the row survives the
+        // FILTER (and, critically, the query does not abort).
+        let n: i64 = Spi::get_one(
+            "SELECT count(*)::bigint FROM pgrdf.sparql(
+                 'PREFIX ex:  <http://ex/> \
+                  PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+                  SELECT ?s WHERE { ?s ex:v ?v \
+                     FILTER(?v < \"INF\"^^xsd:double) }') AS s(j)",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1, "?v < INF holds for finite ?v; no SQL abort");
     }
 
     // ── Issue #50: aggregates over expressions + BIND-produced vars ──
