@@ -1,7 +1,7 @@
--- pgrdf--0.5.1--0.6.18.sql
+-- pgrdf--0.5.1--0.6.19.sql
 --
--- Upgrade-path declaration from v0.5.1 (the earliest installable version) to v0.6.18. PostgreSQL
--- requires this file to exist for `ALTER EXTENSION pgrdf UPDATE TO '0.6.18'` to be a valid path.
+-- Upgrade-path declaration from v0.5.1 (the earliest installable version) to v0.6.19. PostgreSQL
+-- requires this file to exist for `ALTER EXTENSION pgrdf UPDATE TO '0.6.19'` to be a valid path.
 --
 -- Most v0.5.1 -> v0.6.x deltas are runtime / `.so` changes (the M4 join-order pin, auto-ANALYZE after
 -- materialize, the batched materialize write-back, the v0.6.2 parallel bulk loader, the v0.6.3/v0.6.4
@@ -72,7 +72,15 @@
 --   is the one DDL delta this release carries (R3 below): it registers
 --   `_pgrdf_dictionary` so `pg_dump` includes its row data.
 --
--- The authoritative full surface ships in the base install script `pgrdf--0.6.18.sql`, which a fresh
+--   v0.6.19 (SPARQL expression surface + differential oracle + fail-closed truncation) — NO schema
+--   delta. #51 adds `IF` / `ABS` / `ROUND` / `CEIL` / `FLOOR` / `RAND` + the XPath `math#` extension
+--   tier (`exp` / `log` / `sqrt` / `pow`) to the executor; #50 lets aggregates take an arbitrary
+--   expression or a BIND-produced variable (`SUM(?a * ?b)`); #14 adds the `pgrdf.on_path_truncation`
+--   GUC (count | warn | error) so a depth-truncated property-path walk is never a silent partial
+--   result. All are executor + GUC (`_PG_init`) + test-harness changes in the base `.so`, carrying no
+--   DDL. #17 lands the W3C differential oracle (a standalone test crate, no runtime surface).
+--
+-- The authoritative full surface ships in the base install script `pgrdf--0.6.19.sql`, which a fresh
 -- `CREATE EXTENSION pgrdf` installs. Tables here use unqualified names (the extension schema is in
 -- search_path during ALTER EXTENSION UPDATE), matching `sql/schema_v0_2_0.sql`.
 

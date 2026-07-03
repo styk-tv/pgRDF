@@ -6,6 +6,75 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.19] — 2026-07-03
+
+> The SPARQL **expression surface** grows the pieces a derived numeric measure
+> needs — inline `IF`, the standard numeric functions, and a portable `math#`
+> extension tier — and aggregates now take an **arbitrary expression** or a
+> BIND-produced variable, so a decayed weighted sum is one in-plan query.
+> Truncated property-path walks stop being silent, and a **W3C differential
+> oracle** now stands guard over the whole SPARQL suite. `.so` + test-harness
+> only — **no schema delta**.
+
+### Added — SPARQL expression surface: `IF`, numeric functions, `math#` tier (#51)
+
+`IF(cond, then, else)` (§17.4.1.2) in BIND / projection / FILTER, lowered as the
+simple-CASE form `CASE (cond) WHEN TRUE … WHEN FALSE … END` so an *errored*
+condition yields UNBOUND per spec — never the else branch. `ABS` / `CEIL` /
+`FLOOR` map 1:1; **`ROUND` follows XPath `fn:round`** (half-toward-positive-
+infinity: `ROUND(-2.5)` = `-2`) via `floor(x + 0.5)`, since Postgres `round()`
+is half-away-from-zero. `RAND()` → `random()`. **Extension tier:** the XPath
+math namespace `http://www.w3.org/2005/xpath-functions/math#` — `exp`, `log`
+(natural), `sqrt`, `pow` — chosen because other engines expose the same set, so
+queries stay portable. Domain violations (`log` of ≤ 0, `sqrt` of a negative,
+`0^negative`, `exp` overflow) yield UNBOUND (SPARQL type error → NULL), never a
+SQL abort; unknown `math#` locals and other custom-IRI functions keep failing
+loudly. W3C-oracle-eligible fixture `52-bind-if-numeric-fns`.
+
+### Added — aggregates over expressions and BIND-produced variables (#50)
+
+`SUM(?a * ?b)`, `AVG(?v / 2)`, `COUNT(IF(…))`, and the `BIND(expr AS ?x) …
+SUM(?x)` form (SPARQL 1.1 §18.2.4.1). The BIND form lowers identically to the
+inline form — the downstream-BIND substitution pass now also rewrites aggregate
+arguments — and the expression routes through the same numeric/lexical
+translators a FILTER uses, so per-row type errors evaluate to NULL and are
+skipped by the SQL aggregate. Composes with `DISTINCT` and `HAVING`. The scoring
+derivation `SUM(?w * math:exp(-?age / ?tau)) GROUP BY ?c HAVING(…)` is now a
+single in-plan aggregate. Fixture `53-aggregate-over-expression`.
+
+### Added — fail-closed on property-path truncation (#14)
+
+New GUC `pgrdf.on_path_truncation` = `count` | `warn` | `error` (Userset,
+default **`warn`**). A depth-truncated recursive path walk previously surfaced
+only in the cumulative cross-backend `path_depth_truncations` counter —
+invisible to the caller — so an un-materialised `rdfs:subClassOf*` closure walk
+could silently under-collect into a carve slice. `warn` now raises a
+client-visible WARNING per truncated walk; `error` fails the query outright (the
+fail-closed mode for closure queries feeding a carve). The neighbourhood
+`carve_graph` additionally reports its unexpanded **boundary** (nodes one edge
+past the `max_hops` rim) via NOTICE, counted in the same index-only statement.
+Regression `140-truncation-fail-closed.sql` locks all four behaviours.
+
+### Added — W3C SPARQL differential oracle (#17)
+
+`tests/oracle/` — a standalone `pgrdf-oracle` crate (spareval + oxrdf, no pgrx
+linkage) evaluates each oracle-eligible fixture with Oxigraph's W3C SPARQL 1.1
+evaluator and diffs engine-vs-oracle under canonicalization + blank-node
+isomorphism. All harness orchestration moved out of bash into the binary
+(`pgrdf-oracle run`); `tests/w3c-sparql/run.sh` is now one invocation. Always-on
+in CI: an `eligible` divergence fails the job, and every `ACCEPT`-regenerated
+golden is second-opinioned at generation time — closing the blind spot where an
+engine bug can be frozen into a passing golden. Its first run surfaced two
+executor behaviours goldens had codified as correct, now marker-tracked
+(#54 CONSTRUCT set-semantics, #55 HAVING alias resolution).
+
+### Changed — hexastore docs: why three permutations, not six (#49, docs-only)
+
+The LLD and `docs/02-storage.md` now state the full three-vs-six rationale in
+one place: three permutations (SPO/POS/OSP) give complete bound-subset coverage;
+the other three would add alternate **sort orders**, deliberately unaffordable
+at source-graph scale and built per carved graph instead (carve chain C3).
+
 ## [0.6.18] — 2026-06-30
 
 > Carve hardening + a `pg_dump` data-loss fix. The regression bar around the
