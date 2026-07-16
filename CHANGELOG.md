@@ -6,6 +6,22 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Added — PostgreSQL 18 support; pgrx 0.16.1 → 0.19.1 (#63)
+
+The supported matrix grows to **PG 14–18**, and pgrx moves to **0.19.1** —
+resolving ERRATA **E-006**, the largest deferred upstream item, which had held
+pgRDF at pgrx 0.16.1 because pgrx 0.17/0.18 would not compile on stable Rust.
+
+Both E-006 blockers were point-in-time and have cleared: `E0658`
+(`NonNull::from_mut`) is a Rust-version gate satisfied by pgrx's ≥ 1.96 MSRV, and
+`E0716` (`impl_table_iter`) is fixed by pgrx 0.18's `SqlTranslatable` →
+associated-`const` migration. pgRDF carries no hand-written `SqlTranslatable`
+impls, so the change is small: the `pg18` feature is added, the two-pass
+`pgrx_embed` bin target is removed (0.18 embeds schema in a single pass), the
+local builder moves to Rust 1.96, and compose targets `postgres:18-bookworm`.
+Validated end-to-end on PG 18.4 (`CREATE EXTENSION` + a SPARQL round-trip). PG 19
+(still beta) is a tracked follow-up.
+
 ## [0.6.19] — 2026-07-03
 
 > The SPARQL **expression surface** grows the pieces a derived numeric measure
