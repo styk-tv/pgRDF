@@ -168,8 +168,8 @@ def resolve_built_by_url(owner: str, repo: str, sha: str) -> Tuple[str, bool]:
 def render(owner: str, ver: str) -> str:
     repo = "pgRDF"  # publish-side repo slug; constant for this renderer
     pkgs = gh_api(f"/users/{owner}/packages/container/pgrdf-bundle/versions")
-    amd_d, amd_t = find_version(pkgs, f"{ver}-pg17-amd64")
-    arm_d, arm_t = find_version(pkgs, f"{ver}-pg17-arm64")
+    amd_d, amd_t = find_version(pkgs, f"{ver}-pg18-amd64")
+    arm_d, arm_t = find_version(pkgs, f"{ver}-pg18-arm64")
     agg_d, _ = find_version(pkgs, ver)  # the bare ``X.Y.Z`` aggregate tag
 
     # SPEC.OCI.BUNDLE.v0.3 §2.2 fields.
@@ -214,18 +214,18 @@ def render(owner: str, ver: str) -> str:
 
 # pgRDF — latest published artifacts
 
-One publishable surface ships from this repo: the PostgreSQL **extension** (oras-pulled OCI artifact). This file tracks the head on **PostgreSQL 17**. Builds for pg14 / pg15 / pg16 are PAUSED during a stabilization window (see [CHANGELOG.md "Changed (stabilization window)"](./CHANGELOG.md) for context) — they will resume once the multi-PG matrix is stable again. The [Repo packages view](https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle) shows everything currently published.
+One publishable surface ships from this repo: the PostgreSQL **extension** (oras-pulled OCI artifact). This file tracks the head on **PostgreSQL 18**. Builds for pg14 / pg15 / pg16 are PAUSED during a stabilization window (see [CHANGELOG.md "Changed (stabilization window)"](./CHANGELOG.md) for context) — they will resume once the multi-PG matrix is stable again. The [Repo packages view](https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle) shows everything currently published.
 
-## pgRDF extension — `v{ver}` (PostgreSQL 17)
+## pgRDF extension — `v{ver}` (PostgreSQL 18)
 
 Every digest below carries a verifiable SLSA Build Provenance v1 attestation per [`PROVENANCE.md`](./PROVENANCE.md). v0.5.0–v0.5.9 predate the attestation wiring and never appear here.
 
-`oras pull ghcr.io/styk-tv/pgrdf-bundle:{ver}-pg17-<arch>` → drop `lib/pgrdf.so` + `share/extension/{{pgrdf.control, pgrdf--{ver}.sql}}` next to your `postgres:17` install.
+`oras pull ghcr.io/styk-tv/pgrdf-bundle:{ver}-pg18-<arch>` → drop `lib/pgrdf.so` + `share/extension/{{pgrdf.control, pgrdf--{ver}.sql}}` next to your `postgres:18` install.
 
 | arch  | Pull URI                                             | Also tagged | Digest                                                                  | Created (UTC)       |
 |-------|------------------------------------------------------|-------------|-------------------------------------------------------------------------|---------------------|
-| amd64 | `ghcr.io/styk-tv/pgrdf-bundle:{ver}-pg17-amd64`     | {also_tagged_amd}           | `{amd_d}` | {fmt_ts(amd_t)} |
-| arm64 | `ghcr.io/styk-tv/pgrdf-bundle:{ver}-pg17-arm64`     | {also_tagged_arm}           | `{arm_d}` | {fmt_ts(arm_t)} |
+| amd64 | `ghcr.io/styk-tv/pgrdf-bundle:{ver}-pg18-amd64`     | {also_tagged_amd}           | `{amd_d}` | {fmt_ts(amd_t)} |
+| arm64 | `ghcr.io/styk-tv/pgrdf-bundle:{ver}-pg18-arm64`     | {also_tagged_arm}           | `{arm_d}` | {fmt_ts(arm_t)} |
 
 |                       |                                                                                                |
 |-----------------------|------------------------------------------------------------------------------------------------|
@@ -244,12 +244,12 @@ Every digest below carries a verifiable SLSA Build Provenance v1 attestation per
 ## Verifying any artifact above
 
 ```sh
-# Aggregate index (multi-arch; pg17 only during stabilization window)
+# Aggregate index (multi-arch; pg18 only during stabilization window)
 gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:{ver} \\
   --repo styk-tv/pgRDF
 
 # A specific PG×arch leaf
-gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:{ver}-pg17-amd64 \\
+gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:{ver}-pg18-amd64 \\
   --repo styk-tv/pgRDF
 ```
 
@@ -257,7 +257,7 @@ A successful verify means: signed by GitHub's Fulcio CA against the OIDC token o
 
 ## Pin policy
 
-- There is **no `latest` synonym** on the extension OCI artifact — pin by `pg`×`arch` explicitly (e.g. `{ver}-pg17-amd64`).
+- There is **no `latest` synonym** on the extension OCI artifact — pin by `pg`×`arch` explicitly (e.g. `{ver}-pg18-amd64`).
 - Tagged versions are immutable on GHCR.
 - The aggregate `vX.Y.Z` / `X.Y.Z` index references all 8 per-PG×arch leaves for that release; pull it to let your client pick.
 - Per [`PROVENANCE.md`](./PROVENANCE.md) Rule 2: do not consider an artifact "shipped" if its digest does not verify under `gh attestation verify`.
