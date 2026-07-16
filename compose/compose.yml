@@ -108,7 +108,7 @@ services:
       #     stock extensions instead of hiding them.
       - ./extensions/lib/pgrdf.so:/usr/lib/postgresql/18/lib/pgrdf.so:ro,z
       - ./extensions/share/extension/pgrdf.control:/usr/share/postgresql/18/extension/pgrdf.control:ro,z
-      - ./extensions/share/extension/pgrdf--0.6.19.sql:/usr/share/postgresql/18/extension/pgrdf--0.6.19.sql:ro,z
+      - ./extensions/share/extension/pgrdf--0.6.20.sql:/usr/share/postgresql/18/extension/pgrdf--0.6.20.sql:ro,z
       # Read-only ontology + regression fixtures, reachable from the
       # postgres process at /fixtures (see pgrdf.load_turtle path arg).
       - ../fixtures:/fixtures:ro,z
