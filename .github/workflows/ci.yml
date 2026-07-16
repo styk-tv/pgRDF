@@ -32,7 +32,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PGRX_VERSION: "0.16"
+  PGRX_VERSION: "0.19.1"
 
 jobs:
   fmt:
@@ -48,12 +48,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # STABILIZATION WINDOW — matrix cut to pg17 only. See the
-        # release.yml block for context. Do NOT delete the previous
-        # full matrix below; it will be restored verbatim once the
-        # multi-PG bar is stable again.
-        # pg: ["14", "15", "16", "17"]
-        pg: ["17"]
+        # ACTIVE TARGET moved to pg18 only (2026-07-16, #63): E-006
+        # resolved, pgrx 0.19.1 builds PG 18. pg17 (and pg14-16) are
+        # PRESERVED below but NOT run — one active major, no CI bloat.
+        # Restore the full matrix verbatim once the multi-PG bar is stable.
+        # pg: ["14", "15", "16", "17", "18"]
+        pg: ["18"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -79,12 +79,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # STABILIZATION WINDOW — matrix cut to pg17 only. See the
-        # release.yml block for context. Do NOT delete the previous
-        # full matrix below; it will be restored verbatim once the
-        # multi-PG bar is stable again.
-        # pg: ["14", "15", "16", "17"]
-        pg: ["17"]
+        # ACTIVE TARGET moved to pg18 only (2026-07-16, #63): E-006
+        # resolved, pgrx 0.19.1 builds PG 18. pg17 (and pg14-16) are
+        # PRESERVED below but NOT run — one active major, no CI bloat.
+        # Restore the full matrix verbatim once the multi-PG bar is stable.
+        # pg: ["14", "15", "16", "17", "18"]
+        pg: ["18"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -101,13 +101,12 @@ jobs:
   # Compose-based regression suite. Mirrors the local dev loop
   # (`just build-ext && just test-regression`) byte-for-byte: builds the
   # .so inside `compose/builder.Containerfile`, boots the
-  # `postgres:17.4-bookworm` runtime with the artifacts bind-mounted,
+  # `postgres:18-bookworm` runtime with the artifacts bind-mounted,
   # then drives `tests/regression/sql/NN-*.sql` against it.
   #
-  # Lives outside the per-PG matrix because the compose stack is
-  # pinned to PG 17 today (see specs/ERRATA.v0.2.md E-006 for the
-  # pgrx-vs-newer-PG block). Once PG 18 unblocks the matrix here
-  # widens.
+  # Lives outside the per-PG matrix because the compose stack targets a
+  # single major (now PG 18; E-006 resolved via pgrx 0.19.1 — see #63 /
+  # specs/ERRATA.v0.6.md E-015).
   regression:
     runs-on: ubuntu-22.04
     needs: test
@@ -132,21 +131,21 @@ jobs:
           # build artifacts are produced by release.yml, which is NOT
           # cached, so attested bytes stay clean-room.
           docker build --target builder \
-            -t pgrdf-builder-rust:pg17 \
-            --build-arg PG_MAJOR=17 \
-            --cache-from type=gha,scope=pgrdf-builder-pg17 \
+            -t pgrdf-builder-rust:pg18 \
+            --build-arg PG_MAJOR=18 \
+            --cache-from type=gha,scope=pgrdf-builder-pg18 \
             -f compose/builder.Containerfile .
           docker build \
-            -t pgrdf-builder:pg17 \
-            --build-arg PG_MAJOR=17 \
-            --cache-from type=gha,scope=pgrdf-builder-pg17 \
-            --cache-to type=gha,mode=max,scope=pgrdf-builder-pg17 \
+            -t pgrdf-builder:pg18 \
+            --build-arg PG_MAJOR=18 \
+            --cache-from type=gha,scope=pgrdf-builder-pg18 \
+            --cache-to type=gha,mode=max,scope=pgrdf-builder-pg18 \
             -f compose/builder.Containerfile .
           rm -rf compose/extensions/lib compose/extensions/share
           mkdir -p compose/extensions/lib compose/extensions/share/extension
           docker run --rm \
             -v "$PWD/compose/extensions:/export" \
-            pgrdf-builder:pg17
+            pgrdf-builder:pg18
           ls -la compose/extensions/lib compose/extensions/share/extension
       - name: Pre-pull postgres image (retry on transient Hub flakes)
         run: |
@@ -155,7 +154,7 @@ jobs:
           # Retry up to 5× with a short backoff so a transient Hub
           # flake doesn't fail the whole job.
           for i in 1 2 3 4 5; do
-            if docker pull docker.io/library/postgres:17.4-bookworm; then
+            if docker pull docker.io/library/postgres:18-bookworm; then
               exit 0
             fi
             echo "pull attempt $i failed; sleeping before retry"
@@ -237,11 +236,10 @@ jobs:
         # no upstream bug, pgRDF produces the W3C-authoritative
         # conforms:false / 27 violations, and the fixture is now
         # graded in fixtures/core/. See specs/ERRATA.v0.5.md E-013.)
-        # The pgrx `test` matrix job (PG14-17) additionally exercises
-        # pgrdf.validate's SHACL path on every PG major via the
-        # #[pg_test] SHACL tests; the compose stack is PG17 (E-006 —
-        # same scoping the regression/w3c-sparql/LUBM steps in this
-        # job already use).
+        # The pgrx `test` matrix job (PG 18) additionally exercises
+        # pgrdf.validate's SHACL path via the #[pg_test] SHACL tests;
+        # the compose stack is also PG 18 (same active-major scoping the
+        # regression/w3c-sparql/LUBM steps in this job use).
         run: bash tests/w3c-shacl/run.sh
       - name: Run W3C SHACL --sparql pgRDF-side contract
         env:

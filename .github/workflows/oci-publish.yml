@@ -43,7 +43,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────
   # PRE-ATTEST BOOT+VERSION GATE (PROVENANCE.md Rule 7).
   #
-  # Boot a clean postgres:17.4-bookworm and install the EXACT release-
+  # Boot a clean postgres:18-bookworm and install the EXACT release-
   # tarball bytes the leaf job is about to push, then assert the running
   # extension reports the tag version. This job is a hard prerequisite
   # of the leaf publish+attest job (`leaf: needs: gate`), so NO
@@ -53,7 +53,7 @@ jobs:
   # bookworm is the contractual base (NOTIFY: pgrdf-owns-pg-base-release).
   # ────────────────────────────────────────────────────────────────
   gate:
-    name: pre-attest boot+version gate (pg17-amd64)
+    name: pre-attest boot+version gate (pg18-amd64)
     runs-on: ubuntu-22.04
     steps:
       - name: Resolve tag/version
@@ -68,7 +68,7 @@ jobs:
           echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
           echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Download release tarball (pg17-amd64)
+      - name: Download release tarball (pg18-amd64)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -77,19 +77,19 @@ jobs:
           mkdir -p gate/dl && cd gate/dl
           gh release download "${{ steps.v.outputs.tag }}" \
             --repo styk-tv/pgRDF \
-            --pattern "pgrdf-${VER}-pg17-glibc-amd64.tar.gz"
+            --pattern "pgrdf-${VER}-pg18-glibc-amd64.tar.gz"
 
       - name: Boot postgres + assert CREATE EXTENSION + version match
         run: |
           set -euo pipefail
           VER="${{ steps.v.outputs.ver }}"
           tar -xzf gate/dl/*.tar.gz -C gate/
-          EXTRACT="gate/pgrdf-${VER}-pg17-glibc-amd64"
+          EXTRACT="gate/pgrdf-${VER}-pg18-glibc-amd64"
           [ -d "${EXTRACT}" ] || { echo "::error::extract dir ${EXTRACT} missing"; ls -la gate/ || true; exit 1; }
 
           docker run --rm -d --name gate-pg \
             -e POSTGRES_PASSWORD=v -e POSTGRES_USER=v -e POSTGRES_DB=v \
-            postgres:17.4-bookworm
+            postgres:18-bookworm
           # Wait on a real query against db `v`, NOT bare pg_isready:
           # pg_isready can report "ready" against the initdb bootstrap server,
           # which then shuts down before the real server accepts CREATE EXTENSION
@@ -101,10 +101,10 @@ jobs:
             sleep 1
           done
 
-          docker cp "${EXTRACT}/lib/pgrdf.so"                  gate-pg:/usr/lib/postgresql/17/lib/pgrdf.so
-          docker cp "${EXTRACT}/share/extension/pgrdf.control" gate-pg:/usr/share/postgresql/17/extension/pgrdf.control
+          docker cp "${EXTRACT}/lib/pgrdf.so"                  gate-pg:/usr/lib/postgresql/18/lib/pgrdf.so
+          docker cp "${EXTRACT}/share/extension/pgrdf.control" gate-pg:/usr/share/postgresql/18/extension/pgrdf.control
           for f in "${EXTRACT}"/share/extension/*.sql; do
-            docker cp "${f}" "gate-pg:/usr/share/postgresql/17/extension/$(basename "${f}")"
+            docker cp "${f}" "gate-pg:/usr/share/postgresql/18/extension/$(basename "${f}")"
           done
 
           set +e
@@ -151,12 +151,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # STABILIZATION WINDOW — matrix cut to pg17 only. See the
-        # release.yml block for context. Do NOT delete the previous
-        # full matrix below; it will be restored verbatim once the
-        # multi-PG bar is stable again.
-        # pg: ["14", "15", "16", "17"]
-        pg: ["17"]
+        # ACTIVE TARGET moved to pg18 only (2026-07-16, #63). pg17 and
+        # pg14-16 are PRESERVED below (do NOT delete) — one active major,
+        # no attested-artifact bloat. Restore the full matrix when stable.
+        # pg: ["14", "15", "16", "17", "18"]
+        pg: ["18"]
         arch: [amd64, arm64]
     runs-on: ubuntu-22.04
     env:
@@ -275,15 +274,14 @@ jobs:
           VER="${{ steps.v.outputs.ver }}"
           TAG="${{ steps.v.outputs.tag }}"
           REFS=""
-          # STABILIZATION WINDOW — only pg17 leaves are produced by
-          # the matrix above. Aggregate index references the pg17 ×
-          # {amd64, arm64} pair only. Do NOT delete the full-matrix
-          # form below; it will be restored verbatim once pg14/15/16
-          # come back into the leaf matrix.
-          # for pg in 14 15 16 17; do for arch in amd64 arm64; do
+          # ACTIVE TARGET moved to pg18 only (#63). Aggregate index
+          # references the pg18 × {amd64, arm64} pair. The full-matrix
+          # form is PRESERVED below (do NOT delete) — restore verbatim
+          # when pg14/15/16 come back into the leaf matrix.
+          # for pg in 14 15 16 17 18; do for arch in amd64 arm64; do
           #   REFS="$REFS ${REG}:${VER}-pg${pg}-${arch}"
           # done; done
-          for pg in 17; do for arch in amd64 arm64; do
+          for pg in 18; do for arch in amd64 arm64; do
             REFS="$REFS ${REG}:${VER}-pg${pg}-${arch}"
           done; done
           oras manifest index create "${REG}:${VER}" $REFS
@@ -313,7 +311,7 @@ jobs:
       # Post-publish consumer-style smoke verify (PROVENANCE.md
       # Rule 7). Pulls the just-published artifact via ORAS exactly
       # as a downstream consumer would, drops the files into a clean
-      # `postgres:17.4-bookworm` container, and runs
+      # `postgres:18-bookworm` container, and runs
       # `CREATE EXTENSION pgrdf VERSION '<TAG>'` — the precise call
       # OCI-GERMINATION's report 2026-05-30 showed was failing on
       # every v0.5.2..v0.5.23 release because of the Cargo.toml-stuck-
@@ -331,11 +329,11 @@ jobs:
 
           # Pull the published artifact and extract the tarball.
           mkdir -p smoke-verify/dl
-          oras pull "${REG}:${VER}-pg17-amd64" -o smoke-verify/dl
+          oras pull "${REG}:${VER}-pg18-amd64" -o smoke-verify/dl
           tar -xzf smoke-verify/dl/*.tar.gz -C smoke-verify/
 
-          # The extracted dir is `pgrdf-<ver>-pg17-glibc-amd64/`.
-          EXTRACT="smoke-verify/pgrdf-${VER}-pg17-glibc-amd64"
+          # The extracted dir is `pgrdf-<ver>-pg18-glibc-amd64/`.
+          EXTRACT="smoke-verify/pgrdf-${VER}-pg18-glibc-amd64"
           if [ ! -d "${EXTRACT}" ]; then
             echo "::error::extracted dir ${EXTRACT} missing — tarball layout drift?"
             ls -la smoke-verify/ || true
@@ -346,7 +344,7 @@ jobs:
           # SPEC.pgRDF.INSTALL.v0.2 §3 layout instructs.
           docker run --rm -d --name smoke-pg \
             -e POSTGRES_PASSWORD=v -e POSTGRES_USER=v -e POSTGRES_DB=v \
-            postgres:17.4-bookworm
+            postgres:18-bookworm
           # Same readiness fix as the boot gate — wait on a real SELECT 1 so we
           # never race the initdb bootstrap-server shutdown window.
           for i in $(seq 1 30); do
@@ -354,12 +352,12 @@ jobs:
             sleep 1
           done
 
-          docker cp "${EXTRACT}/lib/pgrdf.so"            smoke-pg:/usr/lib/postgresql/17/lib/pgrdf.so
-          docker cp "${EXTRACT}/share/extension/pgrdf.control" smoke-pg:/usr/share/postgresql/17/extension/pgrdf.control
+          docker cp "${EXTRACT}/lib/pgrdf.so"            smoke-pg:/usr/lib/postgresql/18/lib/pgrdf.so
+          docker cp "${EXTRACT}/share/extension/pgrdf.control" smoke-pg:/usr/share/postgresql/18/extension/pgrdf.control
           # Copy every SQL file (the install script + any upgrade
           # paths shipped alongside).
           for f in "${EXTRACT}"/share/extension/*.sql; do
-            docker cp "${f}" "smoke-pg:/usr/share/postgresql/17/extension/$(basename ${f})"
+            docker cp "${f}" "smoke-pg:/usr/share/postgresql/18/extension/$(basename ${f})"
           done
 
           # The actual gate: install with the TAG version pinned.
