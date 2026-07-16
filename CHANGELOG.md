@@ -6,6 +6,16 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.20] — 2026-07-16
+
+> pgRDF moves onto the modern **pgrx 0.19.1** line and adds **PostgreSQL 18** to
+> the supported matrix, resolving **E-006** — the largest deferred upstream item,
+> which had pinned pgRDF to pgrx 0.16.1 for four minor cycles. It is a
+> build/runtime migration with **no schema change and no query-surface change**,
+> validated end-to-end on PG 18.4 (full pgrx test suite + compose regression +
+> W3C harnesses all green). CI and the attested release chain now target PG 18;
+> PG 19 (still beta) is a tracked follow-up.
+
 ### Added — PostgreSQL 18 support; pgrx 0.16.1 → 0.19.1 (#63)
 
 The supported matrix grows to **PG 14–18**, and pgrx moves to **0.19.1** —

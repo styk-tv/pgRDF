@@ -1,7 +1,7 @@
--- pgrdf--0.5.1--0.6.19.sql
+-- pgrdf--0.5.1--0.6.20.sql
 --
--- Upgrade-path declaration from v0.5.1 (the earliest installable version) to v0.6.19. PostgreSQL
--- requires this file to exist for `ALTER EXTENSION pgrdf UPDATE TO '0.6.19'` to be a valid path.
+-- Upgrade-path declaration from v0.5.1 (the earliest installable version) to v0.6.20. PostgreSQL
+-- requires this file to exist for `ALTER EXTENSION pgrdf UPDATE TO '0.6.20'` to be a valid path.
 --
 -- Most v0.5.1 -> v0.6.x deltas are runtime / `.so` changes (the M4 join-order pin, auto-ANALYZE after
 -- materialize, the batched materialize write-back, the v0.6.2 parallel bulk loader, the v0.6.3/v0.6.4
@@ -80,7 +80,12 @@
 --   result. All are executor + GUC (`_PG_init`) + test-harness changes in the base `.so`, carrying no
 --   DDL. #17 lands the W3C differential oracle (a standalone test crate, no runtime surface).
 --
--- The authoritative full surface ships in the base install script `pgrdf--0.6.19.sql`, which a fresh
+--   v0.6.20 (pgrx 0.16.1 -> 0.19.1 + PostgreSQL 18, #63) — NO schema delta. Resolves E-006: the
+--   framework moves to pgrx 0.19.1 and PG 18 joins the supported matrix. A pure build / toolchain /
+--   `.so` change (drop the two-pass `pgrx_embed` bin; Rust 1.96 MSRV; CI + attested release chain
+--   retarget PG 18), carrying no DDL and no query-surface change.
+--
+-- The authoritative full surface ships in the base install script `pgrdf--0.6.20.sql`, which a fresh
 -- `CREATE EXTENSION pgrdf` installs. Tables here use unqualified names (the extension schema is in
 -- search_path during ALTER EXTENSION UPDATE), matching `sql/schema_v0_2_0.sql`.
 
