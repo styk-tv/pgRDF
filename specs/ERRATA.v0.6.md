@@ -16,7 +16,7 @@ v0.6-era delta appears) is closed by this file's creation.
 | Entry | One-line status in v0.6 |
 |---|---|
 | [E-011 — upstream `reasonable` patch](ERRATA.v0.4.md) | Unchanged. Still gated on <https://github.com/gtfierro/reasonable/pull/50>. `[patch.crates-io]` carries forward through the v0.6 cycle. |
-| [E-006 — pgrx 0.18 / PG 18 deferred](ERRATA.v0.2.md) | Unchanged. Largest deferred upstream item carried into v0.6. |
+| [E-006 — pgrx 0.18 / PG 18 deferred](ERRATA.v0.2.md) | **RESOLVED 2026-07-16** (pgrx 0.19.1, PG 18). The two compile blockers were point-in-time and have cleared; migration validated on PG 18.4. See **E-015** below. |
 | [E-013 — SHACL `prop-nodeKind-001`](ERRATA.v0.5.md) | Resolved in v0.5.0; full-pass 25 / 25 retained through the v0.6 cycle. |
 
 ## v0.6 entries
@@ -42,3 +42,15 @@ v0.6-era delta appears) is closed by this file's creation.
 #### Why not patch rudof?
 
 Out of scope for this cycle. The pgRDF-native path is the higher-performance backend regardless (avoids `InMemoryGraph` materialisation for the data graph), and now is also the more correct backend on this conformance fixture. A future SPEC pass may file the upstream issue with rudof; for the v0.6 cycle, pgRDF-mode is the de-facto SHACL-SPARQL engine.
+
+### E-015 — pgrx 0.19.1 / PostgreSQL 18: E-006 resolved
+
+| Field | Value |
+|---|---|
+| Filed | 2026-07-16 (issue #63) |
+| Status | **RESOLVED.** Supersedes [E-006](ERRATA.v0.2.md) (and clears its dependant [E-007](ERRATA.v0.2.md), the `extension_control_path` GUC path). pgRDF builds, links, boots and runs on **PostgreSQL 18.4** via **pgrx 0.19.1**. |
+| Blocker re-eval | E-006 held at pgrx 0.16.1 on two compile errors recorded 2026-05-13. Both were point-in-time. The errata's own re-check trigger ("any pgrx publish above 0.18.0") fired: pgrx shipped 0.18.1, 0.19.0, 0.19.1. **E0658** (`NonNull::from_mut`, `pgrx/src/palloc/pbox.rs`) is a use-of-unstable-feature *Rust-version* gate — clears on Rust ≥ 1.96 (pgrx's MSRV from 0.18.1). **E0716** (`impl_table_iter`, `pgrx/src/iter.rs`) clears via the 0.18 migration: `SqlTranslatable::RETURN_SQL` became an associated `const`, so the `&[..]` temporary gets `'static` promotion in const context. |
+| Migration | pgRDF carries **no** hand-written `SqlTranslatable` impls, so the 0.18 breaking change is limited to: `pgrx`/`pgrx-tests` → `=0.19.1`; add `pg18` feature; drop the `[[bin]] pgrx_embed` target + `src/bin/pgrx_embed.rs` (0.18 single-pass schema embed); `check-cfg` known values → `pg13`,`pg19`. `crate-type` keeps `"lib"` (unit tests). Builder image → Rust 1.96; compose → `postgres:18-bookworm`. |
+| PG18 environment | The `postgres:18+` image stores PGDATA under a major-version subdirectory and requires the data volume at `/var/lib/postgresql` (not `/var/lib/postgresql/data`); mounting the old path makes the entrypoint refuse to start (docker-library/postgres#37). |
+| Validation | Clean `--features pg18` build (0 errors/0 warnings), `cargo fmt --check` + `clippy -D warnings` green; `CREATE EXTENSION pgrdf` + `pgrdf.version()` = 0.6.19 + a SPARQL `load_turtle`→join round-trip, all on PG 18.4. |
+| Remaining | Full `cargo pgrx test` + conformance + regression harness on PG 18 before an attested cut. **PG 19** is a follow-up (add `pg19` feature + `postgres:19`; pgrx 0.19.x already carries `pg19beta`, but PG 19 is still beta). |

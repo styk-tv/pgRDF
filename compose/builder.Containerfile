@@ -18,10 +18,10 @@
 #   DOCKER_BUILDKIT=1 docker build -t pgrdf-builder -f compose/builder.Containerfile .
 #   docker run --rm -v "$PWD/compose/extensions:/out" pgrdf-builder
 
-FROM docker.io/library/rust:1.91-bookworm AS builder
+FROM docker.io/library/rust:1.96-bookworm AS builder
 
-ARG PG_MAJOR=17
-ARG PGRX_VERSION=0.16
+ARG PG_MAJOR=18
+ARG PGRX_VERSION=0.19.1
 
 # Postgres dev headers + full server (initdb for pgrx tests) + sudo
 # for the pgrx-tests RUNAS path. apt cache lives in a BuildKit cache

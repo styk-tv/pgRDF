@@ -46,7 +46,7 @@ LUBM_VOLUME="${LUBM_VOLUME:-pgrdf-lubm-data}"
 EXTENSIONS_DIR="${EXTENSIONS_DIR:-${REPO_ROOT}/compose/extensions}"
 SIDECAR_NAME="pgrdf-perf-pg-$$"
 SIDECAR_PORT="${SIDECAR_PORT:-0}"   # 0 = random host port
-PG_IMAGE="${PG_IMAGE:-docker.io/library/postgres:17.4-bookworm}"
+PG_IMAGE="${PG_IMAGE:-docker.io/library/postgres:18-bookworm}"
 PG_USER="${POSTGRES_USER:-pgrdf}"
 PG_PASS="${POSTGRES_PASSWORD:-pgrdf}"
 PG_DB="${POSTGRES_DB:-pgrdf}"
@@ -111,9 +111,9 @@ ${RUNTIME} run -d --name "${SIDECAR_NAME}" \
   -e POSTGRES_PASSWORD="${PG_PASS}" \
   -e POSTGRES_DB="${PG_DB}" \
   -v "${LUBM_VOLUME}:/lubm-data:ro" \
-  -v "${EXTENSIONS_DIR}/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro" \
-  -v "${EXTENSIONS_DIR}/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro" \
-  -v "${SQL_FILE}:/usr/share/postgresql/17/extension/pgrdf--${DEFAULT_VERSION}.sql:ro" \
+  -v "${EXTENSIONS_DIR}/lib/pgrdf.so:/usr/lib/postgresql/18/lib/pgrdf.so:ro" \
+  -v "${EXTENSIONS_DIR}/share/extension/pgrdf.control:/usr/share/postgresql/18/extension/pgrdf.control:ro" \
+  -v "${SQL_FILE}:/usr/share/postgresql/18/extension/pgrdf--${DEFAULT_VERSION}.sql:ro" \
   "${PG_IMAGE}" \
   postgres -c shared_preload_libraries=pgrdf \
   >/dev/null \

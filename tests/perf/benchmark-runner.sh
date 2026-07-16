@@ -48,7 +48,7 @@ RUNTIME="${PGRDF_RUNTIME:-docker}"
 LUBM_VOLUME="${LUBM_VOLUME:-pgrdf-lubm-data}"
 EXTENSIONS_DIR="${EXTENSIONS_DIR:-${REPO_ROOT}/compose/extensions}"
 SIDECAR_NAME="pgrdf-bench-pg-$$"
-PG_IMAGE="${PG_IMAGE:-docker.io/library/postgres:17.4-bookworm}"
+PG_IMAGE="${PG_IMAGE:-docker.io/library/postgres:18-bookworm}"
 # Baked-image mode: when PGRDF_BAKED_IMAGE is set, the sidecar runs a
 # self-contained image with pgrdf (.so/.control/.sql) + the LUBM Tbox
 # fixtures already baked in, and the host bind-mounts for those are
@@ -122,9 +122,9 @@ MOUNT_ARGS=(-v "${LUBM_VOLUME}:/lubm-data:ro")
 if [ -z "${BAKED_IMAGE}" ]; then
   MOUNT_ARGS+=(
     -v "${REPO_ROOT}/tests/perf/lubm/fixtures:/fixtures:ro"
-    -v "${EXTENSIONS_DIR}/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro"
-    -v "${EXTENSIONS_DIR}/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro"
-    -v "${SQL_FILE}:/usr/share/postgresql/17/extension/pgrdf--${DEFAULT_VERSION}.sql:ro"
+    -v "${EXTENSIONS_DIR}/lib/pgrdf.so:/usr/lib/postgresql/18/lib/pgrdf.so:ro"
+    -v "${EXTENSIONS_DIR}/share/extension/pgrdf.control:/usr/share/postgresql/18/extension/pgrdf.control:ro"
+    -v "${SQL_FILE}:/usr/share/postgresql/18/extension/pgrdf--${DEFAULT_VERSION}.sql:ro"
   )
 fi
 

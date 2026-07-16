@@ -5,7 +5,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PGRX_VERSION: "0.16"
+  PGRX_VERSION: "0.19.1"
 
 permissions:
   contents: write
@@ -15,15 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # STABILIZATION WINDOW — matrix cut to pg17 only while we
-        # work on a string of intermittent pg15/amd64 build flakes
-        # (first surfaced on v0.5.20 release.yml run 26635709923).
-        # The previous full matrix `pg: ["14", "15", "16", "17"]`
-        # is preserved in the comment below; do NOT delete it. It
-        # WILL be restored verbatim once the stabilization work
-        # lands and we have a clean run on the multi-PG bar.
-        # pg: ["14", "15", "16", "17"]
-        pg: ["17"]
+        # ACTIVE TARGET moved to pg18 only (2026-07-16, #63): E-006
+        # resolved, pgrx 0.19.1 builds PG 18. The pg15/amd64 flake work +
+        # pg14/15/16 restoration remain tracked; the previous full matrix
+        # is PRESERVED below, do NOT delete it — one active major, no
+        # release-artifact bloat.
+        # pg: ["14", "15", "16", "17", "18"]
+        pg: ["18"]
         arch: [amd64, arm64]
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
     steps:
@@ -142,7 +140,7 @@ jobs:
             "runtime": { "fn": "pgrdf.version()", "value": "${VER}", "source": "env!(CARGO_PKG_VERSION) compile-time; asserted == tag pre-build + boot-gated in oci-publish" },
             "install_sql": "${INSTALL_SQL}",
             "upgrade_sql": "${UPGRADE_SQL}",
-            "platform": { "pg_major": "${{ matrix.pg }}", "arch": "${{ matrix.arch }}", "base": "postgres:17.4-bookworm (glibc)" },
+            "platform": { "pg_major": "${{ matrix.pg }}", "arch": "${{ matrix.arch }}", "base": "postgres:18-bookworm (glibc)" },
             "build": { "tag": "${GITHUB_REF_NAME}", "git_sha": "${GITHUB_SHA}", "built": "${BUILT}" },
             "integrity": "SHA256SUMS (sibling file)"
           }
