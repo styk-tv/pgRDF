@@ -21,7 +21,7 @@
 #   - build runtime access (`docker` by default)
 #
 # Defaults:
-#   PG_MAJOR=17
+#   PG_MAJOR=18
 #   PGRDF_BUILD_RUNTIME=docker
 #   PGRDF_RUNTIME (or PGRDF_RUN_RUNTIME)=podman
 #   PGRDF_CONTAINER=pgrdf-pgrdf-postgres
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd -P)"
-PG_MAJOR="${PG_MAJOR:-17}"
+PG_MAJOR="${PG_MAJOR:-18}"
 BUILD="${PGRDF_BUILD_RUNTIME:-docker}"
 RUN="${PGRDF_RUNTIME:-${PGRDF_RUN_RUNTIME:-podman}}"
 CONTAINER="${PGRDF_CONTAINER:-pgrdf-pgrdf-postgres}"

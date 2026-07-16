@@ -1,13 +1,13 @@
 set shell := ["bash", "-uc"]
 
-PG_MAJOR := env_var_or_default("PG_MAJOR", "17")
+PG_MAJOR := env_var_or_default("PG_MAJOR", "18")
 
 # Two container runtimes, scoped by purpose:
 #   BUILD = docker (Colima)  — heavy builder images (~5 GB) + cargo cache live
 #                              in the Colima VM (100 GB) rather than the
 #                              podman VM (30 GB, used for the user's other
 #                              container setups).
-#   RUN   = podman           — boots the compose stack (postgres:17.4 + the
+#   RUN   = podman           — boots the compose stack (postgres:18 + the
 #                              extension files bind-mounted from the host).
 # Override either via env: `PGRDF_BUILD_RUNTIME=podman just build-ext` etc.
 BUILD := env_var_or_default("PGRDF_BUILD_RUNTIME", "docker")
