@@ -43,7 +43,7 @@ services:
     command: ["sh", "/parity-check.sh"]
 
   postgres:
-    image: docker.io/library/postgres:17.4-bookworm
+    image: docker.io/library/postgres:18-bookworm
     container_name: ${PGRDF_CONTAINER:-pgrdf-pgrdf-postgres}
     restart: unless-stopped
     depends_on:
@@ -60,7 +60,19 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - ./pg-data:/var/lib/postgresql/data:z
+      # PGDATA on a named docker volume (not a host bind mount): Colima's
+      # rootless user-namespace can't chown a host dir for the postgres
+      # UID, so a host bind mount fails at start ("chown ... permission
+      # denied"). The named volume lives in the Colima VM and side-steps
+      # it — same rationale as the build TARGET_VOLUME in the Justfile.
+      #
+      # PG18 change: the postgres:18+ image stores data in a
+      # major-version subdirectory and requires the mount at
+      # `/var/lib/postgresql` (NOT `/var/lib/postgresql/data`, which was
+      # the PG<=17 convention). Mounting at the old path makes the 18
+      # entrypoint refuse to start ("data in /var/lib/postgresql/data
+      # (unused mount/volume)"). See docker-library/postgres#37.
+      - pgrdf-pg18-data:/var/lib/postgresql
       # Drop the extension files at canonical PG 17 paths. These bind
       # mounts require the files to exist on the host first - produced
       # by `just build-ext` (see compose/README.md).
@@ -95,9 +107,9 @@ services:
       #     (`compose/pg-data` is gitignored, so CI always initdb's
       #     from scratch). Per-file mounts drop pgRDF in beside the
       #     stock extensions instead of hiding them.
-      - ./extensions/lib/pgrdf.so:/usr/lib/postgresql/17/lib/pgrdf.so:ro,z
-      - ./extensions/share/extension/pgrdf.control:/usr/share/postgresql/17/extension/pgrdf.control:ro,z
-      - ./extensions/share/extension/pgrdf--0.6.19.sql:/usr/share/postgresql/17/extension/pgrdf--0.6.19.sql:ro,z
+      - ./extensions/lib/pgrdf.so:/usr/lib/postgresql/18/lib/pgrdf.so:ro,z
+      - ./extensions/share/extension/pgrdf.control:/usr/share/postgresql/18/extension/pgrdf.control:ro,z
+      - ./extensions/share/extension/pgrdf--0.6.19.sql:/usr/share/postgresql/18/extension/pgrdf--0.6.19.sql:ro,z
       # Read-only ontology + regression fixtures, reachable from the
       # postgres process at /fixtures (see pgrdf.load_turtle path arg).
       - ../fixtures:/fixtures:ro,z
@@ -106,3 +118,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+volumes:
+  # Named volume for PG18 PGDATA — see the postgres service note.
+  pgrdf-pg18-data:
