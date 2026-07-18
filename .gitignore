@@ -42,3 +42,9 @@ SPEC.NATS*
 # Generated PGXN source archive
 pgrdf-*.zip
 dist/pgxn/
+
+# Large regression fixtures (wikidata truthy dumps) — kept local
+fixtures/regression/*.nt
+
+# Superpowers working artifacts (specs/plans) — local only
+docs/superpowers/
