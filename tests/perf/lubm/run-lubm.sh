@@ -46,7 +46,7 @@ LUBM_VOLUME="${LUBM_VOLUME:-pgrdf-lubm-data}"
 EXTENSIONS_DIR="${EXTENSIONS_DIR:-${REPO_ROOT}/compose/extensions}"
 SIDECAR_NAME="pgrdf-perf-pg-$$"
 SIDECAR_PORT="${SIDECAR_PORT:-0}"   # 0 = random host port
-PG_IMAGE="${PG_IMAGE:-docker.io/library/postgres:18-bookworm}"
+PG_IMAGE="${PG_IMAGE:-docker.io/library/postgres:18-trixie}"
 PG_USER="${POSTGRES_USER:-pgrdf}"
 PG_PASS="${POSTGRES_PASSWORD:-pgrdf}"
 PG_DB="${POSTGRES_DB:-pgrdf}"

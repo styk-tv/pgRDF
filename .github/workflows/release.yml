@@ -26,9 +26,8 @@ jobs:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: ./.github/actions/setup-pgrx
-        with: { pg: "${{ matrix.pg }}" }
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       # Pre-build version-coherence gate (PROVENANCE.md Rule 7).
       #
@@ -87,8 +86,35 @@ jobs:
             exit 1
           fi
 
-      - name: Build extension package
-        run: cargo pgrx package --pg-config /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      # Build the .so INSIDE the pg18/trixie builder container, on this
+      # job's NATIVE runner arch (amd64 → ubuntu-22.04, arm64 →
+      # ubuntu-24.04-arm). Corresponding-arch, never cross-built. The
+      # container userland (Debian trixie) — not the runner OS — fixes
+      # the glibc floor, so both leaves floor CONSISTENTLY from the SAME
+      # commit. This is the fix for issue #67: the previous bare-runner
+      # build floored each arch at whatever the runner shipped (amd64
+      # 2.34 / arm64 2.39), which shipped a non-loading arm64 .so.
+      #
+      # release.yml is deliberately UNCACHED (no type=gha) — attested
+      # bytes come from a clean-room build, distinct from ci.yml's
+      # cached regression build. Artifacts export to ./out via the
+      # builder's `export` stage.
+      - name: Build extension package (pg18/trixie builder, native arch)
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          set -euo pipefail
+          docker build \
+            -t "pgrdf-builder-release:pg${{ matrix.pg }}-${{ matrix.arch }}" \
+            --build-arg PG_MAJOR=${{ matrix.pg }} \
+            --build-arg PGRX_VERSION=${PGRX_VERSION} \
+            -f compose/builder.Containerfile .
+          rm -rf out && mkdir -p out
+          docker run --rm \
+            -v "$PWD/out:/export" \
+            "pgrdf-builder-release:pg${{ matrix.pg }}-${{ matrix.arch }}"
+          echo "Exported artifacts:"
+          ls -laR out
 
       # SPEC.pgRDF.INSTALL.v0.2 §3 layout:
       #   pgrdf-<ver>-pg<PG>-glibc-<arch>.tar.gz
@@ -102,12 +128,13 @@ jobs:
         run: |
           set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
-          PKG="target/release/pgrdf-pg${{ matrix.pg }}"
+          # Artifacts exported by the trixie builder's `export` stage.
+          PKG="out"
           OUT="pgrdf-${VER}-pg${{ matrix.pg }}-glibc-${{ matrix.arch }}"
           mkdir -p "${OUT}/lib" "${OUT}/share/extension"
-          cp "${PKG}/usr/lib/postgresql/${{ matrix.pg }}/lib/pgrdf.so"            "${OUT}/lib/"
-          cp "${PKG}/usr/share/postgresql/${{ matrix.pg }}/extension/"*.control   "${OUT}/share/extension/"
-          cp "${PKG}/usr/share/postgresql/${{ matrix.pg }}/extension/"*.sql       "${OUT}/share/extension/"
+          cp "${PKG}/lib/pgrdf.so"              "${OUT}/lib/"
+          cp "${PKG}/share/extension/"*.control "${OUT}/share/extension/"
+          cp "${PKG}/share/extension/"*.sql     "${OUT}/share/extension/"
           # Ship upgrade-path SQL files from the source tree (the
           # 0.5.1 -> 0.5.24 bridge added in v0.5.24, plus any future
           # `pgrdf--X--Y.sql` upgrade scripts). `cargo pgrx package`
@@ -132,6 +159,15 @@ jobs:
           INSTALL_SQL=$(cd "${OUT}/share/extension" && ls "pgrdf--${VER}.sql" 2>/dev/null | head -1)
           UPGRADE_SQL=$(cd "${OUT}/share/extension" && ls pgrdf--*--"${VER}.sql" 2>/dev/null | head -1)
           BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # MEASURED glibc floor, read straight out of the shipped .so —
+          # never hand-written. v0.6.20 stamped a fixed "bookworm" string
+          # for both arches, which was a lie for the 2.39-floored arm64
+          # leaf inside a SIGNED manifest (#67). `objdump` ships in
+          # binutils on the runners; best-effort so a missing tool never
+          # fails a release.
+          GLIBC_FLOOR=$(objdump -T "${OUT}/lib/pgrdf.so" 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -V | tail -1 || true)
+          [ -n "${GLIBC_FLOOR}" ] || GLIBC_FLOOR="unknown"
           cat > "${OUT}/MANIFEST.json" <<JSON
           {
             "component": "pgrdf",
@@ -140,11 +176,12 @@ jobs:
             "runtime": { "fn": "pgrdf.version()", "value": "${VER}", "source": "env!(CARGO_PKG_VERSION) compile-time; asserted == tag pre-build + boot-gated in oci-publish" },
             "install_sql": "${INSTALL_SQL}",
             "upgrade_sql": "${UPGRADE_SQL}",
-            "platform": { "pg_major": "${{ matrix.pg }}", "arch": "${{ matrix.arch }}", "base": "postgres:18-bookworm (glibc)" },
+            "platform": { "pg_major": "${{ matrix.pg }}", "arch": "${{ matrix.arch }}", "base": "postgres:18-trixie (glibc)", "build_base": "rust:1.96-trixie", "glibc_floor": "${GLIBC_FLOOR}" },
             "build": { "tag": "${GITHUB_REF_NAME}", "git_sha": "${GITHUB_SHA}", "built": "${BUILT}" },
             "integrity": "SHA256SUMS (sibling file)"
           }
           JSON
+          echo "MANIFEST platform: base=postgres:18-trixie build_base=rust:1.96-trixie arch=${{ matrix.arch }} glibc_floor=${GLIBC_FLOOR}"
           # SHA256SUMS hashes every file INCLUDING MANIFEST.json (covers it for integrity).
           ( cd "${OUT}" && find . -type f ! -name SHA256SUMS -print0 | xargs -0 sha256sum > SHA256SUMS )
           tar czf "${OUT}.tar.gz" "${OUT}"

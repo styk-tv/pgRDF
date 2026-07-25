@@ -6,6 +6,49 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.21] — 2026-07-25
+
+> **Build-provenance fix, no source change.** The extension code is byte-for-byte
+> v0.6.20; what changes is *how* the two arch leaves are built. v0.6.20 built each
+> arch **bare on its runner**, so the `.so`'s glibc floor was an accident of runner
+> selection — amd64 floored at `GLIBC_2.34` (`ubuntu-22.04`), arm64 at `GLIBC_2.39`
+> (`ubuntu-24.04-arm`). The 2.39-floored arm64 leaf could not load on the base, yet
+> shipped **attested** because the pre-attest boot gate only tested amd64. v0.6.21
+> builds **both arches inside the same `postgres:18`/`trixie` builder container** on
+> their native runners (corresponding-arch, never cross-compiled), so both leaves
+> floor consistently from the same commit; boot-tests **both** arches before
+> attestation; stamps the base + commit into the bundle; and moves the contractual
+> base **`bookworm` → `trixie`** to match the trixie-only downstream chain
+> (ck-allinone v0.7.31). Resolves **#67**.
+
+### Changed — dual-arch trixie build parity; contractual base `bookworm` → `trixie` (#67)
+
+- **Both arches build inside `compose/builder.Containerfile` (now `rust:1.96-trixie`),
+  each on its native runner.** `release.yml` no longer compiles bare via
+  `setup-pgrx`; it `docker build`s the trixie builder and exports the artifact. The
+  container userland — not the runner OS — fixes the glibc floor, so amd64 and arm64
+  floor identically. This is the invariant #67 restored.
+- **Truthful, measured provenance.** `MANIFEST.json` `platform.base` is now
+  `postgres:18-trixie` (was a hardcoded `bookworm`, false for arm64 inside a *signed*
+  manifest); a new `platform.glibc_floor` is **measured** from the shipped `.so`
+  (`objdump -T`) rather than hand-written, and `platform.build_base` records the
+  builder image. The bundle also carries `org.opencontainers.image.base.name`,
+  `org.opencontainers.image.revision` (commit), and `io.styk.pgrdf.build-base`
+  annotations, so a consumer verifies base + commit as facts.
+- **arm64 boot gate.** `oci-publish.yml`'s pre-attest `gate` is now a matrix over
+  both arches on native runners, each booting `postgres:18-trixie`; `needs: gate`
+  waits on every leg, so a non-loading `.so` on **either** arch blocks all
+  attestation (PROVENANCE.md Rule 9). All base-boots (`ci.yml`, `compose.yml`, gate,
+  post-publish smoke) move to `postgres:18-trixie` in lockstep.
+- **Docs:** PROVENANCE.md Rule 9 rewritten to declare trixie/pg18 the contractual
+  base and record the executed move; Gate 3 / Rule 8 and the normative INSTALL/BENCH
+  specs updated off `bookworm`.
+
+pgRDF publishes only the attested `pgrdf-bundle` OCI layers; the runnable-container
+assembly stays downstream (oci-germination / sporaxis). Coordination for this move
+is board-driven on the Application Planning Division project (public repos), not a
+NOTIFY.
+
 ## [0.6.20] — 2026-07-16
 
 > pgRDF moves onto the modern **pgrx 0.19.1** line and adds **PostgreSQL 18** to
