@@ -18,7 +18,7 @@ This is the right loop for:
 - Quick "does this UDF return the right thing" checks
 
 It is **not** the right loop for verifying the deployment model —
-pgrx's bundled Postgres differs from the production postgres:17.4-bookworm
+pgrx's bundled Postgres differs from the production postgres:18-trixie
 in several subtle ways (file locations, build flags). Use the slow loop
 below to verify that.
 
@@ -28,7 +28,7 @@ PG 14–17 (only pg17 is published during the stabilization window).
 
 ## 7.2 Slow loop — stock postgres container
 
-This boots `postgres:17.4-bookworm` and side-loads the locally-built
+This boots `postgres:18-trixie` and side-loads the locally-built
 extension via per-file bind mounts at canonical `$libdir` /
 `$sharedir/extension` paths (the PG ≤ 17 incarnation of INSTALL §4.3;
 the §7 GUC path activates with PG 18 — see ERRATA E-007).

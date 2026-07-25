@@ -7,7 +7,7 @@ it: workstation, Kubernetes, or a managed Postgres service.
 ## Path A — Workstation (compose)
 
 This is what the project's own `compose/` directory implements.
-Stock `postgres:17.4-bookworm`, no image rebuild, the extension
+Stock `postgres:18-trixie`, no image rebuild, the extension
 files dropped in via per-file bind mounts.
 
 Prerequisites: `podman` (or `docker`), `just`. On macOS, also
@@ -128,8 +128,8 @@ If any of these don't match, the most common causes are:
    shmem dict cache from LLD §4.1 is disabled and every dictionary
    touch hits the table. Fix: add `pgrdf` to
    `shared_preload_libraries`, restart Postgres.
-3. Container is alpine-based, not bookworm. Symptom:
-   `not a dynamic executable`. Fix: switch to `postgres:<N>-bookworm`.
+3. Container is alpine-based, not Debian. Symptom:
+   `not a dynamic executable`. Fix: switch to `postgres:<N>-trixie`.
 
 The full failure-mode table is in INSTALL spec §9.
 

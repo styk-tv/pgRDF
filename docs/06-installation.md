@@ -28,7 +28,7 @@ files must end up at canonical paths (`$libdir` and
 `$sharedir/extension`). Two supported flavours:
 
 **Local compose (what `compose/compose.yml` implements):** stock
-`postgres:17.4-bookworm` boots with per-file bind mounts placing the
+`postgres:18-trixie` boots with per-file bind mounts placing the
 locally-built artifacts directly at `/usr/lib/postgresql/17/lib/` and
 `/usr/share/postgresql/17/extension/`. No image rebuild, no
 entrypoint wrapper, no init script — the spec-compliant local
