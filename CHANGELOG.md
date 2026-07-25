@@ -6,14 +6,24 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-## [0.6.21] — 2026-07-25
+## [0.6.22] — 2026-07-25
+
+> **Supersedes v0.6.21.** `v0.6.21` was tagged for the same change but its release
+> build failed in the repack step — a latent bug (unrelated to the trixie work):
+> the upgrade-SQL discovery `ls pgrdf--*--<ver>.sql` ran unguarded under
+> `set -euo pipefail`, so a version with **no** upgrade-bridge script (v0.6.21 had
+> none; v0.6.20 coincidentally did) aborted the step before any artifact was
+> packed. Both arches had already *compiled* cleanly in the trixie container. Fixed
+> by guarding that lookup with `|| true` (the field is optional). No artifact was
+> ever published under `v0.6.21`; per forward-only policy it is a burned tag and the
+> release ships as **v0.6.22**.
 
 > **Build-provenance fix, no source change.** The extension code is byte-for-byte
 > v0.6.20; what changes is *how* the two arch leaves are built. v0.6.20 built each
 > arch **bare on its runner**, so the `.so`'s glibc floor was an accident of runner
 > selection — amd64 floored at `GLIBC_2.34` (`ubuntu-22.04`), arm64 at `GLIBC_2.39`
 > (`ubuntu-24.04-arm`). The 2.39-floored arm64 leaf could not load on the base, yet
-> shipped **attested** because the pre-attest boot gate only tested amd64. v0.6.21
+> shipped **attested** because the pre-attest boot gate only tested amd64. v0.6.22
 > builds **both arches inside the same `postgres:18`/`trixie` builder container** on
 > their native runners (corresponding-arch, never cross-compiled), so both leaves
 > floor consistently from the same commit; boot-tests **both** arches before
