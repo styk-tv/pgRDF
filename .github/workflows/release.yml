@@ -157,7 +157,7 @@ jobs:
           # boots + asserts `pgrdf.version() == tag` before any attestation.
           CTL_DEFAULT=$(grep -E '^default_version' "${OUT}/share/extension/pgrdf.control" | head -1 | cut -d"'" -f2)
           INSTALL_SQL=$(cd "${OUT}/share/extension" && ls "pgrdf--${VER}.sql" 2>/dev/null | head -1)
-          UPGRADE_SQL=$(cd "${OUT}/share/extension" && ls pgrdf--*--"${VER}.sql" 2>/dev/null | head -1)
+          UPGRADE_SQL=$(cd "${OUT}/share/extension" && ls pgrdf--*--"${VER}.sql" 2>/dev/null | head -1 || true)  # optional: empty when no upgrade bridge for this version (was: unguarded ls failed under set -euo pipefail)
           BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           # MEASURED glibc floor, read straight out of the shipped .so —
           # never hand-written. v0.6.20 stamped a fixed "bookworm" string
