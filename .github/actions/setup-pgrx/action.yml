@@ -1,5 +1,5 @@
 name: setup-pgrx
-description: Install pgrx and a specific Postgres major (PGDG bookworm).
+description: Install pgrx and a specific Postgres major (PGDG, runner-OS suite).
 inputs:
   pg:
     description: Postgres major version (14|15|16|17|18)

@@ -34,7 +34,7 @@ Status legend:
 
 ## Phase 1 — Core Storage & Build Automation ✅
 
-Outcome: extension registers cleanly in stock `postgres:17.4-bookworm`
+Outcome: extension registers cleanly in stock `postgres:18-trixie`
 and the local build produces a usable `.so` + `.control` + `.sql`.
 
 - ✅ pgrx 0.16 scaffold compiles on PG 14–17. PG 18 support has

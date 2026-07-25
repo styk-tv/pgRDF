@@ -43,18 +43,28 @@ jobs:
   # ────────────────────────────────────────────────────────────────
   # PRE-ATTEST BOOT+VERSION GATE (PROVENANCE.md Rule 7).
   #
-  # Boot a clean postgres:18-bookworm and install the EXACT release-
+  # Boot a clean postgres:18-trixie and install the EXACT release-
   # tarball bytes the leaf job is about to push, then assert the running
   # extension reports the tag version. This job is a hard prerequisite
   # of the leaf publish+attest job (`leaf: needs: gate`), so NO
   # attestation is ever issued unless a container started and
   # pgrdf.version() matched the tag. Fail here ⇒ nothing pushed, nothing
   # attested, the GitHub release stays a draft, LATEST.md never advances.
-  # bookworm is the contractual base (NOTIFY: pgrdf-owns-pg-base-release).
+  # trixie is the contractual base (PROVENANCE.md Rule 9).
+  #
+  # Runs on BOTH arches, each on its NATIVE runner (issue #67): the
+  # amd64-only gate is exactly why v0.6.20's non-loading arm64 leaf
+  # shipped attested — Rule 9 held for one arch. `needs: gate` waits on
+  # every matrix leg, so a non-loading .so on EITHER arch now blocks all
+  # attestation.
   # ────────────────────────────────────────────────────────────────
   gate:
-    name: pre-attest boot+version gate (pg18-amd64)
-    runs-on: ubuntu-22.04
+    name: pre-attest boot+version gate (pg18-${{ matrix.arch }})
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-22.04' }}
     steps:
       - name: Resolve tag/version
         id: v
@@ -68,7 +78,7 @@ jobs:
           echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
           echo "ver=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Download release tarball (pg18-amd64)
+      - name: Download release tarball (pg18-${{ matrix.arch }})
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -77,19 +87,23 @@ jobs:
           mkdir -p gate/dl && cd gate/dl
           gh release download "${{ steps.v.outputs.tag }}" \
             --repo styk-tv/pgRDF \
-            --pattern "pgrdf-${VER}-pg18-glibc-amd64.tar.gz"
+            --pattern "pgrdf-${VER}-pg18-glibc-${{ matrix.arch }}.tar.gz"
 
       - name: Boot postgres + assert CREATE EXTENSION + version match
         run: |
           set -euo pipefail
           VER="${{ steps.v.outputs.ver }}"
           tar -xzf gate/dl/*.tar.gz -C gate/
-          EXTRACT="gate/pgrdf-${VER}-pg18-glibc-amd64"
+          EXTRACT="gate/pgrdf-${VER}-pg18-glibc-${{ matrix.arch }}"
           [ -d "${EXTRACT}" ] || { echo "::error::extract dir ${EXTRACT} missing"; ls -la gate/ || true; exit 1; }
 
+          # Native-arch runner ⇒ docker pulls the arch-matching
+          # postgres:18-trixie automatically; the .so under test is the
+          # same-arch leaf. This is the real "does it load on the
+          # contractual base" test that amd64-only skipped for arm64.
           docker run --rm -d --name gate-pg \
             -e POSTGRES_PASSWORD=v -e POSTGRES_USER=v -e POSTGRES_DB=v \
-            postgres:18-bookworm
+            postgres:18-trixie
           # Wait on a real query against db `v`, NOT bare pg_isready:
           # pg_isready can report "ready" against the initdb bootstrap server,
           # which then shuts down before the real server accepts CREATE EXTENSION
@@ -211,12 +225,21 @@ jobs:
           F="pgrdf-${VER}-pg${PG}-glibc-${ARCH}.tar.gz"
           TAG="${VER}-pg${PG}-${ARCH}"
           [ -f "$F" ] || { echo "missing $F"; exit 1; }
+          # #67 req 4 — stamp the base + source commit into the bundle
+          # annotations so a consumer (oci-germination's cross-arch parity
+          # gate; sporaxis I9 digest-pinning) verifies FACTS — same base,
+          # same commit across arches — instead of reverse-engineering the
+          # glibc floor from the .so. `image.base.name` + `image.revision`
+          # are the OCI-standard annotation keys.
           oras push "${REG}:${TAG}" \
             --artifact-type application/vnd.styk.pgrdf.bundle.v1+tar \
             --annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --annotation "org.opencontainers.image.version=${VER}" \
+            --annotation "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --annotation "org.opencontainers.image.base.name=docker.io/library/postgres:18-trixie" \
             --annotation "io.styk.pgrdf.pg=${PG}" \
             --annotation "io.styk.pgrdf.arch=${ARCH}" \
+            --annotation "io.styk.pgrdf.build-base=docker.io/library/rust:1.96-trixie" \
             "${F}:application/vnd.styk.pgrdf.tarball.v1+gzip"
           # Capture the manifest digest for the attestation step.
           DIGEST=$(oras manifest fetch --descriptor "${REG}:${TAG}" | jq -r .digest)
@@ -311,16 +334,18 @@ jobs:
       # Post-publish consumer-style smoke verify (PROVENANCE.md
       # Rule 7). Pulls the just-published artifact via ORAS exactly
       # as a downstream consumer would, drops the files into a clean
-      # `postgres:18-bookworm` container, and runs
+      # `postgres:18-trixie` container, and runs
       # `CREATE EXTENSION pgrdf VERSION '<TAG>'` — the precise call
       # OCI-GERMINATION's report 2026-05-30 showed was failing on
       # every v0.5.2..v0.5.23 release because of the Cargo.toml-stuck-
       # at-0.5.1 bug. Fail-fast here means update-latest-md.yml never
       # fires, LATEST.md stays at the prior version, and consumers
-      # never see a broken tag advertised. We verify amd64 only —
-      # arm64 has the same bytes structure; if amd64 is well-formed,
-      # arm64 is too. (Adding arm64 would need a self-hosted arm
-      # runner; deferred.)
+      # never see a broken tag advertised. This round-trip smoke is
+      # amd64 only (this job runs on an amd64 runner) — but BOTH arches'
+      # actual .so-loads-on-trixie behaviour is already proven upstream
+      # by the pre-attest `gate` matrix (#67), which is a hard
+      # prerequisite of the leaf attest. So arm64 is no longer trusted
+      # on "same bytes structure" — it is boot-tested for real.
       - name: Post-publish — consumer-style smoke verify (amd64)
         run: |
           set -euo pipefail
@@ -344,7 +369,7 @@ jobs:
           # SPEC.pgRDF.INSTALL.v0.2 §3 layout instructs.
           docker run --rm -d --name smoke-pg \
             -e POSTGRES_PASSWORD=v -e POSTGRES_USER=v -e POSTGRES_DB=v \
-            postgres:18-bookworm
+            postgres:18-trixie
           # Same readiness fix as the boot gate — wait on a real SELECT 1 so we
           # never race the initdb bootstrap-server shutdown window.
           for i in $(seq 1 30); do

@@ -58,7 +58,7 @@ process). It provides four engines, each a Rust module under `src/`:
 
 ## Deployment shape
 
-For local dev: `compose/` brings up stock `postgres:17.4-bookworm`
+For local dev: `compose/` brings up stock `postgres:18-trixie`
 with bind-mounted extension files (PG 18 deferred pending pgrx
 upstream — ERRATA E-006). See [`docs/06-installation.md`](06-installation.md)
 for K8s.

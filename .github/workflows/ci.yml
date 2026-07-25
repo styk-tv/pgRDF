@@ -101,7 +101,7 @@ jobs:
   # Compose-based regression suite. Mirrors the local dev loop
   # (`just build-ext && just test-regression`) byte-for-byte: builds the
   # .so inside `compose/builder.Containerfile`, boots the
-  # `postgres:18-bookworm` runtime with the artifacts bind-mounted,
+  # `postgres:18-trixie` runtime with the artifacts bind-mounted,
   # then drives `tests/regression/sql/NN-*.sql` against it.
   #
   # Lives outside the per-PG matrix because the compose stack targets a
@@ -154,7 +154,7 @@ jobs:
           # Retry up to 5× with a short backoff so a transient Hub
           # flake doesn't fail the whole job.
           for i in 1 2 3 4 5; do
-            if docker pull docker.io/library/postgres:18-bookworm; then
+            if docker pull docker.io/library/postgres:18-trixie; then
               exit 0
             fi
             echo "pull attempt $i failed; sleeping before retry"

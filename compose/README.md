@@ -1,6 +1,6 @@
 # compose/ — local-dev runtime for pgRDF
 
-Stock `postgres:17.4-bookworm` image, no image rebuild, no entrypoint
+Stock `postgres:18-trixie` image, no image rebuild, no entrypoint
 wrapper. The locally-built extension files are placed at the
 canonical Postgres paths via **per-file bind mounts**:
 
@@ -24,7 +24,7 @@ later at `CREATE EXTENSION` time with a confusing
     compose/
     ├── compose.yml                 # services definition (postgres + pgrdf-parity init)
     ├── parity-check.sh             # TG-3 v2 compose-startup gate (runs inside pgrdf-parity)
-    ├── builder.Containerfile       # linux/glibc-bookworm builder
+    ├── builder.Containerfile       # linux/glibc-trixie builder
     ├── .env.example
     ├── extensions/                 # built artifacts (gitignored, populated by `just build-ext`)
     │   ├── lib/pgrdf.so
@@ -58,12 +58,12 @@ The forward path in SPEC.pgRDF.INSTALL.v0.2 §7 is to use PG 18+'s
 side directory without touching `$libdir`/`$sharedir/extension`. That
 is the long-term shape this compose will adopt.
 
-Today it pins to PG 17.4-bookworm because pgrx 0.17 and 0.18 (the
-versions that add PG 18 support) fail to build on current Rust
-toolchains (stable 1.95, nightly 1.97) — they reference unstable
-APIs without enabling the corresponding feature flags. See
-[`specs/ERRATA.v0.2.md`](../specs/ERRATA.v0.2.md) item E-006. Until
-pgrx publishes a fixed 0.17.x or 0.18.x, we pin pgrx 0.16 and PG 17.
+Today it pins to `postgres:18-trixie` on pgrx 0.19.1. ERRATA E-006
+(the pgrx 0.16 / PG ≤ 17 hold that blocked PG 18) is **resolved** —
+see [`specs/ERRATA.v0.6.md`](../specs/ERRATA.v0.6.md) item E-015. The
+`.so` is built inside a `rust:1.96-trixie` builder, so its glibc
+floor matches `postgres:18-trixie`; trixie is the contractual base for
+the whole downstream bundle chain (PROVENANCE.md Rule 9).
 
 ## Why per-file bind mounts (no init script, no entrypoint wrapper)
 
@@ -89,7 +89,7 @@ builder container) before `compose up`.
 We're cross-platform (macOS host, Linux Postgres container). Native
 `cargo pgrx run` works on macOS for fast iteration but produces a
 `.dylib`, which the Linux postgres container cannot load. The
-builder container produces a glibc-bookworm `.so` matching the
+builder container produces a glibc-trixie `.so` matching the
 target environment exactly.
 
 ## Resetting state

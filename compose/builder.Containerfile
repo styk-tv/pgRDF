@@ -1,7 +1,15 @@
 # syntax=docker/dockerfile:1.4
 #
-# Linux builder for pgRDF — produces glibc-bookworm artifacts that the
-# postgres:17.4-bookworm container can load directly via bind mount.
+# Linux builder for pgRDF — produces glibc-trixie artifacts that the
+# postgres:18-trixie container can load directly via bind mount.
+#
+# The build container's userland (Debian trixie) — NOT the host runner
+# OS — determines the .so's glibc floor. Building both arches inside
+# this same trixie image is what gives the amd64 and arm64 leaves a
+# CONSISTENT floor from the SAME commit (issue #67): a bare-runner
+# build floored each arch at whatever the runner shipped (an accident
+# of runner selection), which shipped a 2.39-floored arm64 .so that
+# would not load on the downstream base. See PROVENANCE.md Rule 9.
 #
 # This Containerfile uses BuildKit cache mounts (the `# syntax=` line
 # at the top + `--mount=type=cache` on RUN steps). Cargo's registry,
@@ -18,7 +26,7 @@
 #   DOCKER_BUILDKIT=1 docker build -t pgrdf-builder -f compose/builder.Containerfile .
 #   docker run --rm -v "$PWD/compose/extensions:/out" pgrdf-builder
 
-FROM docker.io/library/rust:1.96-bookworm AS builder
+FROM docker.io/library/rust:1.96-trixie AS builder
 
 ARG PG_MAJOR=18
 ARG PGRX_VERSION=0.19.1
@@ -77,7 +85,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 # Stage 2: minimal export image. `podman run` copies /out into the
 # host (compose/extensions/).
-FROM debian:bookworm-slim AS export
+FROM debian:trixie-slim AS export
 COPY --from=builder /artifacts/lib/pgrdf.so /out/lib/pgrdf.so
 COPY --from=builder /artifacts/share/extension/ /out/share/extension/
 CMD ["sh", "-c", "cp -r /out/* /export/ && ls -laR /export"]
