@@ -42,7 +42,7 @@ runs:
     - name: Install cargo-pgrx
       shell: bash
       # PGRX_VERSION default matches the workspace pin in
-      # Cargo.toml (`pgrx = "=0.19.1"`). E-006 is resolved: pgrx 0.19.x
+      # Cargo.toml (`pgrx = "=0.19.2"`). E-006 is resolved: pgrx 0.19.x
       # builds on stable Rust >= 1.96 and supports PG 14-18 (see #63 and
       # specs/ERRATA.v0.6.md E-015). Callers set PGRX_VERSION explicitly.
       #
@@ -58,7 +58,7 @@ runs:
       run: |
         set -euo pipefail
         for i in 1 2 3 4 5; do
-          if cargo install cargo-pgrx --locked --version "^${PGRX_VERSION:-0.19.1}"; then
+          if cargo install cargo-pgrx --locked --version "=${PGRX_VERSION:-0.19.2}"; then
             exit 0
           fi
           echo "cargo install cargo-pgrx attempt $i failed; retrying after backoff"
