@@ -1,0 +1,5 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://ex/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:a a ex:T ; ex:p "ok" .
