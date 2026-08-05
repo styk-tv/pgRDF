@@ -165,12 +165,64 @@ use std::time::Instant;
 /// re-parsed into rudof's `InMemoryGraph` before validation.
 /// Validation is in-process; no SPARQL endpoint or external store is
 /// contacted.
+/// SHACL constraint components this validator does **not** evaluate,
+/// keyed by the mode they are unevaluated under.
+///
+/// An unevaluated component contributes no violation *and no error*, so
+/// `conforms:true` cannot be distinguished from "never checked". That is
+/// the defect this table exists to close: a shapes graph that relies on
+/// one of these is refused rather than silently passed.
+///
+/// **Every entry is measured, never assumed.** `tests/shacl-capability`
+/// generates the native-mode set; extend this table only from a probe
+/// that reproduces the skip. A guessed entry re-creates the failure it
+/// is meant to prevent, one layer up.
+///
+/// `(IRI, human-readable name)`.
+const UNENFORCED_ALL_MODES: &[(&str, &str)] = &[(
+    "http://www.w3.org/ns/shacl#sparql",
+    "sh:sparql (SHACL-SPARQL constraint component)",
+)];
+
+/// Additionally unevaluated under `'sparql'` mode: rudof ships no
+/// `SparqlValidator` impl for the cardinality constraints, so a shape
+/// relying on them reports `conforms:true` under `'sparql'` while the
+/// same shape reports `conforms:false` under `'native'`.
+const UNENFORCED_SPARQL_MODE: &[(&str, &str)] = &[
+    ("http://www.w3.org/ns/shacl#minCount", "sh:minCount"),
+    ("http://www.w3.org/ns/shacl#maxCount", "sh:maxCount"),
+];
+
+/// Names every unenforced component the shapes graph actually uses.
+///
+/// Matches on `" <iri> "` against the N-Triples serialisation, which
+/// biases toward the predicate position. A term appearing only as an
+/// *object* (a shapes-graph-describing-shapes graph) can also match;
+/// that direction over-refuses rather than under-refuses, which is the
+/// correct way for a fail-closed check to be wrong.
+fn unenforced_components(shapes_nt: &str, mode: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    let mut check = |table: &'static [(&'static str, &'static str)]| {
+        for (iri, name) in table {
+            if shapes_nt.contains(&format!(" <{iri}> ")) && !found.contains(name) {
+                found.push(*name);
+            }
+        }
+    };
+    check(UNENFORCED_ALL_MODES);
+    if mode == "sparql" {
+        check(UNENFORCED_SPARQL_MODE);
+    }
+    found
+}
+
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn validate(
     data_graph_id: i64,
     shapes_graph_id: i64,
     mode: default!(String, "'native'"),
+    strict: default!(bool, true),
 ) -> pgrx::JsonB {
     let start = Instant::now();
 
@@ -229,6 +281,39 @@ fn validate(
     // 1. Rehydrate data + shapes graphs as N-Triples text.
     let (data_nt, data_count) = serialise_graph_to_ntriples(data_graph_id);
     let (shapes_nt, shapes_count) = serialise_graph_to_ntriples(shapes_graph_id);
+
+    // 1a. Fail closed on a constraint component this engine does not
+    //     evaluate. Skipping one silently is indistinguishable from
+    //     validating cleanly, so a caller relying on it gets a pass it
+    //     did not earn. Refuse instead, naming what was skipped.
+    //
+    //     `strict => false` is an explicit, per-call opt-out for
+    //     exploratory use. It is never the default, and it is the only
+    //     way to reach the old silent behaviour.
+    if strict {
+        let skipped = unenforced_components(&shapes_nt, &mode_str);
+        if !skipped.is_empty() {
+            return pgrx::JsonB(json!({
+                "conforms":        Value::Null,
+                "results":         [],
+                "data_graph_id":   data_graph_id,
+                "shapes_graph_id": shapes_graph_id,
+                "data_triples":    data_count,
+                "shapes_triples":  shapes_count,
+                "mode":            mode_str.clone(),
+                "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
+                "error":           format!(
+                    "validate: unenforced constraint component in shapes graph \
+                     under mode {mode_str:?}: {}. This engine does not evaluate \
+                     it, so a verdict would be meaningless. Re-run with \
+                     strict => false to validate the remaining constraints \
+                     anyway (the named component stays unevaluated).",
+                    skipped.join(", ")
+                ),
+                "unenforced":      skipped,
+            }));
+        }
+    }
 
     // 2. Build rudof's in-memory graphs from the N-Triples text.
     let data_im =
@@ -1349,5 +1434,140 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
             "no sh:sparql constraints ⇒ empty results"
         );
         assert!(pv.get("elapsed_ms").is_some());
+    }
+
+    /// #80 — a shapes graph using a constraint component this engine
+    /// does not evaluate is REFUSED, not silently passed.
+    ///
+    /// Measured in PASS-8 of the CKP v3.11 wave: a `sh:SPARQLConstraint`
+    /// whose `sh:select` names a violating focus node returned
+    /// `conforms:true`, zero results and NO error, under both `'native'`
+    /// and `'sparql'`. A caller could not distinguish that from a clean
+    /// validation. This test locks the refusal.
+    #[pg_test]
+    fn validate_refuses_unenforced_sparql_constraint() {
+        let g_data: i64 = 8540;
+        let g_shapes: i64 = 8541;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://ex/> . ex:a a ex:T ; ex:p 20 .".into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix ex: <http://ex/> .
+                 ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                   sh:sparql [ a sh:SPARQLConstraint ;
+                               sh:select \"SELECT $this WHERE { $this <http://ex/p> ?v . FILTER(?v > 10) }\" ] ."
+                    .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+
+        // Strict (the default): refused, conforms is NULL, error names it.
+        let report =
+            Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g_data}, {g_shapes})"))
+                .unwrap()
+                .unwrap();
+        let v = report.0;
+        assert!(
+            v["conforms"].is_null(),
+            "strict validate must NOT return a verdict when a component is unevaluated: {v}"
+        );
+        let err = v["error"].as_str().unwrap_or_default();
+        assert!(
+            err.starts_with("validate: unenforced constraint component"),
+            "error must carry the documented prefix, got: {err}"
+        );
+        assert!(
+            err.contains("sh:sparql"),
+            "error must NAME the component, got: {err}"
+        );
+
+        // Explicit opt-out restores the old behaviour, and only then.
+        let loose = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'native', false)"
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(
+            loose.0["conforms"].is_boolean(),
+            "strict => false must still return a Boolean verdict: {}",
+            loose.0
+        );
+    }
+
+    /// #80 — the unenforced set is MODE-DEPENDENT. rudof ships no
+    /// `SparqlValidator` impl for the cardinality constraints, so a
+    /// `sh:minCount` shape silently passes under `'sparql'` while the
+    /// same shape refuses under `'native'`. Strict mode refuses the
+    /// asymmetry rather than reporting the weaker verdict.
+    #[pg_test]
+    fn validate_refuses_cardinality_under_sparql_mode() {
+        let g_data: i64 = 8542;
+        let g_shapes: i64 = 8543;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://ex/> . ex:a a ex:T .".into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix ex: <http://ex/> .
+                 ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                   sh:property [ sh:path ex:p ; sh:minCount 1 ] ."
+                    .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+
+        // 'native' evaluates minCount — a real verdict, and it refuses.
+        let native = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'native')"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            native.0["conforms"],
+            serde_json::json!(false),
+            "native must still evaluate sh:minCount: {}",
+            native.0
+        );
+
+        // 'sparql' does NOT evaluate it, so strict mode refuses.
+        let sparql = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'sparql')"
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(
+            sparql.0["conforms"].is_null(),
+            "sparql mode cannot evaluate sh:minCount and must refuse: {}",
+            sparql.0
+        );
+        assert!(
+            sparql.0["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("sh:minCount"),
+            "error must NAME sh:minCount: {}",
+            sparql.0
+        );
     }
 }
