@@ -210,37 +210,45 @@ const TARGET_PREDICATES: &[&str] = &[
     "http://www.w3.org/ns/shacl#targetObjectsOf",
 ];
 
-/// True when the shapes graph can select at least one focus node.
+/// The distinct predicate IRIs a graph actually uses.
 ///
-/// Explicit targets are the four `sh:target*` predicates. SHACL also
-/// allows *implicit class targeting* — a node that is both an
-/// `sh:NodeShape` and an `rdfs:Class` targets its own instances — so
-/// their co-occurrence counts as targeting. That direction deliberately
-/// under-refuses: a shapes graph we cannot prove vacuous is validated
-/// normally rather than rejected.
-fn declares_any_target(shapes_nt: &str) -> bool {
-    if TARGET_PREDICATES
-        .iter()
-        .any(|p| shapes_nt.contains(&format!(" <{p}> ")))
-    {
-        return true;
-    }
-    shapes_nt.contains("<http://www.w3.org/ns/shacl#NodeShape>")
-        && shapes_nt.contains("<http://www.w3.org/2000/01/rdf-schema#Class>")
+/// Queried from `_pgrdf_quads` rather than scanned out of the
+/// N-Triples serialisation. The scan version of this looked right and
+/// silently matched nothing — a whitespace assumption about someone
+/// else's serialiser, holding up a fail-closed gate. Asking the store
+/// what predicates a graph contains has no such assumption, and it also
+/// removes the object-position false positives the scan could produce.
+fn predicate_iris(graph_id: i64) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    Spi::connect(|client| {
+        let rows = client.select(
+            "SELECT DISTINCT d.lexical_value
+               FROM pgrdf._pgrdf_quads q
+               JOIN pgrdf._pgrdf_dictionary d ON d.id = q.predicate_id
+              WHERE q.graph_id = $1",
+            None,
+            &[graph_id.into()],
+        );
+        if let Ok(rows) = rows {
+            for row in rows {
+                if let Ok(Some(iri)) = row.get::<String>(1) {
+                    out.insert(iri);
+                }
+            }
+        }
+    });
+    out
 }
 
 /// Names every unenforced component the shapes graph actually uses.
-///
-/// Matches on `" <iri> "` against the N-Triples serialisation, which
-/// biases toward the predicate position. A term appearing only as an
-/// *object* (a shapes-graph-describing-shapes graph) can also match;
-/// that direction over-refuses rather than under-refuses, which is the
-/// correct way for a fail-closed check to be wrong.
-fn unenforced_components(shapes_nt: &str, mode: &str) -> Vec<&'static str> {
+fn unenforced_components(
+    preds: &std::collections::HashSet<String>,
+    mode: &str,
+) -> Vec<&'static str> {
     let mut found = Vec::new();
     let mut check = |table: &'static [(&'static str, &'static str)]| {
         for (iri, name) in table {
-            if shapes_nt.contains(&format!(" <{iri}> ")) && !found.contains(name) {
+            if preds.contains(*iri) && !found.contains(name) {
                 found.push(*name);
             }
         }
@@ -250,6 +258,22 @@ fn unenforced_components(shapes_nt: &str, mode: &str) -> Vec<&'static str> {
         check(UNENFORCED_SPARQL_MODE);
     }
     found
+}
+
+/// True when the shapes graph can select at least one focus node.
+///
+/// Explicit targets are the four `sh:target*` predicates. SHACL also
+/// allows *implicit class targeting* — a node that is both an
+/// `sh:NodeShape` and an `rdfs:Class` targets its own instances — so
+/// their co-occurrence counts as targeting. That direction deliberately
+/// under-refuses: a shapes graph we cannot prove vacuous is validated
+/// normally rather than rejected.
+fn declares_any_target(preds: &std::collections::HashSet<String>, shapes_nt: &str) -> bool {
+    if TARGET_PREDICATES.iter().any(|p| preds.contains(*p)) {
+        return true;
+    }
+    shapes_nt.contains("<http://www.w3.org/ns/shacl#NodeShape>")
+        && shapes_nt.contains("<http://www.w3.org/2000/01/rdf-schema#Class>")
 }
 
 #[search_path(pgrdf, pg_temp)]
@@ -331,7 +355,8 @@ fn validate(
     //     triples but no shape target all report `conforms:true` —
     //     indistinguishable from a real pass. The caller almost always
     //     meant a different graph id.
-    if strict && !declares_any_target(&shapes_nt) {
+    let shapes_preds = predicate_iris(shapes_graph_id);
+    if strict && !declares_any_target(&shapes_preds, &shapes_nt) {
         return pgrx::JsonB(json!({
             "conforms":        Value::Null,
             "results":         [],
@@ -352,7 +377,7 @@ fn validate(
     }
 
     if strict {
-        let skipped = unenforced_components(&shapes_nt, &mode_str);
+        let skipped = unenforced_components(&shapes_preds, &mode_str);
         if !skipped.is_empty() {
             return pgrx::JsonB(json!({
                 "conforms":        Value::Null,
