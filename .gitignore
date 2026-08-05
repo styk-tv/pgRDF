@@ -48,3 +48,9 @@ fixtures/regression/*.nt
 
 # Superpowers working artifacts (specs/plans) — local only
 docs/superpowers/
+
+# CKP wave working documents — internal, never committed to this public repo.
+CK*.md
+SPEC*.md
+# ...but pgRDF's OWN published engineering specs stay tracked.
+!specs/SPEC.pgRDF.*.md
