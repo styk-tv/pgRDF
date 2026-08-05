@@ -32,7 +32,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PGRX_VERSION: "0.19.1"
+  PGRX_VERSION: "0.19.2"
 
 jobs:
   fmt:
@@ -59,13 +59,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy }
       # CI-only build cache (cargo registry + ./target + the cargo-pgrx
-      # binary), keyed per PG major. Placed before setup-pgrx so its
-      # `cargo install cargo-pgrx` becomes a fast no-op on a cache hit.
+      # binary), keyed per PG major AND pgrx version. Placed before
+      # setup-pgrx so its `cargo install cargo-pgrx` is a no-op on a hit.
+      # PGRX_VERSION is IN THE KEY deliberately: the cache carries the
+      # cargo-pgrx binary, and cargo-pgrx refuses to run unless its
+      # version equals the pgrx library pin exactly. Without it, a cache
+      # entry from an older pin shadows the installer and every job fails
+      # with "cargo-pgrx X is not compatible with the dependencies".
       # The release.yml build matrix is deliberately LEFT UNCACHED so the
       # attested release bytes always come from a clean-room compile.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: "pg${{ matrix.pg }}"
+          key: "pg${{ matrix.pg }}-pgrx${{ env.PGRX_VERSION }}"
           cache-on-failure: true
       - uses: ./.github/actions/setup-pgrx
         with: { pg: "${{ matrix.pg }}" }
@@ -92,7 +97,7 @@ jobs:
       # build matrix stays uncached.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: "pg${{ matrix.pg }}"
+          key: "pg${{ matrix.pg }}-pgrx${{ env.PGRX_VERSION }}"
           cache-on-failure: true
       - uses: ./.github/actions/setup-pgrx
         with: { pg: "${{ matrix.pg }}" }

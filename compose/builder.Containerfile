@@ -29,7 +29,7 @@
 FROM docker.io/library/rust:1.96-trixie AS builder
 
 ARG PG_MAJOR=18
-ARG PGRX_VERSION=0.19.1
+ARG PGRX_VERSION=0.19.2
 
 # Postgres dev headers + full server (initdb for pgrx tests) + sudo
 # for the pgrx-tests RUNAS path. apt cache lives in a BuildKit cache
@@ -57,7 +57,7 @@ ENV PGRX_HOME=/opt/pgrx
 # image layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo install cargo-pgrx --locked --version "^${PGRX_VERSION}"
+    cargo install cargo-pgrx --locked --version "=${PGRX_VERSION}"
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \

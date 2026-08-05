@@ -6,7 +6,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PGRX_VERSION: "0.19.1"
+  PGRX_VERSION: "0.19.2"
 
 # Phase 6 step 2 progression:
 #   v0.3 starter:    hand-authored W3C-shape tests in tests/w3c-sparql/<NN>-name/
