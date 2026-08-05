@@ -193,6 +193,35 @@ const UNENFORCED_SPARQL_MODE: &[(&str, &str)] = &[
     ("http://www.w3.org/ns/shacl#maxCount", "sh:maxCount"),
 ];
 
+/// SHACL target declarations. A shapes graph carrying none of these
+/// targets nothing, so validation is vacuous: every data graph
+/// "conforms" because nothing was ever selected to check.
+const TARGET_PREDICATES: &[&str] = &[
+    "http://www.w3.org/ns/shacl#targetClass",
+    "http://www.w3.org/ns/shacl#targetNode",
+    "http://www.w3.org/ns/shacl#targetSubjectsOf",
+    "http://www.w3.org/ns/shacl#targetObjectsOf",
+];
+
+/// True when the shapes graph can select at least one focus node.
+///
+/// Explicit targets are the four `sh:target*` predicates. SHACL also
+/// allows *implicit class targeting* — a node that is both an
+/// `sh:NodeShape` and an `rdfs:Class` targets its own instances — so
+/// their co-occurrence counts as targeting. That direction deliberately
+/// under-refuses: a shapes graph we cannot prove vacuous is validated
+/// normally rather than rejected.
+fn declares_any_target(shapes_nt: &str) -> bool {
+    if TARGET_PREDICATES
+        .iter()
+        .any(|p| shapes_nt.contains(&format!(" <{p}> ")))
+    {
+        return true;
+    }
+    shapes_nt.contains("<http://www.w3.org/ns/shacl#NodeShape>")
+        && shapes_nt.contains("<http://www.w3.org/2000/01/rdf-schema#Class>")
+}
+
 /// Names every unenforced component the shapes graph actually uses.
 ///
 /// Matches on `" <iri> "` against the N-Triples serialisation, which
@@ -290,6 +319,31 @@ fn validate(
     //     `strict => false` is an explicit, per-call opt-out for
     //     exploratory use. It is never the default, and it is the only
     //     way to reach the old silent behaviour.
+    // 1b. Fail closed on a shapes graph that cannot refuse anything.
+    //     A missing graph id, an empty graph, and a graph carrying
+    //     triples but no shape target all report `conforms:true` —
+    //     indistinguishable from a real pass. The caller almost always
+    //     meant a different graph id.
+    if strict && !declares_any_target(&shapes_nt) {
+        return pgrx::JsonB(json!({
+            "conforms":        Value::Null,
+            "results":         [],
+            "data_graph_id":   data_graph_id,
+            "shapes_graph_id": shapes_graph_id,
+            "data_triples":    data_count,
+            "shapes_triples":  shapes_count,
+            "mode":            mode_str.clone(),
+            "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
+            "error":           format!(
+                "validate: shapes graph {shapes_graph_id} declares no SHACL target \
+                 ({shapes_count} triples). Nothing would be selected, so a verdict \
+                 would be vacuous — a missing or wrong graph id reports the same \
+                 `conforms:true` as a clean validation. Re-run with strict => false \
+                 to accept a vacuous pass."
+            ),
+        }));
+    }
+
     if strict {
         let skipped = unenforced_components(&shapes_nt, &mode_str);
         if !skipped.is_empty() {
@@ -1568,6 +1622,90 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
                 .contains("sh:minCount"),
             "error must NAME sh:minCount: {}",
             sparql.0
+        );
+    }
+
+    /// #83 — a shapes graph that cannot select anything must not report
+    /// a verdict. Three shapes of the same defect, all measured
+    /// returning `conforms:true` with no error before this guard:
+    /// a nonexistent graph id, an empty graph, and a graph carrying
+    /// triples but no SHACL target (passing the data graph twice).
+    #[pg_test]
+    fn validate_refuses_vacuous_shapes_graph() {
+        let g_data: i64 = 8550;
+        let g_empty: i64 = 8551;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_empty.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://ex/> . ex:a a ex:T .".into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+
+        for (label, shapes) in [
+            ("nonexistent", 999_999_999_i64),
+            ("empty", g_empty),
+            ("data-graph-as-shapes", g_data),
+        ] {
+            let r =
+                Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g_data}, {shapes})"))
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                r.0["conforms"].is_null(),
+                "{label}: a vacuous shapes graph must not yield a verdict: {}",
+                r.0
+            );
+            assert!(
+                r.0["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("declares no SHACL target"),
+                "{label}: error must say why: {}",
+                r.0
+            );
+        }
+
+        // A real shapes graph still validates normally.
+        let g_shapes: i64 = 8552;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix ex: <http://ex/> .
+                 ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                   sh:property [ sh:path ex:p ; sh:minCount 1 ] ."
+                    .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+        let ok =
+            Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g_data}, {g_shapes})"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            ok.0["conforms"],
+            serde_json::json!(false),
+            "a targeting shapes graph must still produce a real verdict: {}",
+            ok.0
+        );
+
+        // Explicit opt-out still permits the vacuous pass.
+        let loose = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g_data}, {g_empty}, 'native', false)"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            loose.0["conforms"],
+            serde_json::json!(true),
+            "strict => false must still allow it: {}",
+            loose.0
         );
     }
 }
