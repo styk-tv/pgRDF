@@ -51,6 +51,8 @@ docs/superpowers/
 
 # CKP v3.11 wave working documents — internal, never committed to this public repo.
 # Covers CKP.*.VISION-REQUIREMENTS-STATEMENT.md and any SPEC.* drafts dropped here.
+# NOTE: these patterns must live on main, not only on a feature branch — a branch
+# cut from a main that lacked them let `git add -A` sweep the statement in (#84).
 CK*.md
 SPEC*.md
 # ...but pgRDF's OWN published engineering specs are tracked, public, and unrelated to CKP.
