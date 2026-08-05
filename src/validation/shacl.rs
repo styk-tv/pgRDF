@@ -219,25 +219,25 @@ const TARGET_PREDICATES: &[&str] = &[
 /// what predicates a graph contains has no such assumption, and it also
 /// removes the object-position false positives the scan could produce.
 fn predicate_iris(graph_id: i64) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    Spi::connect(|client| {
-        let rows = client.select(
-            "SELECT DISTINCT d.lexical_value
-               FROM pgrdf._pgrdf_quads q
-               JOIN pgrdf._pgrdf_dictionary d ON d.id = q.predicate_id
-              WHERE q.graph_id = $1",
-            None,
-            &[graph_id.into()],
-        );
-        if let Ok(rows) = rows {
-            for row in rows {
-                if let Ok(Some(iri)) = row.get::<String>(1) {
-                    out.insert(iri);
-                }
-            }
-        }
-    });
-    out
+    // Aggregated server-side and read as ONE value. The row-iterating
+    // version of this returned a PARTIAL set — enough to satisfy the
+    // target check and miss `sh:minCount` in the same graph — which cost
+    // three CI rounds to localise because the only coverage was a
+    // `#[pg_test]` that cannot link on a dev host. One value, no cursor,
+    // nothing to half-consume.
+    Spi::get_one_with_args::<Vec<Option<String>>>(
+        "SELECT array_agg(DISTINCT d.lexical_value)
+           FROM pgrdf._pgrdf_quads q
+           JOIN pgrdf._pgrdf_dictionary d ON d.id = q.predicate_id
+          WHERE q.graph_id = $1",
+        &[graph_id.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Names every unenforced component the shapes graph actually uses.
@@ -253,7 +253,14 @@ fn unenforced_components(
             }
         }
     };
-    check(UNENFORCED_ALL_MODES);
+    // 'pgrdf' is the Track-H handler and it EVALUATES sh:sparql — measured
+    // conforms=false, 1 result, on a constraint the other two skip silently.
+    // This exclusion used to be incidental: `validate` returns for 'pgrdf'
+    // before reaching the guard, so the function was wrong and the behaviour
+    // was accidentally right. A unit test caught it the moment one existed.
+    if mode != "pgrdf" {
+        check(UNENFORCED_ALL_MODES);
+    }
     if mode == "sparql" {
         check(UNENFORCED_SPARQL_MODE);
     }
@@ -1775,5 +1782,49 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
             "strict => false must still allow it: {}",
             loose.0
         );
+    }
+
+    /// The gate's own logic, tested WITHOUT Postgres.
+    ///
+    /// #82 sat at "341 pass / 1 fail" for three CI rounds because the
+    /// only coverage of these two functions ran inside a `#[pg_test]`,
+    /// which cannot link on a macOS host. A plain unit test over a
+    /// hand-built set answers in milliseconds whether the pure logic is
+    /// the problem — and it is not, which is what localises the defect
+    /// to the SPI read.
+    #[test]
+    fn unenforced_and_target_logic_is_pure_and_correct() {
+        use super::{declares_any_target, unenforced_components};
+        use std::collections::HashSet;
+        let set = |v: &[&str]| -> HashSet<String> { v.iter().map(|s| (*s).to_string()).collect() };
+
+        const MIN: &str = "http://www.w3.org/ns/shacl#minCount";
+        const TC: &str = "http://www.w3.org/ns/shacl#targetClass";
+        const SP: &str = "http://www.w3.org/ns/shacl#sparql";
+
+        // sh:minCount is unevaluated under 'sparql' and fine under 'native'.
+        assert_eq!(
+            unenforced_components(&set(&[MIN, TC]), "sparql"),
+            vec!["sh:minCount"]
+        );
+        assert!(unenforced_components(&set(&[MIN, TC]), "native").is_empty());
+
+        // sh:sparql is skipped by both rudof modes and evaluated by 'pgrdf'.
+        assert_eq!(unenforced_components(&set(&[SP]), "native").len(), 1);
+        assert_eq!(unenforced_components(&set(&[SP]), "sparql").len(), 1);
+        assert!(
+            unenforced_components(&set(&[SP]), "pgrdf").is_empty(),
+            "'pgrdf' evaluates sh:sparql — refusing it there rejects the only mode that supports it"
+        );
+
+        // Targeting: an explicit target predicate is enough.
+        assert!(declares_any_target(&set(&[TC]), ""));
+        assert!(!declares_any_target(&set(&[MIN]), ""));
+
+        // Implicit class targeting is detected from the serialisation.
+        assert!(declares_any_target(
+            &set(&[]),
+            "_:b <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#NodeShape> .\n             _:b <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> ."
+        ));
     }
 }
