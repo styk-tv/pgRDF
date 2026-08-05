@@ -2,7 +2,8 @@
   "artifact": "pgrdf-shacl-capability",
   "caveats": [
     "validate does NOT entail: sh:targetClass matches ASSERTED rdf:type only. A node typed only by a subclass is not targeted by a shape on its parent unless pgrdf.materialize has run, or the parent type is stamped explicitly.",
-    "A constraint component absent from `enforced` contributes no violation and no error. conforms:true therefore does not distinguish 'validated clean' from 'never evaluated'. See pgRDF#80."
+    "A constraint component absent from `enforced` contributes no violation and no error. conforms:true therefore does not distinguish 'validated clean' from 'never evaluated'. See pgRDF#80.",
+    "`enforced_only_in_mode` names components no default-mode probe catches but another mode evaluates correctly. sh:sparql is the case: silently skipped by 'native' and 'sparql', evaluated by 'pgrdf'. Reading the native verdict alone reports 'unsupported' about an engine that supports it."
   ],
   "enforced": [
     "class",
@@ -22,11 +23,12 @@
     "targetNode",
     "targetSubjectsOf"
   ],
+  "enforced_only_in_mode": {
+    "sparqlConstraint": "pgrdf"
+  },
   "generated_by": "tests/shacl-capability/run.sh",
   "hand_edited": false,
-  "not_enforced": [
-    "sparqlConstraint"
-  ],
+  "not_enforced": [],
   "pgrdf_version": "0.6.22",
   "postgres_major": 18,
   "probes": [
@@ -111,7 +113,7 @@
     {
       "component": "sparqlConstraint",
       "control_conforms": true,
-      "verdict": "SILENTLY-SKIPPED",
+      "verdict": "enforced-in-mode:pgrdf",
       "violating_conforms": true
     },
     {

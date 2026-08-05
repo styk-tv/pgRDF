@@ -85,8 +85,22 @@ rows=""; enforced=(); not_enforced=()
 for c in "${components[@]}"; do
   bad="$(probe "$c" violating native)"
   good="$(probe "$c" control native)"
+  # A component absent from `native` may still be evaluated by another
+  # mode. `sh:sparql` is exactly that case: skipped silently by native
+  # and sparql, evaluated correctly by 'pgrdf'. Reporting only the
+  # native verdict would say "not enforced" about an engine that
+  # enforces it — the same error in the other direction.
+  alt=""
+  if [[ "$bad" != "false" ]]; then
+    for m in pgrdf sparql; do
+      ab="$(probe "$c" violating "$m")"; ag="$(probe "$c" control "$m")"
+      if [[ "$ab" == "false" && "$ag" == "true" ]]; then alt="$m"; break; fi
+    done
+  fi
   if [[ "$bad" == "false" && "$good" == "true" ]]; then
     verdict="enforced";      enforced+=( "$c" )
+  elif [[ -n "$alt" ]]; then
+    verdict="enforced-in-mode:$alt"; enforced+=( "$c" )
   elif [[ "$bad" == "true" ]]; then
     verdict="SILENTLY-SKIPPED"; not_enforced+=( "$c" )
   else
@@ -110,7 +124,10 @@ doc = {
   "pgrdf_version": pgrdf,
   "postgres_major": int(pg),
   "enforced": sorted(p["component"] for p in probes if p["verdict"] == "enforced"),
-  "not_enforced": sorted(p["component"] for p in probes if p["verdict"] != "enforced"),
+  "enforced_only_in_mode": {p["component"]: p["verdict"].split(":", 1)[1]
+                            for p in probes if p["verdict"].startswith("enforced-in-mode:")},
+  "not_enforced": sorted(p["component"] for p in probes
+                         if not p["verdict"].startswith("enforced")),
   "probes": probes,
   "caveats": [
     "validate does NOT entail: sh:targetClass matches ASSERTED rdf:type only. "
@@ -119,6 +136,10 @@ doc = {
     "A constraint component absent from `enforced` contributes no violation and "
     "no error. conforms:true therefore does not distinguish 'validated clean' "
     "from 'never evaluated'. See pgRDF#80.",
+    "`enforced_only_in_mode` names components no default-mode probe catches but "
+    "another mode evaluates correctly. sh:sparql is the case: silently skipped by "
+    "'native' and 'sparql', evaluated by 'pgrdf'. Reading the native verdict alone "
+    "reports 'unsupported' about an engine that supports it.",
   ],
 }
 with open(out, "w") as f:

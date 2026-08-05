@@ -179,9 +179,16 @@ use std::time::Instant;
 /// is meant to prevent, one layer up.
 ///
 /// `(IRI, human-readable name)`.
+/// NOTE the name: "all modes" means the two modes that reach the rudof
+/// pipeline — `'native'` and `'sparql'`. It does NOT include `'pgrdf'`,
+/// which short-circuits to the Track-H handler before this runs and
+/// **does** evaluate `sh:sparql`, measured returning a real verdict
+/// (`conforms:false`, 1 result) on a constraint the other two skip
+/// silently. Refusing it there would reject the one mode built to
+/// support it.
 const UNENFORCED_ALL_MODES: &[(&str, &str)] = &[(
     "http://www.w3.org/ns/shacl#sparql",
-    "sh:sparql (SHACL-SPARQL constraint component)",
+    "sh:sparql (SHACL-SPARQL constraint component — use mode 'pgrdf', which evaluates it)",
 )];
 
 /// Additionally unevaluated under `'sparql'` mode: rudof ships no
@@ -805,8 +812,32 @@ mod tests {
         let v = &j.0;
         assert_eq!(v["data_triples"], 0);
         assert_eq!(v["shapes_triples"], 0);
-        // No shapes ⇒ no failures ⇒ conforms.
-        assert_eq!(v["conforms"], serde_json::json!(true));
+        // #83 — this assertion used to read:
+        //     // No shapes ⇒ no failures ⇒ conforms.
+        //     assert_eq!(v["conforms"], json!(true));
+        // That reasoning is the defect. "Nothing was checked" and
+        // "everything passed" are different facts, and reporting the
+        // second for the first is how a wrong graph id becomes a clean
+        // bill of health. A shapes graph that targets nothing now
+        // refuses instead of conforming.
+        assert!(
+            v["conforms"].is_null(),
+            "a shapes graph that selects nothing must not yield a verdict: {v}"
+        );
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("declares no SHACL target"),
+            "the refusal must say why: {v}"
+        );
+
+        // The old behaviour remains reachable, but only by asking.
+        let loose: pgrx::JsonB =
+            Spi::get_one("SELECT pgrdf.validate(999990::bigint, 999991::bigint, 'native', false)")
+                .unwrap()
+                .unwrap();
+        assert_eq!(loose.0["conforms"], serde_json::json!(true));
     }
 
     // ── v0.5-FUTURE §5 — SHACL-SPARQL mode + materialised-graph ──
@@ -980,7 +1011,11 @@ mod tests {
         // real Boolean (not JSON null), and the call returns without
         // panicking.
         let sparql: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.validate($1, $2, 'sparql')",
+            // strict => false: this test asserts that dispatch REACHES the
+            // upstream engine, not that every constraint is evaluated. The
+            // fail-closed guard (#80) would otherwise refuse first, because
+            // rudof ships no SparqlValidator for the cardinality constraints.
+            "SELECT pgrdf.validate($1, $2, 'sparql', false)",
             &[g_data.into(), g_shapes.into()],
         )
         .unwrap()
@@ -1277,7 +1312,11 @@ ex:ValidResource1
         .unwrap();
 
         let sparql: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.validate($1, $2, 'sparql')",
+            // strict => false: this test asserts that dispatch REACHES the
+            // upstream engine, not that every constraint is evaluated. The
+            // fail-closed guard (#80) would otherwise refuse first, because
+            // rudof ships no SparqlValidator for the cardinality constraints.
+            "SELECT pgrdf.validate($1, $2, 'sparql', false)",
             &[g_data.into(), g_shapes.into()],
         )
         .unwrap()
@@ -1420,7 +1459,11 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         // mode echoed). The "0 violations" outcome is documented
         // expected behaviour, not a passing conformance gate.
         let sparql: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.validate($1, $2, 'sparql')",
+            // strict => false: this test asserts that dispatch REACHES the
+            // upstream engine, not that every constraint is evaluated. The
+            // fail-closed guard (#80) would otherwise refuse first, because
+            // rudof ships no SparqlValidator for the cardinality constraints.
+            "SELECT pgrdf.validate($1, $2, 'sparql', false)",
             &[g_data.into(), g_shapes.into()],
         )
         .unwrap()
@@ -1606,7 +1649,7 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
 
         // 'sparql' does NOT evaluate it, so strict mode refuses.
         let sparql = Spi::get_one::<pgrx::JsonB>(&format!(
-            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'sparql')"
+            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'sparql', false)"
         ))
         .unwrap()
         .unwrap();
