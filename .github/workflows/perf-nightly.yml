@@ -34,7 +34,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  PGRX_VERSION: "0.19.1"
+  PGRX_VERSION: "0.19.2"
 
 jobs:
   lubm-10:
