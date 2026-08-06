@@ -33,7 +33,7 @@
 #   (default)   — validate via `pgrdf.validate(g, g)` ('native').
 #                 The W3C SHACL **Core** suite. Must be FULL-PASS for
 #                 the v0.5 gate (§6.1 #1).
-#   --sparql    — validate via `pgrdf.validate(g, g, 'sparql')`.
+#   --sparql    — validate via `pgrdf.validate(g, g, 'sparql', false)`.
 #                 ERRATA.v0.5 E-012 was RESOLVED on 2026-05-28 by
 #                 `shacl 0.3.2` + pgRDF TH-14 (guard delete). The
 #                 pre-0.3.2 short-circuit returned `conforms:null`
@@ -125,7 +125,13 @@ if [ "${PGRDF_MODE}" -eq 1 ]; then
   MODE_LABEL="pgrdf"
   FIX_DIR="${SPARQL_DIR}"
 elif [ "${SPARQL_MODE}" -eq 1 ]; then
-  MODE_ARG=", 'sparql'"
+  # strict => false. This sub-run asserts the pgRDF-side CONTRACT — that
+  # dispatch reaches the engine and `conforms` is a real Boolean — not
+  # that the constraint was evaluated. `sh:sparql` is unevaluated under
+  # 'sparql' (E-014), so the fail-closed guard refuses it by design.
+  # Refusing is correct and is covered elsewhere; this sub-run opts out
+  # so it keeps testing the thing it was written to test.
+  MODE_ARG=", 'sparql', false"
   MODE_LABEL="sparql"
   FIX_DIR="${SPARQL_DIR}"
 else
