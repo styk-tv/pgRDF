@@ -165,12 +165,131 @@ use std::time::Instant;
 /// re-parsed into rudof's `InMemoryGraph` before validation.
 /// Validation is in-process; no SPARQL endpoint or external store is
 /// contacted.
+/// SHACL constraint components this validator does **not** evaluate,
+/// keyed by the mode they are unevaluated under.
+///
+/// An unevaluated component contributes no violation *and no error*, so
+/// `conforms:true` cannot be distinguished from "never checked". That is
+/// the defect this table exists to close: a shapes graph that relies on
+/// one of these is refused rather than silently passed.
+///
+/// **Every entry is measured, never assumed.** `tests/shacl-capability`
+/// generates the native-mode set; extend this table only from a probe
+/// that reproduces the skip. A guessed entry re-creates the failure it
+/// is meant to prevent, one layer up.
+///
+/// `(IRI, human-readable name)`.
+/// NOTE the name: "all modes" means the two modes that reach the rudof
+/// pipeline — `'native'` and `'sparql'`. It does NOT include `'pgrdf'`,
+/// which short-circuits to the Track-H handler before this runs and
+/// **does** evaluate `sh:sparql`, measured returning a real verdict
+/// (`conforms:false`, 1 result) on a constraint the other two skip
+/// silently. Refusing it there would reject the one mode built to
+/// support it.
+const UNENFORCED_ALL_MODES: &[(&str, &str)] = &[(
+    "http://www.w3.org/ns/shacl#sparql",
+    "sh:sparql (SHACL-SPARQL constraint component — use mode 'pgrdf', which evaluates it)",
+)];
+
+/// Additionally unevaluated under `'sparql'` mode: rudof ships no
+/// `SparqlValidator` impl for the cardinality constraints, so a shape
+/// relying on them reports `conforms:true` under `'sparql'` while the
+/// same shape reports `conforms:false` under `'native'`.
+const UNENFORCED_SPARQL_MODE: &[(&str, &str)] = &[
+    ("http://www.w3.org/ns/shacl#minCount", "sh:minCount"),
+    ("http://www.w3.org/ns/shacl#maxCount", "sh:maxCount"),
+];
+
+/// SHACL target declarations. A shapes graph carrying none of these
+/// targets nothing, so validation is vacuous: every data graph
+/// "conforms" because nothing was ever selected to check.
+const TARGET_PREDICATES: &[&str] = &[
+    "http://www.w3.org/ns/shacl#targetClass",
+    "http://www.w3.org/ns/shacl#targetNode",
+    "http://www.w3.org/ns/shacl#targetSubjectsOf",
+    "http://www.w3.org/ns/shacl#targetObjectsOf",
+];
+
+/// The distinct predicate IRIs a graph actually uses.
+///
+/// Queried from `_pgrdf_quads` rather than scanned out of the
+/// N-Triples serialisation. The scan version of this looked right and
+/// silently matched nothing — a whitespace assumption about someone
+/// else's serialiser, holding up a fail-closed gate. Asking the store
+/// what predicates a graph contains has no such assumption, and it also
+/// removes the object-position false positives the scan could produce.
+fn predicate_iris(graph_id: i64) -> std::collections::HashSet<String> {
+    // Aggregated server-side and read as ONE value. The row-iterating
+    // version of this returned a PARTIAL set — enough to satisfy the
+    // target check and miss `sh:minCount` in the same graph — which cost
+    // three CI rounds to localise because the only coverage was a
+    // `#[pg_test]` that cannot link on a dev host. One value, no cursor,
+    // nothing to half-consume.
+    Spi::get_one_with_args::<Vec<Option<String>>>(
+        "SELECT array_agg(DISTINCT d.lexical_value)
+           FROM pgrdf._pgrdf_quads q
+           JOIN pgrdf._pgrdf_dictionary d ON d.id = q.predicate_id
+          WHERE q.graph_id = $1",
+        &[graph_id.into()],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Names every unenforced component the shapes graph actually uses.
+fn unenforced_components(
+    preds: &std::collections::HashSet<String>,
+    mode: &str,
+) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    let mut check = |table: &'static [(&'static str, &'static str)]| {
+        for (iri, name) in table {
+            if preds.contains(*iri) && !found.contains(name) {
+                found.push(*name);
+            }
+        }
+    };
+    // 'pgrdf' is the Track-H handler and it EVALUATES sh:sparql — measured
+    // conforms=false, 1 result, on a constraint the other two skip silently.
+    // This exclusion used to be incidental: `validate` returns for 'pgrdf'
+    // before reaching the guard, so the function was wrong and the behaviour
+    // was accidentally right. A unit test caught it the moment one existed.
+    if mode != "pgrdf" {
+        check(UNENFORCED_ALL_MODES);
+    }
+    if mode == "sparql" {
+        check(UNENFORCED_SPARQL_MODE);
+    }
+    found
+}
+
+/// True when the shapes graph can select at least one focus node.
+///
+/// Explicit targets are the four `sh:target*` predicates. SHACL also
+/// allows *implicit class targeting* — a node that is both an
+/// `sh:NodeShape` and an `rdfs:Class` targets its own instances — so
+/// their co-occurrence counts as targeting. That direction deliberately
+/// under-refuses: a shapes graph we cannot prove vacuous is validated
+/// normally rather than rejected.
+fn declares_any_target(preds: &std::collections::HashSet<String>, shapes_nt: &str) -> bool {
+    if TARGET_PREDICATES.iter().any(|p| preds.contains(*p)) {
+        return true;
+    }
+    shapes_nt.contains("<http://www.w3.org/ns/shacl#NodeShape>")
+        && shapes_nt.contains("<http://www.w3.org/2000/01/rdf-schema#Class>")
+}
+
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn validate(
     data_graph_id: i64,
     shapes_graph_id: i64,
     mode: default!(String, "'native'"),
+    strict: default!(bool, true),
 ) -> pgrx::JsonB {
     let start = Instant::now();
 
@@ -229,6 +348,65 @@ fn validate(
     // 1. Rehydrate data + shapes graphs as N-Triples text.
     let (data_nt, data_count) = serialise_graph_to_ntriples(data_graph_id);
     let (shapes_nt, shapes_count) = serialise_graph_to_ntriples(shapes_graph_id);
+
+    // 1a. Fail closed on a constraint component this engine does not
+    //     evaluate. Skipping one silently is indistinguishable from
+    //     validating cleanly, so a caller relying on it gets a pass it
+    //     did not earn. Refuse instead, naming what was skipped.
+    //
+    //     `strict => false` is an explicit, per-call opt-out for
+    //     exploratory use. It is never the default, and it is the only
+    //     way to reach the old silent behaviour.
+    // 1b. Fail closed on a shapes graph that cannot refuse anything.
+    //     A missing graph id, an empty graph, and a graph carrying
+    //     triples but no shape target all report `conforms:true` —
+    //     indistinguishable from a real pass. The caller almost always
+    //     meant a different graph id.
+    let shapes_preds = predicate_iris(shapes_graph_id);
+    if strict && !declares_any_target(&shapes_preds, &shapes_nt) {
+        return pgrx::JsonB(json!({
+            "conforms":        Value::Null,
+            "results":         [],
+            "data_graph_id":   data_graph_id,
+            "shapes_graph_id": shapes_graph_id,
+            "data_triples":    data_count,
+            "shapes_triples":  shapes_count,
+            "mode":            mode_str.clone(),
+            "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
+            "error":           format!(
+                "validate: shapes graph {shapes_graph_id} declares no SHACL target \
+                 ({shapes_count} triples). Nothing would be selected, so a verdict \
+                 would be vacuous — a missing or wrong graph id reports the same \
+                 `conforms:true` as a clean validation. Re-run with strict => false \
+                 to accept a vacuous pass."
+            ),
+        }));
+    }
+
+    if strict {
+        let skipped = unenforced_components(&shapes_preds, &mode_str);
+        if !skipped.is_empty() {
+            return pgrx::JsonB(json!({
+                "conforms":        Value::Null,
+                "results":         [],
+                "data_graph_id":   data_graph_id,
+                "shapes_graph_id": shapes_graph_id,
+                "data_triples":    data_count,
+                "shapes_triples":  shapes_count,
+                "mode":            mode_str.clone(),
+                "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
+                "error":           format!(
+                    "validate: unenforced constraint component in shapes graph \
+                     under mode {mode_str:?}: {}. This engine does not evaluate \
+                     it, so a verdict would be meaningless. Re-run with \
+                     strict => false to validate the remaining constraints \
+                     anyway (the named component stays unevaluated).",
+                    skipped.join(", ")
+                ),
+                "unenforced":      skipped,
+            }));
+        }
+    }
 
     // 2. Build rudof's in-memory graphs from the N-Triples text.
     let data_im =
@@ -666,8 +844,32 @@ mod tests {
         let v = &j.0;
         assert_eq!(v["data_triples"], 0);
         assert_eq!(v["shapes_triples"], 0);
-        // No shapes ⇒ no failures ⇒ conforms.
-        assert_eq!(v["conforms"], serde_json::json!(true));
+        // #83 — this assertion used to read:
+        //     // No shapes ⇒ no failures ⇒ conforms.
+        //     assert_eq!(v["conforms"], json!(true));
+        // That reasoning is the defect. "Nothing was checked" and
+        // "everything passed" are different facts, and reporting the
+        // second for the first is how a wrong graph id becomes a clean
+        // bill of health. A shapes graph that targets nothing now
+        // refuses instead of conforming.
+        assert!(
+            v["conforms"].is_null(),
+            "a shapes graph that selects nothing must not yield a verdict: {v}"
+        );
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("declares no SHACL target"),
+            "the refusal must say why: {v}"
+        );
+
+        // The old behaviour remains reachable, but only by asking.
+        let loose: pgrx::JsonB =
+            Spi::get_one("SELECT pgrdf.validate(999990::bigint, 999991::bigint, 'native', false)")
+                .unwrap()
+                .unwrap();
+        assert_eq!(loose.0["conforms"], serde_json::json!(true));
     }
 
     // ── v0.5-FUTURE §5 — SHACL-SPARQL mode + materialised-graph ──
@@ -841,7 +1043,11 @@ mod tests {
         // real Boolean (not JSON null), and the call returns without
         // panicking.
         let sparql: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.validate($1, $2, 'sparql')",
+            // strict => false: this test asserts that dispatch REACHES the
+            // upstream engine, not that every constraint is evaluated. The
+            // fail-closed guard (#80) would otherwise refuse first, because
+            // rudof ships no SparqlValidator for the cardinality constraints.
+            "SELECT pgrdf.validate($1, $2, 'sparql', false)",
             &[g_data.into(), g_shapes.into()],
         )
         .unwrap()
@@ -1138,7 +1344,11 @@ ex:ValidResource1
         .unwrap();
 
         let sparql: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.validate($1, $2, 'sparql')",
+            // strict => false: this test asserts that dispatch REACHES the
+            // upstream engine, not that every constraint is evaluated. The
+            // fail-closed guard (#80) would otherwise refuse first, because
+            // rudof ships no SparqlValidator for the cardinality constraints.
+            "SELECT pgrdf.validate($1, $2, 'sparql', false)",
             &[g_data.into(), g_shapes.into()],
         )
         .unwrap()
@@ -1281,7 +1491,11 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         // mode echoed). The "0 violations" outcome is documented
         // expected behaviour, not a passing conformance gate.
         let sparql: pgrx::JsonB = Spi::get_one_with_args(
-            "SELECT pgrdf.validate($1, $2, 'sparql')",
+            // strict => false: this test asserts that dispatch REACHES the
+            // upstream engine, not that every constraint is evaluated. The
+            // fail-closed guard (#80) would otherwise refuse first, because
+            // rudof ships no SparqlValidator for the cardinality constraints.
+            "SELECT pgrdf.validate($1, $2, 'sparql', false)",
             &[g_data.into(), g_shapes.into()],
         )
         .unwrap()
@@ -1349,5 +1563,275 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
             "no sh:sparql constraints ⇒ empty results"
         );
         assert!(pv.get("elapsed_ms").is_some());
+    }
+
+    /// #80 — a shapes graph using a constraint component this engine
+    /// does not evaluate is REFUSED, not silently passed.
+    ///
+    /// Measured in PASS-8 of the CKP v3.11 wave: a `sh:SPARQLConstraint`
+    /// whose `sh:select` names a violating focus node returned
+    /// `conforms:true`, zero results and NO error, under both `'native'`
+    /// and `'sparql'`. A caller could not distinguish that from a clean
+    /// validation. This test locks the refusal.
+    #[pg_test]
+    fn validate_refuses_unenforced_sparql_constraint() {
+        let g_data: i64 = 8540;
+        let g_shapes: i64 = 8541;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://ex/> . ex:a a ex:T ; ex:p 20 .".into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix ex: <http://ex/> .
+                 ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                   sh:sparql [ a sh:SPARQLConstraint ;
+                               sh:select \"SELECT $this WHERE { $this <http://ex/p> ?v . FILTER(?v > 10) }\" ] ."
+                    .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+
+        // Strict (the default): refused, conforms is NULL, error names it.
+        let report =
+            Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g_data}, {g_shapes})"))
+                .unwrap()
+                .unwrap();
+        let v = report.0;
+        assert!(
+            v["conforms"].is_null(),
+            "strict validate must NOT return a verdict when a component is unevaluated: {v}"
+        );
+        let err = v["error"].as_str().unwrap_or_default();
+        assert!(
+            err.starts_with("validate: unenforced constraint component"),
+            "error must carry the documented prefix, got: {err}"
+        );
+        assert!(
+            err.contains("sh:sparql"),
+            "error must NAME the component, got: {err}"
+        );
+
+        // Explicit opt-out restores the old behaviour, and only then.
+        let loose = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'native', false)"
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(
+            loose.0["conforms"].is_boolean(),
+            "strict => false must still return a Boolean verdict: {}",
+            loose.0
+        );
+    }
+
+    /// #80 — the unenforced set is MODE-DEPENDENT. rudof ships no
+    /// `SparqlValidator` impl for the cardinality constraints, so a
+    /// `sh:minCount` shape silently passes under `'sparql'` while the
+    /// same shape refuses under `'native'`. Strict mode refuses the
+    /// asymmetry rather than reporting the weaker verdict.
+    #[pg_test]
+    fn validate_refuses_cardinality_under_sparql_mode() {
+        let g_data: i64 = 8542;
+        let g_shapes: i64 = 8543;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://ex/> . ex:a a ex:T .".into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix ex: <http://ex/> .
+                 ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                   sh:property [ sh:path ex:p ; sh:minCount 1 ] ."
+                    .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+
+        // 'native' evaluates minCount — a real verdict, and it refuses.
+        let native = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'native')"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            native.0["conforms"],
+            serde_json::json!(false),
+            "native must still evaluate sh:minCount: {}",
+            native.0
+        );
+
+        // 'sparql' does NOT evaluate it, so strict mode refuses.
+        //
+        // THREE args, deliberately: the point of this assertion is that
+        // `strict` DEFAULTS to true. A PASS-13 bulk edit appended
+        // `, false` here while adding the opt-out to the three
+        // pre-existing sparql tests, and this test then spent three CI
+        // rounds asserting that a guard fires while explicitly switching
+        // it off. Do not add a fourth argument to this call.
+        let sparql = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'sparql')"
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(
+            sparql.0["conforms"].is_null(),
+            "sparql mode cannot evaluate sh:minCount and must refuse: {}",
+            sparql.0
+        );
+        assert!(
+            sparql.0["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("sh:minCount"),
+            "error must NAME sh:minCount: {}",
+            sparql.0
+        );
+    }
+
+    /// #83 — a shapes graph that cannot select anything must not report
+    /// a verdict. Three shapes of the same defect, all measured
+    /// returning `conforms:true` with no error before this guard:
+    /// a nonexistent graph id, an empty graph, and a graph carrying
+    /// triples but no SHACL target (passing the data graph twice).
+    #[pg_test]
+    fn validate_refuses_vacuous_shapes_graph() {
+        let g_data: i64 = 8550;
+        let g_empty: i64 = 8551;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_empty.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://ex/> . ex:a a ex:T .".into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+
+        for (label, shapes) in [
+            ("nonexistent", 999_999_999_i64),
+            ("empty", g_empty),
+            ("data-graph-as-shapes", g_data),
+        ] {
+            let r =
+                Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g_data}, {shapes})"))
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                r.0["conforms"].is_null(),
+                "{label}: a vacuous shapes graph must not yield a verdict: {}",
+                r.0
+            );
+            assert!(
+                r.0["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("declares no SHACL target"),
+                "{label}: error must say why: {}",
+                r.0
+            );
+        }
+
+        // A real shapes graph still validates normally.
+        let g_shapes: i64 = 8552;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix ex: <http://ex/> .
+                 ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                   sh:property [ sh:path ex:p ; sh:minCount 1 ] ."
+                    .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+        let ok =
+            Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g_data}, {g_shapes})"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            ok.0["conforms"],
+            serde_json::json!(false),
+            "a targeting shapes graph must still produce a real verdict: {}",
+            ok.0
+        );
+
+        // Explicit opt-out still permits the vacuous pass.
+        let loose = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g_data}, {g_empty}, 'native', false)"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            loose.0["conforms"],
+            serde_json::json!(true),
+            "strict => false must still allow it: {}",
+            loose.0
+        );
+    }
+
+    /// The gate's own logic, tested WITHOUT Postgres.
+    ///
+    /// #82 sat at "341 pass / 1 fail" for three CI rounds because the
+    /// only coverage of these two functions ran inside a `#[pg_test]`,
+    /// which cannot link on a macOS host. A plain unit test over a
+    /// hand-built set answers in milliseconds whether the pure logic is
+    /// the problem — and it is not, which is what localises the defect
+    /// to the SPI read.
+    #[test]
+    fn unenforced_and_target_logic_is_pure_and_correct() {
+        use super::{declares_any_target, unenforced_components};
+        use std::collections::HashSet;
+        let set = |v: &[&str]| -> HashSet<String> { v.iter().map(|s| (*s).to_string()).collect() };
+
+        const MIN: &str = "http://www.w3.org/ns/shacl#minCount";
+        const TC: &str = "http://www.w3.org/ns/shacl#targetClass";
+        const SP: &str = "http://www.w3.org/ns/shacl#sparql";
+
+        // sh:minCount is unevaluated under 'sparql' and fine under 'native'.
+        assert_eq!(
+            unenforced_components(&set(&[MIN, TC]), "sparql"),
+            vec!["sh:minCount"]
+        );
+        assert!(unenforced_components(&set(&[MIN, TC]), "native").is_empty());
+
+        // sh:sparql is skipped by both rudof modes and evaluated by 'pgrdf'.
+        assert_eq!(unenforced_components(&set(&[SP]), "native").len(), 1);
+        assert_eq!(unenforced_components(&set(&[SP]), "sparql").len(), 1);
+        assert!(
+            unenforced_components(&set(&[SP]), "pgrdf").is_empty(),
+            "'pgrdf' evaluates sh:sparql — refusing it there rejects the only mode that supports it"
+        );
+
+        // Targeting: an explicit target predicate is enough.
+        assert!(declares_any_target(&set(&[TC]), ""));
+        assert!(!declares_any_target(&set(&[MIN]), ""));
+
+        // Implicit class targeting is detected from the serialisation.
+        assert!(declares_any_target(
+            &set(&[]),
+            "_:b <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#NodeShape> .\n             _:b <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> ."
+        ));
     }
 }

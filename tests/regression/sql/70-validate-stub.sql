@@ -38,8 +38,12 @@ SELECT (j->>'conforms')::boolean             = TRUE          AS conforms_true,
        jsonb_typeof(j->'elapsed_ms')         = 'number'      AS elapsed_is_number
   FROM (SELECT pgrdf.validate(8500, 8501) AS j) s;
 
--- Unknown graphs return zero counts; degenerate "no shapes ⇒ no
--- failures ⇒ conforms" report.
+-- Unknown graphs return zero counts. The "no shapes ⇒ no failures ⇒
+-- conforms" report this used to lock is the #83 defect: "nothing was
+-- checked" and "everything passed" are different facts, and a wrong
+-- graph id reported as a clean bill of health is how that matters.
+-- `conforms` is now NULL and carries an error naming the reason, so the
+-- first comparison below is NULL rather than TRUE.
 SELECT (j->>'conforms')::boolean             = TRUE          AS unknown_conforms,
        (j->>'data_triples')::int             = 0             AS no_data_triples,
        (j->>'shapes_triples')::int           = 0             AS no_shapes_triples
