@@ -1680,8 +1680,15 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         );
 
         // 'sparql' does NOT evaluate it, so strict mode refuses.
+        //
+        // THREE args, deliberately: the point of this assertion is that
+        // `strict` DEFAULTS to true. A PASS-13 bulk edit appended
+        // `, false` here while adding the opt-out to the three
+        // pre-existing sparql tests, and this test then spent three CI
+        // rounds asserting that a guard fires while explicitly switching
+        // it off. Do not add a fourth argument to this call.
         let sparql = Spi::get_one::<pgrx::JsonB>(&format!(
-            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'sparql', false)"
+            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'sparql')"
         ))
         .unwrap()
         .unwrap();
