@@ -1918,9 +1918,33 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         )
         .unwrap();
 
-        let n = Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g}, {g}, 'native')"))
-            .unwrap()
-            .unwrap();
+        // MEASURED on a loaded engine, not assumed:
+        //   native, strict      -> conforms NULL, 0 results  (refused)
+        //   native, strict=false-> conforms false, Core only
+        //   pgrdf,  strict      -> conforms false, Core AND sh:sparql
+        //
+        // The first line is #80 and #86 interacting, and it is correct:
+        // this shapes graph carries sh:sparql, which 'native' does not
+        // evaluate, so 'native' refuses rather than returning a verdict
+        // over constraints it skipped. An earlier version of this test
+        // asserted native returns false here — written before that guard
+        // existed, by me, and it is exactly the premise-invalidation this
+        // suite keeps catching.
+        let n_strict =
+            Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g}, {g}, 'native')"))
+                .unwrap()
+                .unwrap();
+        assert!(
+            n_strict.0["conforms"].is_null(),
+            "'native' cannot evaluate sh:sparql, so it must refuse this graph: {}",
+            n_strict.0
+        );
+
+        let n = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g}, {g}, 'native', false)"
+        ))
+        .unwrap()
+        .unwrap();
         let p = Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g}, {g}, 'pgrdf')"))
             .unwrap()
             .unwrap();
@@ -1928,19 +1952,16 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         let n_count = n.0["results"].as_array().map(|a| a.len()).unwrap_or(0);
         let p_count = p.0["results"].as_array().map(|a| a.len()).unwrap_or(0);
 
-        // 'native' still sees the Core half only — that is its contract.
-        assert_eq!(n.0["conforms"], serde_json::json!(false));
-        assert_eq!(
-            n_count, 1,
-            "native reports the Core violation only: {}",
-            n.0
-        );
+        assert_eq!(n.0["conforms"], serde_json::json!(false), "native: {}", n.0);
+        assert_eq!(p.0["conforms"], serde_json::json!(false), "pgrdf: {}", p.0);
 
-        // 'pgrdf' must see BOTH. This is the whole point of #86.
-        assert_eq!(p.0["conforms"], serde_json::json!(false));
+        // The #86 invariant: 'pgrdf' evaluates everything 'native' does
+        // PLUS the SHACL-SPARQL constraints, so on a mixed shapes graph
+        // it must see strictly more.
         assert!(
-            p_count >= 2,
-            "mode 'pgrdf' must report the Core violation AND the sh:sparql violation, got {p_count}: {}",
+            p_count > n_count,
+            "mode 'pgrdf' must report strictly more than 'native' on a mixed shapes graph \
+             — native={n_count}, pgrdf={p_count}: {}",
             p.0
         );
         assert_eq!(p.0["mode"], serde_json::json!("pgrdf"));
