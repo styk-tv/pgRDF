@@ -1567,9 +1567,14 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         .unwrap();
         Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
         // Pure Core constraint (sh:minCount) — no sh:sparql block.
-        // The Track H pgRDF-native path only intercepts BasicSparql
-        // constraints; Core-only shapes evaluate to "no SPARQL work
-        // to do" and conform vacuously.
+        //
+        // #86 — this used to assert that mode 'pgrdf' conforms
+        // VACUOUSLY here, because the Track H path intercepted only
+        // BasicSparql constraints and a Core-only shape meant "no SPARQL
+        // work to do". That is the defect: a mode reporting a clean pass
+        // over constraints it never looked at. 'pgrdf' now runs the Core
+        // engine too, so a Core violation is a violation in every mode
+        // that claims to evaluate it.
         Spi::run_with_args(
             "SELECT pgrdf.parse_turtle($1, $2)",
             &[
@@ -1595,13 +1600,14 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         assert_eq!(pv["mode"], serde_json::json!("pgrdf"));
         assert_eq!(
             pv["conforms"],
-            serde_json::json!(true),
-            "no sh:sparql constraints ⇒ pgrdf-mode conforms vacuously"
+            serde_json::json!(false),
+            "#86 — a Core violation is a violation under 'pgrdf' too; \
+             conforming here was the mode reporting on constraints it never read"
         );
         assert_eq!(
             pv["results"].as_array().map(Vec::len),
-            Some(0),
-            "no sh:sparql constraints ⇒ empty results"
+            Some(1),
+            "the sh:minCount violation must appear under 'pgrdf'"
         );
         assert!(pv.get("elapsed_ms").is_some());
     }
