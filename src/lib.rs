@@ -148,5 +148,11 @@ pub mod pg_test {
 extension_sql!(
     r#"SELECT pgrdf.shmem_reset();"#,
     name = "dict_cache_generation_bump_on_install",
-    requires = [crate::storage::stats::shmem_reset],
+    // NOTE the missing `crate::` — pgrx matches a `requires` FullPath by
+    // `module_path.ends_with(path-without-last-segment)`, and the extern's
+    // module_path is `pgrdf::storage::stats`. With `crate::` the suffix match
+    // fails SILENTLY: no ordering is enforced, the SELECT is emitted before
+    // the function exists, and CREATE EXTENSION dies. The caveat is documented
+    // twelve lines above this one and I still wrote it wrong.
+    requires = [storage::stats::shmem_reset],
 );
