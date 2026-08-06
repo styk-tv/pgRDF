@@ -133,9 +133,9 @@ SELECT count(*)::int AS c_alice_violation
 -- `conforms:false`. That asymmetry is a rudof-side cardinality-
 -- constraint follow-up; track via the Track-H W3C SHACL-SPARQL
 -- manifest fixtures (TH-7 vendors them) once they land.
-SELECT (pgrdf.validate(12201, 12202, 'sparql') ->> 'mode') AS d_mode;
-SELECT (pgrdf.validate(12201, 12202, 'sparql') ? 'error') AS d_has_error_field;
-SELECT jsonb_typeof(pgrdf.validate(12201, 12202, 'sparql') -> 'conforms') AS d_conforms_type;
+SELECT (pgrdf.validate(12201, 12202, 'sparql', false) ->> 'mode') AS d_mode;
+SELECT (pgrdf.validate(12201, 12202, 'sparql', false) ? 'error') AS d_has_error_field;
+SELECT jsonb_typeof(pgrdf.validate(12201, 12202, 'sparql', false) -> 'conforms') AS d_conforms_type;
 
 -- ─── E — §5.3 #2 — validation against a materialised graph ──────
 -- ex:fido is typed ex:Dog; AnimalShape targets ex:Animal and
