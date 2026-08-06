@@ -306,19 +306,26 @@ fn validate(
     // `run_pgrdf_sparql` produces directly; `elapsed_ms` is layered
     // here so the meta-field shape stays comparable with the
     // `'native'` / `'sparql'` modes for benchmark-row diffs.
+    // Set by the 'pgrdf' arm below: run the SHACL-SPARQL evaluator in
+    // addition to the Core engine, and merge both reports.
+    let mut sparql_pass = false;
+
     let validation_mode = match mode.as_str() {
         "native" => ShaclValidationMode::Native,
         "sparql" => ShaclValidationMode::Sparql,
+        // #86 — `'pgrdf'` is the COMPLETE mode: the Rust-native Core
+        // engine AND pgRDF's own SHACL-SPARQL evaluator, merged.
+        //
+        // It used to short-circuit straight to the SPARQL handler, so it
+        // evaluated `sh:sparql` and silently skipped every Core
+        // constraint — while `'native'` did the exact opposite. The
+        // partitions were complementary and neither said so, so a
+        // caller with a mixed shapes graph got half a verdict presented
+        // as a whole one. Two components hit that from opposite
+        // directions on the same day.
         "pgrdf" => {
-            let mut value =
-                crate::validation::pgrdf_sparql::run_pgrdf_sparql(data_graph_id, shapes_graph_id);
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert(
-                    "elapsed_ms".to_string(),
-                    json!(start.elapsed().as_secs_f64() * 1000.0),
-                );
-            }
-            return pgrx::JsonB(value);
+            sparql_pass = true;
+            ShaclValidationMode::Native
         }
         other => panic!(
             "validate: unknown mode {other:?} \
@@ -491,9 +498,43 @@ fn validate(
     };
 
     // 5. Shape the report into JSONB.
-    let results_json: Vec<Value> = report.results().iter().map(report_result_to_json).collect();
+    let mut results_json: Vec<Value> = report.results().iter().map(report_result_to_json).collect();
+    let mut conforms = report.conforms();
+
+    // 5a. #86 — merge the SHACL-SPARQL pass under mode 'pgrdf'. A
+    //     violation from EITHER evaluator is a violation, so `conforms`
+    //     is the conjunction and `results` is the union. Reporting one
+    //     half as the whole verdict is what made this mode unusable as
+    //     a gate.
+    if sparql_pass {
+        let sparql_report =
+            crate::validation::pgrdf_sparql::run_pgrdf_sparql(data_graph_id, shapes_graph_id);
+        if let Some(extra) = sparql_report.get("results").and_then(|r| r.as_array()) {
+            results_json.extend(extra.iter().cloned());
+        }
+        // A SPARQL-side error must not be swallowed into a clean pass.
+        if let Some(err) = sparql_report.get("error") {
+            return pgrx::JsonB(json!({
+                "conforms":        Value::Null,
+                "results":         results_json,
+                "data_graph_id":   data_graph_id,
+                "shapes_graph_id": shapes_graph_id,
+                "data_triples":    data_count,
+                "shapes_triples":  shapes_count,
+                "mode":            mode_str,
+                "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
+                "error":           format!("SHACL-SPARQL pass failed: {err}"),
+            }));
+        }
+        conforms = conforms
+            && sparql_report
+                .get("conforms")
+                .and_then(|c| c.as_bool())
+                .unwrap_or(false);
+    }
+
     pgrx::JsonB(json!({
-        "conforms":        report.conforms(),
+        "conforms":        conforms,
         "results":         results_json,
         "data_graph_id":   data_graph_id,
         "shapes_graph_id": shapes_graph_id,
@@ -1526,9 +1567,14 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         .unwrap();
         Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
         // Pure Core constraint (sh:minCount) — no sh:sparql block.
-        // The Track H pgRDF-native path only intercepts BasicSparql
-        // constraints; Core-only shapes evaluate to "no SPARQL work
-        // to do" and conform vacuously.
+        //
+        // #86 — this used to assert that mode 'pgrdf' conforms
+        // VACUOUSLY here, because the Track H path intercepted only
+        // BasicSparql constraints and a Core-only shape meant "no SPARQL
+        // work to do". That is the defect: a mode reporting a clean pass
+        // over constraints it never looked at. 'pgrdf' now runs the Core
+        // engine too, so a Core violation is a violation in every mode
+        // that claims to evaluate it.
         Spi::run_with_args(
             "SELECT pgrdf.parse_turtle($1, $2)",
             &[
@@ -1554,13 +1600,14 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         assert_eq!(pv["mode"], serde_json::json!("pgrdf"));
         assert_eq!(
             pv["conforms"],
-            serde_json::json!(true),
-            "no sh:sparql constraints ⇒ pgrdf-mode conforms vacuously"
+            serde_json::json!(false),
+            "#86 — a Core violation is a violation under 'pgrdf' too; \
+             conforming here was the mode reporting on constraints it never read"
         );
         assert_eq!(
             pv["results"].as_array().map(Vec::len),
-            Some(0),
-            "no sh:sparql constraints ⇒ empty results"
+            Some(1),
+            "the sh:minCount violation must appear under 'pgrdf'"
         );
         assert!(pv.get("elapsed_ms").is_some());
     }
@@ -1833,5 +1880,90 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
             &set(&[]),
             "_:b <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#NodeShape> .\n             _:b <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> ."
         ));
+    }
+
+    /// #86 — mode `'pgrdf'` must enforce BOTH constraint families.
+    ///
+    /// One shapes graph carrying a Core constraint AND a `sh:sparql`
+    /// constraint, one candidate violating both. Before this, the
+    /// partitions were complementary and each mode reported its own
+    /// half as a complete verdict:
+    ///
+    /// ```text
+    /// native  conforms=false  1 violation   Core only,   sh:sparql skipped
+    /// sparql  conforms=true   0 violations  nothing
+    /// pgrdf   conforms=false  1 violation   sh:sparql only, Core skipped
+    /// ```
+    ///
+    /// `pgrdf` reporting `conforms=false` was the dangerous case: a real
+    /// verdict that a caller reasonably reads as complete.
+    #[pg_test]
+    fn validate_pgrdf_mode_enforces_core_and_sparql() {
+        let g: i64 = 8560;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix ex: <http://ex/> .
+                 ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                   sh:property [ sh:path ex:required ; sh:minCount 1 ] ;
+                   sh:sparql [ a sh:SPARQLConstraint ;
+                               sh:message \"p must not exceed 10\" ;
+                               sh:select \"SELECT $this WHERE { $this <http://ex/p> ?v . FILTER(?v > 10) }\" ] .
+                 ex:a a ex:T ; ex:p 20 ."
+                    .into(),
+                g.into(),
+            ],
+        )
+        .unwrap();
+
+        // MEASURED on a loaded engine, not assumed:
+        //   native, strict      -> conforms NULL, 0 results  (refused)
+        //   native, strict=false-> conforms false, Core only
+        //   pgrdf,  strict      -> conforms false, Core AND sh:sparql
+        //
+        // The first line is #80 and #86 interacting, and it is correct:
+        // this shapes graph carries sh:sparql, which 'native' does not
+        // evaluate, so 'native' refuses rather than returning a verdict
+        // over constraints it skipped. An earlier version of this test
+        // asserted native returns false here — written before that guard
+        // existed, by me, and it is exactly the premise-invalidation this
+        // suite keeps catching.
+        let n_strict =
+            Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g}, {g}, 'native')"))
+                .unwrap()
+                .unwrap();
+        assert!(
+            n_strict.0["conforms"].is_null(),
+            "'native' cannot evaluate sh:sparql, so it must refuse this graph: {}",
+            n_strict.0
+        );
+
+        let n = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g}, {g}, 'native', false)"
+        ))
+        .unwrap()
+        .unwrap();
+        let p = Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g}, {g}, 'pgrdf')"))
+            .unwrap()
+            .unwrap();
+
+        let n_count = n.0["results"].as_array().map(|a| a.len()).unwrap_or(0);
+        let p_count = p.0["results"].as_array().map(|a| a.len()).unwrap_or(0);
+
+        assert_eq!(n.0["conforms"], serde_json::json!(false), "native: {}", n.0);
+        assert_eq!(p.0["conforms"], serde_json::json!(false), "pgrdf: {}", p.0);
+
+        // The #86 invariant: 'pgrdf' evaluates everything 'native' does
+        // PLUS the SHACL-SPARQL constraints, so on a mixed shapes graph
+        // it must see strictly more.
+        assert!(
+            p_count > n_count,
+            "mode 'pgrdf' must report strictly more than 'native' on a mixed shapes graph \
+             — native={n_count}, pgrdf={p_count}: {}",
+            p.0
+        );
+        assert_eq!(p.0["mode"], serde_json::json!("pgrdf"));
     }
 }
