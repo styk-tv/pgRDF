@@ -107,9 +107,13 @@ SELECT _check_error(
 -- conforms = false (Alice lacks ex:age) and the violation focus
 -- node is ex:alice. The sh:select block is a no-op (E-012 Gap 1):
 -- it neither breaks the parse nor adds/removes a Core violation.
-SELECT (pgrdf.validate(12201, 12202, 'native') ->> 'conforms') AS c_conforms;
+-- strict => false: graph 12202 deliberately carries sh:sparql ALONGSIDE a Core
+-- constraint, and 'native' does not evaluate sh:sparql. The fail-closed guard
+-- refuses that combination by design. This section compares MODE BEHAVIOUR on a
+-- deliberately mixed shape, so it opts out; the guard has its own coverage.
+SELECT (pgrdf.validate(12201, 12202, 'native', false) ->> 'conforms') AS c_conforms;
 SELECT count(*)::int AS c_alice_violation
-  FROM jsonb_array_elements(pgrdf.validate(12201, 12202, 'native') -> 'results') r
+  FROM jsonb_array_elements(pgrdf.validate(12201, 12202, 'native', false) -> 'results') r
   WHERE r ->> 'focusNode' = 'http://example.org/alice';
 
 -- ─── D — 'sparql' mode no longer short-circuits at the guard ────
