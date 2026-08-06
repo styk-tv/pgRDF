@@ -50,8 +50,14 @@ SETUP_SQL+="SELECT pgrdf.parse_turtle('${SHAPES_ESC}', 91001);"$'\n'
 # Validation under each mode; collect conforms + violation count.
 VAL_SQL=$''
 for mode in sparql pgrdf; do
+  # 'sparql' opts out of the fail-closed guard: this shape carries a
+  # sh:sparql constraint and 'sparql' does not evaluate it (E-014), so
+  # the guard refuses by design. This gate COMPARES the two modes, and
+  # 'pgrdf' — the mode that actually evaluates it — stays strict.
+  STRICT_ARG=""
+  [ "${mode}" = "sparql" ] && STRICT_ARG=", false"
   VAL_SQL+="\\echo MODE: ${mode}"$'\n'
-  VAL_SQL+="SELECT pgrdf.validate(91000, 91001, '${mode}')::text;"$'\n'
+  VAL_SQL+="SELECT pgrdf.validate(91000, 91001, '${mode}'${STRICT_ARG})::text;"$'\n'
 done
 
 ALL_SQL="${SETUP_SQL}${VAL_SQL}"
