@@ -124,3 +124,35 @@ pub mod pg_test {
         vec!["shared_preload_libraries='pgrdf'"]
     }
 }
+
+// #88 — invalidate the shmem dictionary cache at CREATE EXTENSION.
+//
+// The cache keys a term fingerprint to a dictionary id and guards each
+// slot with a GENERATION counter, so a stale slot reads as cold. That
+// guard was correct and it was only ever advanced by an explicit
+// `pgrdf.shmem_reset()` — a manual step `reset()`'s own doc comment
+// asked users to remember after `DROP EXTENSION`.
+//
+// Nothing remembers. On a server with pgrdf preloaded, DROP EXTENSION
+// followed by CREATE EXTENSION recreates `_pgrdf_dictionary` empty and
+// restarts ids at 1, while every cached fingerprint still carries the
+// CURRENT generation. Each one now resolves to whatever term happens to
+// hold that id in the new dictionary, and it does so silently:
+// `ex:s a ex:T` was measured storing predicate `rdfs:label`, because
+// rdf:type's id in the previous extension lifetime is rdfs:label's id
+// in this one.
+//
+// A correctness invariant must not depend on a human running a
+// function. Bumping the generation here makes a fresh extension
+// unable to inherit a stale cache, by construction.
+extension_sql!(
+    r#"SELECT pgrdf.shmem_reset();"#,
+    name = "dict_cache_generation_bump_on_install",
+    // NOTE the missing `crate::` — pgrx matches a `requires` FullPath by
+    // `module_path.ends_with(path-without-last-segment)`, and the extern's
+    // module_path is `pgrdf::storage::stats`. With `crate::` the suffix match
+    // fails SILENTLY: no ordering is enforced, the SELECT is emitted before
+    // the function exists, and CREATE EXTENSION dies. The caveat is documented
+    // twelve lines above this one and I still wrote it wrong.
+    requires = [storage::stats::shmem_reset],
+);
