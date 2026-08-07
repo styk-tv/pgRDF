@@ -71,6 +71,16 @@ fi
 PIN=$(awk '/^name = "pgrx"$/{f=1;next} f&&/^version/{gsub(/[",]/,"");print $3;exit}' "$SRC/Cargo.lock" 2>/dev/null || true)
 [ -n "$PIN" ] || die "could not resolve the pgrx pin from $SRC/Cargo.lock"
 
+# Cargo.lock must already agree with Cargo.toml. /src is read-only, so a
+# stale lock makes cargo fail deep inside cargo-pgrx with
+# "Read-only file system (os error 30)" and a metadata.rs backtrace, which
+# names neither the lock file nor the version. Every version bump hits this.
+# Refuse here, with the actual cause.
+LOCKVER=$(awk -v n="$EXT" '$0=="name = \""n"\""{f=1;next} f&&/^version/{gsub(/[",]/,"");print $2;exit}' "$SRC/Cargo.lock" 2>/dev/null || true)
+if [ -n "$LOCKVER" ] && [ "$LOCKVER" != "$VER" ]; then
+  die "Cargo.lock says ${EXT} ${LOCKVER}, Cargo.toml says ${VER}. /src is read-only so cargo cannot reconcile them — update and commit Cargo.lock first."
+fi
+
 RUSTC=$(rustc --version | awk '{print $2}')
 say "extension" "$EXT $VER"
 say "commit" "$COMMIT (dirty: $DIRTYB)"
@@ -145,6 +155,26 @@ mkdir -p "$STAGE/lib" "$STAGE/share/extension"
 cp "$SO" "$STAGE/lib/${EXT}.so"
 cp "$SHARE/${EXT}.control" "$STAGE/share/extension/"
 cp "$SHARE"/*.sql "$STAGE/share/extension/"
+
+# Upgrade scripts, explicitly from the crate's sql/ (#94).
+#
+# `cargo pgrx package` copies these on some versions and not others -- pgRDF's
+# release workflow carries a comment stating it does NOT, which was true when
+# written and is not true on 0.19.2, where the package step is observed copying
+# pgrdf--0.5.1--0.6.20.sql. A delivery contract that silently depends on which
+# pgrx a crate pins is not a contract, so copy them here regardless. Duplicate
+# copies are identical files and harmless.
+#
+# Without them a delivered extension can only ever be installed FRESH: postgres
+# refuses to apply a full install to an already-installed extension, so a
+# database carrying data has no route forward and ALTER EXTENSION fails with
+# "no update path".
+if compgen -G "$SRC/sql/${EXT}--*--*.sql" > /dev/null 2>&1; then
+  cp "$SRC"/sql/"${EXT}"--*--*.sql "$STAGE/share/extension/"
+  say "upgrade sql" "$(ls -1 "$SRC"/sql/"${EXT}"--*--*.sql | wc -l | tr -d ' ') script(s) from sql/"
+else
+  say "upgrade sql" "none in sql/ — a surface change will need one"
+fi
 
 ( cd "$STAGE/lib" && sha256sum "${EXT}.so" > "${EXT}.so.sha256" )
 DIGEST=$(awk '{print $1}' "$STAGE/lib/${EXT}.so.sha256")
