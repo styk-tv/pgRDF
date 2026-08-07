@@ -64,6 +64,29 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Returns which BUILD of [`version`] this binary is.
+///
+/// `version()` reports the release line and is identical for every build of
+/// that version — two binaries differing by a merged fix both answer
+/// `0.6.22`. That makes it useless for the one question asked after loading a
+/// new `.so`: *is the module I just dropped the one now running?* This answers
+/// it, so a new module is distinguishable from the one it replaced without
+/// reading a digest off disk.
+///
+/// Set at compile time from `git describe --tags --always --dirty`, e.g.
+/// `v0.6.22-2-gab92a33-dirty`. `unknown` means the build did not supply one —
+/// never assume that is the same as clean.
+///
+/// **Deliberately narrow.** Any connected role can call this, so it carries
+/// only tag, commits-since, short commit and a dirty marker: no filesystem
+/// paths, host names, or build users. `build_id_carries_no_paths` enforces
+/// that rather than leaving it to review.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn build_id() -> &'static str {
+    option_env!("PGRDF_BUILD_ID").unwrap_or("unknown")
+}
+
 extension_sql_file!("../sql/schema_v0_2_0.sql", name = "schema_v0_2_0");
 // v0.4 — adds `_pgrdf_graphs` IRI ↔ graph_id mapping (LLD v0.4 §3.1).
 // `requires` enforces ordering: the v0.2 baseline lands first; the
@@ -111,6 +134,28 @@ mod tests {
     #[pg_test]
     fn test_version_matches_cargo() {
         assert_eq!(crate::version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    /// `build_id()` is readable by any connected role, so the disclosure
+    /// constraint is a test rather than a comment. A build id that leaked a
+    /// build path would publish the operator's filesystem layout to every
+    /// user of the database.
+    #[test]
+    fn build_id_carries_no_paths() {
+        let id = crate::build_id();
+        assert!(!id.is_empty(), "build_id must never be empty");
+        for bad in ['/', '\\'] {
+            assert!(
+                !id.contains(bad),
+                "build_id must not carry filesystem paths, found {bad:?} in {id:?}"
+            );
+        }
+        // `git describe` output and the `unknown` fallback are both single
+        // tokens. Whitespace means something else got interpolated.
+        assert!(
+            !id.contains(char::is_whitespace),
+            "build_id must be a single token, got {id:?}"
+        );
     }
 }
 

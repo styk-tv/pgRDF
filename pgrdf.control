@@ -17,7 +17,19 @@
 
 comment = 'Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning'
 default_version = '0.6.22'
-module_pathname = '$libdir/pgrdf'
+# Bare name, NOT '$libdir/pgrdf'. PostgreSQL resolves a module_pathname
+# containing a separator directly against pkglibdir and never consults
+# `dynamic_library_path`; only a bare name is searched along it. With the
+# '$libdir/' prefix a .so placed in an override directory is unreachable no
+# matter how the path is ordered — measured:
+#
+#   SET dynamic_library_path = '/nonexistent';
+#   LOAD 'pgcrypto';         -- ERROR: could not access file
+#   LOAD '$libdir/pgcrypto'; -- LOAD  (bypassed the path entirely)
+#
+# Backward compatible: the default `dynamic_library_path` is '$libdir', so a
+# bare name resolves to exactly the same file on a stock install.
+module_pathname = 'pgrdf'
 relocatable = false
 superuser = true
 trusted = false
