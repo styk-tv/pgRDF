@@ -1,8 +1,8 @@
 //! Process-wide dictionary cache backed by PostgreSQL shared memory.
 //!
 //! Implements LLD §4.1 — a fixed-capacity, open-addressed hash table in
-//! Postgres shmem that caches `(term_type, lexical_value, datatype_id,
-//! language) → dict_id` mappings across backends and across calls. The
+//! Postgres shmem that caches `(database_oid, term_type, lexical_value,
+//! datatype_id, language) → dict_id` mappings across backends and across calls. The
 //! per-call HashMap in [`super::loader`] sits on top: a load picks up
 //! "saw this term inside this Turtle file" with zero locks; the shmem
 //! cache then catches "saw this term in any backend since the
@@ -12,6 +12,17 @@
 //! * Hit-path latency well under 1 µs (LWLock share + two slot probes).
 //! * Cross-backend reuse: a second connection's first `put_term` for an
 //!   already-warmed term hits shmem, never the dictionary table.
+//!
+//! Database scoping. This table lives in postmaster shared memory and
+//! is therefore process-wide, while `_pgrdf_dictionary` is an ordinary
+//! table and therefore per-database. The same lexical term is a
+//! DIFFERENT `dict_id` in each database, so the database OID is part
+//! of the key: without it a fingerprint warmed by database A is a hit
+//! in database B and resolves to an id that means another term there,
+//! and the caller writes quads pointing at ids it does not own. The
+//! generation counter does not cover this — every database on the
+//! instance shares one counter and one keyspace. `super::staged::pool`
+//! carries `MyDatabaseId` explicitly for the same reason.
 //!
 //! Transactional safety. Dictionary INSERTs can be rolled back, so
 //! freshly inserted (key → id) pairs are STAGED in a per-backend
@@ -171,7 +182,21 @@ pub fn is_ready() -> bool {
 const SEED_A: u64 = 0x9E37_79B9_7F4A_7C15; // golden ratio
 const SEED_B: u64 = 0xC4F1_7B5E_9D0A_3E27; // unrelated odd 64-bit
 
+/// The database this backend is connected to. Every cache key is
+/// scoped by it — see the module header. Taken per call rather than
+/// cached in a static: a background worker in `super::staged::pool`
+/// does not inherit the coordinator's database and connects to its
+/// own, so a value latched at `_PG_init` in the postmaster would be
+/// wrong for every backend that inherits it.
+fn current_db_oid() -> u32 {
+    unsafe { pg_sys::MyDatabaseId }.to_u32()
+}
+
+/// `db_oid` is a parameter rather than being read inside, so the
+/// keyspace separation is provable in a plain unit test without a
+/// second database — the pgrx harness runs one.
 fn fingerprint(
+    db_oid: u32,
     term_type: i16,
     value: &str,
     datatype_id: Option<i64>,
@@ -179,12 +204,14 @@ fn fingerprint(
 ) -> (u64, u64) {
     let mut h1 = DefaultHasher::new();
     SEED_A.hash(&mut h1);
+    db_oid.hash(&mut h1);
     term_type.hash(&mut h1);
     value.hash(&mut h1);
     datatype_id.hash(&mut h1);
     language.hash(&mut h1);
     let mut h2 = DefaultHasher::new();
     SEED_B.hash(&mut h2);
+    db_oid.hash(&mut h2);
     term_type.hash(&mut h2);
     value.hash(&mut h2);
     datatype_id.hash(&mut h2);
@@ -205,7 +232,7 @@ pub fn lookup(
         return None;
     }
     let gen = current_generation();
-    let (h1, h2) = fingerprint(term_type, value, datatype_id, language);
+    let (h1, h2) = fingerprint(current_db_oid(), term_type, value, datatype_id, language);
     let table = DICT_CACHE.share();
     let start = (h1 as usize) % SLOTS;
     for i in 0..PROBE_DEPTH {
@@ -243,7 +270,7 @@ pub fn stage_for_commit(
     if !is_ready() {
         return;
     }
-    let (h1, h2) = fingerprint(term_type, value, datatype_id, language);
+    let (h1, h2) = fingerprint(current_db_oid(), term_type, value, datatype_id, language);
     PENDING.with(|p| p.borrow_mut().push((h1, h2, dict_id)));
     register_xact_callbacks_once();
 }
@@ -259,7 +286,7 @@ pub fn insert_committed(
     if !is_ready() {
         return;
     }
-    let (h1, h2) = fingerprint(term_type, value, datatype_id, language);
+    let (h1, h2) = fingerprint(current_db_oid(), term_type, value, datatype_id, language);
     insert_slot(h1, h2, dict_id);
 }
 
@@ -452,6 +479,37 @@ mod tests {
         insert_committed(term_type::LITERAL, "42", Some(7), None, 2);
         assert_eq!(lookup(term_type::LITERAL, "42", None, None), Some(1));
         assert_eq!(lookup(term_type::LITERAL, "42", Some(7), None), Some(2));
+    }
+
+    /// The database OID is part of the key — the same term in two
+    /// databases must not share a slot.
+    ///
+    /// This is a plain unit test, not a `#[pg_test]`, deliberately:
+    /// the harness runs ONE database, so the cross-database case is
+    /// unreachable through `lookup`/`insert_committed`. Passing the
+    /// oid to `fingerprint` explicitly is what makes the separation
+    /// provable here rather than asserted in a comment. It is also
+    /// the defect's shape — the previous key had no database input at
+    /// all, so a fingerprint warmed by database A hit in database B.
+    #[test]
+    fn fingerprint_separates_databases() {
+        let a = fingerprint(16384, term_type::URI, "http://example.com/x", None, None);
+        let b = fingerprint(16385, term_type::URI, "http://example.com/x", None, None);
+        assert_ne!(
+            a, b,
+            "identical terms in different databases must not share a cache slot"
+        );
+
+        // Both halves must move. They carry independent seeds, and a
+        // key that separated on only one would halve the u128 the
+        // false-hit budget is stated against.
+        assert_ne!(a.0, b.0, "hash half 1 must include the database oid");
+        assert_ne!(a.1, b.1, "hash half 2 must include the database oid");
+
+        // Same database, same term still agrees — scoping the key
+        // must not make it unstable within a database.
+        let c = fingerprint(16384, term_type::URI, "http://example.com/x", None, None);
+        assert_eq!(a, c, "the key must stay stable within one database");
     }
 
     /// Counters increment on hit / miss.
