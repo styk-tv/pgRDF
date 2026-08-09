@@ -36,3 +36,42 @@ AS 'MODULE_PATHNAME', 'build_id_wrapper';
 -- OLD binary already interned. Reset once here, at the version boundary,
 -- for the same reason the install path resets at CREATE EXTENSION.
 SELECT pgrdf.shmem_reset();
+
+-- 3. Backfill partition grants (#96).
+--
+-- Postgres does not propagate ACLs to partitions, so every
+-- `_pgrdf_quads_g<id>` created before 0.6.23 is owner-only regardless of
+-- what was granted on the parent. A downstream SECURITY DEFINER function
+-- owned by a non-superuser role reads the parent fine and fails on the
+-- partition holding the rows.
+--
+-- 0.6.23 replicates the parent's ACL at creation time; this pass applies
+-- the same rule to partitions that already exist, so an upgrade does not
+-- leave the graphs a database already has behind the ones it makes next.
+--
+-- Copies only what the parent carries. If the parent has no grants
+-- (`relacl IS NULL`) this does nothing.
+DO $pgrdf_acl_backfill$
+DECLARE
+  p record;
+  r record;
+BEGIN
+  FOR p IN
+    SELECT c.relname AS part
+    FROM pg_class c
+    JOIN pg_inherits i     ON i.inhrelid = c.oid
+    JOIN pg_class parent   ON parent.oid = i.inhparent
+    WHERE parent.oid = 'pgrdf._pgrdf_quads'::regclass
+  LOOP
+    FOR r IN
+      SELECT a.privilege_type AS priv,
+             CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                  ELSE quote_ident(pg_get_userbyid(a.grantee)) END AS grantee
+      FROM pg_class c, aclexplode(c.relacl) a
+      WHERE c.oid = 'pgrdf._pgrdf_quads'::regclass
+    LOOP
+      EXECUTE format('GRANT %s ON pgrdf.%I TO %s', r.priv, p.part, r.grantee);
+    END LOOP;
+  END LOOP;
+END
+$pgrdf_acl_backfill$;

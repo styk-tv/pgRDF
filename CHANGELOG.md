@@ -31,6 +31,37 @@ which binary is answering.
   The generation counter does not cover this case and never did — every database
   on an instance shares one counter and one keyspace.
 
+- **Per-graph partitions were unreadable by downstream definer rings (#96).**
+  `_pgrdf_quads_g<id>` is a partition of `pgrdf._pgrdf_quads`, and PostgreSQL
+  does **not** propagate ACLs to partitions — a partition is owned by whoever
+  ran the `CREATE`, with no grants, whatever the parent carries. A
+  `SECURITY DEFINER` function owned by a non-superuser role could therefore read
+  the parent and fail on the partition holding the rows:
+  `permission denied for table _pgrdf_quads_g1`. No caller could grant at the
+  right moment, because the table does not exist until `add_graph` makes it and
+  its name is a pgRDF internal.
+
+  Partitions now inherit the parent's ACL at creation. A consumer grants once on
+  `pgrdf._pgrdf_quads` and every partition created afterwards follows.
+
+  **Grant order now matters:** grant on the parent *before* creating graphs.
+  Granting afterwards covers only graphs that already exist — which was the
+  original defect. The upgrade script backfills partitions that predate 0.6.23,
+  so an upgrade does not leave existing graphs behind the ones made next.
+
+  **Grant in its own transaction, not interleaved with graph creation.**
+  `GRANT ... ON pgrdf._pgrdf_quads` locks the parent, while creating a partition
+  takes the partition-DDL advisory gate and *then* the parent's
+  `AccessExclusiveLock`. A transaction that grants and then creates graphs holds
+  those two in the opposite order, and can deadlock against a concurrent
+  `add_graph`. This is not new in 0.6.23 — it applies to anything that locks the
+  parent before calling `add_graph` — but the fix makes granting on the parent
+  the expected step, so it is worth stating.
+
+  Copies exactly what the parent carries and never widens it. A parent with no
+  grants (`relacl IS NULL`) grants nothing, so deployments that never granted
+  anything are unaffected.
+
 ### Added
 
 - **`pgrdf.build_id()` (#92, #93)** — reports *which build* of a version is
