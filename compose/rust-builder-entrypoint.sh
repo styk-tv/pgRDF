@@ -48,10 +48,34 @@ git config --global --add safe.directory "$SRC" 2>/dev/null || true
 
 if git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
   COMMIT=$(git -C "$SRC" rev-parse --short HEAD)
-  # No pipefail trap here: `git status` failing mid-pipeline would
-  # otherwise kill the script with an exit code and no message.
-  DIRTY=$(git -C "$SRC" status --porcelain | wc -l | tr -d ' ')
-  [ "$DIRTY" = "0" ] && DIRTYB=false || DIRTYB=true
+
+  # Dirtiness means TRACKED files differ from HEAD. Two container-specific
+  # traps make the naive check wrong in opposite ways:
+  #
+  # 1. `git status --porcelain` counts UNTRACKED files. The host's ignore
+  #    rules (global excludesFile, .git/info/exclude) do not come along
+  #    into the container, so files ignored on the host show up as `??`
+  #    here and every build reports dirty. That also makes
+  #    CK_REQUIRE_CLEAN refuse every release build.
+  #
+  # 2. /src is READ-ONLY, so git cannot write back a refreshed index.
+  #    Stat metadata differs across the mount, so `diff-index` reports
+  #    modifications for files whose contents are identical.
+  #
+  # Both are fixed by refreshing into a WRITABLE copy of the index and
+  # comparing tracked content only.
+  GIT_INDEX_COPY=/tmp/ck-build-index
+  if cp "$(git -C "$SRC" rev-parse --git-dir)/index" "$GIT_INDEX_COPY" 2>/dev/null; then
+    if GIT_INDEX_FILE="$GIT_INDEX_COPY" git -C "$SRC" update-index --refresh -q >/dev/null 2>&1 \
+       || true; then
+      GIT_INDEX_FILE="$GIT_INDEX_COPY" git -C "$SRC" diff-index --quiet HEAD -- \
+        && DIRTYB=false || DIRTYB=true
+    fi
+    rm -f "$GIT_INDEX_COPY"
+  else
+    # No readable index — do not guess. UNKNOWN, never clean.
+    DIRTYB=null
+  fi
 else
   COMMIT=unknown
   DIRTYB=null          # JSON null — "not known", distinct from false
