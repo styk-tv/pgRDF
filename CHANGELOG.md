@@ -6,7 +6,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-## [0.6.23] — 2026-08-09
+## [0.6.24] — 2026-08-09
 
 Two independent defects behind a single symptom — a term cached under one
 identity being returned under another — plus the build identity needed to tell
@@ -46,7 +46,7 @@ which binary is answering.
 
   **Grant order now matters:** grant on the parent *before* creating graphs.
   Granting afterwards covers only graphs that already exist — which was the
-  original defect. The upgrade script backfills partitions that predate 0.6.23,
+  original defect. The upgrade script backfills partitions that predate 0.6.24,
   so an upgrade does not leave existing graphs behind the ones made next.
 
   **Grant in its own transaction, not interleaved with graph creation.**
@@ -54,7 +54,7 @@ which binary is answering.
   takes the partition-DDL advisory gate and *then* the parent's
   `AccessExclusiveLock`. A transaction that grants and then creates graphs holds
   those two in the opposite order, and can deadlock against a concurrent
-  `add_graph`. This is not new in 0.6.23 — it applies to anything that locks the
+  `add_graph`. This is not new in 0.6.24 — it applies to anything that locks the
   parent before calling `add_graph` — but the fix makes granting on the parent
   the expected step, so it is worth stating.
 
@@ -66,7 +66,7 @@ which binary is answering.
 
 - **`pgrdf.build_id()` (#92, #93)** — reports *which build* of a version is
   loaded, as `git describe --tags --always --dirty`, e.g.
-  `v0.6.23-2-gab92a33-dirty`, or `unknown` when the build did not supply one.
+  `v0.6.24-2-gab92a33-dirty`, or `unknown` when the build did not supply one.
 
   `version()` reports the release line and is identical across every build of it,
   so after replacing a library it cannot answer whether the binary now serving
@@ -96,7 +96,7 @@ which binary is answering.
 
 ### Upgrading
 
-`sql/pgrdf--0.6.22--0.6.23.sql` ships with the release. On a database that
+`sql/pgrdf--0.6.22--0.6.24.sql` ships with the release. On a database that
 already carries the extension:
 
 ```sql

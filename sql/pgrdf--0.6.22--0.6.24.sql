@@ -1,12 +1,12 @@
--- pgRDF 0.6.22 -> 0.6.23
+-- pgRDF 0.6.22 -> 0.6.24
 --
 -- Upgrade path for a database that already carries the extension. Without
 -- this file, `ALTER EXTENSION pgrdf UPDATE` fails with "no update path from
--- version 0.6.22 to version 0.6.23" and the only routes forward are a fresh
+-- version 0.6.22 to version 0.6.24" and the only routes forward are a fresh
 -- database or DROP/CREATE EXTENSION, which destroys the data.
 --
 -- Derived from the diff between the released `pgrdf--0.6.22.sql` and the
--- generated `pgrdf--0.6.23.sql`, so it is the actual surface delta rather
+-- generated `pgrdf--0.6.24.sql`, so it is the actual surface delta rather
 -- than a hand-recalled one. Two statements.
 --
 -- Note for future bumps: a version bump ONLY needs a script when the SQL
@@ -30,7 +30,7 @@ AS 'MODULE_PATHNAME', 'build_id_wrapper';
 -- 2. Invalidate the shared-memory dictionary cache (#88).
 --
 -- The cache is postmaster-wide and survives this transaction, so slots warmed
--- by the previous binary are still live and still claim to be valid. 0.6.23
+-- by the previous binary are still live and still claim to be valid. 0.6.24
 -- carries both #88 fixes — the generation bump (#89) and database-scoped
 -- fingerprints (#91) — and neither can retroactively invalidate what the
 -- OLD binary already interned. Reset once here, at the version boundary,
@@ -40,12 +40,12 @@ SELECT pgrdf.shmem_reset();
 -- 3. Backfill partition grants (#96).
 --
 -- Postgres does not propagate ACLs to partitions, so every
--- `_pgrdf_quads_g<id>` created before 0.6.23 is owner-only regardless of
+-- `_pgrdf_quads_g<id>` created before 0.6.24 is owner-only regardless of
 -- what was granted on the parent. A downstream SECURITY DEFINER function
 -- owned by a non-superuser role reads the parent fine and fails on the
 -- partition holding the rows.
 --
--- 0.6.23 replicates the parent's ACL at creation time; this pass applies
+-- 0.6.24 replicates the parent's ACL at creation time; this pass applies
 -- the same rule to partitions that already exist, so an upgrade does not
 -- leave the graphs a database already has behind the ones it makes next.
 --
