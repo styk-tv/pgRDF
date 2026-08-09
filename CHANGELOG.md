@@ -6,6 +6,79 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.23] — 2026-08-09
+
+Two independent defects behind a single symptom — a term cached under one
+identity being returned under another — plus the build identity needed to tell
+which binary is answering.
+
+### Fixed
+
+- **Shared-memory dictionary cache survived an extension lifetime (#88, #89).**
+  `CREATE EXTENSION` now bumps the cache generation, so a fresh install cannot
+  read slots warmed before it. Previously a `DROP EXTENSION` / `CREATE EXTENSION`
+  cycle left the postmaster-wide cache populated with ids the new dictionary had
+  never issued.
+
+- **The cache was not scoped by database (#90, #91).** The fingerprint hashed
+  `term_type`, lexical value, datatype and language only, while the cache lives
+  in postmaster shared memory and `_pgrdf_dictionary` is per-database. The same
+  term in two databases therefore shared one slot, and database B read database
+  A's `dict_id` — writing quads that referenced ids it did not own. The database
+  OID now seeds both halves of the key. This needed no `DROP EXTENSION`: two
+  databases on one instance were sufficient.
+
+  The generation counter does not cover this case and never did — every database
+  on an instance shares one counter and one keyspace.
+
+### Added
+
+- **`pgrdf.build_id()` (#92, #93)** — reports *which build* of a version is
+  loaded, as `git describe --tags --always --dirty`, e.g.
+  `v0.6.23-2-gab92a33-dirty`, or `unknown` when the build did not supply one.
+
+  `version()` reports the release line and is identical across every build of it,
+  so after replacing a library it cannot answer whether the binary now serving
+  queries is the one installed. Comparing `extversion`, the control file and the
+  repo compares three declarations of the same string. `build_id()` is the only
+  reading that distinguishes two builds of one version.
+
+  Deliberately narrow — any connected role can call it, so it carries tag,
+  commits-since, short commit and a dirty marker: no filesystem paths, host names
+  or build users. A test enforces that.
+
+### Changed
+
+- **`module_pathname` is now a bare name** (`'pgrdf'`, previously
+  `'$libdir/pgrdf'`). PostgreSQL resolves a `module_pathname` containing a
+  separator directly against `pkglibdir` and never consults
+  `dynamic_library_path`; only a bare name is searched along it. The previous
+  value made a library placed in an override directory unreachable regardless of
+  path order, with no error raised.
+
+  Backward compatible: the default `dynamic_library_path` is `$libdir`, so a bare
+  name resolves to the same file on a stock install. Exercised by 346 `pg_test`s,
+  each of which runs `CREATE EXTENSION`.
+
+- **`rust-toolchain.toml` unchanged in effect, exact in intent** — the release
+  builder and CI both pin rustc 1.97.1 against `pgrx =0.19.2`.
+
+### Upgrading
+
+`sql/pgrdf--0.6.22--0.6.23.sql` ships with the release. On a database that
+already carries the extension:
+
+```sql
+ALTER EXTENSION pgrdf UPDATE;
+SELECT pgrdf.version(), pgrdf.build_id();
+```
+
+The script adds `build_id()` and resets the shared-memory cache once at the
+version boundary — slots interned by the previous binary survive the transaction,
+and neither fix above can retroactively invalidate them.
+
+A fresh database needs nothing beyond `CREATE EXTENSION pgrdf`.
+
 ## [0.6.22] — 2026-07-25
 
 > **Supersedes v0.6.21.** `v0.6.21` was tagged for the same change but its release
