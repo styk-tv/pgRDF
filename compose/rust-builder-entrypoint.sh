@@ -76,7 +76,7 @@ PIN=$(awk '/^name = "pgrx"$/{f=1;next} f&&/^version/{gsub(/[",]/,"");print $3;ex
 # "Read-only file system (os error 30)" and a metadata.rs backtrace, which
 # names neither the lock file nor the version. Every version bump hits this.
 # Refuse here, with the actual cause.
-LOCKVER=$(awk -v n="$EXT" '$0=="name = \""n"\""{f=1;next} f&&/^version/{gsub(/[",]/,"");print $2;exit}' "$SRC/Cargo.lock" 2>/dev/null || true)
+LOCKVER=$(awk -v n="$EXT" '$0=="name = \""n"\""{f=1;next} f&&/^version/{gsub(/[",]/,"");print $3;exit}' "$SRC/Cargo.lock" 2>/dev/null || true)
 if [ -n "$LOCKVER" ] && [ "$LOCKVER" != "$VER" ]; then
   die "Cargo.lock says ${EXT} ${LOCKVER}, Cargo.toml says ${VER}. /src is read-only so cargo cannot reconcile them — update and commit Cargo.lock first."
 fi
