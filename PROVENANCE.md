@@ -133,7 +133,11 @@ pgRDF cuts each release as a **PR** (so the version bump + CHANGELOG flip are re
 2. On a `release-v<new>` branch off `main`, reconcile the version across the **Rule 7 source set** (`Cargo.toml` + the `Cargo.lock` `pgrdf` entry + `pgrdf.control` `default_version` + `META.json` + the `compose/compose.yml` bind-mount + `tests/regression/expected/00-smoke.out`), and `git mv sql/pgrdf--0.5.1--<old>.sql sql/pgrdf--0.5.1--<new>.sql` (version-string rename; the upgrade path carries no DDL unless a schema change shipped).
 3. Flip `CHANGELOG.md` `[Unreleased]` → `[<new>]` with the per-task entries that close the release — **at the cut, in this PR; never a separate post-merge changelog PR.** Refresh README / guide / compose install version refs (leave historical bench / feature attributions at their original version).
 4. Open the release PR — label `release`, milestone `v<new>`. CI is the boot+version reconciliation gate (the regression suite asserts `pgrdf.version() == <new>`). Merge on green (the merge is a human gate).
-5. Tag the merge commit (tagger `Peter Styk <peter@styk.tv>`): `git tag -a v<new> -F <annotated-message-file> <merge-sha>`; `git push origin v<new>`. Then delete the merged `release-v<new>` branch (branch-hygiene ritual above).
+5. **Run `scripts/pre-tag-check.sh <new>` on the merge commit** (`git checkout main && git pull` first — the merge commit is what gets tagged, and it is not always what you last tested). It replicates this workflow's pre-build assertions locally: the full Rule 7 source set, both upgrade scripts, the `0.5.1` bridge carrying the newer delta, the compose mount, the CHANGELOG section, `make check-meta`, Rule 4's prior-release check against `LATEST.md`, and a clean/pushed tree. Exit 0 is the go-ahead.
+
+   **Why this step exists:** `release.yml` refuses a mismatched tag, which is correct but expensive — the tag is already pushed by then, and a pushed tag is never reused. `v0.6.24` was burned exactly this way: `META.json` still read `0.6.22` while the tag said `0.6.24`. `META.json` is the one member of the Rule 7 set that a glob over `*.toml` / `*.control` / `*.yml` never reaches, so sweeping for version strings by filename silently skips it. Read this list; do not pattern-match it.
+
+6. Tag the merge commit (tagger `Peter Styk <peter@styk.tv>`): `git tag -a v<new> -F <annotated-message-file> <merge-sha>`; `git push origin v<new>`. Then delete the merged `release-v<new>` branch (branch-hygiene ritual above).
 
 GitHub Actions takes over:
 
