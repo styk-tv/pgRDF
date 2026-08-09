@@ -147,6 +147,59 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
         part_name, graph_id
     );
     Spi::run(&sql).expect("create_quads_partition: CREATE TABLE failed");
+
+    // (5) Replicate the parent's ACL onto the new partition.
+    inherit_parent_acl(part_name);
+}
+
+/// Copy `pgrdf._pgrdf_quads`'s grants onto a freshly created partition.
+///
+/// **Postgres does not propagate ACLs to partitions.** A partition is
+/// owned by whoever ran the `CREATE`, with no grants, regardless of what
+/// the parent carries. A downstream `SECURITY DEFINER` function owned by
+/// a non-superuser role can therefore read the parent but not the
+/// partition holding the rows — `permission denied for table
+/// _pgrdf_quads_g<id>` — and no caller can grant at the right moment,
+/// because the table does not exist until we make it and its name is our
+/// internal detail (issue #96).
+///
+/// The parent's ACL is the right template: a consumer grants once on
+/// `pgrdf._pgrdf_quads` and every partition created afterwards follows.
+/// Granting after the fact only covers graphs that already exist, which
+/// is the part that kept re-breaking for later consumers.
+///
+/// `relacl IS NULL` means default, owner-only privileges — `aclexplode`
+/// yields no rows and nothing is granted, so a deployment that never
+/// granted anything sees no behaviour change.
+fn inherit_parent_acl(part_name: &str) {
+    // Grantee 0 is PUBLIC, which has no entry in pg_authid and must be
+    // spelled as a bare keyword rather than a quoted identifier.
+    let sql = format!(
+        r#"DO $pgrdf_acl$
+        DECLARE r record;
+        BEGIN
+          FOR r IN
+            SELECT a.privilege_type AS priv,
+                   CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                        ELSE quote_ident(pg_get_userbyid(a.grantee)) END AS grantee
+            FROM pg_class c, aclexplode(c.relacl) a
+            WHERE c.oid = 'pgrdf._pgrdf_quads'::regclass
+          LOOP
+            EXECUTE format('GRANT %s ON pgrdf.%I TO %s', r.priv, {part}, r.grantee);
+          END LOOP;
+        END
+        $pgrdf_acl$;"#,
+        part = spi_quote_literal(part_name),
+    );
+    Spi::run(&sql).expect("create_quads_partition: ACL inheritance failed");
+}
+
+/// Single-quote a value for embedding in SQL. `part_name` is built
+/// internally from a BIGINT, so this is belt-and-braces rather than a
+/// live injection surface — but the value crosses into a `DO` body where
+/// it is no longer in identifier position, so it gets quoted properly.
+fn spi_quote_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 /// Create the canonical `_pgrdf_quads_g{graph_id}` partition,
@@ -173,4 +226,80 @@ pub(crate) fn create_quads_partition(graph_id: i64) {
 #[cfg(any(test, feature = "pg_test"))]
 pub(crate) fn create_quads_partition_named(part_name: &str, graph_id: i64) {
     create_partition_impl(part_name, graph_id);
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pg_schema]
+mod tests {
+    use pgrx::prelude::*;
+
+    /// A partition created after a grant on the parent carries that
+    /// grant. This is issue #96: without it a downstream `SECURITY
+    /// DEFINER` function owned by a non-superuser role reads the parent
+    /// fine and gets `permission denied for table _pgrdf_quads_g<id>`,
+    /// because Postgres does not propagate ACLs to partitions.
+    #[pg_test]
+    fn partition_inherits_parent_grants() {
+        // Take the DDL gate FIRST. `GRANT ... ON pgrdf._pgrdf_quads`
+        // locks the parent, and the module's rule is that the advisory
+        // gate is the OUTERMOST lock — locking the parent before it
+        // inverts the order against any parallel test doing
+        // gate-then-parent, and Postgres deadlocks. `create_quads_partition`
+        // re-enters the gate harmlessly.
+        crate::storage::partition::acquire_partition_ddl_gate();
+
+        Spi::run("CREATE ROLE pgrdf_acl_probe NOLOGIN").unwrap();
+        Spi::run("GRANT SELECT, INSERT ON pgrdf._pgrdf_quads TO pgrdf_acl_probe").unwrap();
+
+        // Grant FIRST, create SECOND — the ordering the fix exists to
+        // make work. Granting afterwards was always possible; it just
+        // never covered graphs created later.
+        crate::storage::partition::create_quads_partition(960_001);
+
+        let has_select = Spi::get_one::<bool>(
+            "SELECT has_table_privilege('pgrdf_acl_probe', \
+             'pgrdf._pgrdf_quads_g960001', 'SELECT')",
+        )
+        .unwrap()
+        .unwrap_or(false);
+        let has_insert = Spi::get_one::<bool>(
+            "SELECT has_table_privilege('pgrdf_acl_probe', \
+             'pgrdf._pgrdf_quads_g960001', 'INSERT')",
+        )
+        .unwrap()
+        .unwrap_or(false);
+
+        assert!(has_select, "partition must inherit SELECT from the parent");
+        assert!(has_insert, "partition must inherit INSERT from the parent");
+
+        // A privilege the parent does NOT carry must not appear — the
+        // fix copies the parent's ACL, it does not widen it.
+        let has_delete = Spi::get_one::<bool>(
+            "SELECT has_table_privilege('pgrdf_acl_probe', \
+             'pgrdf._pgrdf_quads_g960001', 'DELETE')",
+        )
+        .unwrap()
+        .unwrap_or(true);
+        assert!(
+            !has_delete,
+            "partition must not gain privileges the parent lacks"
+        );
+    }
+
+    /// With no grants on the parent, nothing is granted on the partition.
+    /// `relacl IS NULL` means default owner-only privileges, so a
+    /// deployment that never granted anything sees no change.
+    #[pg_test]
+    fn partition_with_ungranted_parent_stays_owner_only() {
+        Spi::run("CREATE ROLE pgrdf_acl_probe2 NOLOGIN").unwrap();
+        crate::storage::partition::create_quads_partition(960_002);
+
+        let has_select = Spi::get_one::<bool>(
+            "SELECT has_table_privilege('pgrdf_acl_probe2', \
+             'pgrdf._pgrdf_quads_g960002', 'SELECT')",
+        )
+        .unwrap()
+        .unwrap_or(true);
+        assert!(!has_select, "an unrelated role must not gain access");
+    }
 }
