@@ -38,16 +38,27 @@ SELECT (j->>'conforms')::boolean             = TRUE          AS conforms_true,
        jsonb_typeof(j->'elapsed_ms')         = 'number'      AS elapsed_is_number
   FROM (SELECT pgrdf.validate(8500, 8501) AS j) s;
 
--- Unknown graphs return zero counts. The "no shapes ⇒ no failures ⇒
--- conforms" report this used to lock is the #83 defect: "nothing was
--- checked" and "everything passed" are different facts, and a wrong
--- graph id reported as a clean bill of health is how that matters.
--- `conforms` is now NULL and carries an error naming the reason, so the
--- first comparison below is NULL rather than TRUE.
-SELECT (j->>'conforms')::boolean             = TRUE          AS unknown_conforms,
+-- Unknown graphs: the "no shapes ⇒ no failures ⇒ conforms" report this
+-- used to lock is the #83 defect — "nothing was checked" and
+-- "everything passed" are different facts. #103 (0.6.26) tightened it
+-- again: the strict refusal now RAISES, because the in-band
+-- conforms:null was fail-open at call sites (NOT(conforms)::bool over
+-- null is NULL, which WHERE drops). Pin the raise, then pin the
+-- lenient opt-out's zero-count echo shape.
+DO $$ BEGIN
+  PERFORM pgrdf.validate(99990, 99991);
+  PERFORM set_config('regress70.err', 'NO-ERROR', false);
+EXCEPTION WHEN OTHERS THEN
+  PERFORM set_config('regress70.err', SQLERRM, false);
+END $$;
+SELECT current_setting('regress70.err', true)
+       LIKE 'validate: shapes graph 99991 declares no SHACL target%'
+       AS unknown_graphs_strict_raises;
+
+SELECT (j->>'conforms')::boolean             = TRUE          AS unknown_conforms_lenient,
        (j->>'data_triples')::int             = 0             AS no_data_triples,
        (j->>'shapes_triples')::int           = 0             AS no_shapes_triples
-  FROM (SELECT pgrdf.validate(99990, 99991) AS j) s;
+  FROM (SELECT pgrdf.validate(99990, 99991, 'native', false) AS j) s;
 
 -- Cleanup.
 DROP EXTENSION pgrdf CASCADE;
