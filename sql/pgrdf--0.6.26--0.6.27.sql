@@ -1,0 +1,15 @@
+-- pgRDF 0.6.26 -> 0.6.27 — deliberately a NO-OP bridge (the v0.5.25
+-- precedent): this release changes no catalog object. It exists so
+-- `ALTER EXTENSION pgrdf UPDATE` can move extversion to match the
+-- library. What the release actually carries lives in the .so:
+--
+--   #72  edition 2021 -> 2024, resolver "3" (toolchain, no behaviour)
+--   #71  pgrdf.ingest_dict_path / on_path_truncation /
+--        staged_resolve_strategy are native ENUM GUCs: an unrecognised
+--        value is refused AT SET by postgres, naming the valid values.
+--        Previously a typo was accepted and silently read as a default.
+--   #62  (harness-only) the differential oracle's numeric fold is
+--        family-scoped: "2" vs "2.0" now diverges.
+--
+-- #71 is a calling-contract note, not a schema one: a script that used
+-- to SET an invalid value and rely on the silent fallback now errors.

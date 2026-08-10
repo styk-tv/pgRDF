@@ -65,10 +65,10 @@
 
 use crate::validation::shacl::serialise_graph_to_ntriples;
 use pgrx::prelude::*;
-use rudof_rdf::rdf_core::term::Object;
 use rudof_rdf::rdf_core::RDFFormat;
 use rudof_rdf::rdf_core::SHACLPath;
-use serde_json::{json, Value};
+use rudof_rdf::rdf_core::term::Object;
+use serde_json::{Value, json};
 use shacl::ir::components::BasicSparql;
 use shacl::ir::{IRComponent, IRSchema, IRShape};
 use shacl::types::{Severity, Target};

@@ -494,10 +494,10 @@ fn ingest_turtle_dict_batched<R: Read>(
     let t_dict = Instant::now();
     let mut datatype_iris: HashSet<String> = HashSet::new();
     for tr in &triples {
-        if let Term::Literal(lit) = &tr.object {
-            if lit.language().is_none() {
-                datatype_iris.insert(lit.datatype().as_str().to_string());
-            }
+        if let Term::Literal(lit) = &tr.object
+            && lit.language().is_none()
+        {
+            datatype_iris.insert(lit.datatype().as_str().to_string());
         }
     }
     let mut dt_iri_id: HashMap<String, i64> = HashMap::new();
@@ -1022,7 +1022,7 @@ fn drain_pending_into_batch(
 /// `_pgrdf_quads` rows by construction; only the SPI shape differs.
 fn ingest_dispatch<R: Read>(reader: R, graph_id: i64, base_iri: Option<&str>) -> LoaderStats {
     use crate::query::guc::{
-        dict_batch_size, ingest_dict_path, shmem_prewarm_on_init, IngestDictPath,
+        IngestDictPath, dict_batch_size, ingest_dict_path, shmem_prewarm_on_init,
     };
     let path = ingest_dict_path();
     if shmem_prewarm_on_init() || path == IngestDictPath::ShmemWarm {
@@ -1406,7 +1406,7 @@ where
     E: std::fmt::Display,
 {
     use crate::query::guc::{
-        dict_batch_size, ingest_dict_path, shmem_prewarm_on_init, IngestDictPath,
+        IngestDictPath, dict_batch_size, ingest_dict_path, shmem_prewarm_on_init,
     };
     let path = ingest_dict_path();
     if shmem_prewarm_on_init() || path == IngestDictPath::ShmemWarm {
@@ -2025,7 +2025,7 @@ fn ingest_turtle_streaming(
             }};
         }
         macro_rules! intern1 {
-            ($tt:expr, $lv:expr) => {{
+            ($tt:expr_2021, $lv:expr_2021) => {{
                 let key: DictKey = ($tt, $lv.to_string(), None, None);
                 if !dict.contains_key(&key) {
                     let id = alloc_id!();
@@ -2059,7 +2059,7 @@ fn ingest_turtle_streaming(
         );
         // tier-2: literals, keyed (LITERAL, lexical, datatype_id, lang).
         macro_rules! intern2 {
-            ($lv:expr, $di:expr, $lt:expr) => {{
+            ($lv:expr_2021, $di:expr_2021, $lt:expr_2021) => {{
                 let key: DictKey = (term_type::LITERAL, $lv.to_string(), $di, $lt.clone());
                 if !dict.contains_key(&key) {
                     let id = alloc_id!();

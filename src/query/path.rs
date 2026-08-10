@@ -188,8 +188,7 @@ use spargebra::term::{NamedNode, NamedNodePattern, TermPattern, TriplePattern};
 /// over plain (optionally inverted) predicates (E4) are executable;
 /// the exotic nested-recursive / non-plain-arm case is the
 /// §7.1-permitted gated remainder.
-pub(crate) const PANIC_ONE_OR_MORE_NESTED: &str =
-    "pgrdf: nested recursive property path (e.g. `(p*)+`, `(a/b|c)`) is a gated stretch goal (Phase E group E4)";
+pub(crate) const PANIC_ONE_OR_MORE_NESTED: &str = "pgrdf: nested recursive property path (e.g. `(p*)+`, `(a/b|c)`) is a gated stretch goal (Phase E group E4)";
 
 /// Stable panic for negated property sets `!(...)` — out of v0.4 scope.
 pub(crate) const PANIC_NEGATED: &str = "pgrdf: negated property sets are out of scope for v0.4";
@@ -198,8 +197,7 @@ pub(crate) const PANIC_NEGATED: &str = "pgrdf: negated property sets are out of 
 /// 2-pattern BGP in user-facing SPARQL; E2 keeps E1's stance and does
 /// not desugar (would mint a synthetic join var that pollutes
 /// `SELECT *`).
-pub(crate) const PANIC_SEQUENCE: &str =
-    "pgrdf: sequence property paths (p1/p2) are not a property-path \
+pub(crate) const PANIC_SEQUENCE: &str = "pgrdf: sequence property paths (p1/p2) are not a property-path \
      operator in pgRDF — express them as a multi-pattern BGP \
      (`{ ?s p1 ?mid . ?mid p2 ?o }`)";
 
@@ -358,10 +356,10 @@ fn fold_inner_predicates(
     }
     // E4 — `(a|b)+` / `(a|b)*` / `(a|b)?`: the inner box is an
     // alternation of plain (optionally inverted) predicates.
-    if matches!(inner, PropertyPathExpression::Alternative(_, _)) {
-        if let Some((preds, sw)) = flatten_alternation(inner, outer_swapped) {
-            return (preds, sw);
-        }
+    if matches!(inner, PropertyPathExpression::Alternative(_, _))
+        && let Some((preds, sw)) = flatten_alternation(inner, outer_swapped)
+    {
+        return (preds, sw);
     }
     // `(p*)+`, `(p1/p2)?`, `(a/b|c)+`, `(a+|b)*` — nested recursive
     // / sequence / non-plain-arm. Exotic; the gated E4 remainder.
@@ -445,7 +443,7 @@ pub(crate) fn classify_path(
                         return PathPlan::Alternation {
                             predicates,
                             swapped,
-                        }
+                        };
                     }
                     None => panic!("{PANIC_ONE_OR_MORE_NESTED}"),
                 }
@@ -497,14 +495,14 @@ pub(crate) fn is_executable(path: &PropertyPathExpression) -> bool {
             PropertyPathExpression::OneOrMore(inner)
             | PropertyPathExpression::ZeroOrMore(inner)
             | PropertyPathExpression::ZeroOrOne(inner) => {
-                return inner_is_plain_or_alternation(inner)
+                return inner_is_plain_or_alternation(inner);
             }
             // E4 — top-level `a|b` (and `^(a|b)` since we tunnelled
             // through `Reverse` above): executable iff every arm is
             // a plain (optionally inverted, uniform-direction)
             // predicate.
             PropertyPathExpression::Alternative(_, _) => {
-                return flatten_alternation(cur, false).is_some()
+                return flatten_alternation(cur, false).is_some();
             }
             _ => return false,
         }
@@ -1505,9 +1503,10 @@ mod tests {
             &[],
         );
         // Transitive part is the `+` relation verbatim …
-        assert!(r
-            .from_fragment
-            .contains("WITH RECURSIVE walk(src, dst, depth)"));
+        assert!(
+            r.from_fragment
+                .contains("WITH RECURSIVE walk(src, dst, depth)")
+        );
         assert!(
             r.from_fragment
                 .contains("CYCLE src, dst SET is_cycle USING path"),
@@ -1616,9 +1615,10 @@ mod tests {
 
         // Inverse `(^p)?`: direct arm reads object_id → subject_id.
         let ri = build_zero_or_one_relation_sql("$1", None, &PathGraphScope::AllGraphs, true, &[]);
-        assert!(ri
-            .from_fragment
-            .contains("SELECT object_id AS src, subject_id AS dst"));
+        assert!(
+            ri.from_fragment
+                .contains("SELECT object_id AS src, subject_id AS dst")
+        );
     }
 
     #[test]
@@ -1660,9 +1660,10 @@ mod tests {
 
         // Inverse `^(a|b)`: swapped endpoints.
         let ri = build_alternation_relation_sql("$1, $2", None, &PathGraphScope::AllGraphs, true);
-        assert!(ri
-            .from_fragment
-            .contains("SELECT DISTINCT object_id AS src, subject_id AS dst"));
+        assert!(
+            ri.from_fragment
+                .contains("SELECT DISTINCT object_id AS src, subject_id AS dst")
+        );
 
         // `GRAPH ?g`: per-graph, carries gid.
         let rv = build_alternation_relation_sql("$3", None, &PathGraphScope::Variable, false);
@@ -1684,9 +1685,10 @@ mod tests {
             64,
             None,
         );
-        assert!(r
-            .from_fragment
-            .contains("WITH RECURSIVE walk(src, dst, depth)"));
+        assert!(
+            r.from_fragment
+                .contains("WITH RECURSIVE walk(src, dst, depth)")
+        );
         assert!(r.from_fragment.contains("SELECT subject_id, object_id"));
         assert!(
             r.from_fragment.contains("WHERE predicate_id IN ($1)"),

@@ -6,6 +6,41 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.27] — 2026-08-10
+
+Toolchain currency and configuration fail-closed. No catalog change — the
+upgrade bridge is deliberately a no-op (the v0.5.25 precedent); everything
+this release carries lives in the library.
+
+### Changed
+
+- **Three GUCs are now native enum GUCs (#71):** `pgrdf.ingest_dict_path`,
+  `pgrdf.on_path_truncation`, `pgrdf.staged_resolve_strategy`. An
+  unrecognised value is **refused at `SET`** by PostgreSQL itself, naming
+  the valid values. Previously a typo was accepted silently and each reader
+  fell back to a default — set wrong, run different, no error anywhere.
+  Valid values and defaults are unchanged; `RESET` restores the documented
+  default. **Calling-contract note:** a script that relied on setting an
+  invalid value and being silently defaulted now errors at the `SET`.
+
+- **Edition 2021 → 2024, `resolver = "3"` (#72).** pgrx 0.17+ migrated and
+  0.19 restated it; staying on 2021 was drift, not breakage. Mechanical
+  migration (`cargo fix --edition`), no behaviour delta.
+
+- **Differential oracle: numeric folding is family-scoped (#62,
+  harness-only).** The comparator folded any two numerically-equal strings,
+  so `"2"` passed where the W3C-correct answer was `"2.0"` — a real
+  lexical/datatype divergence scored as a Match. Value-folding now applies
+  only within a lexical family: integer formatting folds (`"010"` = `"10"`),
+  decimal/double formatting folds (`"1.0E1"` = `"10.0"`), but integer vs
+  fractional is a datatype distinction and diverges. Lock fixtures added.
+
+### Upgrading
+
+```sql
+ALTER EXTENSION pgrdf UPDATE;   -- moves extversion; the bridge is a no-op
+```
+
 ## [0.6.26] — 2026-08-10
 
 The verification cut. Three defects the v3.11 wave surfaced in pgRDF's own

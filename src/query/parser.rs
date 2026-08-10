@@ -47,7 +47,7 @@
 //!     `unsupported_algebra` (VALUES in §4-deferred backlog).
 
 use pgrx::prelude::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use spargebra::algebra::{Expression, GraphPattern, QueryDataset};
 use spargebra::term::{GraphName, GraphNamePattern, NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{GraphUpdateOperation, Query, SparqlParser, Update};
@@ -611,15 +611,15 @@ fn analyse_describe(pattern: &GraphPattern) -> (Value, &GraphPattern) {
     } = cur
     {
         let vname = variable.as_str().to_string();
-        if proj_vars.contains(&vname) {
-            if let Expression::NamedNode(n) = expression {
-                if !const_iris.iter().any(|i| i == n.as_str()) {
-                    const_iris.push(n.as_str().to_string());
-                }
-                consumed.insert(vname);
-                cur = inner;
-                continue;
+        if proj_vars.contains(&vname)
+            && let Expression::NamedNode(n) = expression
+        {
+            if !const_iris.iter().any(|i| i == n.as_str()) {
+                const_iris.push(n.as_str().to_string());
             }
+            consumed.insert(vname);
+            cur = inner;
+            continue;
         }
         break;
     }

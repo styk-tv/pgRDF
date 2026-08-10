@@ -212,7 +212,7 @@ fn derive_work_mem_kb(mem_total: Option<u64>, nproc: usize) -> (u64, u64) {
     // unchanged); the floor keeps a tight host workable and from there the hash SPILLS (PG default ~4 MB).
     const WORK_MEM_MIN_KB: u64 = 64 * 1024; // 64 MB
     const WORK_MEM_MAX_KB: u64 = 2 * 1024 * 1024; // 2 GB
-                                                  // maintenance_work_mem ∈ [256 MB, 16 GB]: the cap equals the prior fixed value.
+    // maintenance_work_mem ∈ [256 MB, 16 GB]: the cap equals the prior fixed value.
     const MAINT_MIN_KB: u64 = 256 * 1024; // 256 MB
     const MAINT_MAX_KB: u64 = 16 * 1024 * 1024; // 16 GB
 
@@ -747,7 +747,9 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
 /// the same way the dict's NULLS-DISTINCT `unique_term` treats them, so a plain `"1"` (o_dt NULL,
 /// o_lang NULL) and `"1"^^xsd:string` (o_dt = the xsd:string IRI) stay distinct.
 fn dict_lit_dedup_select(stg: &str, literal: i32) -> String {
-    format!("SELECT o_val, o_dt, o_lang FROM {stg} WHERE o_type = {literal} GROUP BY o_val, o_dt, o_lang")
+    format!(
+        "SELECT o_val, o_dt, o_lang FROM {stg} WHERE o_type = {literal} GROUP BY o_val, o_dt, o_lang"
+    )
 }
 
 /// The object-side `ON` predicate of RESOLVE's quad-object → dict-id hash join (the `dobj` join in
@@ -1087,7 +1089,7 @@ pub fn build_index(_job: &JobSlot, w: &WorkerSlot) {
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
-    use super::{dict_lit_dedup_select, parse_window_par, resolve_object_join_on, STAGE_COLS};
+    use super::{STAGE_COLS, dict_lit_dedup_select, parse_window_par, resolve_object_join_on};
     use crate::storage::dict::term_type;
     use pgrx::prelude::*;
 

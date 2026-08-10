@@ -146,11 +146,52 @@ fn str_field<'a>(obj: &'a serde_json::Map<String, Value>, key: &str) -> Option<&
     obj.get(key).and_then(Value::as_str)
 }
 
-/// Lexical-form-insensitive numeric equality: both sides must parse
-/// fully as finite numbers. Guards against "01a"-style near-numbers.
+/// The lexical family of a numeric string — a proxy for its XSD
+/// datatype when all we hold is the serialised cell (#62).
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum NumericFamily {
+    /// `^[+-]?\d+$` — an xsd:integer lexical form.
+    Integer,
+    /// Carries a `.` or an exponent — xsd:decimal / xsd:double space.
+    Fractional,
+    /// Does not fully parse as a finite number.
+    NotNumeric,
+}
+
+fn numeric_family(s: &str) -> NumericFamily {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() => {
+            let body = s.strip_prefix(['+', '-']).unwrap_or(s);
+            if body.chars().all(|c| c.is_ascii_digit()) {
+                NumericFamily::Integer
+            } else {
+                NumericFamily::Fractional
+            }
+        }
+        _ => NumericFamily::NotNumeric,
+    }
+}
+
+/// Family-scoped numeric equality (#62). The old comparator folded any
+/// two numerically-equal strings, so an executor answer of `"2"`
+/// passed where the W3C-correct answer was `"2.0"` — a real
+/// lexical/datatype divergence scored as a Match, which blunts the one
+/// thing a differential judge exists to catch.
+///
+/// Value-folding is now allowed only WITHIN a lexical family:
+///   * `"010"` vs `"10"`      → Match    (integer formatting)
+///   * `"1.0E1"` vs `"10.0"`  → Match    (decimal/double formatting —
+///     the documented false-divergence noise this fold exists for)
+///   * `"2"` vs `"2.0"`       → DIVERGE  (integer vs fractional is a
+///     datatype distinction, not formatting)
+/// The full-parse guard ("01a"-style near-numbers) is unchanged.
 fn numeric_eq(a: &str, b: &str) -> bool {
+    let (fa, fb) = (numeric_family(a), numeric_family(b));
+    if fa == NumericFamily::NotNumeric || fa != fb {
+        return false;
+    }
     match (a.parse::<f64>(), b.parse::<f64>()) {
-        (Ok(x), Ok(y)) => x.is_finite() && y.is_finite() && x == y,
+        (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
 }
@@ -219,10 +260,17 @@ mod tests {
     fn numeric_lexical_forms_equivalent() {
         // Engine derives values through Postgres numeric, the oracle
         // through XSD arithmetic — lexical forms may differ while the
-        // number is the same.
-        let e = rows(vec![json!({"a": "01", "b": "2.50", "c": "1e0"})]);
-        let o = rows(vec![json!({"a": "1", "b": "2.5", "c": "1"})]);
+        // number is the same. #62 scoped this fold to WITHIN a lexical
+        // family: "01"/"1" (integer) and "2.50"/"2.5" (fractional)
+        // still fold …
+        let e = rows(vec![json!({"a": "01", "b": "2.50"})]);
+        let o = rows(vec![json!({"a": "1", "b": "2.5"})]);
         assert_eq!(compare(&e, &o), Verdict::Match);
+        // … while "1e0" vs "1" — the pair this test used to bless — is
+        // an integer-vs-fractional DATATYPE distinction and diverges.
+        let e = rows(vec![json!({"c": "1e0"})]);
+        let o = rows(vec![json!({"c": "1"})]);
+        assert!(matches!(compare(&e, &o), Verdict::Diverge { .. }));
     }
 
     #[test]
@@ -231,6 +279,33 @@ mod tests {
         let e = rows(vec![json!({"a": "01a"})]);
         let o = rows(vec![json!({"a": "1a"})]);
         assert!(matches!(compare(&e, &o), Verdict::Diverge { .. }));
+    }
+
+    /// #62 lock fixture: an integer where a decimal is required is a
+    /// DATATYPE divergence, not formatting. This pair PASSED under the
+    /// value-blind comparator; it must fail forever now.
+    #[test]
+    fn integer_vs_decimal_lexical_diverges() {
+        let e = rows(vec![json!({"a": "2.0"})]);
+        let o = rows(vec![json!({"a": "2"})]);
+        assert!(matches!(compare(&e, &o), Verdict::Diverge { .. }));
+    }
+
+    /// The fold this canonicalization exists for stays: decimal/double
+    /// FORMATTING variance is not a divergence.
+    #[test]
+    fn fractional_formatting_still_folds() {
+        let e = rows(vec![json!({"a": "1.0E1"})]);
+        let o = rows(vec![json!({"a": "10.0"})]);
+        assert_eq!(compare(&e, &o), Verdict::Match);
+    }
+
+    /// Integer formatting folds within its own family.
+    #[test]
+    fn integer_formatting_still_folds() {
+        let e = rows(vec![json!({"a": "010"})]);
+        let o = rows(vec![json!({"a": "10"})]);
+        assert_eq!(compare(&e, &o), Verdict::Match);
     }
 
     #[test]

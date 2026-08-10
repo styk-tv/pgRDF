@@ -35,9 +35,9 @@
 //! false-hit probability is ~2⁻¹²⁸ at fleet scale (one shared hasher
 //! seed per half).
 
-use pgrx::callbacks::{register_xact_callback, PgXactCallbackEvent};
+use pgrx::callbacks::{PgXactCallbackEvent, register_xact_callback};
 use pgrx::prelude::*;
-use pgrx::{pg_shmem_init, PGRXSharedMemory, PgAtomic, PgLwLock};
+use pgrx::{PGRXSharedMemory, PgAtomic, PgLwLock, pg_shmem_init};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -231,14 +231,14 @@ pub fn lookup(
     if !is_ready() {
         return None;
     }
-    let gen = current_generation();
+    let r#gen = current_generation();
     let (h1, h2) = fingerprint(current_db_oid(), term_type, value, datatype_id, language);
     let table = DICT_CACHE.share();
     let start = (h1 as usize) % SLOTS;
     for i in 0..PROBE_DEPTH {
         let slot = &table[(start + i) % SLOTS];
         if slot.occupied != 0
-            && slot.generation == gen
+            && slot.generation == r#gen
             && slot.key_hash1 == h1
             && slot.key_hash2 == h2
         {
@@ -320,19 +320,19 @@ fn flush_pending() {
 }
 
 fn insert_slot(h1: u64, h2: u64, dict_id: i64) {
-    let gen = current_generation();
+    let r#gen = current_generation();
     let mut table = DICT_CACHE.exclusive();
     let start = (h1 as usize) % SLOTS;
     for i in 0..PROBE_DEPTH {
         let idx = (start + i) % SLOTS;
         // Treat any slot with a stale generation as if it were empty
         // — it cannot be trusted any more and is fair game to reuse.
-        let slot_usable = table[idx].occupied != 0 && table[idx].generation == gen;
+        let slot_usable = table[idx].occupied != 0 && table[idx].generation == r#gen;
         if !slot_usable {
             table[idx] = DictCacheSlot {
                 key_hash1: h1,
                 key_hash2: h2,
-                generation: gen,
+                generation: r#gen,
                 dict_id,
                 occupied: 1,
                 _pad: [0; 7],
@@ -354,7 +354,7 @@ fn insert_slot(h1: u64, h2: u64, dict_id: i64) {
     table[idx] = DictCacheSlot {
         key_hash1: h1,
         key_hash2: h2,
-        generation: gen,
+        generation: r#gen,
         dict_id,
         occupied: 1,
         _pad: [0; 7],

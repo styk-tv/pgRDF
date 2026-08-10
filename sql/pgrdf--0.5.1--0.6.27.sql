@@ -196,3 +196,9 @@ CREATE FUNCTION "graph_integrity"("graph_id" bigint) RETURNS jsonb
 STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'graph_integrity_wrapper';
+
+-- ---------------------------------------------------------------
+-- 0.6.26 -> 0.6.27: no catalog delta (see pgrdf--0.6.26--0.6.27.sql).
+-- The bridge target moves so a 0.5.1 install lands on the current
+-- version label; nothing further to replay.
+-- ---------------------------------------------------------------

@@ -18,7 +18,7 @@
 //! only place `DefineCustomIntVariable` may be called. pgrx's
 //! `GucRegistry::define_int_guc` is the safe wrapper.
 
-use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
+use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting, PostgresGucEnum};
 use std::ffi::CString;
 
 /// Default property-path recursion depth bound (LLD v0.4 §7.2:
@@ -52,10 +52,11 @@ pub(crate) static PATH_MAX_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(DEFAU
 ///   walk feeding a carve) where under-collection would silently
 ///   propagate into a curated slice.
 ///
-/// An unrecognised value logs a warning and behaves as `warn` (the
-/// default — honest but non-fatal).
-pub(crate) static ON_PATH_TRUNCATION: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(Some(c"warn"));
+/// #71: a native enum GUC — an unrecognised value is refused AT SET
+/// by postgres itself, naming the valid values. It can no longer be
+/// set wrong and read differently.
+pub(crate) static ON_PATH_TRUNCATION: GucSetting<OnPathTruncation> =
+    GucSetting::<OnPathTruncation>::new(OnPathTruncation::Warn);
 
 // ─────────────────────────────────────────────────────────────────────
 // TA-7 — dict-path GUCs
@@ -107,8 +108,8 @@ pub(crate) const DEFAULT_BULK_DEFER_INDEX_MIN: i32 = 100_000;
 /// `Userset` context (per-session override is safe — the path is
 /// idempotent w.r.t. the resulting `_pgrdf_quads` rows; only the
 /// per-term SPI shape differs).
-pub(crate) static INGEST_DICT_PATH: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(Some(c"combined"));
+pub(crate) static INGEST_DICT_PATH: GucSetting<IngestDictPath> =
+    GucSetting::<IngestDictPath>::new(IngestDictPath::Combined);
 
 /// `pgrdf.dict_batch_size` — terms per `put_terms_batch` chunk in
 /// the `combined` / `batched` paths. `0` is interpreted as "fall
@@ -158,13 +159,35 @@ pub(crate) static STAGED_TEMP_TABLESPACES: GucSetting<Option<CString>> =
 ///   Wikidata-truthy load on E64ads_v7 completes with no multi-TB hash
 ///   spill / no ENOSPC.
 ///
-/// An unrecognised value logs a warning and falls back to `hash`, the
-/// known-safe historical behaviour.
+/// #71: a native enum GUC — an unrecognised value is refused AT SET.
 ///
 /// `Userset` context: an operator can `SET` it per session before a
 /// staged load to steer that load's RESOLVE plan.
-pub(crate) static STAGED_RESOLVE_STRATEGY: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(Some(c"index"));
+pub(crate) static STAGED_RESOLVE_STRATEGY: GucSetting<StagedResolveStrategy> =
+    GucSetting::<StagedResolveStrategy>::new(StagedResolveStrategy::Index);
+
+/// `pgrdf.staged_resolve_strategy` values (#71). The join output is
+/// identical for any choice — a performance knob, not a correctness
+/// one — which is exactly why a typo must not silently pick one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PostgresGucEnum)]
+pub(crate) enum StagedResolveStrategy {
+    #[name = c"auto"]
+    Auto,
+    #[name = c"hash"]
+    Hash,
+    #[name = c"index"]
+    Index,
+}
+
+impl StagedResolveStrategy {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Hash => "hash",
+            Self::Index => "index",
+        }
+    }
+}
 
 /// `pgrdf.shmem_prewarm_on_init` — when on, the shmem dict cache
 /// is auto-prewarmed from `_pgrdf_dictionary` once per backend
@@ -193,27 +216,24 @@ pub(crate) static AUTO_ANALYZE: GucSetting<bool> = GucSetting::<bool>::new(true)
 pub(crate) static BULK_DEFER_INDEX_MIN: GucSetting<i32> =
     GucSetting::<i32>::new(DEFAULT_BULK_DEFER_INDEX_MIN);
 
-/// `pgrdf.ingest_dict_path` parsed into a Rust enum so callers
-/// don't keep matching the raw string. `parse_turtle` / `load_turtle`
-/// dispatch on this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `pgrdf.ingest_dict_path` as a NATIVE ENUM GUC (#71). Postgres
+/// itself refuses an unrecognised value AT SET, listing the valid
+/// ones — the previous string GUC silently fell back to `Combined`
+/// at read, so an operator could set a typo, get no error, and run
+/// in a different mode than the one they asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PostgresGucEnum)]
 pub(crate) enum IngestDictPath {
+    #[name = c"baseline"]
     Baseline,
+    #[name = c"batched"]
     Batched,
+    #[name = c"shmem_warm"]
     ShmemWarm,
+    #[name = c"combined"]
     Combined,
 }
 
 impl IngestDictPath {
-    fn from_guc_string(raw: Option<&str>) -> Self {
-        match raw.map(str::trim).unwrap_or("combined") {
-            "baseline" => Self::Baseline,
-            "batched" => Self::Batched,
-            "shmem_warm" => Self::ShmemWarm,
-            _ => Self::Combined,
-        }
-    }
-
     /// Canonical lowercase name of the path, matching the GUC enum
     /// values. Surfaced as the `path` field in the verbose-ingest
     /// JSONB (TA-5) so callers can confirm which route the dispatch
@@ -245,7 +265,7 @@ pub fn register() {
         GucContext::Userset,
         GucFlags::default(),
     );
-    GucRegistry::define_string_guc(
+    GucRegistry::define_enum_guc(
         c"pgrdf.on_path_truncation",
         c"Behaviour when a property-path walk hits pgrdf.path_max_depth.",
         c"One of 'count' | 'warn' | 'error'. 'count' silently bumps \
@@ -255,12 +275,12 @@ pub fn register() {
           result is never silent; 'error' fails the query instead of \
           returning a depth-truncated result — the fail-closed mode \
           for closure queries feeding a carve. An unrecognised value \
-          logs a warning and behaves as 'warn'.",
+          is refused at SET (#71).",
         &ON_PATH_TRUNCATION,
         GucContext::Userset,
         GucFlags::default(),
     );
-    GucRegistry::define_string_guc(
+    GucRegistry::define_enum_guc(
         c"pgrdf.ingest_dict_path",
         c"Dict-resolution path used by parse_turtle / load_turtle.",
         c"One of 'baseline' | 'batched' | 'shmem_warm' | 'combined'. \
@@ -270,7 +290,7 @@ pub fn register() {
           production default that streams the parser with a defer \
           queue, falling back to put_terms_batch at \
           pgrdf.dict_batch_size or at quad-flush boundaries. An \
-          unrecognised value silently falls back to 'combined'.",
+          unrecognised value is refused at SET (#71).",
         &INGEST_DICT_PATH,
         GucContext::Userset,
         GucFlags::default(),
@@ -331,7 +351,7 @@ pub fn register() {
         GucContext::Userset,
         GucFlags::default(),
     );
-    GucRegistry::define_string_guc(
+    GucRegistry::define_enum_guc(
         c"pgrdf.staged_resolve_strategy",
         c"Join strategy the staged loader's RESOLVE phase forces.",
         c"One of 'auto' | 'hash' | 'index'. 'auto' forces no \
@@ -343,8 +363,7 @@ pub fn register() {
           index-nested-loop path — the at-scale-validated default \
           (out-of-the-box 8.2 B-triple load, no ENOSPC). The join output \
           is identical for any method — this is a performance knob, not a \
-          correctness one. An unrecognised value warns and falls back to \
-          'hash'.",
+          correctness one. An unrecognised value is refused at SET (#71).",
         &STAGED_RESOLVE_STRATEGY,
         GucContext::Userset,
         GucFlags::default(),
@@ -379,16 +398,15 @@ pub(crate) fn path_max_depth() -> i32 {
     PATH_MAX_DEPTH.get()
 }
 
-/// Resolved `pgrdf.ingest_dict_path` for this call. Reads the GUC,
-/// parses it into the enum, applies the `dict_batch_size = 0` →
-/// baseline override so the two GUCs combine in the obvious way.
+/// Resolved `pgrdf.ingest_dict_path` for this call, applying the
+/// `dict_batch_size = 0` → baseline override so the two GUCs combine
+/// in the obvious way. Since #71 the GUC is a native enum, so no
+/// string parse and no fallback path exist here at all.
 pub(crate) fn ingest_dict_path() -> IngestDictPath {
     if DICT_BATCH_SIZE.get() == 0 {
         return IngestDictPath::Baseline;
     }
-    let raw = INGEST_DICT_PATH.get();
-    let s = raw.as_ref().and_then(|c| c.to_str().ok());
-    IngestDictPath::from_guc_string(s)
+    INGEST_DICT_PATH.get()
 }
 
 /// Resolved `pgrdf.auto_analyze` — whether `materialize` should run
@@ -397,34 +415,25 @@ pub(crate) fn auto_analyze() -> bool {
     AUTO_ANALYZE.get()
 }
 
-/// Parsed `pgrdf.on_path_truncation` policy (issue #14).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// `pgrdf.on_path_truncation` policy (issue #14; native enum GUC
+/// since #71 — an unrecognised value is refused at SET, so the
+/// per-read warning fallback is gone by construction).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PostgresGucEnum)]
 pub(crate) enum OnPathTruncation {
     /// Bump `path_depth_truncations` only (silent; pre-#14 behaviour).
+    #[name = c"count"]
     Count,
     /// Counter + a client-visible WARNING per truncated walk.
+    #[name = c"warn"]
     Warn,
     /// Fail the query rather than return a depth-truncated result.
+    #[name = c"error"]
     Error,
 }
 
-/// Resolved `pgrdf.on_path_truncation` for this session. An
-/// unrecognised value warns (once per read) and behaves as `Warn` —
-/// the default is already the honest mode, so a typo never *loosens*
-/// the policy to silent.
+/// Resolved `pgrdf.on_path_truncation` for this session.
 pub(crate) fn on_path_truncation() -> OnPathTruncation {
-    let raw = ON_PATH_TRUNCATION.get();
-    match raw.as_ref().and_then(|c| c.to_str().ok()) {
-        Some("count") => OnPathTruncation::Count,
-        Some("warn") | None => OnPathTruncation::Warn,
-        Some("error") => OnPathTruncation::Error,
-        Some(other) => {
-            pgrx::warning!(
-                "pgrdf.on_path_truncation: unrecognised value '{other}' — behaving as 'warn'"
-            );
-            OnPathTruncation::Warn
-        }
-    }
+    ON_PATH_TRUNCATION.get()
 }
 
 /// Resolved `pgrdf.dict_batch_size` for this call. Returns at least
@@ -467,22 +476,62 @@ pub(crate) fn staged_temp_tablespaces() -> String {
         .to_string()
 }
 
-/// Resolved `pgrdf.staged_resolve_strategy` for this session, trimmed
-/// and lowercased. The GucSetting default is `"index"` (the
-/// at-scale-validated low-spill path); a `None`/blank value — only
-/// reachable if an operator explicitly `RESET`s/clears it — falls back
-/// to `"auto"` here, which the mapping fn then renders as no forcing.
-/// The returned
-/// string is the operator's raw selection; the strategy → SQL-fragment
-/// mapping (and the fallback for an unrecognised value) lives in
-/// [`crate::storage::staged::phases::resolve_join_strategy_sql`], which
-/// the staged loader's RESOLVE phase consults. Reads the GUC the same
-/// way as [`staged_temp_tablespaces`].
+/// Resolved `pgrdf.staged_resolve_strategy` for this session as its
+/// canonical lowercase string, which is what the strategy →
+/// SQL-fragment mapping in
+/// [`crate::storage::staged::phases::resolve_join_strategy_sql`]
+/// consumes. Since #71 the GUC is a native enum: an invalid value is
+/// refused at SET, `RESET` restores the default `index`, and the
+/// blank/typo fallback arms downstream are unreachable.
 pub(crate) fn staged_resolve_strategy() -> String {
-    let raw = STAGED_RESOLVE_STRATEGY.get();
-    raw.as_ref()
-        .and_then(|c| c.to_str().ok())
-        .map(str::trim)
-        .unwrap_or("auto")
-        .to_ascii_lowercase()
+    STAGED_RESOLVE_STRATEGY.get().as_str().to_string()
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pgrx::pg_schema]
+mod tests {
+    use pgrx::prelude::*;
+
+    /// #71 — an unrecognised value is refused AT SET by postgres
+    /// itself. Before the enum conversion this SET succeeded silently
+    /// and the read fell back to 'combined': set wrong, run different.
+    #[pg_test(error = "invalid value for parameter \"pgrdf.ingest_dict_path\": \"nonsense\"")]
+    fn guc_ingest_dict_path_refuses_at_set() {
+        Spi::run("SET pgrdf.ingest_dict_path = 'nonsense'").unwrap();
+    }
+
+    #[pg_test(error = "invalid value for parameter \"pgrdf.on_path_truncation\": \"whatever\"")]
+    fn guc_on_path_truncation_refuses_at_set() {
+        Spi::run("SET pgrdf.on_path_truncation = 'whatever'").unwrap();
+    }
+
+    #[pg_test(error = "invalid value for parameter \"pgrdf.staged_resolve_strategy\": \"fastest\"")]
+    fn guc_staged_resolve_strategy_refuses_at_set() {
+        Spi::run("SET pgrdf.staged_resolve_strategy = 'fastest'").unwrap();
+    }
+
+    /// Every documented value still accepted, reads back canonically,
+    /// and RESET restores the default — the refusal must not have
+    /// narrowed the valid set.
+    #[pg_test]
+    fn guc_enum_valid_values_roundtrip() {
+        for v in ["baseline", "batched", "shmem_warm", "combined"] {
+            Spi::run(&format!("SET pgrdf.ingest_dict_path = '{v}'")).unwrap();
+            assert_eq!(
+                Spi::get_one::<String>("SHOW pgrdf.ingest_dict_path").unwrap(),
+                Some(v.to_string())
+            );
+        }
+        for v in ["count", "warn", "error"] {
+            Spi::run(&format!("SET pgrdf.on_path_truncation = '{v}'")).unwrap();
+        }
+        for v in ["auto", "hash", "index"] {
+            Spi::run(&format!("SET pgrdf.staged_resolve_strategy = '{v}'")).unwrap();
+        }
+        Spi::run("RESET pgrdf.staged_resolve_strategy").unwrap();
+        assert_eq!(
+            Spi::get_one::<String>("SHOW pgrdf.staged_resolve_strategy").unwrap(),
+            Some("index".to_string())
+        );
+    }
 }
