@@ -47,9 +47,9 @@ SELECT (j->>'conforms')::boolean             = TRUE          AS conforms_true,
 -- lenient opt-out's zero-count echo shape.
 DO $$ BEGIN
   PERFORM pgrdf.validate(99990, 99991);
-  PERFORM set_config('regress70.err', 'NO-ERROR', true);
+  PERFORM set_config('regress70.err', 'NO-ERROR', false);
 EXCEPTION WHEN OTHERS THEN
-  PERFORM set_config('regress70.err', SQLERRM, true);
+  PERFORM set_config('regress70.err', SQLERRM, false);
 END $$;
 SELECT current_setting('regress70.err', true)
        LIKE 'validate: shapes graph 99991 declares no SHACL target%'
