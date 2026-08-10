@@ -1,14 +1,17 @@
 [package]
 name = "pgrdf"
-version = "0.6.26"
-edition = "2021"
-# MSRV. Matches the CI build container (compose/builder.Containerfile
-# `FROM rust:1.91-bookworm`) — the only Rust version pgRDF artifacts
-# are actually produced against. The check-cfg lint block below also
-# assumes Rust 1.91+'s strict check-cfg behavior, so going lower would
-# misadvertise support. pgrx 0.16.1's `resolver = "3"` independently
-# imposes a 1.84 floor; this declaration tightens that to the value CI
-# verifies. Bump together with the Containerfile when upgrading.
+version = "0.6.27"
+# #72: edition 2024 + resolver "3" — pgrx 0.17+ migrated and 0.19
+# restated it; staying on 2021 was drift, not breakage. resolver "3"
+# is edition 2024's default, declared explicitly because the workspace
+# reads clearer than the implication.
+edition = "2024"
+resolver = "3"
+# MSRV. The shared builder (ck-rust-builder:trixie-pg18, rustc 1.97.1)
+# is the only Rust pgRDF artifacts are actually produced against; the
+# check-cfg lint block below assumes 1.91+ strict check-cfg, and pgrx
+# =0.19.2 imposes the 1.96 floor this declares. Bump together with the
+# builder image when upgrading.
 rust-version = "1.96"
 license = "MIT"
 authors = ["Peter Styk"]

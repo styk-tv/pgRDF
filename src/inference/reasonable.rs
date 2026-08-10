@@ -203,12 +203,12 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     type TermKey = (i16, String, Option<i64>, Option<String>);
     let mut dt_ids: HashMap<String, i64> = HashMap::new();
     for t in &inferred {
-        if let Term::Literal(lit) = &t.object {
-            if lit.language().is_none() {
-                dt_ids
-                    .entry(lit.datatype().as_str().to_string())
-                    .or_insert(0);
-            }
+        if let Term::Literal(lit) = &t.object
+            && lit.language().is_none()
+        {
+            dt_ids
+                .entry(lit.datatype().as_str().to_string())
+                .or_insert(0);
         }
     }
     if !dt_ids.is_empty() {
@@ -439,10 +439,10 @@ fn rdfs_closure(base: &[Triple]) -> Vec<Triple> {
                 if let (Some(s), Some(o)) = (named_str(&t.subject), term_named_str(&t.object)) {
                     domain.entry(s).or_default().push(o);
                 }
-            } else if p == RDFS_RANGE {
-                if let (Some(s), Some(o)) = (named_str(&t.subject), term_named_str(&t.object)) {
-                    range.entry(s).or_default().push(o);
-                }
+            } else if p == RDFS_RANGE
+                && let (Some(s), Some(o)) = (named_str(&t.subject), term_named_str(&t.object))
+            {
+                range.entry(s).or_default().push(o);
             }
         }
 
@@ -498,16 +498,16 @@ fn rdfs_closure(base: &[Triple]) -> Vec<Triple> {
 
             if p == RDF_TYPE {
                 // rdfs9 — c ⊑ d ∧ s a c ⇒ s a d (every super-class).
-                if let Some(c) = term_named_str(&t.object) {
-                    if let Some(ds) = subclass.get(&c) {
-                        for d in ds {
-                            if let Ok(dn) = NamedNode::new(d) {
-                                next.push(Triple::new(
-                                    t.subject.clone(),
-                                    NamedNode::new(RDF_TYPE).unwrap(),
-                                    Term::NamedNode(dn),
-                                ));
-                            }
+                if let Some(c) = term_named_str(&t.object)
+                    && let Some(ds) = subclass.get(&c)
+                {
+                    for d in ds {
+                        if let Ok(dn) = NamedNode::new(d) {
+                            next.push(Triple::new(
+                                t.subject.clone(),
+                                NamedNode::new(RDF_TYPE).unwrap(),
+                                Term::NamedNode(dn),
+                            ));
                         }
                     }
                 }
@@ -527,16 +527,16 @@ fn rdfs_closure(base: &[Triple]) -> Vec<Triple> {
                 // rdfs3 — p rdfs:range c ∧ s p o ⇒ o rdf:type c.
                 // Only when the object can be a type subject (IRI /
                 // bnode); a literal object yields no rdf:type triple.
-                if let Some(cs) = range.get(p) {
-                    if let Some(o_subj) = term_as_subject(&t.object) {
-                        for c in cs {
-                            if let Ok(cn) = NamedNode::new(c) {
-                                next.push(Triple::new(
-                                    o_subj.clone(),
-                                    NamedNode::new(RDF_TYPE).unwrap(),
-                                    Term::NamedNode(cn),
-                                ));
-                            }
+                if let Some(cs) = range.get(p)
+                    && let Some(o_subj) = term_as_subject(&t.object)
+                {
+                    for c in cs {
+                        if let Ok(cn) = NamedNode::new(c) {
+                            next.push(Triple::new(
+                                o_subj.clone(),
+                                NamedNode::new(RDF_TYPE).unwrap(),
+                                Term::NamedNode(cn),
+                            ));
                         }
                     }
                 }

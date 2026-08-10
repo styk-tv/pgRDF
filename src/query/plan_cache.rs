@@ -29,7 +29,7 @@
 
 use pgrx::prelude::*;
 use pgrx::spi::OwnedPreparedStatement;
-use pgrx::{pg_shmem_init, PgAtomic};
+use pgrx::{PgAtomic, pg_shmem_init};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

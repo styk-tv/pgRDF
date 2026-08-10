@@ -102,7 +102,7 @@ pub fn spawn_checked(name: &str, worker_slot: usize) -> Result<DynamicBackground
 /// dead-code-eliminates it (nothing references the function by Rust path — only by string), so the
 /// postmaster's launcher fails with `could not find function "pgrdf_staged_worker_main" in
 /// pgrdf.so` and every worker exits code 1 before its body runs (observed on E160).
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[pg_guard]
 pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
     let slot =

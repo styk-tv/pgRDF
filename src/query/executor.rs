@@ -105,7 +105,7 @@ use pgrx::datum::DatumWithOid;
 use pgrx::iter::SetOfIterator;
 use pgrx::pg_sys::{Oid, PgBuiltInOids};
 use pgrx::prelude::*;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use spargebra::algebra::GraphTarget;
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, Function, GraphPattern, OrderExpression,
@@ -955,10 +955,10 @@ fn collect_construct_template_vars(slots: &[TemplateTripleSlots]) -> Vec<String>
     let mut out: Vec<String> = Vec::new();
     for s in slots {
         for pos in [&s.subject, &s.predicate, &s.object] {
-            if let ConstructTermSlot::Variable(v) = pos {
-                if seen.insert(v.clone()) {
-                    out.push(v.clone());
-                }
+            if let ConstructTermSlot::Variable(v) = pos
+                && seen.insert(v.clone())
+            {
+                out.push(v.clone());
             }
         }
     }
@@ -1220,13 +1220,19 @@ fn encode_dict_term(term: &ResolvedTerm) -> Value {
 fn reject_construct_modifiers(p: &GraphPattern) {
     match p {
         GraphPattern::Distinct { .. } | GraphPattern::Reduced { .. } => {
-            panic!("pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)")
+            panic!(
+                "pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)"
+            )
         }
         GraphPattern::OrderBy { .. } => {
-            panic!("pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)")
+            panic!(
+                "pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)"
+            )
         }
         GraphPattern::Group { .. } => {
-            panic!("pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)")
+            panic!(
+                "pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)"
+            )
         }
         GraphPattern::Project { inner, .. } | GraphPattern::Slice { inner, .. } => {
             reject_construct_modifiers(inner)
@@ -1614,15 +1620,15 @@ fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     } = cur
     {
         let vname = variable.as_str().to_string();
-        if proj_vars.contains(&vname) {
-            if let Expression::NamedNode(n) = expression {
-                if !const_iris.iter().any(|i| i == n.as_str()) {
-                    const_iris.push(n.as_str().to_string());
-                }
-                consumed_vars.insert(vname);
-                cur = ext_inner;
-                continue;
+        if proj_vars.contains(&vname)
+            && let Expression::NamedNode(n) = expression
+        {
+            if !const_iris.iter().any(|i| i == n.as_str()) {
+                const_iris.push(n.as_str().to_string());
             }
+            consumed_vars.insert(vname);
+            cur = ext_inner;
+            continue;
         }
         // An `Extend` that is not a constant described term (e.g. a
         // BIND inside the WHERE) — stop peeling; it belongs to the
@@ -1662,10 +1668,10 @@ fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     let mut subject_ids: Vec<i64> = Vec::new();
     let mut seen_subject: HashSet<i64> = HashSet::new();
     for iri in &const_iris {
-        if let Some(id) = lookup_iri_dict_id(iri) {
-            if seen_subject.insert(id) {
-                subject_ids.push(id);
-            }
+        if let Some(id) = lookup_iri_dict_id(iri)
+            && seen_subject.insert(id)
+        {
+            subject_ids.push(id);
         }
     }
     if !describe_vars.is_empty() {
@@ -2507,18 +2513,18 @@ fn subst_expr(e: &Expression, binds: &HashMap<String, Expression>) -> Expression
 /// (a computed expression as a join key is degenerate and stays
 /// unsubstituted — v0.3 behaviour, documented as v0.5-FUTURE §8).
 fn subst_term_pattern(t: &TermPattern, binds: &HashMap<String, Expression>) -> TermPattern {
-    if let TermPattern::Variable(v) = t {
-        if let Some(repl) = binds.get(v.as_str()) {
-            return match repl {
-                Expression::Variable(rv) => TermPattern::Variable(rv.clone()),
-                Expression::NamedNode(n) => TermPattern::NamedNode(n.clone()),
-                Expression::Literal(l) => TermPattern::Literal(l.clone()),
-                // Computed expression as a triple subject/object — not
-                // expressible as a term; keep the original variable
-                // (degenerate; v0.3 behaviour preserved).
-                _ => t.clone(),
-            };
-        }
+    if let TermPattern::Variable(v) = t
+        && let Some(repl) = binds.get(v.as_str())
+    {
+        return match repl {
+            Expression::Variable(rv) => TermPattern::Variable(rv.clone()),
+            Expression::NamedNode(n) => TermPattern::NamedNode(n.clone()),
+            Expression::Literal(l) => TermPattern::Literal(l.clone()),
+            // Computed expression as a triple subject/object — not
+            // expressible as a term; keep the original variable
+            // (degenerate; v0.3 behaviour preserved).
+            _ => t.clone(),
+        };
     }
     t.clone()
 }
@@ -2527,10 +2533,10 @@ fn subst_named_node_pattern(
     n: &NamedNodePattern,
     binds: &HashMap<String, Expression>,
 ) -> NamedNodePattern {
-    if let NamedNodePattern::Variable(v) = n {
-        if let Some(Expression::NamedNode(nn)) = binds.get(v.as_str()) {
-            return NamedNodePattern::NamedNode(nn.clone());
-        }
+    if let NamedNodePattern::Variable(v) = n
+        && let Some(Expression::NamedNode(nn)) = binds.get(v.as_str())
+    {
+        return NamedNodePattern::NamedNode(nn.clone());
     }
     n.clone()
 }
@@ -3042,9 +3048,8 @@ fn scoped_triple_from_path(
     scope: Option<GraphScope>,
 ) -> ScopedTriple {
     use crate::query::path::{
-        build_alternation_relation_sql, build_one_or_more_relation_sql,
+        PathGraphScope, PathPlan, build_alternation_relation_sql, build_one_or_more_relation_sql,
         build_zero_or_more_relation_sql, build_zero_or_one_relation_sql, classify_path,
-        PathGraphScope, PathPlan,
     };
     // The recursive/optional/alternation operators share all the
     // scaffolding: resolve the predicate SET, map the BGP graph scope
@@ -3906,10 +3911,10 @@ fn collect_union_branches_normalised(
 }
 
 fn push_unique(out: &mut Vec<String>, name: Option<String>) {
-    if let Some(n) = name {
-        if !out.contains(&n) {
-            out.push(n);
-        }
+    if let Some(n) = name
+        && !out.contains(&n)
+    {
+        out.push(n);
     }
 }
 
@@ -4871,10 +4876,10 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
         }
     }
     for a in &ps.aggregates {
-        if let Some(av) = &a.arg_var {
-            if !needed.contains(av) {
-                needed.push(av.clone());
-            }
+        if let Some(av) = &a.arg_var
+            && !needed.contains(av)
+        {
+            needed.push(av.clone());
         }
         // Issue #50: an expression argument needs every variable it
         // references carried into the vK pool. Sorted so the column
@@ -5920,10 +5925,10 @@ fn translate_minus(
                 clauses.push(format!("q{qi}.graph_id = {p}"));
             }
             Some(GraphScope::Variable { .. }) => {
-                if let Some(first_qi) = minus_first_qi {
-                    if qi != first_qi {
-                        clauses.push(format!("q{qi}.graph_id = q{first_qi}.graph_id"));
-                    }
+                if let Some(first_qi) = minus_first_qi
+                    && qi != first_qi
+                {
+                    clauses.push(format!("q{qi}.graph_id = q{first_qi}.graph_id"));
                 }
             }
             None => {}
@@ -5935,15 +5940,15 @@ fn translate_minus(
     // the IRI mapping (consistent with mandatory-side semantics).
     // The scope is internal to the subquery; the outer projection
     // never references it.
-    if let Some(GraphScope::Variable { scope_id, .. }) = &minus.scope {
-        if let Some(first_qi) = minus_first_qi {
-            from_aliases.push(format!("pgrdf._pgrdf_graphs g{scope_id}"));
-            all_clauses.push(format!("g{scope_id}.graph_id = q{first_qi}.graph_id"));
-            // Slice 55: default-graph exclusion for variable scope —
-            // a `MINUS { GRAPH ?g { … } }` NOT EXISTS never matches a
-            // default-graph quad against `?g`.
-            all_clauses.push(format!("g{scope_id}.graph_id <> 0"));
-        }
+    if let Some(GraphScope::Variable { scope_id, .. }) = &minus.scope
+        && let Some(first_qi) = minus_first_qi
+    {
+        from_aliases.push(format!("pgrdf._pgrdf_graphs g{scope_id}"));
+        all_clauses.push(format!("g{scope_id}.graph_id = q{first_qi}.graph_id"));
+        // Slice 55: default-graph exclusion for variable scope —
+        // a `MINUS { GRAPH ?g { … } }` NOT EXISTS never matches a
+        // default-graph quad against `?g`.
+        all_clauses.push(format!("g{scope_id}.graph_id <> 0"));
     }
     let where_inside = if all_clauses.is_empty() {
         "TRUE".to_string()
