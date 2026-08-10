@@ -92,10 +92,19 @@ BEGIN
 END $$;
 
 -- ─── A — mode field present; default-arg form ⇒ "native" ────────
--- The 2-arg (v0.4) form defaults mode => 'native'.
-SELECT (pgrdf.validate(12201, 12202) ->> 'mode') AS a_default_mode;
+-- #103 (0.6.26): graph 12202 deliberately carries sh:sparql, and a
+-- STRICT 'native' call now RAISES on it instead of returning an
+-- in-band conforms:null (which NOT(conforms)::bool read as a pass).
+-- Pin the raise once, then do the mode-echo checks under
+-- strict => false — the echo is what this section is about.
+SELECT _check_error(
+  'a_strict_guard_raises',
+  $q$ SELECT pgrdf.validate(12201, 12202) $q$,
+  'validate: unenforced constraint component');
+-- The 2-arg-equivalent (v0.4) form defaults mode => 'native'.
+SELECT (pgrdf.validate(12201, 12202, 'native', false) ->> 'mode') AS a_default_mode;
 -- Explicit 'native' echoes "native".
-SELECT (pgrdf.validate(12201, 12202, 'native') ->> 'mode') AS a_native_mode;
+SELECT (pgrdf.validate(12201, 12202, 'native', false) ->> 'mode') AS a_native_mode;
 
 -- ─── B — unknown mode ⇒ stable prefix, no side effect ───────────
 SELECT _check_error(
