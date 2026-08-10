@@ -185,3 +185,14 @@ BEGIN
   END LOOP;
 END
 $pgrdf_acl_backfill$;
+
+
+-- ---------------------------------------------------------------
+-- 0.6.25 -> 0.6.26 delta, replayed. This bridge is a DIRECT path;
+-- postgres takes the shortest route, so a 0.5.1 install never reads
+-- pgrdf--0.6.25--0.6.26.sql.
+-- ---------------------------------------------------------------
+CREATE FUNCTION "graph_integrity"("graph_id" bigint) RETURNS jsonb
+STRICT
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'graph_integrity_wrapper';

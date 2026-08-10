@@ -352,6 +352,25 @@ fn validate(
     // unchanged (the v0.5 §5.2 contract held forward-compatible
     // exactly so this gate could be deleted with no API churn).
 
+    // #102 — self-validation warning. `validate(g, g)` is legal (shapes
+    // graphs validating shape metamodels exist) but any `sh:target*`
+    // over a common predicate then selects the shape declarations too:
+    // `sh:targetSubjectsOf rdf:type` catches `<Shape> a sh:NodeShape`,
+    // which fails its own `sh:in` and PRESENTS AS A DATA DEFECT. That
+    // exact misreading produced a wrong cross-repo diagnosis once.
+    // Warn loudly; the report also carries it so a tool layer can show
+    // it next to the verdict rather than in a log nobody reads.
+    let self_validation = data_graph_id == shapes_graph_id;
+    if self_validation {
+        pgrx::warning!(
+            "validate: data and shapes are the SAME graph ({data_graph_id}). Any \
+             sh:target* over a common predicate (e.g. sh:targetSubjectsOf rdf:type) \
+             selects the shape declarations as focus nodes, and their violations \
+             present as data defects. Pass a separate shapes graph unless you are \
+             deliberately validating the shapes themselves."
+        );
+    }
+
     // 1. Rehydrate data + shapes graphs as N-Triples text.
     let (data_nt, data_count) = serialise_graph_to_ntriples(data_graph_id);
     let (shapes_nt, shapes_count) = serialise_graph_to_ntriples(shapes_graph_id);
@@ -369,49 +388,36 @@ fn validate(
     //     triples but no shape target all report `conforms:true` —
     //     indistinguishable from a real pass. The caller almost always
     //     meant a different graph id.
+    // #103 — a strict refusal RAISES; it no longer returns
+    // `conforms:null` in-band. Measured trap that forced this:
+    // `NOT (conforms)::bool` over a null is NULL, which a WHERE clause
+    // drops — so the fail-closed guard was fail-open at every call
+    // site that didn't explicitly check `error`. An exception cannot
+    // be mistaken for a verdict and propagates through SECURITY
+    // DEFINER wrappers. `strict => false` keeps the in-band
+    // report-and-continue contract, unchanged.
     let shapes_preds = predicate_iris(shapes_graph_id);
     if strict && !declares_any_target(&shapes_preds, &shapes_nt) {
-        return pgrx::JsonB(json!({
-            "conforms":        Value::Null,
-            "results":         [],
-            "data_graph_id":   data_graph_id,
-            "shapes_graph_id": shapes_graph_id,
-            "data_triples":    data_count,
-            "shapes_triples":  shapes_count,
-            "mode":            mode_str.clone(),
-            "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
-            "error":           format!(
-                "validate: shapes graph {shapes_graph_id} declares no SHACL target \
-                 ({shapes_count} triples). Nothing would be selected, so a verdict \
-                 would be vacuous — a missing or wrong graph id reports the same \
-                 `conforms:true` as a clean validation. Re-run with strict => false \
-                 to accept a vacuous pass."
-            ),
-        }));
+        pgrx::error!(
+            "validate: shapes graph {shapes_graph_id} declares no SHACL target \
+             ({shapes_count} triples). Nothing would be selected, so a verdict \
+             would be vacuous — a missing or wrong graph id reports the same \
+             `conforms:true` as a clean validation. Re-run with strict => false \
+             to accept a vacuous pass."
+        );
     }
 
     if strict {
         let skipped = unenforced_components(&shapes_preds, &mode_str);
         if !skipped.is_empty() {
-            return pgrx::JsonB(json!({
-                "conforms":        Value::Null,
-                "results":         [],
-                "data_graph_id":   data_graph_id,
-                "shapes_graph_id": shapes_graph_id,
-                "data_triples":    data_count,
-                "shapes_triples":  shapes_count,
-                "mode":            mode_str.clone(),
-                "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
-                "error":           format!(
-                    "validate: unenforced constraint component in shapes graph \
-                     under mode {mode_str:?}: {}. This engine does not evaluate \
-                     it, so a verdict would be meaningless. Re-run with \
-                     strict => false to validate the remaining constraints \
-                     anyway (the named component stays unevaluated).",
-                    skipped.join(", ")
-                ),
-                "unenforced":      skipped,
-            }));
+            pgrx::error!(
+                "validate: unenforced constraint component in shapes graph \
+                 under mode {mode_str:?}: {}. This engine does not evaluate \
+                 it, so a verdict would be meaningless. Re-run with \
+                 strict => false to validate the remaining constraints \
+                 anyway (the named component stays unevaluated).",
+                skipped.join(", ")
+            );
         }
     }
 
@@ -421,6 +427,12 @@ fn validate(
         {
             Ok(g) => g,
             Err(e) => {
+                // #103: an engine failure is a non-verdict. Strict
+                // raises; lenient keeps the in-band shape.
+                let msg = format!("data graph parse failed: {e}");
+                if strict {
+                    pgrx::error!("validate: {msg}");
+                }
                 return pgrx::JsonB(json!({
                     "conforms":        Value::Null,
                     "results":         [],
@@ -430,7 +442,7 @@ fn validate(
                     "shapes_triples":  shapes_count,
                     "mode":            mode_str.clone(),
                     "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
-                    "error":           format!("data graph parse failed: {e}"),
+                    "error":           msg,
                 }));
             }
         };
@@ -438,6 +450,10 @@ fn validate(
     let data_graph = match Graph::try_from(data_im) {
         Ok(g) => g,
         Err(e) => {
+            let msg = format!("data graph build failed: {e}");
+            if strict {
+                pgrx::error!("validate: {msg}");
+            }
             return pgrx::JsonB(json!({
                 "conforms":        Value::Null,
                 "results":         [],
@@ -447,7 +463,7 @@ fn validate(
                 "shapes_triples":  shapes_count,
                 "mode":            mode_str.clone(),
                 "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
-                "error":           format!("data graph build failed: {e}"),
+                "error":           msg,
             }));
         }
     };
@@ -461,6 +477,10 @@ fn validate(
     ) {
         Ok(s) => s,
         Err(e) => {
+            let msg = format!("shapes compile failed: {e}");
+            if strict {
+                pgrx::error!("validate: {msg}");
+            }
             return pgrx::JsonB(json!({
                 "conforms":        Value::Null,
                 "results":         [],
@@ -470,7 +490,7 @@ fn validate(
                 "shapes_triples":  shapes_count,
                 "mode":            mode_str.clone(),
                 "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
-                "error":           format!("shapes compile failed: {e}"),
+                "error":           msg,
             }));
         }
     };
@@ -483,6 +503,10 @@ fn validate(
     let report = match validator.validate(&schema, &validation_mode) {
         Ok(r) => r,
         Err(e) => {
+            let msg = format!("validation failed: {e}");
+            if strict {
+                pgrx::error!("validate: {msg}");
+            }
             return pgrx::JsonB(json!({
                 "conforms":        Value::Null,
                 "results":         [],
@@ -492,7 +516,7 @@ fn validate(
                 "shapes_triples":  shapes_count,
                 "mode":            mode_str.clone(),
                 "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
-                "error":           format!("validation failed: {e}"),
+                "error":           msg,
             }));
         }
     };
@@ -514,6 +538,10 @@ fn validate(
         }
         // A SPARQL-side error must not be swallowed into a clean pass.
         if let Some(err) = sparql_report.get("error") {
+            let msg = format!("SHACL-SPARQL pass failed: {err}");
+            if strict {
+                pgrx::error!("validate: {msg}");
+            }
             return pgrx::JsonB(json!({
                 "conforms":        Value::Null,
                 "results":         results_json,
@@ -523,7 +551,7 @@ fn validate(
                 "shapes_triples":  shapes_count,
                 "mode":            mode_str,
                 "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
-                "error":           format!("SHACL-SPARQL pass failed: {err}"),
+                "error":           msg,
             }));
         }
         conforms = conforms
@@ -533,7 +561,7 @@ fn validate(
                 .unwrap_or(false);
     }
 
-    pgrx::JsonB(json!({
+    let mut report_json = json!({
         "conforms":        conforms,
         "results":         results_json,
         "data_graph_id":   data_graph_id,
@@ -542,7 +570,16 @@ fn validate(
         "shapes_triples":  shapes_count,
         "mode":            mode_str,
         "elapsed_ms":      start.elapsed().as_secs_f64() * 1000.0,
-    }))
+    });
+    // #102 — the warning rides IN the report too, so a tool layer can
+    // show it beside the verdict instead of in a log nobody reads.
+    if self_validation {
+        report_json["warnings"] = json!([format!(
+            "self-validation: data and shapes are the same graph ({data_graph_id}); \
+             sh:target* selections include the shape declarations themselves"
+        )]);
+    }
+    pgrx::JsonB(report_json)
 }
 
 /// Rehydrate one graph from `_pgrdf_quads` JOIN `_pgrdf_dictionary`
@@ -753,6 +790,28 @@ fn encode_severity(sev: &Severity) -> Value {
 mod tests {
     use pgrx::prelude::*;
 
+    /// #103 — run a strict validate expecting it to RAISE, and return
+    /// the error message. A raised pgrx error aborts the statement, so
+    /// the catch happens in a PL/pgSQL block and the message travels
+    /// out through a transaction-local custom GUC (`pgrdf_test.*` is
+    /// an unreserved prefix; `pgrdf.*` is reserved by the extension).
+    /// Returns "NO-ERROR" if the call unexpectedly succeeded — assert
+    /// against that explicitly, never assume.
+    fn strict_validate_err(call_args: &str) -> String {
+        Spi::run(&format!(
+            "DO $t$ BEGIN \
+               PERFORM pgrdf.validate({call_args}); \
+               PERFORM set_config('pgrdf_test.err', 'NO-ERROR', true); \
+             EXCEPTION WHEN OTHERS THEN \
+               PERFORM set_config('pgrdf_test.err', SQLERRM, true); \
+             END $t$"
+        ))
+        .expect("strict_validate_err: DO block failed");
+        Spi::get_one::<String>("SELECT current_setting('pgrdf_test.err', true)")
+            .expect("strict_validate_err: readback failed")
+            .expect("strict_validate_err: GUC unset")
+    }
+
     /// Conforming data graph against a `sh:NodeShape` with
     /// `sh:property` + `sh:datatype` constraints. The report MUST
     /// claim `conforms: true` and carry zero results.
@@ -879,30 +938,16 @@ mod tests {
     /// "vacuously conforming" report (no targets ⇒ no failures).
     #[pg_test]
     fn validate_unknown_graphs() {
-        let j: pgrx::JsonB = Spi::get_one("SELECT pgrdf.validate(999990::bigint, 999991::bigint)")
-            .unwrap()
-            .unwrap();
-        let v = &j.0;
-        assert_eq!(v["data_triples"], 0);
-        assert_eq!(v["shapes_triples"], 0);
-        // #83 — this assertion used to read:
-        //     // No shapes ⇒ no failures ⇒ conforms.
-        //     assert_eq!(v["conforms"], json!(true));
-        // That reasoning is the defect. "Nothing was checked" and
-        // "everything passed" are different facts, and reporting the
-        // second for the first is how a wrong graph id becomes a clean
-        // bill of health. A shapes graph that targets nothing now
-        // refuses instead of conforming.
+        // #83 — the original assertion here read "No shapes ⇒ no
+        // failures ⇒ conforms", which IS the defect: "nothing was
+        // checked" and "everything passed" are different facts.
+        // #103 tightened it further: the strict refusal now RAISES —
+        // an in-band `conforms:null` was filtered out by
+        // `WHERE NOT (conforms)::bool` and read as a pass.
+        let err = strict_validate_err("999990::bigint, 999991::bigint");
         assert!(
-            v["conforms"].is_null(),
-            "a shapes graph that selects nothing must not yield a verdict: {v}"
-        );
-        assert!(
-            v["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("declares no SHACL target"),
-            "the refusal must say why: {v}"
+            err.contains("declares no SHACL target"),
+            "a shapes graph that selects nothing must refuse, saying why: {err}"
         );
 
         // The old behaviour remains reachable, but only by asking.
@@ -1648,17 +1693,9 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         )
         .unwrap();
 
-        // Strict (the default): refused, conforms is NULL, error names it.
-        let report =
-            Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g_data}, {g_shapes})"))
-                .unwrap()
-                .unwrap();
-        let v = report.0;
-        assert!(
-            v["conforms"].is_null(),
-            "strict validate must NOT return a verdict when a component is unevaluated: {v}"
-        );
-        let err = v["error"].as_str().unwrap_or_default();
+        // Strict (the default): refused by RAISING (#103) — an in-band
+        // null was readable as a pass at the call site.
+        let err = strict_validate_err(&format!("{g_data}, {g_shapes}"));
         assert!(
             err.starts_with("validate: unenforced constraint component"),
             "error must carry the documented prefix, got: {err}"
@@ -1726,7 +1763,8 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
             native.0
         );
 
-        // 'sparql' does NOT evaluate it, so strict mode refuses.
+        // 'sparql' does NOT evaluate it, so strict mode refuses — by
+        // RAISING (#103).
         //
         // THREE args, deliberately: the point of this assertion is that
         // `strict` DEFAULTS to true. A PASS-13 bulk edit appended
@@ -1734,23 +1772,10 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         // pre-existing sparql tests, and this test then spent three CI
         // rounds asserting that a guard fires while explicitly switching
         // it off. Do not add a fourth argument to this call.
-        let sparql = Spi::get_one::<pgrx::JsonB>(&format!(
-            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'sparql')"
-        ))
-        .unwrap()
-        .unwrap();
+        let err = strict_validate_err(&format!("{g_data}, {g_shapes}, 'sparql'"));
         assert!(
-            sparql.0["conforms"].is_null(),
-            "sparql mode cannot evaluate sh:minCount and must refuse: {}",
-            sparql.0
-        );
-        assert!(
-            sparql.0["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("sh:minCount"),
-            "error must NAME sh:minCount: {}",
-            sparql.0
+            err.contains("sh:minCount"),
+            "sparql mode cannot evaluate sh:minCount and must refuse naming it: {err}"
         );
     }
 
@@ -1779,22 +1804,11 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
             ("empty", g_empty),
             ("data-graph-as-shapes", g_data),
         ] {
-            let r =
-                Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g_data}, {shapes})"))
-                    .unwrap()
-                    .unwrap();
+            // #103: the strict refusal RAISES.
+            let err = strict_validate_err(&format!("{g_data}, {shapes}"));
             assert!(
-                r.0["conforms"].is_null(),
-                "{label}: a vacuous shapes graph must not yield a verdict: {}",
-                r.0
-            );
-            assert!(
-                r.0["error"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("declares no SHACL target"),
-                "{label}: error must say why: {}",
-                r.0
+                err.contains("declares no SHACL target"),
+                "{label}: a vacuous shapes graph must refuse, saying why: {err}"
             );
         }
 
@@ -1930,14 +1944,11 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         // asserted native returns false here — written before that guard
         // existed, by me, and it is exactly the premise-invalidation this
         // suite keeps catching.
-        let n_strict =
-            Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g}, {g}, 'native')"))
-                .unwrap()
-                .unwrap();
+        // #103: the strict refusal RAISES.
+        let n_err = strict_validate_err(&format!("{g}, {g}, 'native'"));
         assert!(
-            n_strict.0["conforms"].is_null(),
-            "'native' cannot evaluate sh:sparql, so it must refuse this graph: {}",
-            n_strict.0
+            n_err.contains("sh:sparql"),
+            "'native' cannot evaluate sh:sparql, so it must refuse this graph: {n_err}"
         );
 
         let n = Spi::get_one::<pgrx::JsonB>(&format!(

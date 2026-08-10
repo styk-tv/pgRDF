@@ -25,6 +25,7 @@ pub mod construct_ingest;
 pub mod dict;
 pub mod graphs;
 pub mod hexastore;
+pub mod integrity;
 pub mod loader;
 pub mod loader_ta11;
 pub mod partition;

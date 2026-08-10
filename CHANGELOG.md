@@ -6,6 +6,55 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.26] — 2026-08-10
+
+The verification cut. Three defects the v3.11 wave surfaced in pgRDF's own
+verification story, shipped together because each changes what a verifier can
+trust.
+
+### Added
+
+- **`pgrdf.graph_integrity(graph_id)` (#104)** — one read-only call reporting
+  type-illegal terms per position (a Literal or BlankNode stored as a
+  predicate, a Literal as a subject) and dangling ids (quads referencing no
+  dictionary row), with a single `clean` boolean a monitor can alarm on. The
+  witness that forced it: a graph carried 592 literal-predicates for weeks —
+  written under a since-fixed cache defect — and the diagnosis took a raw
+  forensic session. Refuses an unknown graph id rather than reporting a clean
+  audit of nothing. Runs with the caller's privileges.
+
+### Changed
+
+- **Strict `validate` refusals now RAISE (#103).** Previously a refusal
+  returned `{"conforms": null, "error": …}` in-band — and
+  `NOT (conforms)::bool` over that null yields NULL, which a `WHERE` clause
+  drops, so the fail-closed guard was fail-open at any call site that did not
+  explicitly check `error`. An exception cannot be mistaken for a verdict and
+  propagates through `SECURITY DEFINER` wrappers. Applies to every non-verdict
+  under `strict => true`: vacuous shapes graph, unenforced constraint
+  component, and engine failures (parse/build/compile/validation).
+  **`strict => false` keeps the in-band report-and-continue contract,
+  unchanged.** Callers that parsed the in-band refusal must catch the error
+  instead.
+
+- **`validate(g, g)` warns on self-validation (#102).** Any `sh:target*` over
+  a common predicate selects the shape declarations too —
+  `sh:targetSubjectsOf rdf:type` catches `<Shape> a sh:NodeShape`, which fails
+  its own `sh:in` and presents as a data defect (it produced a wrong
+  cross-repo diagnosis once). Warns in the log and carries a `warnings` array
+  in the report; still legal, because validating a shapes graph against a
+  metamodel is a real use.
+
+### Upgrading
+
+```sql
+ALTER EXTENSION pgrdf UPDATE;
+```
+
+`sql/pgrdf--0.6.25--0.6.26.sql` ships with the release (the `0.5.1` direct
+bridge carries the same delta). The #103 behaviour change needs no catalog
+change but is a **calling-contract** change under the default `strict`.
+
 ## [0.6.25] — 2026-08-09
 
 Two independent defects behind a single symptom — a term cached under one
