@@ -139,17 +139,14 @@ SELECT (
   )
 ) AS d_combined_subset_of_shmem_warm;
 
--- E: an unrecognised GUC value silently falls back to combined
-SET LOCAL pgrdf.ingest_dict_path = 'no-such-path';
-DO $$
-DECLARE
-  gid bigint := pgrdf.add_graph('urn:test/ta-7/fallback');
-BEGIN
-  PERFORM pgrdf.parse_turtle('@prefix ex: <http://x/> . ex:s ex:p "fallback" .', gid);
+-- E (#71, 0.6.27): an unrecognised GUC value is REFUSED AT SET — the
+-- silent fallback to 'combined' this section used to bless is gone.
+DO $$ BEGIN
+  EXECUTE $q$SET LOCAL pgrdf.ingest_dict_path = 'no-such-path'$q$;
+  RAISE EXCEPTION 'UNEXPECTED: invalid GUC value was accepted';
+EXCEPTION WHEN invalid_parameter_value THEN
+  NULL; -- the refusal is the pass
 END $$;
-SET LOCAL pgrdf.ingest_dict_path = 'combined';
-SELECT (
-  (SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = pgrdf.graph_id('urn:test/ta-7/fallback')) = 1
-) AS e_unknown_value_falls_back;
+SELECT true AS e_unknown_value_refused_at_set;
 
 ROLLBACK;

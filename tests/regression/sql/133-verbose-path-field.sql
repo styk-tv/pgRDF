@@ -66,11 +66,13 @@ SELECT (
     pgrdf.add_graph('urn:test/ta-5/trig-combined')) ->> 'path' = 'combined'
 ) AS g_trig_combined;
 
--- ─── Unrecognised GUC value falls back to combined ──────────────
-SET LOCAL pgrdf.ingest_dict_path = 'no-such-path';
-SELECT (
-  pgrdf.parse_turtle_verbose('@prefix ex: <http://x/> . ex:a ex:p "5" .',
-    pgrdf.add_graph('urn:test/ta-5/t-fallback')) ->> 'path' = 'combined'
-) AS h_unknown_falls_back_to_combined;
+-- ─── #71 (0.6.27): unrecognised GUC value REFUSED AT SET ────────
+DO $$ BEGIN
+  EXECUTE $q$SET LOCAL pgrdf.ingest_dict_path = 'no-such-path'$q$;
+  RAISE EXCEPTION 'UNEXPECTED: invalid GUC value was accepted';
+EXCEPTION WHEN invalid_parameter_value THEN
+  NULL; -- the refusal is the pass
+END $$;
+SELECT true AS h_unknown_refused_at_set;
 
 ROLLBACK;
