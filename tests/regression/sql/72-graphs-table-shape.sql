@@ -32,8 +32,13 @@ SELECT EXISTS(
 -- baseline.
 SELECT bool_and(
   CASE attname
-    WHEN 'graph_id' THEN format_type(atttypid, atttypmod) = 'bigint' AND attnotnull
-    WHEN 'iri'      THEN format_type(atttypid, atttypmod) = 'text'   AND attnotnull
+    WHEN 'graph_id'    THEN format_type(atttypid, atttypmod) = 'bigint' AND attnotnull
+    WHEN 'iri'         THEN format_type(atttypid, atttypmod) = 'text'   AND attnotnull
+    -- #107 (0.6.28): engine-owned lock state. locked is NOT NULL with a
+    -- default; reason/timestamp are nullable (they belong to a lock).
+    WHEN 'locked'      THEN format_type(atttypid, atttypmod) = 'boolean' AND attnotnull
+    WHEN 'lock_reason' THEN format_type(atttypid, atttypmod) = 'text'    AND NOT attnotnull
+    WHEN 'locked_at'   THEN format_type(atttypid, atttypmod) = 'timestamp with time zone' AND NOT attnotnull
     ELSE FALSE
   END
 ) AS columns_correct
