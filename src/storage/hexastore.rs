@@ -16,6 +16,7 @@ use pgrx::prelude::*;
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn put_quad(s: i64, p: i64, o: i64, g: default!(i64, 0)) {
+    crate::storage::lock::require_unlocked(g, "put_quad"); // #107
     Spi::run_with_args(
         "INSERT INTO pgrdf._pgrdf_quads (subject_id, predicate_id, object_id, graph_id)
          VALUES ($1, $2, $3, $4)",

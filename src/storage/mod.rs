@@ -28,6 +28,7 @@ pub mod hexastore;
 pub mod integrity;
 pub mod loader;
 pub mod loader_ta11;
+pub mod lock;
 pub mod partition;
 pub mod shmem_cache;
 pub mod staged;

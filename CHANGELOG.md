@@ -6,6 +6,59 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.28] — 2026-08-11
+
+The lock becomes law (#107). One catalog change, two new functions, thirteen
+enforcement hooks.
+
+### Fixed
+
+- **The checkpoint lock is now enforced by the engine, not only the MCP door
+  (#107).** Measured on 0.6.27: `pgrdf_checkpoint` reported `locked: true`,
+  yet `SELECT pgrdf.clear_graph(...)` emptied the locked graph — the lock
+  lived in `pgrdf_mcp.ledger` and only the MCP's own writes consulted it,
+  leaving the graph locked *and* empty with the sanctioned repair refused.
+
+  Lock state now lives on `pgrdf._pgrdf_graphs` (`locked`, `lock_reason`,
+  `locked_at`) and **every** engine write path refuses on a locked graph
+  with a stable-prefix error naming the reason and the unlock path:
+  `clear_graph`, `drop_graph`, `move_graph` (source and destination),
+  `copy_graph`/`carve_graph` (destination), `put_quad`,
+  `put_construct_row(s)`, the whole `parse_*`/`load_*` ingest family
+  (including streaming and staged), and `materialize`.
+
+  **Reads are never blocked** — a lock is a write fence, not a read fence.
+
+### Added
+
+- **`pgrdf.lock_graph(graph_id, reason)` / `pgrdf.unlock_graph(graph_id,
+  reason)`** — reasons mandatory both ways; the reason *is* the record.
+  Double-lock refuses (a silent re-lock would swallow the standing reason);
+  unlocking an unlocked graph refuses (the caller's model of the state is
+  wrong, and that is worth hearing about).
+
+### Scope, stated plainly
+
+The lock is a **coordination primitive, not a security boundary**. Anyone
+who can write the graph can lock or unlock it. Security remains table
+grants (partitions inherit them since 0.6.25). A lock that claimed to stop
+a hostile writer would be the same over-promise #107 was filed about.
+
+**Known limitation:** `parse_trig`/`parse_nquads` lock-check the
+*parameter* graph; graphs named inside the payload are not checked in this
+release.
+
+### Upgrading
+
+```sql
+ALTER EXTENSION pgrdf UPDATE;
+```
+
+`sql/pgrdf--0.6.27--0.6.28.sql` carries the DDL and both functions. MCP
+doors should migrate their checkpoint/unlock paths to call
+`pgrdf.lock_graph`/`unlock_graph` — the engine is now the enforcer; a
+door-side guard is a courtesy fast-path.
+
 ## [0.6.27] — 2026-08-10
 
 Toolchain currency and configuration fail-closed. No catalog change — the

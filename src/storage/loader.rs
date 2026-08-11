@@ -1021,6 +1021,8 @@ fn drain_pending_into_batch(
 /// combined (TA-7 production path). All four produce identical
 /// `_pgrdf_quads` rows by construction; only the SPI shape differs.
 fn ingest_dispatch<R: Read>(reader: R, graph_id: i64, base_iri: Option<&str>) -> LoaderStats {
+    // #107: one hook covers the whole parse_/load_turtle family.
+    crate::storage::lock::require_unlocked(graph_id, "turtle ingest");
     use crate::query::guc::{
         IngestDictPath, dict_batch_size, ingest_dict_path, shmem_prewarm_on_init,
     };
@@ -2172,6 +2174,7 @@ fn load_turtle_streaming(
     base_iri: default!(Option<&str>, "NULL"),
 ) -> pgrx::JsonB {
     let base = base_iri.filter(|s| !s.is_empty());
+    crate::storage::lock::require_unlocked(graph_id, "load_turtle_streaming"); // #107
     let stats = streaming_load_guarded(
         path,
         graph_id,
@@ -2751,6 +2754,9 @@ fn parse_trig(
     strict: default!(bool, false),
 ) -> pgrx::JsonB {
     let parser = TriGParser::new().for_slice(content.as_bytes());
+    // #107: the PARAMETER graph is lock-checked. Graphs named inside
+    // the TriG payload are not (documented v0.6.28 limitation).
+    crate::storage::lock::require_unlocked(default_graph_id, "parse_trig");
     let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_trig");
     quad_stats_to_jsonb(&stats, &graphs)
 }
@@ -2777,6 +2783,9 @@ fn parse_nquads(
     strict: default!(bool, false),
 ) -> pgrx::JsonB {
     let parser = NQuadsParser::new().for_slice(content.as_bytes());
+    // #107: parameter graph checked; payload-named graphs are not
+    // (documented v0.6.28 limitation).
+    crate::storage::lock::require_unlocked(default_graph_id, "parse_nquads");
     let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_nquads");
     quad_stats_to_jsonb(&stats, &graphs)
 }

@@ -111,6 +111,8 @@ const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::JsonB {
+    // #107: materialize WRITES inferred rows — a locked graph refuses.
+    crate::storage::lock::require_unlocked(graph_id, "materialize");
     let start = Instant::now();
 
     // Validate the profile up-front, BEFORE any side effect (the

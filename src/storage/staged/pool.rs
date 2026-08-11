@@ -564,6 +564,7 @@ fn run_phase(job_idx: usize, phase: u8, specs: &[WorkerSpec]) -> PhaseOutcome {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)) -> pgrx::JsonB {
+    crate::storage::lock::require_unlocked(graph_id, "load_turtle_staged_run"); // #107
     if !jobctl::is_ready() {
         error!(
             "pgrdf staged loader requires pgrdf in shared_preload_libraries \

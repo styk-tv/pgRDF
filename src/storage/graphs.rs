@@ -213,6 +213,7 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
     if id < 0 {
         panic!("drop_graph: graph_id must be >= 0, got {id}");
     }
+    crate::storage::lock::require_unlocked(id, "drop_graph"); // #107
     if id == 0 {
         panic!("drop_graph: cannot drop default partition (graph_id = 0)");
     }
@@ -360,6 +361,9 @@ fn move_graph(src: i64, dst: i64) -> i64 {
     if src < 0 || dst < 0 {
         panic!("move_graph: graph_id must be >= 0, got src={src}, dst={dst}");
     }
+    // #107: move clears src and writes dst — both must be unlocked.
+    crate::storage::lock::require_unlocked(src, "move_graph (source)");
+    crate::storage::lock::require_unlocked(dst, "move_graph (destination)");
     if src == dst {
         panic!("move_graph: src and dst must differ (both = {src})");
     }
@@ -487,6 +491,7 @@ fn clear_graph(id: i64) -> i64 {
     if id < 0 {
         panic!("clear_graph: graph_id must be >= 0, got {id}");
     }
+    crate::storage::lock::require_unlocked(id, "clear_graph"); // #107
 
     let partition_name = format!("_pgrdf_quads_g{id}");
 
@@ -591,6 +596,7 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
     if src < 0 || dst < 0 {
         panic!("copy_graph: graph_id must be >= 0, got src={src}, dst={dst}");
     }
+    crate::storage::lock::require_unlocked(dst, "copy_graph (destination)"); // #107 — src is only read
     if src == dst {
         panic!("copy_graph: src and dst must differ (both = {src})");
     }
@@ -691,6 +697,7 @@ fn carve_graph(src: i64, predicate: &str, dst: i64) -> i64 {
     if src < 0 || dst < 0 {
         panic!("carve_graph: graph_id must be >= 0, got src={src}, dst={dst}");
     }
+    crate::storage::lock::require_unlocked(dst, "carve_graph (destination)"); // #107
     if src == dst {
         panic!("carve_graph: src and dst must differ (both = {src})");
     }
@@ -799,6 +806,7 @@ fn carve_graph_neighbourhood(
     dst: i64,
     max_hops: default!(i32, 1),
 ) -> i64 {
+    crate::storage::lock::require_unlocked(dst, "carve_graph (destination)"); // #107
     if src < 0 || dst < 0 {
         panic!("carve_graph: graph_id must be >= 0, got src={src}, dst={dst}");
     }
