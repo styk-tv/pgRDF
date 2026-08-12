@@ -204,6 +204,7 @@ fn put_construct_row(row: pgrx::JsonB, graph_id: default!(i64, 0)) -> i64 {
     if graph_id < 0 {
         panic!("{PANIC_PREFIX}: graph_id must be >= 0, got {graph_id}");
     }
+    crate::storage::lock::require_unlocked(graph_id, "put_construct_row"); // #107
     let mut bnode_map: HashMap<String, i64> = HashMap::new();
     ingest_one(&row.0, graph_id, &mut bnode_map)
 }
@@ -234,6 +235,7 @@ fn put_construct_rows(rows: Option<Vec<Option<pgrx::JsonB>>>, graph_id: default!
     if graph_id < 0 {
         panic!("{PANIC_PREFIX}: graph_id must be >= 0, got {graph_id}");
     }
+    crate::storage::lock::require_unlocked(graph_id, "put_construct_rows"); // #107
     let Some(rows) = rows else {
         // `array_agg(j)` returns NULL when the construct emits zero
         // rows; mirror Turtle's "load nothing → 0 triples" semantics
