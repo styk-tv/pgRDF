@@ -132,12 +132,17 @@ fi
 # from inside SQL; one that ignores it is unaffected. Deliberately carries
 # only tag/commits-since/short-commit/dirty — no paths, host or user, because
 # any connected role can read it.
-if [ "$COMMIT" != "unknown" ]; then
+BUILD_ID_VAR="$(printf '%s' "$EXT" | tr '[:lower:]-' '[:upper:]_')_BUILD_ID"
+# Caller-supplied identity wins (#112): CI passes the tag explicitly because
+# its checkout is shallow and tagless — git describe there would lie or starve.
+PRESET_BUILD_ID=$(eval "printf '%s' \"\${${BUILD_ID_VAR}:-}\"")
+if [ -n "$PRESET_BUILD_ID" ]; then
+  BUILD_ID="$PRESET_BUILD_ID"
+elif [ "$COMMIT" != "unknown" ]; then
   BUILD_ID=$(git -C "$SRC" describe --tags --always --dirty 2>/dev/null || echo "$COMMIT")
 else
   BUILD_ID=unknown
 fi
-BUILD_ID_VAR="$(printf '%s' "$EXT" | tr '[:lower:]-' '[:upper:]_')_BUILD_ID"
 export "$BUILD_ID_VAR=$BUILD_ID"
 say "build id" "$BUILD_ID  (as \$$BUILD_ID_VAR)"
 

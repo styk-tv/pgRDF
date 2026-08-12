@@ -108,6 +108,7 @@ jobs:
             -t "pgrdf-builder-release:pg${{ matrix.pg }}-${{ matrix.arch }}" \
             --build-arg PG_MAJOR=${{ matrix.pg }} \
             --build-arg PGRX_VERSION=${PGRX_VERSION} \
+            --build-arg PGRDF_BUILD_ID=${{ github.ref_name }} \
             -f compose/builder.Containerfile .
           rm -rf out && mkdir -p out
           docker run --rm \

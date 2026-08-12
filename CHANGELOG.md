@@ -6,6 +6,35 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.29] — 2026-08-12
+
+The attested artifact learns its own name (#112). No SQL-surface change.
+
+### Fixed
+
+- **CI-built bundles baked `pgrdf.build_id() = "unknown"`** — the release
+  checkout is shallow and tagless, so the builder's `git describe` starved.
+  The release workflow now passes the tag explicitly
+  (`--build-arg PGRDF_BUILD_ID=<tag>`), the builder Containerfile declares
+  and bakes it, and the shared builder entrypoint honours a caller-supplied
+  build id before falling back to `git describe` (local flows unchanged).
+- **The boot gate was vacuous on the third identity plane** — it asserted
+  `pgrdf.version()` and `extversion` against the tag but never
+  `pgrdf.build_id()`, which is how the defect above shipped through a gate
+  built to catch identity defects. Both the pre-attest gate and the
+  consumer-style install check now refuse unless
+  `version() == extversion == <tag version>` **and** `build_id() == <tag>`.
+
+### Scope
+
+- `pgrdf--0.6.28--0.6.29.sql` is a deliberate no-op: catalog objects are
+  identical; the script exists so `ALTER EXTENSION pgrdf UPDATE` walks the
+  chain without a gap. The direct `0.5.1` bridge is renamed to target 0.6.29
+  with unchanged content.
+- v0.6.28 artifacts remain immutable and report `build_id() = "unknown"`
+  forever; consumers wanting the coherent identity triple in the attested
+  artifact should pin ≥ 0.6.29.
+
 ## [0.6.28] — 2026-08-11
 
 The lock becomes law (#107). One catalog change, two new functions, thirteen
