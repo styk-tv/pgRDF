@@ -130,11 +130,17 @@ jobs:
             "SELECT extversion FROM pg_extension WHERE extname='pgrdf';" 2>&1 || true)
           FN_VER=$(docker exec gate-pg psql -U v -d v -A -t -c \
             "SELECT pgrdf.version();" 2>&1 || true)
+          FN_BID=$(docker exec gate-pg psql -U v -d v -A -t -c \
+            "SELECT pgrdf.build_id();" 2>&1 || true)
           docker rm -f gate-pg >/dev/null 2>&1 || true
 
           [ "${CREATE_RC}" -eq 0 ] || { echo "::error::CREATE EXTENSION pgrdf VERSION '${VER}' FAILED — refusing to attest."; exit 1; }
           [ "${EXT_VER}" = "${VER}" ] || { echo "::error::extversion='${EXT_VER}' != '${VER}' — refusing to attest."; exit 1; }
           [ "${FN_VER}" = "${VER}" ] || { echo "::error::pgrdf.version()='${FN_VER}' != '${VER}' — refusing to attest."; exit 1; }
+          # Third identity plane (#112): the baked build id must equal the tag.
+          # v0.6.28 and earlier shipped "unknown" here — that is exactly the
+          # defect this assertion exists to refuse.
+          [ "${FN_BID}" = "v${VER}" ] || { echo "::error::pgrdf.build_id()='${FN_BID}' != 'v${VER}' — refusing to attest."; exit 1; }
           # MANIFEST.json cross-check (#37): the bundle's self-described runtime
           # value must equal the version the booted .so ACTUALLY reports — i.e.
           # validate the manifest against the artifact, not the source. Present
@@ -399,6 +405,8 @@ jobs:
             "SELECT extversion FROM pg_extension WHERE extname='pgrdf';" 2>&1 || true)
           FN_VER=$(docker exec smoke-pg psql -U v -d v -A -t -c \
             "SELECT pgrdf.version();" 2>&1 || true)
+          FN_BID=$(docker exec smoke-pg psql -U v -d v -A -t -c \
+            "SELECT pgrdf.build_id();" 2>&1 || true)
 
           docker rm -f smoke-pg >/dev/null 2>&1 || true
 
@@ -416,7 +424,11 @@ jobs:
             echo "::error::pgrdf.version()='${FN_VER}' but expected '${VER}'"
             exit 1
           fi
-          echo "✓ Consumer-style install OK: extversion=${EXT_VER}, pgrdf.version()=${FN_VER}"
+          if [ "${FN_BID}" != "v${VER}" ]; then
+            echo "::error::pgrdf.build_id()='${FN_BID}' but expected 'v${VER}' (#112 — identity triple must hold in the consumer path)"
+            exit 1
+          fi
+          echo "✓ Consumer-style install OK: extversion=${EXT_VER}, pgrdf.version()=${FN_VER}, pgrdf.build_id()=${FN_BID}"
 
       # Chain update-latest-md.yml via repository_dispatch.
       #
