@@ -100,6 +100,19 @@ static GENERATION: PgAtomic<AtomicU64> = unsafe { PgAtomic::new(c"pgrdf_dict_cac
 static PATH_DEPTH_TRUNCATIONS: PgAtomic<AtomicU64> =
     unsafe { PgAtomic::new(c"pgrdf_path_depth_truncations") };
 
+/// #114: count of query translations REFUSED because a group-level
+/// construct (FILTER / triple / OPTIONAL / MINUS / VALUES) sat
+/// alongside a UNION, where the union assembly paths would have
+/// silently dropped it and widened the result set. The refusal is the
+/// fix; this counter is the belt-and-braces signal — any future
+/// translation path that skips a clause instead of refusing MUST
+/// increment it, so "this answer is silently incomplete" is always
+/// detectable on the first call. Surfaces on `pgrdf.stats()` as
+/// `filter_clauses_dropped`. Cross-backend cumulative; incremented
+/// BEFORE the refusal error is raised (shmem survives the abort).
+static FILTER_CLAUSES_DROPPED: PgAtomic<AtomicU64> =
+    unsafe { PgAtomic::new(c"pgrdf_filter_clauses_dropped") };
+
 /// Register shmem requests + startup hooks for the dict cache and
 /// its counters + generation flag. Must be called from inside
 /// `_PG_init` and ONLY when
@@ -117,6 +130,7 @@ pub fn init_in_postmaster() {
     pg_shmem_init!(EVICTIONS);
     pg_shmem_init!(GENERATION = AtomicU64::new(1));
     pg_shmem_init!(PATH_DEPTH_TRUNCATIONS);
+    pg_shmem_init!(FILTER_CLAUSES_DROPPED);
     mark_ready();
 }
 
@@ -142,6 +156,7 @@ pub fn reset() {
     // assert a clean `0` baseline (LLD v0.4 §7.2 / regression
     // invariant I).
     PATH_DEPTH_TRUNCATIONS.get().store(0, Ordering::Relaxed);
+    FILTER_CLAUSES_DROPPED.get().store(0, Ordering::Relaxed);
 }
 
 /// Increment the property-path depth-truncation counter by one.
@@ -157,6 +172,16 @@ pub fn note_path_depth_truncation() {
         return;
     }
     PATH_DEPTH_TRUNCATIONS.get().fetch_add(1, Ordering::Relaxed);
+}
+
+/// #114: record one would-have-been-dropped clause event. Called at
+/// the refusal site immediately before the error is raised (and by
+/// any future path that skips a clause it cannot apply).
+pub fn note_filter_clause_dropped() {
+    if !is_ready() {
+        return;
+    }
+    FILTER_CLAUSES_DROPPED.get().fetch_add(1, Ordering::Relaxed);
 }
 
 /// Set true inside `_PG_init` only when Postgres is running the
@@ -376,6 +401,11 @@ pub struct Snapshot {
     /// truncate yet); E2 starts incrementing it. Surfaces on
     /// `pgrdf.stats()` as `path_depth_truncations`.
     pub path_depth_truncations: u64,
+    /// #114: clauses a translation path could not apply — refused (or,
+    /// in any future silent path, skipped). Non-zero means callers hit
+    /// the group-construct-over-UNION refusal or a path is dropping
+    /// clauses; either way the number is the signal.
+    pub filter_clauses_dropped: u64,
 }
 
 pub fn snapshot() -> Snapshot {
@@ -404,6 +434,11 @@ pub fn snapshot() -> Snapshot {
         },
         path_depth_truncations: if is_ready() {
             PATH_DEPTH_TRUNCATIONS.get().load(Ordering::Relaxed)
+        } else {
+            0
+        },
+        filter_clauses_dropped: if is_ready() {
+            FILTER_CLAUSES_DROPPED.get().load(Ordering::Relaxed)
         } else {
             0
         },

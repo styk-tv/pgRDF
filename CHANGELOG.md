@@ -6,6 +6,44 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.30] — 2026-08-13
+
+A filter never silently evaluates to true (#114), and lookups say what they
+are (#115). Closes the escalation a downstream kernel sealed against pgRDF.
+
+### Fixed
+
+- **Group-level constructs alongside a UNION were silently discarded** —
+  every UNION assembly path consumed only branch-local state, so a FILTER
+  (graph-membership, NOT EXISTS, or even a plain equality), a triple
+  pattern, an OPTIONAL, a MINUS, or a VALUES parked at group level was
+  dropped wholesale and the result set silently WIDENED. Measured live: an
+  `ASK … FILTER(?g IN (<no-such-graph>))` returned true; a NOT EXISTS
+  census returned every class; a plain equality filter returned 55 rows
+  instead of 1. A downstream security-critical gate ran eleven of its
+  versions on the widened answers. Now: any group-level construct over a
+  UNION **refuses** with a stable `pgRDF#114` error naming the construct
+  and the rewrite (move it into every branch). Branch-local filters are
+  unaffected and keep applying.
+- **`pgrdf.stats()` gains `filter_clauses_dropped`** — the fail-closed
+  counterpart of `path_depth_truncations`: every refusal (and any future
+  path that skips a clause it cannot apply) increments it, so "this answer
+  is silently incomplete" is detectable on the first call. Zeroed by
+  `pgrdf.shmem_reset()`.
+- **Honest volatility classes (#115)**: `graph_id`/`graph_iri` are now
+  STABLE (same-snapshot catalog reads — previously VOLATILE, re-evaluated
+  per scanned row: 63,833 calls measured for a single census);
+  `version()`/`build_id()` are IMMUTABLE (compile-time constants of the
+  loaded .so). Upgrade script carries the `ALTER FUNCTION`s.
+
+### Scope
+
+- Lifting the #114 refusal for a construct means implementing its
+  application on the union path with a regression proving the restricted
+  answer — tracked in #114; the refusal is the contract until then.
+- Parallel-safety classification is deliberately untouched (volatility
+  only); it needs its own measurement pass.
+
 ## [0.6.29] — 2026-08-12
 
 The attested artifact learns its own name (#112). No SQL-surface change.

@@ -59,7 +59,7 @@ pub extern "C-unwind" fn _PG_init() {
 /// verification: `SELECT pgrdf.version();` should return the version
 /// declared in `Cargo.toml`.
 #[search_path(pgrdf, pg_temp)]
-#[pg_extern]
+#[pg_extern(immutable)]
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -82,7 +82,7 @@ fn version() -> &'static str {
 /// paths, host names, or build users. `build_id_carries_no_paths` enforces
 /// that rather than leaving it to review.
 #[search_path(pgrdf, pg_temp)]
-#[pg_extern]
+#[pg_extern(immutable)]
 fn build_id() -> &'static str {
     option_env!("PGRDF_BUILD_ID").unwrap_or("unknown")
 }
@@ -134,6 +134,23 @@ mod tests {
     #[pg_test]
     fn test_version_matches_cargo() {
         assert_eq!(crate::version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    /// #115: version()/build_id() are compile-time constants of the
+    /// loaded .so — IMMUTABLE is the honest class.
+    #[pg_test]
+    fn identity_fns_are_immutable() {
+        for f in ["version", "build_id"] {
+            let v: String = pgrx::Spi::get_one_with_args(
+                "SELECT DISTINCT provolatile::text FROM pg_proc p
+                   JOIN pg_namespace n ON n.oid = p.pronamespace
+                  WHERE n.nspname = 'pgrdf' AND p.proname = $1",
+                &[f.into()],
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(v, "i", "pgrdf.{f} must be IMMUTABLE");
+        }
     }
 
     /// `build_id()` is readable by any connected role, so the disclosure
