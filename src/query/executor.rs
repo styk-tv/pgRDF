@@ -2345,6 +2345,7 @@ fn translate(q: &Query) -> ExecPlan {
 /// being wrapped in EXISTS().
 fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
     if !ps.union_branches.is_empty() {
+        refuse_group_constructs_over_union(ps, "ASK");
         let branch_sqls: Vec<String> = ps
             .union_branches
             .iter()
@@ -4050,8 +4051,41 @@ fn type_aware_order_terms(lex: &str, ascending: bool) -> Vec<String> {
 /// the union in an outer SELECT for DISTINCT/ORDER BY/LIMIT/OFFSET.
 /// ORDER BY on UNION may only reference projected variables (the
 /// outer SELECT has no access to a branch's per-alias columns).
+/// #114 fail-closed guard. Every UNION assembly path (`build_union_sql`,
+/// `build_aggregate_over_union_sql`, `build_ask_probe_sql`'s union arm)
+/// consumes ONLY branch-local state (`b.bgp` / `b.filters` / `b.optionals`
+/// / `b.minuses` / `b.values`). Anything the walker parked at GROUP level
+/// on `ps` alongside those branches would be silently DROPPED by the
+/// assembly — and a dropped restriction WIDENS the result set with no
+/// signal (measured: a graph-membership FILTER, a NOT EXISTS, and a plain
+/// equality FILTER all silently ignored; a downstream security gate was
+/// widened for eleven of its versions). A filter must never silently
+/// evaluate to true: refuse loudly, and count the event so `stats()`
+/// (`filter_clauses_dropped`) shows callers are hitting it. Lifting the
+/// refusal for a construct means actually APPLYING it on the union path,
+/// with a regression proving the restricted answer.
+fn refuse_group_constructs_over_union(ps: &ParsedSelect, ctx: &str) {
+    let parked = [
+        (!ps.filters.is_empty(), "FILTER"),
+        (!ps.bgp.is_empty(), "triple pattern"),
+        (!ps.optionals.is_empty(), "OPTIONAL"),
+        (!ps.minuses.is_empty(), "MINUS"),
+        (!ps.values.is_empty(), "VALUES"),
+    ];
+    if let Some((_, what)) = parked.iter().find(|(hit, _)| *hit) {
+        crate::storage::shmem_cache::note_filter_clause_dropped();
+        panic!(
+            "sparql: group-level {what} alongside a UNION is not applied on the {ctx} path \
+             (pgRDF#114) — it would be silently dropped and widen the result set. Move the \
+             {what} into every UNION branch (or restructure the query). Refusing instead of \
+             returning a wrong answer."
+        );
+    }
+}
+
 fn build_bgp_sql(ps: &ParsedSelect) -> String {
     if !ps.union_branches.is_empty() {
+        refuse_group_constructs_over_union(ps, "SELECT/CONSTRUCT");
         if !ps.aggregates.is_empty() {
             // Phase F group F2 (LLD v0.4 §11): aggregates over a UNION
             // — the UNION becomes a derived table the aggregation
@@ -14507,5 +14541,88 @@ mod tests {
             (val - expected).abs() < 1e-9,
             "score should be 2 + e^-1 ≈ {expected}, got {val}"
         );
+    }
+
+    // ── #114: group-level constructs over UNION refuse, never widen ──
+
+    #[pg_test(
+        error = "sparql: group-level FILTER alongside a UNION is not applied on the SELECT/CONSTRUCT path (pgRDF#114) — it would be silently dropped and widen the result set. Move the FILTER into every UNION branch (or restructure the query). Refusing instead of returning a wrong answer."
+    )]
+    fn union_group_filter_refuses() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(
+                 'SELECT ?c WHERE { { ?c a <urn:t:A> } UNION { ?c a <urn:t:B> }
+                   FILTER(?c = <urn:t:x>) }')",
+        )
+        .unwrap();
+    }
+
+    #[pg_test(
+        error = "sparql: group-level VALUES alongside a UNION is not applied on the SELECT/CONSTRUCT path (pgRDF#114) — it would be silently dropped and widen the result set. Move the VALUES into every UNION branch (or restructure the query). Refusing instead of returning a wrong answer."
+    )]
+    fn union_group_values_refuses() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(
+                 'SELECT ?c WHERE { VALUES ?c { <urn:t:x> }
+                   { ?c a <urn:t:A> } UNION { ?c a <urn:t:B> } }')",
+        )
+        .unwrap();
+    }
+
+    #[pg_test(
+        error = "sparql: group-level FILTER alongside a UNION is not applied on the ASK path (pgRDF#114) — it would be silently dropped and widen the result set. Move the FILTER into every UNION branch (or restructure the query). Refusing instead of returning a wrong answer."
+    )]
+    fn ask_union_group_filter_refuses() {
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(
+                 'ASK WHERE { GRAPH ?g { { ?s a <urn:t:A> } UNION { ?s a <urn:t:B> } }
+                   FILTER(?g IN (<urn:g:none>)) }')",
+        )
+        .unwrap();
+    }
+
+    /// The un-parked shape stays translatable: the SAME filter INSIDE
+    /// each branch applies (branch-local b.filters — the correct path).
+    #[pg_test]
+    fn union_branch_local_filter_still_applies() {
+        Spi::run("SELECT pgrdf.add_graph('urn:g:u114')").unwrap();
+        Spi::run(
+            "SELECT * FROM pgrdf.sparql(
+                 'INSERT DATA { GRAPH <urn:g:u114> {
+                    <urn:t:x> a <urn:t:A> . <urn:t:y> a <urn:t:B> . } }')",
+        )
+        .unwrap();
+        let n: i64 = Spi::get_one(
+            "SELECT count(*) FROM pgrdf.sparql(
+                 'SELECT ?c WHERE {
+                    { ?c a <urn:t:A> FILTER(?c = <urn:t:x>) }
+                    UNION
+                    { ?c a <urn:t:B> FILTER(?c = <urn:t:x>) } }')",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1, "branch-local filters must keep applying");
+    }
+
+    /// stats() carries the #114 counter and the refusal increments it
+    /// (shmem survives the aborted transaction).
+    #[pg_test]
+    fn filter_clauses_dropped_counter_surfaces() {
+        let before = crate::storage::shmem_cache::snapshot().filter_clauses_dropped;
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Spi::run(
+                "SELECT * FROM pgrdf.sparql(
+                     'SELECT ?c WHERE { { ?c a <urn:t:A> } UNION { ?c a <urn:t:B> }
+                       FILTER(?c = <urn:t:x>) }')",
+            )
+            .unwrap();
+        }))
+        .is_err();
+        // Post-catch: the transaction is aborted — no SPI beyond this
+        // point (the 0.6.28 vacuity lesson); the counter is read from
+        // shmem directly, which needs no transaction.
+        let after = crate::storage::shmem_cache::snapshot().filter_clauses_dropped;
+        assert!(refused, "the group filter over UNION must refuse");
+        assert_eq!(after, before + 1, "the refusal must count");
     }
 }

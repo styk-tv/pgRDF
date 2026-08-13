@@ -36,7 +36,8 @@ SELECT
   jsonb_typeof(j->'plan_cache_misses')     = 'number'  AS pc_misses_is_number,
   jsonb_typeof(j->'plan_cache_inserts')    = 'number'  AS pc_inserts_is_number,
   jsonb_typeof(j->'plan_cache_local_size') = 'number'  AS pc_size_is_number,
-  jsonb_typeof(j->'path_depth_truncations') = 'number' AS pdt_is_number
+  jsonb_typeof(j->'path_depth_truncations') = 'number' AS pdt_is_number,
+  jsonb_typeof(j->'filter_clauses_dropped')  = 'number' AS fcd_is_number
   FROM (SELECT pgrdf.stats() AS j) s;
 
 -- ─── Value-range contract: every counter is non-negative; slots is
@@ -56,7 +57,8 @@ SELECT
   (j->>'plan_cache_misses')::bigint      >= 0    AS pc_misses_nonneg,
   (j->>'plan_cache_inserts')::bigint     >= 0    AS pc_inserts_nonneg,
   (j->>'plan_cache_local_size')::bigint  >= 0    AS pc_size_nonneg,
-  (j->>'path_depth_truncations')::bigint >= 0    AS pdt_nonneg
+  (j->>'path_depth_truncations')::bigint >= 0    AS pdt_nonneg,
+  (j->>'filter_clauses_dropped')::bigint >= 0    AS fcd_nonneg
   FROM (SELECT pgrdf.stats() AS j) s;
 
 -- Note: functional invariants (cache hit/miss counter behaviour
@@ -87,13 +89,15 @@ SELECT
 --  wires the recursive-CTE increment.)
 
 -- (a) Exact field count — the bullseye tripwire.
+-- (#114 added filter_clauses_dropped — the fail-closed drop counter.)
 SELECT (SELECT count(*) FROM jsonb_object_keys((SELECT pgrdf.stats())))
-       = 11 AS exact_eleven_keys;
+       = 12 AS exact_twelve_keys;
 
 -- (b) No extra / no missing keys — array equality against the
 --     canonical sorted list. Catches both additions and renames.
 SELECT array_agg(k ORDER BY k)
        = ARRAY[
+           'filter_clauses_dropped',
            'path_depth_truncations',
            'plan_cache_hits',
            'plan_cache_inserts',

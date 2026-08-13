@@ -221,3 +221,9 @@ CREATE FUNCTION "unlock_graph"("graph_id" bigint, "reason" TEXT) RETURNS bool
 STRICT
 LANGUAGE c
 AS 'MODULE_PATHNAME', 'unlock_graph_wrapper';
+
+-- 0.6.29 -> 0.6.30 delta (#115): honest volatility classes.
+ALTER FUNCTION pgrdf.graph_id(text) STABLE;
+ALTER FUNCTION pgrdf.graph_iri(bigint) STABLE;
+ALTER FUNCTION pgrdf.version() IMMUTABLE;
+ALTER FUNCTION pgrdf.build_id() IMMUTABLE;

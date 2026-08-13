@@ -65,6 +65,12 @@ fn stats() -> pgrx::JsonB {
         // truncate lands in group E2); the field is present so
         // tooling can rely on its shape from v0.4.5 onward.
         "path_depth_truncations": s.path_depth_truncations,
+        // #114: clauses a translation path refused to silently drop
+        // (group-level constructs alongside UNION). The fail-closed
+        // counterpart of path_depth_truncations: non-zero means some
+        // caller's query shape hits the refusal — or a future path is
+        // dropping clauses and must be fixed.
+        "filter_clauses_dropped": s.filter_clauses_dropped,
     }))
 }
 

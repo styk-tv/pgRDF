@@ -136,7 +136,7 @@ use pgrx::prelude::*;
 /// SQL surface: `pgrdf.graph_id(iri TEXT) → BIGINT`. Per LLD v0.4
 /// §3.2.
 #[search_path(pgrdf, pg_temp)]
-#[pg_extern(strict)]
+#[pg_extern(strict, stable)]
 fn graph_id(iri: &str) -> Option<i64> {
     Spi::get_one_with_args(
         "SELECT (SELECT graph_id FROM pgrdf._pgrdf_graphs WHERE iri = $1 LIMIT 1)",
@@ -158,7 +158,7 @@ fn graph_id(iri: &str) -> Option<i64> {
 /// SQL surface: `pgrdf.graph_iri(id BIGINT) → TEXT`. Per LLD v0.4
 /// §3.2. Symmetric inverse of [`graph_id`].
 #[search_path(pgrdf, pg_temp)]
-#[pg_extern(strict)]
+#[pg_extern(strict, stable)]
 fn graph_iri(id: i64) -> Option<String> {
     Spi::get_one_with_args(
         "SELECT (SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = $1 LIMIT 1)",
@@ -1370,6 +1370,25 @@ mod tests {
     /// UDFs are exact inverses: any bound `(id, iri)` pair satisfies
     /// `graph_id(graph_iri(id)) = id` and `graph_iri(graph_id(iri))
     /// = iri`. Locks the inverse contract.
+    /// #115: graph_id / graph_iri are same-snapshot catalog reads —
+    /// STABLE, so the planner folds one call per statement instead of
+    /// re-evaluating per scanned row (measured: 63,833 calls for one
+    /// census before the fix).
+    #[pg_test]
+    fn graph_lookups_are_stable() {
+        for f in ["graph_id", "graph_iri"] {
+            let v: String = Spi::get_one_with_args(
+                "SELECT DISTINCT provolatile::text FROM pg_proc p
+                   JOIN pg_namespace n ON n.oid = p.pronamespace
+                  WHERE n.nspname = 'pgrdf' AND p.proname = $1",
+                &[f.into()],
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(v, "s", "pgrdf.{f} must be STABLE");
+        }
+    }
+
     #[pg_test]
     fn graph_iri_roundtrip() {
         Spi::run(
