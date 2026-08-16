@@ -1,6 +1,6 @@
 [package]
 name = "pgrdf"
-version = "0.6.30"
+version = "0.6.31"
 # #72: edition 2024 + resolver "3" — pgrx 0.17+ migrated and 0.19
 # restated it; staying on 2021 was drift, not breakage. resolver "3"
 # is edition 2024's default, declared explicitly because the workspace
