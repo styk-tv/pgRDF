@@ -2589,7 +2589,14 @@ fn load_turtle(
     // Turtle file would be silently skipped there), AND no base_iri is set
     // (staged has no relative-IRI base). Any miss ⇒ the standard full-Turtle
     // path, unchanged.
-    if crate::storage::staged::jobctl::is_ready() && base.is_none() {
+    // #123: auto-selection never picks a path that cannot work — inside a
+    // transaction block the staged loader's per-phase commits are impossible
+    // (measured: silent uncancellable hang), so the sniff defers to the
+    // standard full parser there.
+    let staged_eligible = crate::storage::staged::jobctl::is_ready()
+        && base.is_none()
+        && !unsafe { pgrx::pg_sys::IsTransactionBlock() };
+    if staged_eligible {
         match file_sniffs_as_ntriples(path) {
             Some(true) => return staged_load_default(path, graph_id),
             Some(false) => {

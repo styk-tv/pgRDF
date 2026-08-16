@@ -565,6 +565,18 @@ fn run_phase(job_idx: usize, phase: u8, specs: &[WorkerSpec]) -> PhaseOutcome {
 #[pg_extern]
 fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)) -> pgrx::JsonB {
     crate::storage::lock::require_unlocked(graph_id, "load_turtle_staged_run"); // #107
+    // #123: staged workers COMMIT their own transactions; inside a caller
+    // transaction block the coordinator waits on workers that wait on the
+    // caller's locks — measured: a silent hang that statement_timeout never
+    // cancels (the wait sits in wait_for_shutdown, which does not observe
+    // interrupts). Refuse with the rewrite, before any slot is taken.
+    if unsafe { pg_sys::IsTransactionBlock() } {
+        error!(
+            "pgRDF#123: the staged loader commits per phase and cannot run inside a \
+             transaction block; call it as a single statement, or use \
+             pgrdf.load_turtle / pgrdf.parse_turtle here"
+        );
+    }
     if !jobctl::is_ready() {
         error!(
             "pgrdf staged loader requires pgrdf in shared_preload_libraries \
