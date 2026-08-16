@@ -227,3 +227,7 @@ ALTER FUNCTION pgrdf.graph_id(text) STABLE;
 ALTER FUNCTION pgrdf.graph_iri(bigint) STABLE;
 ALTER FUNCTION pgrdf.version() IMMUTABLE;
 ALTER FUNCTION pgrdf.build_id() IMMUTABLE;
+
+-- 0.6.30 -> 0.6.31 delta (#118): loader-recorded source byte digest.
+ALTER TABLE pgrdf._pgrdf_graphs ADD COLUMN IF NOT EXISTS source_sha256 TEXT;
+ALTER TABLE pgrdf._pgrdf_graphs ADD COLUMN IF NOT EXISTS source_loads  INTEGER;

@@ -1726,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "pgrdf"
-version = "0.6.30"
+version = "0.6.31"
 dependencies = [
  "oxrdf",
  "oxttl",
@@ -1737,6 +1737,7 @@ dependencies = [
  "reasonable",
  "rudof_rdf",
  "serde_json",
+ "sha2 0.11.0",
  "shacl",
  "spargebra",
 ]

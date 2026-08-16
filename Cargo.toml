@@ -1,6 +1,6 @@
 [package]
 name = "pgrdf"
-version = "0.6.30"
+version = "0.6.31"
 # #72: edition 2024 + resolver "3" — pgrx 0.17+ migrated and 0.19
 # restated it; staying on 2021 was drift, not breakage. resolver "3"
 # is edition 2024's default, declared explicitly because the workspace
@@ -74,6 +74,10 @@ oxrdf      = "0.3"
 oxttl      = "0.2"   # Turtle / N-Triples / TriG / N-Quads. Latest stable as of 2026-05-13.
 spargebra  = "0.4"   # SPARQL 1.1 parser → algebra AST. Pins =0.3.3 on oxrdf (matches our own).
 serde_json = "1"     # Used by load_turtle_verbose and sparql_parse to emit JSONB.
+# #118: the loader records sha256 of the exact input bytes it consumed
+# (source_sha256 on _pgrdf_graphs). 0.11.0 verified latest stable on
+# crates.io 2026-08-16 (published 2026-03-25); 0.10.9 was the prior line.
+sha2       = "0.11"
 # Phase 4: OWL 2 RL forward-chain reasoner. Pulls in `oxrdf ^0.3.3`
 # transitively (matches our own pin) plus datafrog / disjoint-sets /
 # roaring / rio_api. 0.4.1 (2026-05-10) supersedes the v0.2-LLD

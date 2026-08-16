@@ -217,13 +217,18 @@ build-ext:
     # directives in compose/builder.Containerfile. Without it the
     # build silently falls back to the legacy builder and the
     # cache-mounts are ignored — image layers bloat right back.
+    # PGRDF_BUILD_ID: same seam CI uses (release.yml passes the tag) — a
+    # local build names itself via git describe, `-dirty` included, so a
+    # workstation .so never reports "unknown" and never impersonates CI.
     DOCKER_BUILDKIT=1 {{BUILD}} build --target builder \
         -t pgrdf-builder-rust:pg{{PG_MAJOR}} \
         --build-arg PG_MAJOR={{PG_MAJOR}} \
+        --build-arg PGRDF_BUILD_ID="$(git describe --tags --always --dirty)" \
         -f compose/builder.Containerfile .
     DOCKER_BUILDKIT=1 {{BUILD}} build \
         -t pgrdf-builder:pg{{PG_MAJOR}} \
         --build-arg PG_MAJOR={{PG_MAJOR}} \
+        --build-arg PGRDF_BUILD_ID="$(git describe --tags --always --dirty)" \
         -f compose/builder.Containerfile .
     rm -rf compose/extensions/lib compose/extensions/share
     mkdir -p compose/extensions/lib compose/extensions/share/extension

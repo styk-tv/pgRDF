@@ -39,6 +39,10 @@ SELECT bool_and(
     WHEN 'locked'      THEN format_type(atttypid, atttypmod) = 'boolean' AND attnotnull
     WHEN 'lock_reason' THEN format_type(atttypid, atttypmod) = 'text'    AND NOT attnotnull
     WHEN 'locked_at'   THEN format_type(atttypid, atttypmod) = 'timestamp with time zone' AND NOT attnotnull
+    -- #118 (0.6.31): loader-recorded source byte digest. Both nullable --
+    -- NULL means never recorded, distinct from every digest and count.
+    WHEN 'source_sha256' THEN format_type(atttypid, atttypmod) = 'text'    AND NOT attnotnull
+    WHEN 'source_loads'  THEN format_type(atttypid, atttypmod) = 'integer' AND NOT attnotnull
     ELSE FALSE
   END
 ) AS columns_correct

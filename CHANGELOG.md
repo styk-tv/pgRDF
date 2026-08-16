@@ -6,6 +6,53 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.31] — 2026-08-16
+
+The loader records the source byte digest (#118). Closes a defect class a
+downstream kernel measured with a controlled test: a module "verified"
+under a digest of sixty-four zeros, because a source-bytes pin was
+recorded, pattern-checked, and consulted by nothing — once triples are in
+the store, nothing can recompute file bytes. The loader is the only party
+that ever sees them; now it records them.
+
+### Added
+
+- **`_pgrdf_graphs.source_sha256` + `source_loads`** — every load through
+  the turtle funnel (the `parse_/load_turtle` family) records the sha256
+  of the exact bytes the parser consumed: a hashing reader wraps the
+  input at `ingest_dispatch` (the same chokepoint as the #107 lock hook),
+  so there is no second read and no gap between what was hashed and what
+  was parsed. `source_sha256` carries the most recent load's digest;
+  `source_loads` counts recorded loads, and `> 1` self-reports that
+  whole-graph byte identity no longer holds. NULL in both means never
+  recorded — distinct from every digest; pre-existing graphs read NULL
+  after upgrade. A downstream composer can now compare a pinned digest
+  against the load-time record and refuse on mismatch instead of
+  trusting a string. Not yet recording (stated, not implied): the staged
+  loader, the v0.6.2 parallel bulk path, TriG/N-Quads quad ingest.
+- **Local builds name themselves** — `just build-ext` now passes
+  `PGRDF_BUILD_ID=$(git describe --tags --always --dirty)` through the
+  same build-arg seam CI uses for the tag, so a workstation `.so`
+  reports its describe string (dirty flag included) instead of
+  `unknown`. The identity triple stays the release gate; this closes the
+  local blind spot.
+
+### Fixed
+
+- **Lock order at the loader** (found by this release's own full-suite
+  run): the digest record originally wrote after the parse, acquiring a
+  graphs-table lock as the transaction's last act while holding
+  partition-DDL locks from its first — the mirror order of a concurrent
+  `add_graph`, completing a deadlock cycle. The record now opens at
+  ingest start (`source_loads` bump takes the graphs-table lock in the
+  same early position `add_graph`'s INSERT does) and closes after the
+  parse under a lock the transaction already holds. A failed parse
+  aborts the transaction and rolls back both halves together.
+
+Regression: case 72's `_pgrdf_graphs` contract extends with the two
+nullable columns; four contract tests pin digest-matches-`shasum`,
+latest-load-wins, and NULL-means-never-recorded.
+
 ## [0.6.30] — 2026-08-13
 
 A filter never silently evaluates to true (#114), and lookups say what they
