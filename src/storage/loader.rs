@@ -1033,7 +1033,10 @@ fn ingest_dispatch<R: Read>(reader: R, graph_id: i64, base_iri: Option<&str>) ->
     // #118: the same chokepoint that enforces lock custody records the
     // source digest — every byte the parser consumes flows through the
     // hashing reader, so the digest is over the exact input bytes, with
-    // no second read and no gap between hashing and parsing.
+    // no second read and no gap between hashing and parsing. The record
+    // opens HERE, before any partition/DDL lock: graphs-table first is
+    // the canonical order (see begin_source_record on the deadlock).
+    crate::storage::source_digest::begin_source_record(graph_id);
     let (reader, hasher) = crate::storage::source_digest::HashingReader::new(reader);
     let mut stats = match path {
         IngestDictPath::Baseline | IngestDictPath::ShmemWarm => {
@@ -1050,8 +1053,8 @@ fn ingest_dispatch<R: Read>(reader: R, graph_id: i64, base_iri: Option<&str>) ->
     // surface it. `as_str()` matches the GUC enum values exactly.
     stats.path = path.as_str();
     // Reached only on success — a failed parse panics above, aborting
-    // the transaction before any digest could describe unlanded bytes.
-    crate::storage::source_digest::record_source_digest(graph_id, &hasher);
+    // the transaction and rolling back the opened record with it.
+    crate::storage::source_digest::finish_source_record(graph_id, &hasher);
     stats
 }
 

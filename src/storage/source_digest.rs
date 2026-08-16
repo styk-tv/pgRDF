@@ -72,21 +72,46 @@ impl<R: Read> Read for HashingReader<R> {
     }
 }
 
-/// Record the digest of a completed load on the graph's `_pgrdf_graphs`
-/// row: latest-load-wins on `source_sha256`, `source_loads` counts every
-/// recorded load. Called AFTER a successful ingest only — a failed parse
-/// panics first, aborting the transaction, so no digest ever describes
-/// bytes that did not land. A graph with no `_pgrdf_graphs` row (e.g.
-/// the implicit default graph before registration) records nothing —
-/// zero rows updated is the honest outcome there, mirroring the lock
+/// Open the load record at INGEST START: bump `source_loads` and take the
+/// graphs-table lock in the canonical early position — BEFORE the parse
+/// path acquires any partition/DDL locks on the quads parent.
+///
+/// LOCK ORDER IS THE POINT. The first full-suite run deadlocked
+/// (measured: `deadlock detected`, my late UPDATE waiting on
+/// `_pgrdf_graphs` while a concurrent `add_graph`'s partition DDL —
+/// which takes strong locks on the quads parent AND, via the partition
+/// FK, on the graphs table — waited on locks this transaction already
+/// held from its own earlier DDL). A single UPDATE after the parse
+/// acquired the graphs lock LAST and completed the cycle. Splitting the
+/// record puts the graphs-table acquisition first, where `add_graph`'s
+/// own INSERT takes it; the digest write then reuses a lock the
+/// transaction already holds and never waits late.
+///
+/// Rollback keeps the semantics honest: a failed parse panics, aborting
+/// the transaction, so the early count and the late digest vanish
+/// together — no record ever describes bytes that did not land. A graph
+/// with no `_pgrdf_graphs` row updates zero rows, mirroring the lock
 /// module's treatment of unregistered graphs.
-pub fn record_source_digest(graph_id: i64, hasher: &Rc<RefCell<Sha256>>) {
+pub fn begin_source_record(graph_id: i64) {
+    pgrx::Spi::run_with_args(
+        "UPDATE pgrdf._pgrdf_graphs
+            SET source_loads = COALESCE(source_loads, 0) + 1
+          WHERE graph_id = $1",
+        &[graph_id.into()],
+    )
+    .expect("source_digest: opening the load record failed");
+}
+
+/// Close the load record AFTER a successful ingest: write the digest of
+/// the exact bytes the parser consumed (latest-load-wins). The graphs
+/// row lock was taken by `begin_source_record`, so this statement waits
+/// on nothing late in the transaction.
+pub fn finish_source_record(graph_id: i64, hasher: &Rc<RefCell<Sha256>>) {
     let digest = hasher.borrow_mut().finalize_reset();
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     pgrx::Spi::run_with_args(
         "UPDATE pgrdf._pgrdf_graphs
-            SET source_sha256 = $1,
-                source_loads  = COALESCE(source_loads, 0) + 1
+            SET source_sha256 = $1
           WHERE graph_id = $2",
         &[hex.into(), graph_id.into()],
     )
