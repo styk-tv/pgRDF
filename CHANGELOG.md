@@ -6,6 +6,49 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.32] — 2026-08-16
+
+The truth cut: canonical graph identity (#117), and two silent failure
+modes become refusals (#109, #123).
+
+### Added
+
+- **`pgrdf.graph_digest(graph_id) -> text`** — RDFC-1.0 canonical graph
+  digest: identity of *meaning* that survives reload. Blank nodes are
+  existential variables whose labels re-mint on every parse, so byte
+  digests identify one stored copy and nothing more; `graph_digest`
+  canonically relabels (W3C RDFC-1.0), serializes canonical N-Triples,
+  and hashes — isomorphic graphs produce **equal** digests, unequal
+  digests **prove** difference. Algorithm label `rdfc-1.0-sha256`;
+  values are deliberately incomparable with byte digests or first-degree
+  structural pins. Asserted triples only (inferred is a check value).
+  Conformance is proven, not claimed: a vendored ten-case subset of the
+  W3C rdf-canon suite passes with our digest equal to the sha256 of the
+  suite's *own* expected canonical documents, byte-for-byte — and the
+  suite's poison graph (test074, a NegativeEvalTest) hits the resource
+  budgets and **raises `pgRDF#117`**, which is precisely the conforming
+  behaviour: refusing under budget is what the spec demands there.
+  Downstream: adoption pins and fork/severance re-matching upgrade from
+  evidence-grade to proof-grade the moment a consumer cites this digest.
+
+### Fixed
+
+- **`VALUES` binding a graph variable silently widened to every graph**
+  (#109) — re-confirmed live before coding: three nonexistent graphs in
+  the `VALUES` and the query answered for every graph in the store. Now
+  refuses with a stable `pgRDF#109` error naming the rewrite, on both
+  assembly paths, and increments `filter_clauses_dropped`. `VALUES` on
+  plain variables is regression-pinned as still applying.
+- **The staged loader hung silently — and uncancellably — inside
+  transaction blocks** (#123): staged workers commit per phase, which a
+  caller's transaction can never allow; measured 31 minutes at 0% CPU
+  with `statement_timeout` never firing. A direct
+  `load_turtle_staged_run` in a transaction block now raises `pgRDF#123`
+  with the rewrite before any slot is taken, and `load_turtle`'s
+  N-Triples auto-dispatch falls back to the standard parser there.
+  The deeper cancellability gap (the coordinator's wait observes no
+  interrupts in *any* context) is filed as #125 with the measurement.
+
 ## [0.6.31] — 2026-08-16
 
 The loader records the source byte digest (#118). Closes a defect class a
