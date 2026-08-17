@@ -2344,6 +2344,7 @@ fn translate(q: &Query) -> ExecPlan {
 /// SELECT clause (`SELECT 1`) so the SQL is well-formed before
 /// being wrapped in EXISTS().
 fn build_ask_probe_sql(ps: &ParsedSelect) -> String {
+    refuse_values_on_graph_variable(ps, "ASK");
     if !ps.union_branches.is_empty() {
         refuse_group_constructs_over_union(ps, "ASK");
         let branch_sqls: Vec<String> = ps
@@ -4064,6 +4065,53 @@ fn type_aware_order_terms(lex: &str, ascending: bool) -> Vec<String> {
 /// (`filter_clauses_dropped`) shows callers are hitting it. Lifting the
 /// refusal for a construct means actually APPLYING it on the union path,
 /// with a regression proving the restricted answer.
+/// #109: a `VALUES` that binds a variable also used as a `GRAPH` name is
+/// not joined into graph resolution — measured (filed on 0.6.27,
+/// re-confirmed live on 0.6.31): three nonexistent graphs in the VALUES
+/// and the query answered for EVERY graph in the store. The binding
+/// contributes nothing and the answer silently widens. Refuse with the
+/// rewrite; the real join is #111-adjacent follow-up work. Runs on BOTH
+/// assembly paths and unconditionally — the repro has no UNION in it.
+fn refuse_values_on_graph_variable(ps: &ParsedSelect, ctx: &str) {
+    let mut scope_vars: Vec<String> = Vec::new();
+    let mut collect_triples = |bgp: &[ScopedTriple]| {
+        for t in bgp {
+            if let Some(v) = scope_var_name(&t.scope) {
+                scope_vars.push(v);
+            }
+        }
+    };
+    collect_triples(&ps.bgp);
+    for ob in &ps.optionals {
+        collect_triples(&ob.triples);
+    }
+    for b in &ps.union_branches {
+        collect_triples(&b.bgp);
+        for ob in &b.optionals {
+            collect_triples(&ob.triples);
+        }
+    }
+    if scope_vars.is_empty() {
+        return;
+    }
+    let all_blocks = ps
+        .values
+        .iter()
+        .chain(ps.union_branches.iter().flat_map(|b| b.values.iter()))
+        .chain(ps.optionals.iter().flat_map(|ob| ob.values.iter()));
+    for vb in all_blocks {
+        if let Some(hit) = vb.variables.iter().find(|v| scope_vars.contains(v)) {
+            crate::storage::shmem_cache::note_filter_clause_dropped();
+            panic!(
+                "sparql: VALUES binds ?{hit}, which also names a GRAPH scope — the binding \
+                 is not joined into graph resolution on the {ctx} path and the answer would \
+                 silently widen to every graph (pgRDF#109). Enumerate explicit GRAPH <iri> \
+                 groups instead. Refusing instead of returning a wrong answer."
+            );
+        }
+    }
+}
+
 fn refuse_group_constructs_over_union(ps: &ParsedSelect, ctx: &str) {
     let parked = [
         (!ps.filters.is_empty(), "FILTER"),
@@ -4084,6 +4132,7 @@ fn refuse_group_constructs_over_union(ps: &ParsedSelect, ctx: &str) {
 }
 
 fn build_bgp_sql(ps: &ParsedSelect) -> String {
+    refuse_values_on_graph_variable(ps, "SELECT/CONSTRUCT");
     if !ps.union_branches.is_empty() {
         refuse_group_constructs_over_union(ps, "SELECT/CONSTRUCT");
         if !ps.aggregates.is_empty() {

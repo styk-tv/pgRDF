@@ -231,3 +231,11 @@ ALTER FUNCTION pgrdf.build_id() IMMUTABLE;
 -- 0.6.30 -> 0.6.31 delta (#118): loader-recorded source byte digest.
 ALTER TABLE pgrdf._pgrdf_graphs ADD COLUMN IF NOT EXISTS source_sha256 TEXT;
 ALTER TABLE pgrdf._pgrdf_graphs ADD COLUMN IF NOT EXISTS source_loads  INTEGER;
+
+-- 0.6.31 -> 0.6.32 delta (#117): RDFC-1.0 canonical graph digest.
+CREATE  FUNCTION "graph_digest"(
+	"graph_id" bigint /* i64 */
+) RETURNS TEXT /* String */
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'graph_digest_wrapper';

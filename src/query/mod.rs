@@ -7,3 +7,4 @@ pub mod guc;
 pub mod parser;
 pub mod path;
 pub mod plan_cache;
+pub mod values_graph_guard;
