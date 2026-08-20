@@ -35,7 +35,9 @@
 //! false-hit probability is ~2⁻¹²⁸ at fleet scale (one shared hasher
 //! seed per half).
 
-use pgrx::callbacks::{PgXactCallbackEvent, register_xact_callback};
+use pgrx::callbacks::{
+    PgSubXactCallbackEvent, PgXactCallbackEvent, register_subxact_callback, register_xact_callback,
+};
 use pgrx::prelude::*;
 use pgrx::{PGRXSharedMemory, PgAtomic, PgLwLock, pg_shmem_init};
 use std::cell::RefCell;
@@ -275,12 +277,19 @@ pub fn lookup(
     None
 }
 
-// Per-backend list of (fingerprint, dict_id) entries staged inside the
-// current transaction. Published on commit; discarded on abort. The
+// Per-backend list of (fingerprint, dict_id, subxact_id) entries staged
+// inside the current transaction. Published on commit; discarded on
+// abort. Each entry carries the subtransaction id it was staged under
+// (#127): a PL/pgSQL EXCEPTION block aborts only a SUBtransaction, the
+// dictionary INSERT rolls back with it, and the outer transaction still
+// commits — so without the tag the commit flush publishes a dict id
+// that has no row, and every later intern of that exact lexical value
+// resolves to the dangling id until `pgrdf.shmem_reset()`. The
 // thread-local makes the lifetime trivially per-backend; pgrx's
 // register_xact_callback handles the per-txn part.
 thread_local! {
-    static PENDING: RefCell<Vec<(u64, u64, i64)>> = const { RefCell::new(Vec::new()) };
+    static PENDING: RefCell<Vec<(u64, u64, i64, pg_sys::SubTransactionId)>> =
+        const { RefCell::new(Vec::new()) };
     static REGISTERED: RefCell<bool> = const { RefCell::new(false) };
 }
 
@@ -296,7 +305,8 @@ pub fn stage_for_commit(
         return;
     }
     let (h1, h2) = fingerprint(current_db_oid(), term_type, value, datatype_id, language);
-    PENDING.with(|p| p.borrow_mut().push((h1, h2, dict_id)));
+    let subxid = unsafe { pg_sys::GetCurrentSubTransactionId() };
+    PENDING.with(|p| p.borrow_mut().push((h1, h2, dict_id, subxid)));
     register_xact_callbacks_once();
 }
 
@@ -335,11 +345,32 @@ fn register_xact_callbacks_once() {
         PENDING.with(|p| p.borrow_mut().clear());
         REGISTERED.with(|r| *r.borrow_mut() = false);
     });
+    // #127: a subtransaction abort must take its staged entries with it.
+    // Subtransaction ids are assigned monotonically within a backend's
+    // transaction, and while a subtransaction is open every newer id is
+    // nested inside it — so on abort of `my_subid`, exactly the entries
+    // tagged >= `my_subid` are the ones whose dictionary INSERTs rolled
+    // back. Entries from subtransactions that already committed carry
+    // ids below any later-aborting sibling and survive; if an ANCESTOR
+    // aborts, their ids are above its and they are correctly dropped
+    // with it. pgrx clears subxact hooks at top-level txn end, so this
+    // registration rides the same once-per-transaction flag as the
+    // callbacks above.
+    register_subxact_callback(
+        PgSubXactCallbackEvent::AbortSub,
+        |my_subid, _parent_subid| {
+            PENDING.with(|p| {
+                p.borrow_mut()
+                    .retain(|&(_, _, _, subxid)| subxid < my_subid)
+            });
+        },
+    );
 }
 
 fn flush_pending() {
-    let drained: Vec<(u64, u64, i64)> = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
-    for (h1, h2, dict_id) in drained {
+    let drained: Vec<(u64, u64, i64, pg_sys::SubTransactionId)> =
+        PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    for (h1, h2, dict_id, _subxid) in drained {
         insert_slot(h1, h2, dict_id);
     }
 }
@@ -406,6 +437,16 @@ pub struct Snapshot {
     /// the group-construct-over-UNION refusal or a path is dropping
     /// clauses; either way the number is the signal.
     pub filter_clauses_dropped: u64,
+}
+
+/// Test-only view of how many staged entries are pending publish.
+/// The #127 regression test asserts this returns to its prior value
+/// after a subtransaction abort — the poison was precisely a pending
+/// entry surviving the subxact rollback and publishing on the outer
+/// commit.
+#[cfg(any(test, feature = "pg_test"))]
+pub fn pending_len() -> usize {
+    PENDING.with(|p| p.borrow().len())
 }
 
 pub fn snapshot() -> Snapshot {
@@ -545,6 +586,83 @@ mod tests {
         // must not make it unstable within a database.
         let c = fingerprint(16384, term_type::URI, "http://example.com/x", None, None);
         assert_eq!(a, c, "the key must stay stable within one database");
+    }
+
+    /// #127: a term first interned inside a subtransaction that aborts
+    /// must NOT stay staged for publish — the dictionary INSERT rolled
+    /// back with the subxact, so publishing the pair on the outer
+    /// commit poisons the cache with a dict id that has no row. The
+    /// PL/pgSQL EXCEPTION block is the real-world trigger: the caught
+    /// error aborts only the subtransaction and the outer transaction
+    /// goes on to commit.
+    #[pg_test]
+    fn shmem_subxact_abort_discards_staged_entries() {
+        let before = pending_len();
+        Spi::run(
+            "DO $$ BEGIN \
+               BEGIN \
+                 PERFORM pgrdf.put_term('urn:pgrdf-test:subxact-poison-1', 1::smallint); \
+                 RAISE EXCEPTION 'simulated refusal'; \
+               EXCEPTION WHEN OTHERS THEN NULL; \
+               END; \
+             END $$;",
+        )
+        .expect("DO block must succeed (exception is swallowed)");
+        assert_eq!(
+            pending_len(),
+            before,
+            "entries staged inside an aborted subtransaction must be discarded, \
+             not published on the outer commit"
+        );
+    }
+
+    /// #127 companion: staging that happens in a subtransaction that
+    /// COMMITS must survive to the outer publish list — the abort
+    /// cleanup must not over-discard.
+    #[pg_test]
+    fn shmem_subxact_commit_keeps_staged_entries() {
+        let before = pending_len();
+        Spi::run(
+            "DO $$ BEGIN \
+               BEGIN \
+                 PERFORM pgrdf.put_term('urn:pgrdf-test:subxact-commit-1', 1::smallint); \
+               EXCEPTION WHEN OTHERS THEN NULL; \
+               END; \
+             END $$;",
+        )
+        .expect("DO block must succeed");
+        assert!(
+            pending_len() > before,
+            "a term interned in a committed subtransaction must stay staged for publish"
+        );
+    }
+
+    /// #127 boundary: entries staged BEFORE a subtransaction started
+    /// belong to the outer transaction and must survive that
+    /// subtransaction's abort — the cleanup drops only ids at-or-above
+    /// the aborting subxact's.
+    #[pg_test]
+    fn shmem_subxact_abort_keeps_earlier_entries() {
+        Spi::run("SELECT pgrdf.put_term('urn:pgrdf-test:pre-subxact-1', 1::smallint);")
+            .expect("top-level intern must succeed");
+        let staged = pending_len();
+        assert!(staged > 0, "top-level intern must stage an entry");
+        Spi::run(
+            "DO $$ BEGIN \
+               BEGIN \
+                 PERFORM pgrdf.put_term('urn:pgrdf-test:subxact-poison-2', 1::smallint); \
+                 RAISE EXCEPTION 'simulated refusal'; \
+               EXCEPTION WHEN OTHERS THEN NULL; \
+               END; \
+             END $$;",
+        )
+        .expect("DO block must succeed");
+        assert_eq!(
+            pending_len(),
+            staged,
+            "a subtransaction abort must drop only its own staged entries, \
+             not the outer transaction's"
+        );
     }
 
     /// Counters increment on hit / miss.
