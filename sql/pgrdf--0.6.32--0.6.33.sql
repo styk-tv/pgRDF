@@ -1,0 +1,19 @@
+-- pgRDF 0.6.32 -> 0.6.33 — shmem term cache honours subtransaction
+-- aborts (#127).
+--
+-- No DDL: the fix ships in the .so as behaviour. Terms first interned
+-- inside a subtransaction that aborts (the PL/pgSQL EXCEPTION pattern:
+-- the caught error rolls back only the subtransaction while the outer
+-- transaction commits) were previously still published to the
+-- cross-backend shared-memory cache on that outer commit — a dict id
+-- whose dictionary row had rolled back. Every later intern of the same
+-- lexical value then resolved to the dangling id, and quads written
+-- with it dereferenced to NULL, until pgrdf.shmem_reset() or a
+-- postmaster restart.
+--
+-- From this release each staged cache entry carries the subtransaction
+-- id it was staged under, and a subtransaction-abort callback discards
+-- exactly the entries at-or-above the aborting id (subtransaction ids
+-- are monotonic within a backend, so those are precisely the ones whose
+-- INSERTs rolled back). Entries from committed subtransactions and the
+-- outer transaction survive unchanged.

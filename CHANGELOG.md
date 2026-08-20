@@ -6,6 +6,32 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.33] — 2026-08-20
+
+One fix, fleet-measured before it was coded: the shared-memory term
+cache now honours subtransaction aborts (#127).
+
+### Fixed
+
+- **shmem term cache published dict ids rolled back by subtransaction
+  abort** (#127) — a term first interned inside a subtransaction that
+  aborts (the PL/pgSQL `EXCEPTION` pattern: the caught error rolls back
+  only the subtransaction while the outer transaction commits) left its
+  staged `(fingerprint → dict_id)` pair in the pending list, and the
+  outer commit published it to shmem with the dictionary row already
+  rolled back. Every later intern of that exact lexical value — any
+  backend — resolved to the dangling id (`pgrdf.get_term` NULL, quads
+  dereferencing to nothing) until `pgrdf.shmem_reset()` or a postmaster
+  restart. Measured downstream as adoption-retry failures where a
+  validation-refused write made the retry of the *same* payload fail on
+  values provably present; because shared vocabulary terms can be
+  first-interned in such an aborted subtransaction, one refusal could
+  block unrelated writes fleet-wide. Staged entries now carry their
+  subtransaction id and an abort callback discards exactly the entries
+  at-or-above the aborting id (subtransaction ids are monotonic within
+  a backend). Diagnostic for an affected instance: quads whose term ids
+  have no `_pgrdf_dictionary` row.
+
 ## [0.6.32] — 2026-08-16
 
 The truth cut: canonical graph identity (#117), and two silent failure
