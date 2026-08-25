@@ -1,0 +1,56 @@
+src//inference/reasonable.rs:257	materialize: unsupported object term (RDF-star out of scope)
+src//query/executor.rs:3390	sparql: unsupported algebra inside UNION branch: {other:?}
+src//query/executor.rs:3552	sparql: MINUS right side must be a BGP
+src//query/executor.rs:3556	sparql: MINUS right side must be a BGP
+src//query/executor.rs:3759	sparql: unsupported algebra in select wrapper: {other:?}
+src//query/executor.rs:6671	sparql: literal subject is invalid in RDF
+src//query/executor.rs:6672	sparql: unsupported subject term {other:?}
+src//query/executor.rs:6713	sparql: unsupported object term {other:?}
+src//query/executor.rs:7541	sparql: UPDATE: unsupported object term (RDF-star not in v0.4 scope)
+src//query/executor.rs:7922	sparql: INSERT WHERE requires a non-empty WHERE pattern
+src//query/executor.rs:8106	sparql: literal subject is invalid in RDF
+src//query/executor.rs:8107	sparql: INSERT WHERE template: unsupported subject term {other:?}
+src//query/executor.rs:8136	sparql: INSERT WHERE template: unsupported object term {other:?}
+src//query/executor.rs:8222	sparql: DELETE WHERE requires a non-empty WHERE pattern
+src//query/executor.rs:8404	sparql: literal subject is invalid in RDF
+src//query/executor.rs:8407	sparql: DELETE WHERE template: unsupported subject term {other:?}
+src//query/executor.rs:8432	sparql: DELETE WHERE template: unsupported object term {other:?}
+src//query/executor.rs:8544	sparql: DELETE/INSERT WHERE requires a non-empty WHERE pattern
+src//query/executor.rs:921	pgrdf.construct: unsupported subject term shape
+src//query/executor.rs:940	pgrdf.construct: unsupported object term shape
+src//query/path.rs:1195	`p+` must classify as OneOrMore
+src//query/path.rs:1243	`p*` must classify as ZeroOrMore
+src//query/path.rs:1256	`^(p*)` must classify as ZeroOrMore
+src//query/path.rs:1276	`p?` must classify as ZeroOrOne
+src//query/path.rs:1286	`(^p)?` must classify as ZeroOrOne
+src//query/path.rs:1314	`a|b` must classify as Alternation
+src//query/path.rs:1348	`a|b|c` must classify as Alternation
+src//query/path.rs:1373	`^(a|b)` must classify as Alternation
+src//query/path.rs:1393	`(a|b)+` must classify as OneOrMore over the set
+src//storage/construct_ingest.rs:169	{PANIC_PREFIX}: row must be a JSON object, got {row}
+src//storage/construct_ingest.rs:205	{PANIC_PREFIX}: graph_id must be >= 0, got {graph_id}
+src//storage/construct_ingest.rs:236	{PANIC_PREFIX}: graph_id must be >= 0, got {graph_id}
+src//storage/construct_ingest.rs:69	{PANIC_PREFIX}: {position}: term cell must be a JSON object, got {cell}
+src//storage/graphs.rs:214	drop_graph: graph_id must be >= 0, got {id}
+src//storage/graphs.rs:218	drop_graph: cannot drop default partition (graph_id = 0)
+src//storage/graphs.rs:362	move_graph: graph_id must be >= 0, got src={src}, dst={dst}
+src//storage/graphs.rs:368	move_graph: src and dst must differ (both = {src})
+src//storage/graphs.rs:492	clear_graph: graph_id must be >= 0, got {id}
+src//storage/graphs.rs:597	copy_graph: graph_id must be >= 0, got src={src}, dst={dst}
+src//storage/graphs.rs:601	copy_graph: src and dst must differ (both = {src})
+src//storage/graphs.rs:698	carve_graph: graph_id must be >= 0, got src={src}, dst={dst}
+src//storage/graphs.rs:702	carve_graph: src and dst must differ (both = {src})
+src//storage/graphs.rs:811	carve_graph: graph_id must be >= 0, got src={src}, dst={dst}
+src//storage/graphs.rs:814	carve_graph: src and dst must differ (both = {src})
+src//storage/hexastore.rs:153	add_graph: iri must be non-empty
+src//storage/hexastore.rs:257	add_graph: graph_id must be >= 0, got {}
+src//storage/hexastore.rs:260	add_graph: iri must be non-empty
+src//storage/hexastore.rs:64	add_graph: graph_id must be >= 0, got {}
+src//storage/loader.rs:1637	load_turtle: unsupported object term
+src//storage/loader.rs:2006	load_turtle_streaming: unsupported object term
+src//storage/loader.rs:230	load_turtle: unsupported object term (RDF-star not in v0.2 scope)
+src//storage/loader.rs:313	load_turtle: invalid base IRI {base:?}: {e}
+src//storage/loader.rs:426	load_turtle_dict_batched: invalid base IRI {base:?}: {e}
+src//storage/loader.rs:699	load_turtle: invalid base IRI {base:?}: {e}
+src//storage/loader.rs:879	{prefix}: unsupported object term
+src//storage/staged/phases.rs:590	staged STAGE: unsupported object term

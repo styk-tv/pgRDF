@@ -327,9 +327,16 @@ fn validate(
             sparql_pass = true;
             ShaclValidationMode::Native
         }
-        other => panic!(
-            "validate: unknown mode {other:?} \
-             (supported: 'native', 'sparql', 'pgrdf')"
+        // E0 (LIB v0.6.34): a rejected argument is 22023
+        // invalid_parameter_value, not XX000. Message byte-identical
+        // (K2); same panic/unwind mechanism (crate::refuse). The
+        // REPORT payload is untouched — E0's scope guard.
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!(
+                "validate: unknown mode {other:?} \
+                 (supported: 'native', 'sparql', 'pgrdf')"
+            ),
         ),
     };
     // Canonical mode string echoed back in every JSONB return site.
@@ -1027,6 +1034,31 @@ mod tests {
             Spi::get_one("SELECT pgrdf.validate(999992::bigint, 999993::bigint, 'endpoint')")
                 .unwrap()
                 .unwrap();
+    }
+
+    /// E0 negative control (LIB K10): the unknown-mode refusal carries
+    /// 22023 `invalid_parameter_value` — asserted by ENUM. The sibling
+    /// test above pins the message; this pins the code; together they
+    /// are the full contract. No SPI after the catch (aborted txn).
+    #[pg_test]
+    fn validate_unknown_mode_carries_invalid_parameter_value() {
+        use pgrx::pg_sys::errcodes::PgSqlErrorCode;
+        use pgrx::pg_sys::panic::CaughtError;
+        let code = pgrx::PgTryBuilder::new(|| {
+            Spi::run("SELECT pgrdf.validate(999992::bigint, 999993::bigint, 'endpoint')").unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            CaughtError::PostgresError(r)
+            | CaughtError::ErrorReport(r)
+            | CaughtError::RustPanic { ereport: r, .. } => Some(r.sql_error_code()),
+        })
+        .execute();
+        assert_eq!(
+            code,
+            Some(PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE),
+            "unknown-mode refusal must reach callers as 22023, not XX000"
+        );
     }
 
     /// §5.2 — `'sparql'` mode no longer short-circuits at pgRDF's

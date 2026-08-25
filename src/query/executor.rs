@@ -3387,7 +3387,15 @@ fn walk_branch(
             // branch joins against that branch's BGP on shared vars.
             ub.values.push(make_values_block(variables, bindings));
         }
-        other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
+        // E0: same reclassification as the select-wrapper arm — 0A000,
+        // construct named, Debug dump retired (T-MSG-1).
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "sparql: unsupported algebra inside UNION branch: {}",
+                algebra_construct_name(other)
+            ),
+        ),
     }
 }
 
@@ -3756,7 +3764,43 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
             // vN(cols)` derived table joined on shared variables.
             ps.values.push(make_values_block(variables, bindings));
         }
-        other => panic!("sparql: unsupported algebra in select wrapper: {other:?}"),
+        // E0 (LIB v0.6.34): 0A000 feature_not_supported — the engine
+        // considered the request and declined a named construct; that is
+        // a RESULT, not an internal error. T-MSG-1: the message names the
+        // SPARQL construct instead of dumping the algebra node's Debug
+        // form (a refusal is documentation; `NamedNode { .. }` is not).
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "sparql: unsupported algebra in select wrapper: {}",
+                algebra_construct_name(other)
+            ),
+        ),
+    }
+}
+
+/// E0 / T-MSG-1: name the SPARQL construct a refusal is about. Position
+/// matters — a variant listed here may be perfectly supported elsewhere;
+/// the refusal is about THIS position in the algebra tree. The catch-all
+/// keeps future spargebra variants refusing loudly rather than blindly.
+fn algebra_construct_name(p: &GraphPattern) -> &'static str {
+    match p {
+        GraphPattern::Service { .. } => "SERVICE (federated query)",
+        GraphPattern::Minus { .. } => "MINUS (in this position)",
+        GraphPattern::Group { .. } => "GROUP BY / aggregation (in this position)",
+        GraphPattern::OrderBy { .. } => "ORDER BY (in this position)",
+        GraphPattern::Slice { .. } => "LIMIT/OFFSET (in this position)",
+        GraphPattern::Distinct { .. } => "DISTINCT (in this position)",
+        GraphPattern::Reduced { .. } => "REDUCED (in this position)",
+        GraphPattern::Project { .. } => "a nested SELECT (in this position)",
+        GraphPattern::LeftJoin { .. } => "OPTIONAL (in this position)",
+        GraphPattern::Filter { .. } => "FILTER (in this position)",
+        GraphPattern::Extend { .. } => "BIND (in this position)",
+        GraphPattern::Graph { .. } => "GRAPH (in this position)",
+        GraphPattern::Union { .. } => "UNION (in this position)",
+        GraphPattern::Path { .. } => "a property path (in this position)",
+        GraphPattern::Bgp { .. } => "a basic graph pattern (in this position)",
+        _ => "an unrecognized algebra construct",
     }
 }
 
@@ -7040,10 +7084,17 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
                          to forbid partial results",
                         crate::query::guc::path_max_depth()
                     ),
-                    crate::query::guc::OnPathTruncation::Error => panic!(
-                        "sparql: property path truncated at pgrdf.path_max_depth={} \
-                         (pgrdf.on_path_truncation=error forbids partial results)",
-                        crate::query::guc::path_max_depth()
+                    // E0 (LIB v0.6.34): the fail-closed opt-in hit a
+                    // configured budget — 54000 program_limit_exceeded,
+                    // the same class RDFC's complexity guard deserves.
+                    // Message byte-identical (a #[pg_test] pins it).
+                    crate::query::guc::OnPathTruncation::Error => crate::refuse(
+                        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                        format!(
+                            "sparql: property path truncated at pgrdf.path_max_depth={} \
+                             (pgrdf.on_path_truncation=error forbids partial results)",
+                            crate::query::guc::path_max_depth()
+                        ),
                     ),
                 }
             }
@@ -13249,6 +13300,84 @@ mod tests {
         assert!(trunc > 0, "count mode still bumps the counter");
         Spi::run("RESET pgrdf.path_max_depth").unwrap();
         Spi::run("RESET pgrdf.on_path_truncation").unwrap();
+    }
+
+    /// E0 negative control (LIB K10): unsupported algebra carries
+    /// 0A000 `feature_not_supported` — by ENUM — and the message names
+    /// the construct (T-MSG-1), never a Rust Debug dump. No SPI after
+    /// the catch.
+    #[pg_test]
+    fn unsupported_algebra_carries_feature_not_supported() {
+        use pgrx::pg_sys::errcodes::PgSqlErrorCode;
+        use pgrx::pg_sys::panic::CaughtError;
+        let caught = pgrx::PgTryBuilder::new(|| {
+            Spi::run(
+                "SELECT * FROM pgrdf.sparql(
+                     'SELECT ?s WHERE { ?s ?p ?o . SERVICE <http://remote/> { ?s ?p2 ?o2 } }')",
+            )
+            .unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            CaughtError::PostgresError(r)
+            | CaughtError::ErrorReport(r)
+            | CaughtError::RustPanic { ereport: r, .. } => {
+                Some((r.sql_error_code(), r.message().to_string()))
+            }
+        })
+        .execute();
+        let (code, msg) = caught.expect("SERVICE query must refuse");
+        assert_eq!(
+            code,
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "unsupported algebra must reach callers as 0A000, not XX000"
+        );
+        assert!(
+            msg.contains("SERVICE"),
+            "the refusal names the construct; got: {msg}"
+        );
+        assert!(
+            !msg.contains("NamedNode {"),
+            "no Rust Debug dump in a gate message (T-MSG-1); got: {msg}"
+        );
+    }
+
+    /// E0 negative control (LIB K10): fail-closed path truncation carries
+    /// 54000 `program_limit_exceeded` — by ENUM. The sibling test above
+    /// pins the message; SETs happen BEFORE the catch (aborted txn after).
+    #[pg_test]
+    fn truncation_error_mode_carries_program_limit_exceeded() {
+        use pgrx::pg_sys::errcodes::PgSqlErrorCode;
+        use pgrx::pg_sys::panic::CaughtError;
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+            '@prefix ex: <http://example.com/> .
+             ex:t1 ex:sub ex:t2 . ex:t2 ex:sub ex:t3 . ex:t3 ex:sub ex:t4 .',
+            9207)",
+        )
+        .unwrap();
+        Spi::run("SET pgrdf.path_max_depth = 2").unwrap();
+        Spi::run("SET pgrdf.on_path_truncation = 'error'").unwrap();
+        let code = pgrx::PgTryBuilder::new(|| {
+            Spi::run(
+                "SELECT count(*) FROM pgrdf.sparql(
+                     'PREFIX ex: <http://example.com/> \
+                      SELECT ?o WHERE { ex:t1 ex:sub+ ?o }')",
+            )
+            .unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            CaughtError::PostgresError(r)
+            | CaughtError::ErrorReport(r)
+            | CaughtError::RustPanic { ereport: r, .. } => Some(r.sql_error_code()),
+        })
+        .execute();
+        assert_eq!(
+            code,
+            Some(PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            "fail-closed truncation must reach callers as 54000, not XX000"
+        );
     }
 
     /// E3 invariant A in miniature — `*` is the reflexive-transitive

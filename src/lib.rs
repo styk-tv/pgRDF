@@ -33,6 +33,22 @@ pub mod query;
 pub mod storage;
 pub mod validation;
 
+/// E0 (SPEC.pgRDF.LIB.v0.6.34): raise a deliberate refusal as a Postgres
+/// ERROR carrying a semantic SQLSTATE — the one door every reclassified
+/// gate goes through. Mechanism identical to `pgrx::error!`: pgrx converts
+/// ERROR-level reports into Rust panics ("ERRORs get converted into panics
+/// so they can perform proper stack unwinding" — pgrx-pg-sys panic.rs), so
+/// Drop handlers run and `PgTryBuilder` catches exactly as before. The only
+/// observable difference is the SQLSTATE a client receives: the gate names
+/// its class instead of defaulting to XX000 internal_error. `#[track_caller]`
+/// keeps LOCATION pointing at the gate site, not this helper.
+#[track_caller]
+pub(crate) fn refuse(code: pgrx::pg_sys::errcodes::PgSqlErrorCode, msg: String) -> ! {
+    pgrx::pg_sys::panic::ErrorReport::new(code, msg, "pgrdf")
+        .report(pgrx::pg_sys::elog::PgLogLevel::ERROR);
+    unreachable!("ERROR-level report always unwinds")
+}
+
 /// Postgres entrypoint. Runs once per process: in the postmaster
 /// when `pgrdf` is in `shared_preload_libraries` (the supported
 /// production deployment), or lazily in a backend on first extension
