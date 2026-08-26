@@ -52,9 +52,17 @@ pub(crate) fn require_unlocked(graph_id: i64, verb: &str) {
     );
     if let Ok((Some(true), reason)) = row {
         let reason = reason.unwrap_or_else(|| "checkpointed".to_string());
-        pgrx::error!(
-            "{LOCK_PREFIX} {graph_id} is locked ({reason}): {verb} refused. \
-             Unlock with pgrdf.unlock_graph({graph_id}, '<reason>')."
+        // E0 (SPEC.pgRDF.LIB.v0.6.34): a deliberate refusal is a RESULT and
+        // must not reach clients as XX000 internal_error. 55P03
+        // lock_not_available is the standard class for "declined because a
+        // lock is held". Mechanism unchanged (see crate::refuse); message
+        // byte-identical to the pre-E0 text (K2).
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
+            format!(
+                "{LOCK_PREFIX} {graph_id} is locked ({reason}): {verb} refused. \
+                 Unlock with pgrdf.unlock_graph({graph_id}, '<reason>')."
+            ),
         );
     }
 }
@@ -65,7 +73,10 @@ pub(crate) fn require_unlocked(graph_id: i64, verb: &str) {
 #[pg_extern]
 fn lock_graph(graph_id: i64, reason: &str) -> bool {
     if reason.trim().is_empty() {
-        pgrx::error!("lock_graph: a non-empty reason is required — the reason IS the record");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "lock_graph: a non-empty reason is required — the reason IS the record".to_string(),
+        );
     }
     let existing = Spi::get_two_with_args::<bool, String>(
         "SELECT locked, COALESCE(lock_reason, '') FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
@@ -74,13 +85,19 @@ fn lock_graph(graph_id: i64, reason: &str) -> bool {
     match existing {
         Ok((Some(true), prior)) => {
             let prior = prior.unwrap_or_default();
-            pgrx::error!(
-                "lock_graph: graph {graph_id} is already locked ({prior}). \
-                 Unlock first — a silent re-lock would swallow the standing reason."
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
+                format!(
+                    "lock_graph: graph {graph_id} is already locked ({prior}). \
+                     Unlock first — a silent re-lock would swallow the standing reason."
+                ),
             );
         }
         Ok((Some(false), _)) => {}
-        _ => pgrx::error!("lock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+            format!("lock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
+        ),
     }
     Spi::run_with_args(
         "UPDATE pgrdf._pgrdf_graphs \
@@ -98,7 +115,10 @@ fn lock_graph(graph_id: i64, reason: &str) -> bool {
 #[pg_extern]
 fn unlock_graph(graph_id: i64, reason: &str) -> bool {
     if reason.trim().is_empty() {
-        pgrx::error!("unlock_graph: a non-empty reason is required — the reason IS the record");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "unlock_graph: a non-empty reason is required — the reason IS the record".to_string(),
+        );
     }
     let existing = Spi::get_one_with_args::<bool>(
         "SELECT locked FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
@@ -106,10 +126,14 @@ fn unlock_graph(graph_id: i64, reason: &str) -> bool {
     );
     match existing {
         Ok(Some(true)) => {}
-        Ok(Some(false)) => {
-            pgrx::error!("unlock_graph: graph {graph_id} is not locked — nothing to unlock")
-        }
-        _ => pgrx::error!("unlock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
+        Ok(Some(false)) => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            format!("unlock_graph: graph {graph_id} is not locked — nothing to unlock"),
+        ),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+            format!("unlock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
+        ),
     }
     Spi::run_with_args(
         "UPDATE pgrdf._pgrdf_graphs \
@@ -220,6 +244,35 @@ mod tests {
     fn unlock_unlocked_refuses() {
         Spi::run("SELECT pgrdf.add_graph(980031)").unwrap();
         Spi::run("SELECT pgrdf.unlock_graph(980031, 'why')").unwrap();
+    }
+
+    /// E0 negative control (LIB K10): the lock refusal carries
+    /// 55P03 `lock_not_available` — asserted by ENUM, never by message
+    /// (asserting prose is the L6 defect this line of work retires).
+    /// A gate nobody has watched raise its code is unproven.
+    ///
+    /// No SPI after the catch: the transaction is aborted at that point
+    /// (the 0.6.28 vacuity lesson, same as the #114 test).
+    #[pg_test]
+    fn lock_refusal_carries_lock_not_available() {
+        use pgrx::pg_sys::errcodes::PgSqlErrorCode;
+        use pgrx::pg_sys::panic::CaughtError;
+        setup(980_040);
+        let code = pgrx::PgTryBuilder::new(|| {
+            Spi::run("SELECT pgrdf.clear_graph(980040)").unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            CaughtError::PostgresError(r)
+            | CaughtError::ErrorReport(r)
+            | CaughtError::RustPanic { ereport: r, .. } => Some(r.sql_error_code()),
+        })
+        .execute();
+        assert_eq!(
+            code,
+            Some(PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE),
+            "lock refusal must reach callers as 55P03 lock_not_available, not XX000"
+        );
     }
 
     #[pg_test]

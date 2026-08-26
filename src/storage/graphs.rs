@@ -211,11 +211,17 @@ fn graph_iri(id: i64) -> Option<String> {
 #[pg_extern]
 fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
     if id < 0 {
-        panic!("drop_graph: graph_id must be >= 0, got {id}");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("drop_graph: graph_id must be >= 0, got {id}"),
+        );
     }
     crate::storage::lock::require_unlocked(id, "drop_graph"); // #107
     if id == 0 {
-        panic!("drop_graph: cannot drop default partition (graph_id = 0)");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "drop_graph: cannot drop default partition (graph_id = 0)".to_string(),
+        );
     }
 
     // Partition-DDL gate FIRST — the same global outermost lock the
@@ -271,9 +277,12 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         .unwrap_or_else(|e| panic!("drop_graph: is_inferred check failed: {e}"))
         .unwrap_or(false);
         if has_inferred {
-            panic!(
-                "drop_graph: inferred rows present (graph_id = {id}); \
-                 pass cascade => true to proceed"
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST,
+                format!(
+                    "drop_graph: inferred rows present (graph_id = {id}); \
+                     pass cascade => true to proceed"
+                ),
             );
         }
     }
@@ -359,13 +368,19 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
 #[pg_extern]
 fn move_graph(src: i64, dst: i64) -> i64 {
     if src < 0 || dst < 0 {
-        panic!("move_graph: graph_id must be >= 0, got src={src}, dst={dst}");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("move_graph: graph_id must be >= 0, got src={src}, dst={dst}"),
+        );
     }
     // #107: move clears src and writes dst — both must be unlocked.
     crate::storage::lock::require_unlocked(src, "move_graph (source)");
     crate::storage::lock::require_unlocked(dst, "move_graph (destination)");
     if src == dst {
-        panic!("move_graph: src and dst must differ (both = {src})");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("move_graph: src and dst must differ (both = {src})"),
+        );
     }
 
     // Partition-DDL gate FIRST — uniform with the lifecycle UDFs it
@@ -419,9 +434,12 @@ fn move_graph(src: i64, dst: i64) -> i64 {
                 .unwrap_or_else(|e| panic!("move_graph: dst count failed: {e}"))
                 .unwrap_or(0);
         if dst_count > 0 {
-            panic!(
-                "move_graph: dst graph_id {dst} already has data ({dst_count} rows); \
-                 clear or drop it first"
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                format!(
+                    "move_graph: dst graph_id {dst} already has data ({dst_count} rows); \
+                     clear or drop it first"
+                ),
             );
         }
     }
@@ -489,7 +507,10 @@ fn move_graph(src: i64, dst: i64) -> i64 {
 #[pg_extern]
 fn clear_graph(id: i64) -> i64 {
     if id < 0 {
-        panic!("clear_graph: graph_id must be >= 0, got {id}");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("clear_graph: graph_id must be >= 0, got {id}"),
+        );
     }
     crate::storage::lock::require_unlocked(id, "clear_graph"); // #107
 
@@ -594,11 +615,17 @@ fn clear_graph(id: i64) -> i64 {
 #[pg_extern]
 fn copy_graph(src: i64, dst: i64) -> i64 {
     if src < 0 || dst < 0 {
-        panic!("copy_graph: graph_id must be >= 0, got src={src}, dst={dst}");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("copy_graph: graph_id must be >= 0, got src={src}, dst={dst}"),
+        );
     }
     crate::storage::lock::require_unlocked(dst, "copy_graph (destination)"); // #107 — src is only read
     if src == dst {
-        panic!("copy_graph: src and dst must differ (both = {src})");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("copy_graph: src and dst must differ (both = {src})"),
+        );
     }
 
     // Partition-DDL gate FIRST — uniform with the rest of the
@@ -695,11 +722,17 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
 #[pg_extern]
 fn carve_graph(src: i64, predicate: &str, dst: i64) -> i64 {
     if src < 0 || dst < 0 {
-        panic!("carve_graph: graph_id must be >= 0, got src={src}, dst={dst}");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("carve_graph: graph_id must be >= 0, got src={src}, dst={dst}"),
+        );
     }
     crate::storage::lock::require_unlocked(dst, "carve_graph (destination)"); // #107
     if src == dst {
-        panic!("carve_graph: src and dst must differ (both = {src})");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("carve_graph: src and dst must differ (both = {src})"),
+        );
     }
 
     // Partition-DDL gate first — same lock order (`advisory -> {graphs,quads}`)
@@ -808,10 +841,16 @@ fn carve_graph_neighbourhood(
 ) -> i64 {
     crate::storage::lock::require_unlocked(dst, "carve_graph (destination)"); // #107
     if src < 0 || dst < 0 {
-        panic!("carve_graph: graph_id must be >= 0, got src={src}, dst={dst}");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("carve_graph: graph_id must be >= 0, got src={src}, dst={dst}"),
+        );
     }
     if src == dst {
-        panic!("carve_graph: src and dst must differ (both = {src})");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("carve_graph: src and dst must differ (both = {src})"),
+        );
     }
     let hops = max_hops.max(0);
 
@@ -976,7 +1015,10 @@ fn resolve_iri_or_panic(fn_name: &str, iri: &str) -> i64 {
     .unwrap_or_else(|e| panic!("{fn_name}: iri resolution failed: {e}"));
     match id {
         Some(g) => g,
-        None => panic!("{fn_name}: unknown iri {iri:?}"),
+        None => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+            format!("{fn_name}: unknown iri {iri:?}"),
+        ),
     }
 }
 

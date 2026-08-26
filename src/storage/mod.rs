@@ -24,9 +24,13 @@
 pub mod canon;
 pub mod construct_ingest;
 pub mod dict;
+pub mod export;
+pub mod fd1;
+pub mod freshness;
 pub mod graphs;
 pub mod hexastore;
 pub mod integrity;
+pub mod inventory;
 pub mod loader;
 pub mod loader_ta11;
 pub mod lock;

@@ -121,9 +121,12 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     // pgrx negative test pins the full message.
     match profile.as_str() {
         "owl-rl" | "rdfs" => {}
-        other => panic!(
-            "materialize: unknown profile {other:?} \
-             (supported: 'owl-rl', 'rdfs')"
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!(
+                "materialize: unknown profile {other:?} \
+                 (supported: 'owl-rl', 'rdfs')"
+            ),
         ),
     }
 
@@ -254,7 +257,10 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
                 (term_type::LITERAL, lit.value().to_string(), dt, lang)
             }
             #[allow(unreachable_patterns)]
-            _ => panic!("materialize: unsupported object term (RDF-star out of scope)"),
+            _ => crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "materialize: unsupported object term (RDF-star out of scope)".to_string(),
+            ),
         }
     }
     let mut distinct: HashMap<TermKey, usize> = HashMap::new();
@@ -326,6 +332,10 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     // (set-diff), `write_ms` (dict interning + batched quad inserts),
     // `analyze_ms` (the M1 ANALYZE). Additive fields — existing
     // consumers key on the original fields only.
+    // E4: a successful materialization records when it ran and the
+    // asserted count it ran over — graph_inventory()'s `materialization`
+    // column derives current/stale from these at read time.
+    crate::storage::freshness::stamp_materialize(graph_id, base_count);
     pgrx::JsonB(json!({
         "base_triples":              base_count,
         "inferred_triples_written":  written,

@@ -1,0 +1,7 @@
+# macOS-only link flag for pgrx cdylibs (pgrx #731): rustc emits a Mach-O
+# MH_DYLIB whose Postgres backend symbols are undefined at link time, and
+# macOS's two-level namespace cannot resolve them. Flat-namespace lookup at
+# dlopen is the standard pgrx workaround. No effect on Linux builds — CI and
+# the container builders are untouched by this file.
+[target.'cfg(target_os="macos")']
+rustflags = ["-Clink-arg=-Wl,-undefined,dynamic_lookup"]

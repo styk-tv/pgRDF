@@ -170,6 +170,11 @@ pub fn reset() {
 /// clippy quiet until that first caller lands.
 #[allow(dead_code)]
 pub fn note_path_depth_truncation() {
+    // E2 (LIB v0.6.34): the per-call, per-backend figure bumps FIRST and
+    // unconditionally — session-local completeness must not depend on
+    // shmem being preloaded. The global counter below stays what it
+    // always was: instance health, never a per-call verdict (L2).
+    CALL_PATH_TRUNCATIONS.with(|c| c.set(c.get() + 1));
     if !is_ready() {
         return;
     }
@@ -180,10 +185,39 @@ pub fn note_path_depth_truncation() {
 /// the refusal site immediately before the error is raised (and by
 /// any future path that skips a clause it cannot apply).
 pub fn note_filter_clause_dropped() {
+    CALL_FILTER_DROPS.with(|c| c.set(c.get() + 1));
     if !is_ready() {
         return;
     }
     FILTER_CLAUSES_DROPPED.get().fetch_add(1, Ordering::Relaxed);
+}
+
+// ── E2: per-call completeness figures (LIB v0.6.34) ──────────────────
+//
+// Backend-local, reset at the entry of every pgrdf query verb
+// (`sparql` / `construct` / `describe`), bumped alongside the global
+// counters above. Session-local by construction: another session's
+// truncation CANNOT appear here, which is the property the global
+// counters cannot offer (L2 — measured as cross-session delta
+// pollution, and as this suite's own parallel-run flake).
+thread_local! {
+    static CALL_PATH_TRUNCATIONS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    static CALL_FILTER_DROPS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+/// Reset the per-call figures. Called at query-verb entry.
+pub fn call_stats_reset() {
+    CALL_PATH_TRUNCATIONS.with(|c| c.set(0));
+    CALL_FILTER_DROPS.with(|c| c.set(0));
+}
+
+/// The per-call figures for the most recent pgrdf query verb in THIS
+/// backend: (path_depth_truncations, filter_clauses_dropped).
+pub fn call_stats() -> (i64, i64) {
+    (
+        CALL_PATH_TRUNCATIONS.with(|c| c.get()),
+        CALL_FILTER_DROPS.with(|c| c.get()),
+    )
 }
 
 /// Set true inside `_PG_init` only when Postgres is running the
