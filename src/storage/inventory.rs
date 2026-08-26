@@ -15,6 +15,9 @@
 //!   Q1 which graphs exist (id + iri)      → `graph_inventory`
 //!   Q2 asserted/inferred counts per graph → `graph_inventory`
 //!   Q5 which partitions are orphaned      → `orphan_partitions`
+//! plus the E4 fact no client ledger can state correctly (only the
+//! engine sees every connection's writes): `materialization` =
+//! current | stale | never | unknown.
 //! (Q3 term lexical value → `pgrdf.get_term`; Q4 graphs containing a
 //! subject → SPARQL `GRAPH ?g` — both already supported.)
 
@@ -39,6 +42,7 @@ fn graph_inventory() -> TableIterator<
         name!(inferred, i64),
         name!(locked, bool),
         name!(lock_reason, Option<String>),
+        name!(materialization, String),
     ),
 > {
     let mut rows = Vec::new();
@@ -49,7 +53,14 @@ fn graph_inventory() -> TableIterator<
                         COALESCE(c.a, 0) AS asserted,
                         COALESCE(c.i, 0) AS inferred,
                         COALESCE(g.locked, false) AS locked,
-                        g.lock_reason
+                        g.lock_reason,
+                        CASE
+                          WHEN g.last_materialize_at IS NULL THEN
+                            CASE WHEN COALESCE(c.i, 0) > 0 THEN 'unknown' ELSE 'never' END
+                          WHEN COALESCE(c.a, 0) IS DISTINCT FROM g.materialized_base_count
+                            THEN 'stale'
+                          ELSE 'current'
+                        END AS materialization
                  FROM pgrdf._pgrdf_graphs g
                  LEFT JOIN (
                      SELECT graph_id,
@@ -70,6 +81,9 @@ fn graph_inventory() -> TableIterator<
                 row.get::<i64>(4).unwrap().unwrap_or(0),
                 row.get::<bool>(5).unwrap().unwrap_or(false),
                 row.get::<String>(6).unwrap(),
+                row.get::<String>(7)
+                    .unwrap()
+                    .unwrap_or_else(|| "unknown".into()),
             ));
         }
     });

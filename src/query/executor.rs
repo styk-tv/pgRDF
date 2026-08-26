@@ -7168,6 +7168,19 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
 /// carrying the `_update` summary; the caller wraps it in
 /// `SetOfIterator`. Wall-clock timing starts at function entry so the
 /// dictionary internment + partition setup cost is visible to operators.
+/// #107 completed + E4: every graph an UPDATE writes passes through
+/// here exactly once per statement (HashSet dedupe). On first touch it
+/// takes the lock fence — closing the hole where INSERT DATA / DELETE
+/// into a LOCKED graph succeeded while every other write path refused
+/// (a consumer compensated client-side for years) — and stamps the
+/// freshness write. Fencing after the first row is sound: a refusal
+/// aborts the statement's transaction and every prior write rolls back.
+fn touch_written_graph(touched: &mut HashSet<i64>, g_id: i64) {
+    if touched.insert(g_id) {
+        crate::storage::lock::require_unlocked(g_id, "SPARQL UPDATE");
+    }
+}
+
 fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
     // Partition-DDL gate FIRST — the global OUTERMOST lock for the
     // whole UPDATE statement, taken before ANY dictionary internment,
@@ -7226,7 +7239,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     let o_id = intern_object(&quad.object);
                     insert_quad(s_id, p_id, o_id, g_id);
                     triples_inserted += 1;
-                    graphs_touched.insert(g_id);
+                    touch_written_graph(&mut graphs_touched, g_id);
                 }
             }
             GraphUpdateOperation::DeleteData { data } => {
@@ -7269,7 +7282,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     let (Some(s), Some(p), Some(o)) = (s_id, p_id, o_id) else {
                         // At least one term not in the dictionary —
                         // the quad cannot exist. Spec-correct no-op.
-                        graphs_touched.insert(g_id);
+                        touch_written_graph(&mut graphs_touched, g_id);
                         continue;
                     };
                     let n: i64 = Spi::get_one_with_args(
@@ -7286,7 +7299,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     .unwrap_or_else(|e| panic!("sparql: UPDATE: DELETE quad failed: {e}"))
                     .unwrap_or(0);
                     triples_deleted += n;
-                    graphs_touched.insert(g_id);
+                    touch_written_graph(&mut graphs_touched, g_id);
                 }
             }
             GraphUpdateOperation::DeleteInsert {
@@ -7341,7 +7354,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                         triples_deleted += n_del;
                         triples_inserted += n_ins;
                         for g in graphs {
-                            graphs_touched.insert(g);
+                            touch_written_graph(&mut graphs_touched, g);
                         }
                     }
                     (true, false) => {
@@ -7371,7 +7384,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                         let (n_deleted, graphs) = execute_delete_where(delete, pattern_ref);
                         triples_deleted += n_deleted;
                         for g in graphs {
-                            graphs_touched.insert(g);
+                            touch_written_graph(&mut graphs_touched, g);
                         }
                     }
                     (false, true) => {
@@ -7390,7 +7403,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                         let (n_inserted, graphs) = execute_insert_where(insert, pattern_ref);
                         triples_inserted += n_inserted;
                         for g in graphs {
-                            graphs_touched.insert(g);
+                            touch_written_graph(&mut graphs_touched, g);
                         }
                     }
                     (false, false) => {
@@ -7816,7 +7829,7 @@ fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet
             match lookup_graph_id(iri) {
                 Some(id) => {
                     let n = clear_graph_by_id(id);
-                    graphs_touched.insert(id);
+                    touch_written_graph(graphs_touched, id);
                     n
                 }
                 None if silent => 0,
@@ -7825,7 +7838,7 @@ fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet
         }
         GraphTarget::DefaultGraph => {
             let n = clear_default_graph_rows();
-            graphs_touched.insert(0);
+            touch_written_graph(graphs_touched, 0);
             n
         }
         GraphTarget::AllGraphs => {
@@ -7835,10 +7848,10 @@ fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet
             // `_pgrdf_quads_g0` and `_pgrdf_quads_default` regardless
             // of which one `add_graph(0)` allocated).
             let mut total: i64 = clear_default_graph_rows();
-            graphs_touched.insert(0);
+            touch_written_graph(graphs_touched, 0);
             for id in enumerate_bound_graph_ids(false) {
                 total += clear_graph_by_id(id);
-                graphs_touched.insert(id);
+                touch_written_graph(graphs_touched, id);
             }
             total
         }
@@ -7848,7 +7861,7 @@ fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet
             let mut total: i64 = 0;
             for id in enumerate_bound_graph_ids(false) {
                 total += clear_graph_by_id(id);
-                graphs_touched.insert(id);
+                touch_written_graph(graphs_touched, id);
             }
             total
         }
@@ -7868,13 +7881,13 @@ fn execute_create(graph: &NamedNode, silent: bool, graphs_touched: &mut HashSet<
         }
         // SILENT idempotent path — already bound, no-op, but still
         // record the touched graph_id for the summary.
-        graphs_touched.insert(existing);
+        touch_written_graph(graphs_touched, existing);
         return;
     }
     let allocated: i64 = Spi::get_one_with_args("SELECT pgrdf.add_graph($1::text)", &[iri.into()])
         .unwrap_or_else(|e| panic!("sparql: CREATE GRAPH <{iri}>: add_graph failed: {e}"))
         .expect("sparql: CREATE GRAPH: add_graph returned NULL (impossible)");
-    graphs_touched.insert(allocated);
+    touch_written_graph(graphs_touched, allocated);
 }
 
 /// Dispatch a `DROP` operation. Returns the count of triples that
@@ -7905,7 +7918,7 @@ fn execute_drop(
                     // Capture the IRI before the drop wipes the binding.
                     captured_graph_iris.insert(iri.to_string());
                     let n = drop_graph_by_id(id);
-                    graphs_touched.insert(id);
+                    touch_written_graph(graphs_touched, id);
                     n
                 }
                 None if silent => 0,
@@ -7919,7 +7932,7 @@ fn execute_drop(
             // an "empty, not destroy" anyway. Direct partition-wide
             // DELETE handles both g0 and default routing.
             let n = clear_default_graph_rows();
-            graphs_touched.insert(0);
+            touch_written_graph(graphs_touched, 0);
             n
         }
         GraphTarget::AllGraphs => {
@@ -7928,14 +7941,14 @@ fn execute_drop(
             // post-state is an empty default partition + zero named
             // graphs bound.
             let mut total: i64 = clear_default_graph_rows();
-            graphs_touched.insert(0);
+            touch_written_graph(graphs_touched, 0);
             for id in enumerate_bound_graph_ids(false) {
                 // Capture the IRI before drop_graph_by_id wipes it.
                 if let Some(iri) = lookup_graph_iri(id) {
                     captured_graph_iris.insert(iri);
                 }
                 total += drop_graph_by_id(id);
-                graphs_touched.insert(id);
+                touch_written_graph(graphs_touched, id);
             }
             total
         }
@@ -7949,7 +7962,7 @@ fn execute_drop(
                     captured_graph_iris.insert(iri);
                 }
                 total += drop_graph_by_id(id);
-                graphs_touched.insert(id);
+                touch_written_graph(graphs_touched, id);
             }
             total
         }
@@ -8142,7 +8155,7 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
                 let (s_id, p_id, o_id, g_id) = instantiate_template_quad(qp, &binding);
                 insert_quad(s_id, p_id, o_id, g_id);
                 triples_inserted += 1;
-                graphs_touched.insert(g_id);
+                touch_written_graph(&mut graphs_touched, g_id);
             }
         }
     });
@@ -8463,7 +8476,7 @@ fn execute_delete_where(
                 // DELETE DATA's behaviour where graphs_touched
                 // surfaces scope even when no row was actually
                 // removed (per slice 83 contract).
-                graphs_touched.insert(g_id);
+                touch_written_graph(&mut graphs_touched, g_id);
             }
         }
     });
@@ -8801,7 +8814,7 @@ fn execute_delete_insert_where(
                 })
                 .unwrap_or(0);
                 triples_deleted += n;
-                graphs_touched.insert(g_id);
+                touch_written_graph(&mut graphs_touched, g_id);
             }
 
             // INSERT half — interning path, set-semantic guard.
@@ -8809,7 +8822,7 @@ fn execute_delete_insert_where(
                 let (s_id, p_id, o_id, g_id) = instantiate_template_quad(qp, &binding);
                 insert_quad(s_id, p_id, o_id, g_id);
                 triples_inserted += 1;
-                graphs_touched.insert(g_id);
+                touch_written_graph(&mut graphs_touched, g_id);
             }
         }
     });

@@ -28,11 +28,31 @@ becomes a query, and the fleet's interop digest comes home.
   every function with its stability class (stable/internal/spike/
   deprecated). A `#[pg_test]` enforces the classification complete in
   both directions against `pg_proc`.
+- **`pgrdf.export_graph(graph_id)`** (E3, closes #36) — a graph's
+  asserted triples as canonical N-Triples, byte-sorted. Inferred rows
+  never export: they re-derive, and exporting them would re-import as
+  asserted what was only derived.
+- **`pgrdf.graph_manifest(graph_id)`** (E7) — the portable manifest of
+  one graph: three digests each carrying its method (bytes over the
+  canonical export / rdfc-1.0 identity / pgrdf-fd1 structure), counts,
+  engine identity, capture time, and a mandatory `not_carried` list.
+  Pair with `export_graph` to build a redistributable package.
+- **Materialization freshness** (E4) — `materialize` records when it ran
+  and the asserted count it ran over; `graph_inventory()` derives
+  `materialization` = never | unknown | stale | current. Stated limit:
+  a write leaving the asserted count unchanged reads current.
 - **`pgrdf.structural_digest(graph_id)`** (E6) — the first-degree
   structural pin (method `pgrdf-fd1-sha256`), byte-for-byte the fleet
   algorithm. `DIFFERENT` is conclusive; `SAME` is evidence, never proof
   — `pgrdf.graph_digest` (rdfc-1.0-sha256) remains the proof plane, and
   the two values are never comparable with each other.
+
+### Fixed
+
+- **SPARQL UPDATE now takes the graph lock fence** (#107 completed) —
+  `INSERT DATA` / `DELETE` into a LOCKED graph previously succeeded
+  while every other write path refused; consumers compensated with
+  client-side lock checks. It now refuses `55P03` like everything else.
 
 ### Changed
 

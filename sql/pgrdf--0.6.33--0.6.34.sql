@@ -17,6 +17,24 @@
 --   digested to sha256 of empty input — indistinguishable from a
 --   legitimately EMPTY graph (which still answers, as it should).
 --
+-- Also in this release:
+--
+-- * E4 — materialization freshness: `materialize` records when it ran
+--   and the asserted count it ran over (two new nullable columns on
+--   _pgrdf_graphs); graph_inventory() derives materialization =
+--   never | unknown | stale | current at read time. Pre-0.6.34 graphs
+--   with inferred rows read 'unknown' until their next materialize —
+--   the honest value, never a guess. Stated limit: a write leaving the
+--   asserted count unchanged reads 'current'.
+-- * #107 completed — SPARQL UPDATE now takes the graph lock fence:
+--   INSERT DATA / DELETE into a LOCKED graph previously SUCCEEDED
+--   while every other write path refused; it now refuses 55P03.
+-- * E3 export_graph(graph_id) — asserted triples as canonical
+--   N-Triples, byte-sorted; inferred rows never export (closes #36).
+-- * E7 graph_manifest(graph_id) — the portable manifest: three digests
+--   each with its method (bytes / rdfc-1.0 / pgrdf-fd1), counts,
+--   engine identity, and a mandatory not_carried list.
+--
 -- New functions (DDL below, from the pgrx-generated install script):
 --
 -- * E1 graph_inventory() / orphan_partitions() — the supported
@@ -38,17 +56,35 @@
 --   (rdfc-1.0-sha256) where proof is required; the two values are
 --   never comparable with each other.
 
+ALTER TABLE _pgrdf_graphs ADD COLUMN IF NOT EXISTS last_materialize_at     TIMESTAMPTZ;
+ALTER TABLE _pgrdf_graphs ADD COLUMN IF NOT EXISTS materialized_base_count BIGINT;
+
 CREATE FUNCTION "graph_inventory"() RETURNS TABLE (
     "graph_id" bigint,
     "iri" TEXT,
     "asserted" bigint,
     "inferred" bigint,
     "locked" bool,
-    "lock_reason" TEXT
+    "lock_reason" TEXT,
+    "materialization" TEXT
 )
 STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'graph_inventory_wrapper';
+
+CREATE FUNCTION "export_graph"(
+    "graph_id" bigint
+) RETURNS SETOF TEXT
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'export_graph_wrapper';
+
+CREATE FUNCTION "graph_manifest"(
+    "graph_id" bigint
+) RETURNS jsonb
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'graph_manifest_wrapper';
 
 CREATE FUNCTION "orphan_partitions"() RETURNS TABLE (
     "relname" TEXT

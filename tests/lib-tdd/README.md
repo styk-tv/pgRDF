@@ -30,8 +30,8 @@ them on exit; all are re-runnable and safe to run concurrently with other work.
 ## Case catalog
 
 State = the ledger as of the FULL E-series close (0.6.34, branch `lib-0-6-34-emissions`):
-**14 GREEN · 1 RED (case 15 on any dirty-tree build — the honest state while iterating;
-green on clean-tree deliveries) · 0 BROKEN.**
+**16 GREEN · 1 RED (case 15 on any dirty-tree build — the honest state while iterating;
+green on clean-tree deliveries) · 0 BROKEN.** The full E-series (E0–E7) is closed.
 Every RED asserts its *specific* current failure (exact SQLSTATE, exact hash, exact
 delta), so a stale prediction surfaces as BROKEN, never as a silent pass.
 
@@ -51,6 +51,8 @@ delta), so a stale prediction surfaces as BROKEN, never as a silent pass.
 | `12-e5-manifest-coverage` | E5-2/K9 | regenerates the live surface (`gen-surface.sh`) and diffs both directions against `src/surface_manifest.tsv` — the same file `surface()` serves via `include_str!` | the manifest (DRAFT judgments — operator review owed) + in-engine K9-2 test | **GREEN** |
 | `13-k11-lock-cure-works` | K11-1 (RET) | provokes the lock refusal, extracts the cure it names, EXECUTES that cure, asserts the condition resolves | `lock.rs` message contract (`unlock_graph(id, reason)`) | **GREEN** |
 | `14-tmsg-no-debug-dump` | T-MSG-1 | asserts the algebra refusal names the construct (SERVICE) and carries no `NamedNode { … }` debris | `algebra_construct_name()` in `executor.rs` | **GREEN** |
+| `16-e3-export-roundtrip` | E3-1 | exports a bnode-bearing graph, re-imports into a fresh graph, asserts identical rdfc-1.0 identity (byte-equality would be the category error) | E3 `export_graph()`; round-trip + sorted/asserted-only `#[pg_test]`s | **GREEN** |
+| `17-e7-manifest-honest` | E7-1/K5/K8 | every digest carries its method, `not_carried` non-empty, bytes digest recomputes offline from the export stream | E7 `graph_manifest()`; recompute + K8 `#[pg_test]` | **GREEN** |
 | `15-bench-identity-triple` | T-BENCH-TRIPLE (RET) | `version == extversion`, `build_id` populated, not `-dirty` — the stale-`.so` catcher (caught a pre-tag artifact on the compose bench's first boot) | `version()`/`build_id()`/catalog | RED while iterating (dirty tree — the honest state); GREEN on any clean-tree delivery |
 
 ## Coverage map — what tests what
