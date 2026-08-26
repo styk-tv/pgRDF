@@ -61,7 +61,10 @@ fn count_quads(g: default!(i64, 0)) -> i64 {
 #[pg_extern]
 fn add_graph(g: i64) -> bool {
     if g < 0 {
-        panic!("add_graph: graph_id must be >= 0, got {}", g);
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("add_graph: graph_id must be >= 0, got {}", g),
+        );
     }
     // Take the partition-DDL gate FIRST — the global outermost lock
     // (see `partition::acquire_partition_ddl_gate`). This must precede
@@ -150,7 +153,10 @@ fn add_graph(g: i64) -> bool {
 #[pg_extern(name = "add_graph")]
 fn add_graph_iri(iri: &str) -> i64 {
     if iri.trim().is_empty() {
-        panic!("add_graph: iri must be non-empty");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "add_graph: iri must be non-empty".to_string(),
+        );
     }
 
     // Partition-DDL gate FIRST — the global outermost lock — taken
@@ -254,10 +260,16 @@ fn add_graph_iri(iri: &str) -> i64 {
 #[pg_extern(name = "add_graph")]
 fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
     if id < 0 {
-        panic!("add_graph: graph_id must be >= 0, got {}", id);
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("add_graph: graph_id must be >= 0, got {}", id),
+        );
     }
     if iri.trim().is_empty() {
-        panic!("add_graph: iri must be non-empty");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "add_graph: iri must be non-empty".to_string(),
+        );
     }
 
     // Partition-DDL gate FIRST — global outermost lock — before the
@@ -312,17 +324,23 @@ fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
         // already short-circuited the equal-IRI branch, so reaching
         // here implies `existing_iri != iri`.)
         (Some(existing_iri), _) => {
-            panic!(
-                "add_graph: graph_id {} is bound to a different IRI ({})",
-                id, existing_iri
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+                format!(
+                    "add_graph: graph_id {} is bound to a different IRI ({})",
+                    id, existing_iri
+                ),
             );
         }
         // id is unbound but the IRI is bound to a different
         // graph_id — error.
         (None, Some(existing_id)) => {
-            panic!(
-                "add_graph: iri {} is bound to a different graph_id ({})",
-                iri, existing_id
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+                format!(
+                    "add_graph: iri {} is bound to a different graph_id ({})",
+                    iri, existing_id
+                ),
             );
         }
         // Neither bound — fresh INSERT + partition creation. We

@@ -1,0 +1,70 @@
+# pgrdf.surface() manifest — authored classification of every export.
+# Columns: name(identity_args) <TAB> class <TAB> note
+# Classes: stable (contract; removal/signature change = breaking release)
+#          internal (reachable but not API; no compatibility promise)
+#          spike (development measurement harness; may vanish without notice)
+#          deprecated (superseded; the note names the replacement)
+# Notes are CONSUMER-FACING: they describe what the function is and how to
+# use it well, in words that stand alone. A completeness test enforces this
+# file covers every extension-owned function in both directions.
+add_graph(g bigint)	internal	ensures the quad partition for a raw graph id; consumers create graphs by IRI with add_graph(iri)
+add_graph(id bigint, iri text)	internal	binds an explicit id/IRI pair; refuses rebinding either side. Consumers create graphs by IRI
+add_graph(iri text)	stable	create (or ensure) a graph by IRI; returns its graph_id; idempotent
+build_id()	stable	which build of version() this binary is (git describe at compile time); 'unknown' means the build did not supply one. Since 0.6.29
+carve_graph(src bigint, predicate text, dst bigint)	stable	copy the subgraph matching one predicate from src into dst
+carve_graph(src bigint, seeds text[], dst bigint, max_hops integer)	stable	copy the neighbourhood reachable from seed IRIs within max_hops from src into dst
+clear_graph(id bigint)	stable	remove every triple from a graph; the graph itself remains
+clear_graph(iri text)	stable	remove every triple from a graph by IRI; unknown IRI refuses (42704)
+construct(query text)	stable	SPARQL CONSTRUCT; rows are JSONB triples suitable for put_construct_rows
+copy_graph(src bigint, dst bigint)	stable	copy src into dst. Caution: appends, and carries inferred triples with it — clear dst first for a clean copy, re-materialize after
+copy_graph(src_iri text, dst_iri text)	stable	copy by IRI; same append-and-carry caution as the id form
+count_quads(g bigint)	stable	total quads (asserted + inferred) in one graph; graph 0 is the default graph
+describe(query text)	stable	SPARQL DESCRIBE; rows are JSONB triples
+drop_graph(id bigint, cascade boolean)	stable	drop a graph and its partition; refuses over inferred rows unless cascade (2BP01); cannot drop the default partition
+drop_graph(iri text, cascade boolean)	stable	drop by IRI; unknown IRI refuses (42704)
+get_term(id bigint)	stable	lexical value of a dictionary term id, as returned in query results and inventory
+graph_digest(graph_id bigint)	stable	canonical graph identity, method rdfc-1.0-sha256: survives reload and blank-node relabelling; equal AND unequal are both conclusive. Absent graph refuses (42704); empty graph answers. Not comparable with structural_digest values. Since 0.6.32
+graph_id(iri text)	stable	graph_id for an IRI, or NULL when unknown — check before feeding into strict functions, which silently pass NULL through
+graph_integrity(graph_id bigint)	stable	term-position integrity report (non-IRI predicates, literal subjects); unclean graphs validate vacuously and should be reloaded
+export_graph(graph_id bigint)	stable	a graph's asserted triples as canonical N-Triples, byte-sorted, one line per triple; inferred rows never export (they re-derive). Absent graph refuses (42704). Since 0.6.34
+graph_inventory()	stable	every registered graph with IRI, asserted/inferred counts, lock state and materialization freshness (current/stale/never/unknown) — the supported alternative to reading private tables. Since 0.6.34
+graph_manifest(graph_id bigint)	stable	portable manifest of one graph: three digests each carrying its method (bytes / rdfc-1.0 identity / fd1 structure), counts, engine identity, and what is NOT carried. Pair with export_graph to build a redistributable package. Since 0.6.34
+graph_iri(id bigint)	stable	IRI bound to a graph_id, or NULL when unknown
+last_call_stats()	stable	per-call completeness figures (path_depth_truncations, filter_clauses_dropped) for the most recent sparql/construct/describe call in THIS session; session-local, so other sessions cannot pollute it. Read it right after the query. Since 0.6.34
+load_turtle(path text, graph_id bigint, base_iri text, bulk_load boolean)	stable	load a Turtle FILE from the server filesystem; bulk_load enables the parallel ingest fast path
+load_turtle_dict_batched(path text, graph_id bigint, base_iri text, dict_batch_size integer)	internal	tuning variant of load_turtle with explicit dictionary batching; use load_turtle
+load_turtle_staged(IN path text, IN graph_id bigint, IN n_workers integer)	stable	staged multi-worker bulk load as a CALL-able procedure; per-phase commits, resumable
+load_turtle_staged_ping(n_workers integer)	internal	staged-loader worker-pool liveness diagnostic
+load_turtle_staged_run(path text, graph_id bigint, n_workers integer)	stable	staged multi-worker bulk load, function form; returns the run report
+load_turtle_streaming(path text, graph_id bigint, window_triples integer, id_reserve_block integer, base_iri text)	stable	windowed streaming load for files larger than memory
+load_turtle_verbose(path text, graph_id bigint, base_iri text, bulk_load boolean)	stable	load_turtle returning a JSONB report (counts, timings, source sha256) instead of a bare count
+lock_graph(graph_id bigint, reason text)	stable	write-fence a graph with a mandatory reason; every engine write path refuses while held (55P03). A coordination primitive, not a security boundary. Since 0.6.28
+materialize(graph_id bigint, profile text)	stable	OWL 2 RL ('owl-rl') or RDFS ('rdfs') forward-chaining entailment; wipes and rewrites the graph's inferred rows; unknown profile refuses (22023)
+move_graph(src bigint, dst bigint)	stable	move src into an EMPTY dst and drop src; non-empty dst refuses (55000)
+move_graph(src_iri text, dst_iri text)	stable	move by IRI; same empty-destination requirement
+orphan_partitions()	stable	quad partitions with no registered graph — invisible to SPARQL and to graph-level export/digest; a non-empty result deserves investigation. Since 0.6.34
+parse_nquads(content text, default_graph_id bigint, strict boolean)	stable	parse N-Quads text; quads without a graph label land in default_graph_id
+parse_trig(content text, default_graph_id bigint, strict boolean)	stable	parse TriG text; triples outside named graphs land in default_graph_id
+parse_turtle(content text, graph_id bigint, base_iri text)	stable	parse Turtle text into a graph; returns the triple count
+parse_turtle_dict_batched(content text, graph_id bigint, base_iri text, dict_batch_size integer)	internal	tuning variant of parse_turtle with explicit dictionary batching; use parse_turtle
+parse_turtle_verbose(content text, graph_id bigint, base_iri text)	stable	parse_turtle returning a JSONB report instead of a bare count
+plan_cache_clear()	internal	drop this backend's prepared-plan cache; a diagnostic, not part of any workflow
+put_construct_row("row" jsonb, graph_id bigint)	internal	ingest one CONSTRUCT-shaped JSONB row; the round-trip partner of construct()
+put_construct_rows(rows jsonb[], graph_id bigint)	internal	ingest CONSTRUCT-shaped JSONB rows in bulk; the round-trip partner of construct()
+put_quad(s bigint, p bigint, o bigint, g bigint)	internal	raw quad insert by dictionary ids; bypasses parsing and per-statement bookkeeping
+put_term(value text, term_type smallint)	internal	raw dictionary insert; returns the term id
+shmem_cache_prewarm("limit" bigint)	internal	warm the shared term cache from the dictionary after a restart or shmem_reset
+shmem_reset()	stable	invalidate the shared term cache (bumps its generation). Needed after DROP/CREATE EXTENSION in a live cluster. The historic use — clearing subtransaction-abort poisoning — is fixed since 0.6.33 and no longer requires this
+sparql(query text)	stable	SPARQL SELECT/ASK and UPDATE; rows are JSONB bindings. Pair with last_call_stats() for per-call completeness; no GRAPH clause means the union of all graphs
+sparql_parse(query text)	stable	parse-only dry run: the algebra, or what the engine cannot run, without executing
+sparql_sql(query text)	stable	translation dry run: the SQL a query would execute
+spike_ta10_logged_flat(triple_count integer, batch_size integer)	spike	synthetic ingest benchmark (flat table variant); measurement harness, not API
+spike_ta10_logged_indexed(triple_count integer, batch_size integer)	spike	synthetic ingest benchmark (indexed variant); measurement harness, not API
+spike_ta10_logged_partitioned(triple_count integer, batch_size integer)	spike	synthetic ingest benchmark (partitioned variant); measurement harness, not API
+spike_ta11_batch_sweep(triple_count integer, batch_size integer)	spike	synthetic ingest benchmark sweeping batch sizes; measurement harness, not API
+stats()	stable	instance-wide health counters (caches, truncations, filter refusals). Cumulative and global — never a per-call verdict; use last_call_stats() for that
+structural_digest(graph_id bigint)	stable	first-degree structural pin, method pgrdf-fd1-sha256 — the cross-implementation interop digest. Unequal values PROVE difference; equal values are evidence, not proof. Use graph_digest for conclusive identity; the two methods' values are never comparable. Absent graph refuses (42704). Since 0.6.34
+surface()	stable	this listing: every export with its stability class. Ask the engine what it supports instead of probing function existence. Since 0.6.34
+unlock_graph(graph_id bigint, reason text)	stable	release a graph lock with a mandatory reason — the cure the lock refusal names. Unlocking an unlocked graph refuses (55000). Since 0.6.28
+validate(data_graph_id bigint, shapes_graph_id bigint, mode text, strict boolean)	stable	SHACL validation report (modes: native, sparql, pgrdf). The report payload shape is frozen — tooling may rely on it
+version()	stable	extension version; with build_id() and pg_extension.extversion forms the identity triple a healthy deployment shows as three equal values

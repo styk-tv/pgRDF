@@ -43,6 +43,11 @@ SELECT bool_and(
     -- NULL means never recorded, distinct from every digest and count.
     WHEN 'source_sha256' THEN format_type(atttypid, atttypmod) = 'text'    AND NOT attnotnull
     WHEN 'source_loads'  THEN format_type(atttypid, atttypmod) = 'integer' AND NOT attnotnull
+    -- E4 (0.6.34): materialization freshness record. Both nullable —
+    -- NULL means never materialized ('never'/'unknown' in the
+    -- graph_inventory() derivation), never a guess.
+    WHEN 'last_materialize_at'     THEN format_type(atttypid, atttypmod) = 'timestamp with time zone' AND NOT attnotnull
+    WHEN 'materialized_base_count' THEN format_type(atttypid, atttypmod) = 'bigint' AND NOT attnotnull
     ELSE FALSE
   END
 ) AS columns_correct

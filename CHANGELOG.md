@@ -6,6 +6,71 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.34] — 2026-08-26
+
+SPEC.pgRDF.LIB.v0.6.34 — "the engine emits, every client listens." The
+E-series lands: refusals become typed results, the private-table reach
+becomes unnecessary, completeness becomes per-call, capability detection
+becomes a query, and the fleet's interop digest comes home.
+
+### Added
+
+- **`pgrdf.graph_inventory()` / `pgrdf.orphan_partitions()`** (E1) — the
+  supported inventory surface: graphs with iri/id, asserted/inferred
+  counts, lock state; partitions unreachable by SPARQL. Retires every
+  private `_pgrdf_*` join consumers were forced into.
+- **`pgrdf.last_call_stats()`** (E2) — per-call completeness figures
+  (`path_depth_truncations`, `filter_clauses_dropped`) for the most
+  recent query verb in this session. Backend-local: another session's
+  truncation cannot appear here, which the cumulative `stats()` counters
+  structurally cannot promise.
+- **`pgrdf.surface()`** (E5) — the classified export list, queryable:
+  every function with its stability class (stable/internal/spike/
+  deprecated). A `#[pg_test]` enforces the classification complete in
+  both directions against `pg_proc`.
+- **`pgrdf.export_graph(graph_id)`** (E3, closes #36) — a graph's
+  asserted triples as canonical N-Triples, byte-sorted. Inferred rows
+  never export: they re-derive, and exporting them would re-import as
+  asserted what was only derived.
+- **`pgrdf.graph_manifest(graph_id)`** (E7) — the portable manifest of
+  one graph: three digests each carrying its method (bytes over the
+  canonical export / rdfc-1.0 identity / pgrdf-fd1 structure), counts,
+  engine identity, capture time, and a mandatory `not_carried` list.
+  Pair with `export_graph` to build a redistributable package.
+- **Materialization freshness** (E4) — `materialize` records when it ran
+  and the asserted count it ran over; `graph_inventory()` derives
+  `materialization` = never | unknown | stale | current. Stated limit:
+  a write leaving the asserted count unchanged reads current.
+- **`pgrdf.structural_digest(graph_id)`** (E6) — the first-degree
+  structural pin (method `pgrdf-fd1-sha256`), byte-for-byte the fleet
+  algorithm. `DIFFERENT` is conclusive; `SAME` is evidence, never proof
+  — `pgrdf.graph_digest` (rdfc-1.0-sha256) remains the proof plane, and
+  the two values are never comparable with each other.
+
+### Fixed
+
+- **SPARQL UPDATE now takes the graph lock fence** (#107 completed) —
+  `INSERT DATA` / `DELETE` into a LOCKED graph previously succeeded
+  while every other write path refused; consumers compensated with
+  client-side lock checks. It now refuses `55P03` like everything else.
+
+### Changed
+
+- **Every deliberate refusal now carries a semantic SQLSTATE** (E0, 74
+  gates): `55P03` lock held · `55000` wrong lifecycle state · `22023`
+  invalid argument/content · `0A000` unsupported construct · `42704`
+  unknown graph · `42710` rebinding conflict · `2BP01` drop without
+  cascade · `54000` budget exceeded. Refusal **messages are
+  byte-identical** to 0.6.33 — message-matching clients are unaffected;
+  `err.code`-matching finally works. Genuine internal faults remain
+  `XX000`, deliberately: class XX means "no verdict was reached".
+- The unsupported-algebra refusal names the SPARQL construct (SERVICE,
+  MINUS, …) instead of dumping the algebra node's internal debug form.
+- **`graph_digest`/`structural_digest` of an absent graph refuse with
+  `42704`** instead of silently returning the sha256 of empty input —
+  an absent graph and an empty graph are now distinguishable in the
+  identity plane (an empty graph still digests: that is an answer).
+
 ## [0.6.33] — 2026-08-20
 
 One fix, fleet-measured before it was coded: the shared-memory term

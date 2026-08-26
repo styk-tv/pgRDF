@@ -208,6 +208,9 @@ fn derived_col(k: usize) -> &'static str {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    // E2: per-call completeness figures start fresh at every query-verb
+    // entry; read them after the call with pgrdf.last_call_stats().
+    crate::storage::shmem_cache::call_stats_reset();
     pin_join_order();
     let parser = SparqlParser::new();
     match parser.parse_query(query) {
@@ -373,6 +376,7 @@ fn sparql_sql(query: &str) -> String {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    crate::storage::shmem_cache::call_stats_reset(); // E2
     // M4 coverage gap (found post-v0.6.0 audit): construct() is its own
     // entry point — without the pin a direct `pgrdf.construct(...)` with
     // a multi-pattern WHERE hits the cross-product planner blowup that
@@ -392,17 +396,21 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // Cost: ASCII scan, O(input length), microseconds.
     let is_shorthand = detect_construct_where_shorthand(query);
 
-    let parsed = SparqlParser::new()
-        .parse_query(query)
-        .unwrap_or_else(|e| panic!("pgrdf.construct: parse error: {e}"));
+    let parsed = SparqlParser::new().parse_query(query).unwrap_or_else(|e| {
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("pgrdf.construct: parse error: {e}"),
+        )
+    });
 
     let (template, pattern) = match parsed {
         Query::Construct {
             template, pattern, ..
         } => (template, pattern),
-        Query::Select { .. } | Query::Ask { .. } | Query::Describe { .. } => {
-            panic!("pgrdf.construct: not a CONSTRUCT query")
-        }
+        Query::Select { .. } | Query::Ask { .. } | Query::Describe { .. } => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "pgrdf.construct: not a CONSTRUCT query".to_string(),
+        ),
     };
 
     // §16.2 modifier guard — detect DISTINCT / REDUCED / ORDER BY /
@@ -452,7 +460,10 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // explicit `CONSTRUCT { } WHERE { … }` form or for the degenerate
     // `CONSTRUCT WHERE { }` empty shorthand.)
     if template.is_empty() {
-        panic!("pgrdf.construct: empty template");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "pgrdf.construct: empty template".to_string(),
+        );
     }
 
     // Slice 57 — classify every template triple position into a
@@ -478,7 +489,10 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // reject cleanly.
     let ps = parse_select(&pattern);
     if ps.bgp.is_empty() && ps.union_branches.is_empty() {
-        panic!("pgrdf.construct: empty WHERE pattern");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "pgrdf.construct: empty WHERE pattern".to_string(),
+        );
     }
 
     // Validate every template variable is BGP-bound. ps.projected
@@ -502,7 +516,10 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
         .collect();
     for v in &template_vars {
         if !ps.projected.contains(v) && !bind_template_vars.contains(v) {
-            panic!("pgrdf.construct: unbound template variable ?{v}");
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("pgrdf.construct: unbound template variable ?{v}"),
+            );
         }
     }
 
@@ -639,7 +656,10 @@ fn execute_construct_per_solution_path(
             // Shouldn't fire — we validated against ps.projected
             // above. Defensive: surface the unbound-variable panic
             // with the slice-58 prefix.
-            panic!("pgrdf.construct: unbound template variable ?{var}")
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("pgrdf.construct: unbound template variable ?{var}"),
+            )
         });
         select_clauses.push(format!(
             "q{alias_idx}.{col} AS {alias_v}",
@@ -918,7 +938,10 @@ fn classify_template_triple_slots(tp: &TriplePattern) -> TemplateTripleSlots {
         ),
         TermPattern::BlankNode(b) => ConstructTermSlot::BlankNode(b.as_str().to_string()),
         #[allow(unreachable_patterns)]
-        _ => panic!("pgrdf.construct: unsupported subject term shape"),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "pgrdf.construct: unsupported subject term shape".to_string(),
+        ),
     };
     let predicate = match &tp.predicate {
         NamedNodePattern::NamedNode(n) => ConstructTermSlot::Iri(n.as_str().to_string()),
@@ -937,7 +960,10 @@ fn classify_template_triple_slots(tp: &TriplePattern) -> TemplateTripleSlots {
         }
         TermPattern::BlankNode(b) => ConstructTermSlot::BlankNode(b.as_str().to_string()),
         #[allow(unreachable_patterns)]
-        _ => panic!("pgrdf.construct: unsupported object term shape"),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "pgrdf.construct: unsupported object term shape".to_string(),
+        ),
     };
     TemplateTripleSlots {
         subject,
@@ -1572,6 +1598,7 @@ fn dedup_construct_rows(rows: Vec<pgrx::JsonB>) -> Vec<pgrx::JsonB> {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    crate::storage::shmem_cache::call_stats_reset(); // E2
     // M4 coverage gap (found post-v0.6.0 audit): describe() is its own
     // entry point — pin the join order so a multi-pattern WHERE can't
     // cross-product (see construct()/sparql()).
@@ -3387,7 +3414,15 @@ fn walk_branch(
             // branch joins against that branch's BGP on shared vars.
             ub.values.push(make_values_block(variables, bindings));
         }
-        other => panic!("sparql: unsupported algebra inside UNION branch: {other:?}"),
+        // E0: same reclassification as the select-wrapper arm — 0A000,
+        // construct named, Debug dump retired (T-MSG-1).
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "sparql: unsupported algebra inside UNION branch: {}",
+                algebra_construct_name(other)
+            ),
+        ),
     }
 }
 
@@ -3549,11 +3584,17 @@ fn extract_minus_triples(
             let scope = make_scope(name, scope_counter);
             match inner.as_ref() {
                 GraphPattern::Bgp { patterns } => (patterns.clone(), Some(scope)),
-                _ => panic!("sparql: MINUS right side must be a BGP"),
+                _ => crate::refuse(
+                    pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "sparql: MINUS right side must be a BGP".to_string(),
+                ),
             }
         }
         GraphPattern::Bgp { patterns } => (patterns.clone(), current_scope.cloned()),
-        _ => panic!("sparql: MINUS right side must be a BGP"),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: MINUS right side must be a BGP".to_string(),
+        ),
     }
 }
 
@@ -3756,7 +3797,43 @@ fn walk_select_scoped(p: &GraphPattern, ps: &mut ParsedSelect, current_scope: Op
             // vN(cols)` derived table joined on shared variables.
             ps.values.push(make_values_block(variables, bindings));
         }
-        other => panic!("sparql: unsupported algebra in select wrapper: {other:?}"),
+        // E0 (LIB v0.6.34): 0A000 feature_not_supported — the engine
+        // considered the request and declined a named construct; that is
+        // a RESULT, not an internal error. T-MSG-1: the message names the
+        // SPARQL construct instead of dumping the algebra node's Debug
+        // form (a refusal is documentation; `NamedNode { .. }` is not).
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "sparql: unsupported algebra in select wrapper: {}",
+                algebra_construct_name(other)
+            ),
+        ),
+    }
+}
+
+/// E0 / T-MSG-1: name the SPARQL construct a refusal is about. Position
+/// matters — a variant listed here may be perfectly supported elsewhere;
+/// the refusal is about THIS position in the algebra tree. The catch-all
+/// keeps future spargebra variants refusing loudly rather than blindly.
+fn algebra_construct_name(p: &GraphPattern) -> &'static str {
+    match p {
+        GraphPattern::Service { .. } => "SERVICE (federated query)",
+        GraphPattern::Minus { .. } => "MINUS (in this position)",
+        GraphPattern::Group { .. } => "GROUP BY / aggregation (in this position)",
+        GraphPattern::OrderBy { .. } => "ORDER BY (in this position)",
+        GraphPattern::Slice { .. } => "LIMIT/OFFSET (in this position)",
+        GraphPattern::Distinct { .. } => "DISTINCT (in this position)",
+        GraphPattern::Reduced { .. } => "REDUCED (in this position)",
+        GraphPattern::Project { .. } => "a nested SELECT (in this position)",
+        GraphPattern::LeftJoin { .. } => "OPTIONAL (in this position)",
+        GraphPattern::Filter { .. } => "FILTER (in this position)",
+        GraphPattern::Extend { .. } => "BIND (in this position)",
+        GraphPattern::Graph { .. } => "GRAPH (in this position)",
+        GraphPattern::Union { .. } => "UNION (in this position)",
+        GraphPattern::Path { .. } => "a property path (in this position)",
+        GraphPattern::Bgp { .. } => "a basic graph pattern (in this position)",
+        _ => "an unrecognized algebra construct",
     }
 }
 
@@ -5476,8 +5553,12 @@ fn build_from_and_where(
     // result. NULL comparisons drop the row (SPARQL "type error →
     // unbound" semantics).
     for expr in filters {
-        let sql = translate_filter(expr, anchors)
-            .unwrap_or_else(|| panic!("sparql: FILTER expression not translatable: {expr:?}"));
+        let sql = translate_filter(expr, anchors).unwrap_or_else(|| {
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: FILTER expression not translatable: {expr:?}"),
+            )
+        });
         where_clauses.push(sql);
     }
     // MINUS blocks → `NOT EXISTS (SELECT 1 FROM … WHERE shared_vars)`.
@@ -6668,8 +6749,14 @@ fn bind_subject(
         TermPattern::BlankNode(_) => {
             panic!("sparql: blank-node subject in query not supported")
         }
-        TermPattern::Literal(_) => panic!("sparql: literal subject is invalid in RDF"),
-        other => panic!("sparql: unsupported subject term {other:?}"),
+        TermPattern::Literal(_) => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "sparql: literal subject is invalid in RDF".to_string(),
+        ),
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!("sparql: unsupported subject term {other:?}"),
+        ),
     }
 }
 
@@ -6710,7 +6797,10 @@ fn bind_object(
         TermPattern::BlankNode(_) => {
             panic!("sparql: blank-node object in query not supported")
         }
-        other => panic!("sparql: unsupported object term {other:?}"),
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!("sparql: unsupported object term {other:?}"),
+        ),
     }
 }
 
@@ -7040,10 +7130,17 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
                          to forbid partial results",
                         crate::query::guc::path_max_depth()
                     ),
-                    crate::query::guc::OnPathTruncation::Error => panic!(
-                        "sparql: property path truncated at pgrdf.path_max_depth={} \
-                         (pgrdf.on_path_truncation=error forbids partial results)",
-                        crate::query::guc::path_max_depth()
+                    // E0 (LIB v0.6.34): the fail-closed opt-in hit a
+                    // configured budget — 54000 program_limit_exceeded,
+                    // the same class RDFC's complexity guard deserves.
+                    // Message byte-identical (a #[pg_test] pins it).
+                    crate::query::guc::OnPathTruncation::Error => crate::refuse(
+                        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                        format!(
+                            "sparql: property path truncated at pgrdf.path_max_depth={} \
+                             (pgrdf.on_path_truncation=error forbids partial results)",
+                            crate::query::guc::path_max_depth()
+                        ),
                     ),
                 }
             }
@@ -7071,6 +7168,19 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
 /// carrying the `_update` summary; the caller wraps it in
 /// `SetOfIterator`. Wall-clock timing starts at function entry so the
 /// dictionary internment + partition setup cost is visible to operators.
+/// #107 completed + E4: every graph an UPDATE writes passes through
+/// here exactly once per statement (HashSet dedupe). On first touch it
+/// takes the lock fence — closing the hole where INSERT DATA / DELETE
+/// into a LOCKED graph succeeded while every other write path refused
+/// (a consumer compensated client-side for years) — and stamps the
+/// freshness write. Fencing after the first row is sound: a refusal
+/// aborts the statement's transaction and every prior write rolls back.
+fn touch_written_graph(touched: &mut HashSet<i64>, g_id: i64) {
+    if touched.insert(g_id) {
+        crate::storage::lock::require_unlocked(g_id, "SPARQL UPDATE");
+    }
+}
+
 fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
     // Partition-DDL gate FIRST — the global OUTERMOST lock for the
     // whole UPDATE statement, taken before ANY dictionary internment,
@@ -7129,7 +7239,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     let o_id = intern_object(&quad.object);
                     insert_quad(s_id, p_id, o_id, g_id);
                     triples_inserted += 1;
-                    graphs_touched.insert(g_id);
+                    touch_written_graph(&mut graphs_touched, g_id);
                 }
             }
             GraphUpdateOperation::DeleteData { data } => {
@@ -7172,7 +7282,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     let (Some(s), Some(p), Some(o)) = (s_id, p_id, o_id) else {
                         // At least one term not in the dictionary —
                         // the quad cannot exist. Spec-correct no-op.
-                        graphs_touched.insert(g_id);
+                        touch_written_graph(&mut graphs_touched, g_id);
                         continue;
                     };
                     let n: i64 = Spi::get_one_with_args(
@@ -7189,7 +7299,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     .unwrap_or_else(|e| panic!("sparql: UPDATE: DELETE quad failed: {e}"))
                     .unwrap_or(0);
                     triples_deleted += n;
-                    graphs_touched.insert(g_id);
+                    touch_written_graph(&mut graphs_touched, g_id);
                 }
             }
             GraphUpdateOperation::DeleteInsert {
@@ -7244,7 +7354,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                         triples_deleted += n_del;
                         triples_inserted += n_ins;
                         for g in graphs {
-                            graphs_touched.insert(g);
+                            touch_written_graph(&mut graphs_touched, g);
                         }
                     }
                     (true, false) => {
@@ -7274,7 +7384,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                         let (n_deleted, graphs) = execute_delete_where(delete, pattern_ref);
                         triples_deleted += n_deleted;
                         for g in graphs {
-                            graphs_touched.insert(g);
+                            touch_written_graph(&mut graphs_touched, g);
                         }
                     }
                     (false, true) => {
@@ -7293,7 +7403,7 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                         let (n_inserted, graphs) = execute_insert_where(insert, pattern_ref);
                         triples_inserted += n_inserted;
                         for g in graphs {
-                            graphs_touched.insert(g);
+                            touch_written_graph(&mut graphs_touched, g);
                         }
                     }
                     (false, false) => {
@@ -7303,9 +7413,11 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
                     }
                 }
             }
-            GraphUpdateOperation::Load { .. } => {
-                panic!("sparql: UPDATE form 'LOAD' is out of scope for v0.4 (see LLD v0.4 §14)")
-            }
+            GraphUpdateOperation::Load { .. } => crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                "sparql: UPDATE form 'LOAD' is out of scope for v0.4 (see LLD v0.4 §14)"
+                    .to_string(),
+            ),
             GraphUpdateOperation::Clear { graph, silent } => {
                 // Phase C slice 78 — `CLEAR GRAPH <iri>` / `CLEAR
                 // DEFAULT` / `CLEAR NAMED` / `CLEAR ALL` route through
@@ -7464,7 +7576,10 @@ fn with_iri_from_using(
     if ds.default.len() == 1 && named_empty {
         return Some(ds.default[0].clone());
     }
-    panic!("sparql: {form_label} template feature 'USING / USING NAMED' not yet supported");
+    crate::refuse(
+        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+        format!("sparql: {form_label} template feature 'USING / USING NAMED' not yet supported"),
+    );
 }
 
 /// Wrap a WHERE pattern in `GraphPattern::Graph { name: <iri>, inner }`
@@ -7538,7 +7653,10 @@ fn intern_object(t: &Term) -> i64 {
             put_term_full(lit.value(), term_type::LITERAL, datatype_id, lang)
         }
         #[allow(unreachable_patterns)]
-        _ => panic!("sparql: UPDATE: unsupported object term (RDF-star not in v0.4 scope)"),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: UPDATE: unsupported object term (RDF-star not in v0.4 scope)".to_string(),
+        ),
     }
 }
 
@@ -7711,7 +7829,7 @@ fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet
             match lookup_graph_id(iri) {
                 Some(id) => {
                     let n = clear_graph_by_id(id);
-                    graphs_touched.insert(id);
+                    touch_written_graph(graphs_touched, id);
                     n
                 }
                 None if silent => 0,
@@ -7720,7 +7838,7 @@ fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet
         }
         GraphTarget::DefaultGraph => {
             let n = clear_default_graph_rows();
-            graphs_touched.insert(0);
+            touch_written_graph(graphs_touched, 0);
             n
         }
         GraphTarget::AllGraphs => {
@@ -7730,10 +7848,10 @@ fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet
             // `_pgrdf_quads_g0` and `_pgrdf_quads_default` regardless
             // of which one `add_graph(0)` allocated).
             let mut total: i64 = clear_default_graph_rows();
-            graphs_touched.insert(0);
+            touch_written_graph(graphs_touched, 0);
             for id in enumerate_bound_graph_ids(false) {
                 total += clear_graph_by_id(id);
-                graphs_touched.insert(id);
+                touch_written_graph(graphs_touched, id);
             }
             total
         }
@@ -7743,7 +7861,7 @@ fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet
             let mut total: i64 = 0;
             for id in enumerate_bound_graph_ids(false) {
                 total += clear_graph_by_id(id);
-                graphs_touched.insert(id);
+                touch_written_graph(graphs_touched, id);
             }
             total
         }
@@ -7763,13 +7881,13 @@ fn execute_create(graph: &NamedNode, silent: bool, graphs_touched: &mut HashSet<
         }
         // SILENT idempotent path — already bound, no-op, but still
         // record the touched graph_id for the summary.
-        graphs_touched.insert(existing);
+        touch_written_graph(graphs_touched, existing);
         return;
     }
     let allocated: i64 = Spi::get_one_with_args("SELECT pgrdf.add_graph($1::text)", &[iri.into()])
         .unwrap_or_else(|e| panic!("sparql: CREATE GRAPH <{iri}>: add_graph failed: {e}"))
         .expect("sparql: CREATE GRAPH: add_graph returned NULL (impossible)");
-    graphs_touched.insert(allocated);
+    touch_written_graph(graphs_touched, allocated);
 }
 
 /// Dispatch a `DROP` operation. Returns the count of triples that
@@ -7800,7 +7918,7 @@ fn execute_drop(
                     // Capture the IRI before the drop wipes the binding.
                     captured_graph_iris.insert(iri.to_string());
                     let n = drop_graph_by_id(id);
-                    graphs_touched.insert(id);
+                    touch_written_graph(graphs_touched, id);
                     n
                 }
                 None if silent => 0,
@@ -7814,7 +7932,7 @@ fn execute_drop(
             // an "empty, not destroy" anyway. Direct partition-wide
             // DELETE handles both g0 and default routing.
             let n = clear_default_graph_rows();
-            graphs_touched.insert(0);
+            touch_written_graph(graphs_touched, 0);
             n
         }
         GraphTarget::AllGraphs => {
@@ -7823,14 +7941,14 @@ fn execute_drop(
             // post-state is an empty default partition + zero named
             // graphs bound.
             let mut total: i64 = clear_default_graph_rows();
-            graphs_touched.insert(0);
+            touch_written_graph(graphs_touched, 0);
             for id in enumerate_bound_graph_ids(false) {
                 // Capture the IRI before drop_graph_by_id wipes it.
                 if let Some(iri) = lookup_graph_iri(id) {
                     captured_graph_iris.insert(iri);
                 }
                 total += drop_graph_by_id(id);
-                graphs_touched.insert(id);
+                touch_written_graph(graphs_touched, id);
             }
             total
         }
@@ -7844,7 +7962,7 @@ fn execute_drop(
                     captured_graph_iris.insert(iri);
                 }
                 total += drop_graph_by_id(id);
-                graphs_touched.insert(id);
+                touch_written_graph(graphs_touched, id);
             }
             total
         }
@@ -7916,10 +8034,16 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
         // the SQL shape (UNION ALL of per-branch SELECTs) doesn't
         // share anchor aliases across branches, which would force
         // per-branch template instantiation. Out of scope for 82.
-        panic!("sparql: INSERT WHERE template feature 'UNION in WHERE' not yet supported");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: INSERT WHERE template feature 'UNION in WHERE' not yet supported".to_string(),
+        );
     }
     if ps.bgp.is_empty() {
-        panic!("sparql: INSERT WHERE requires a non-empty WHERE pattern");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: INSERT WHERE requires a non-empty WHERE pattern".to_string(),
+        );
     }
     // We don't honour DISTINCT / ORDER BY / LIMIT / OFFSET from the
     // walker (the spec doesn't admit them on WHERE-of-UPDATE), but
@@ -8031,7 +8155,7 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
                 let (s_id, p_id, o_id, g_id) = instantiate_template_quad(qp, &binding);
                 insert_quad(s_id, p_id, o_id, g_id);
                 triples_inserted += 1;
-                graphs_touched.insert(g_id);
+                touch_written_graph(&mut graphs_touched, g_id);
             }
         }
     });
@@ -8103,8 +8227,14 @@ fn instantiate_template_quad(
                 b.as_str()
             )
         }
-        TermPattern::Literal(_) => panic!("sparql: literal subject is invalid in RDF"),
-        other => panic!("sparql: INSERT WHERE template: unsupported subject term {other:?}"),
+        TermPattern::Literal(_) => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "sparql: literal subject is invalid in RDF".to_string(),
+        ),
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!("sparql: INSERT WHERE template: unsupported subject term {other:?}"),
+        ),
     };
     let p_id = match &qp.predicate {
         NamedNodePattern::Variable(v) => {
@@ -8133,7 +8263,10 @@ fn instantiate_template_quad(
             )
         }
         TermPattern::Literal(lit) => intern_object(&Term::Literal(lit.clone())),
-        other => panic!("sparql: INSERT WHERE template: unsupported object term {other:?}"),
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!("sparql: INSERT WHERE template: unsupported object term {other:?}"),
+        ),
     };
     let g_id = match &qp.graph_name {
         GraphNamePattern::DefaultGraph => 0,
@@ -8216,10 +8349,16 @@ fn execute_delete_where(
         );
     }
     if !ps.union_branches.is_empty() {
-        panic!("sparql: DELETE WHERE template feature 'UNION in WHERE' not yet supported");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: DELETE WHERE template feature 'UNION in WHERE' not yet supported".to_string(),
+        );
     }
     if ps.bgp.is_empty() {
-        panic!("sparql: DELETE WHERE requires a non-empty WHERE pattern");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: DELETE WHERE requires a non-empty WHERE pattern".to_string(),
+        );
     }
     ps.distinct = false;
     ps.order_by.clear();
@@ -8337,7 +8476,7 @@ fn execute_delete_where(
                 // DELETE DATA's behaviour where graphs_touched
                 // surfaces scope even when no row was actually
                 // removed (per slice 83 contract).
-                graphs_touched.insert(g_id);
+                touch_written_graph(&mut graphs_touched, g_id);
             }
         }
     });
@@ -8401,10 +8540,16 @@ fn instantiate_ground_template_quad(
             // GroundTermPattern is the same union used for both s and
             // o, so we surface a clear error rather than silently
             // skipping.
-            panic!("sparql: literal subject is invalid in RDF")
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                "sparql: literal subject is invalid in RDF".to_string(),
+            )
         }
         #[allow(unreachable_patterns)]
-        other => panic!("sparql: DELETE WHERE template: unsupported subject term {other:?}"),
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!("sparql: DELETE WHERE template: unsupported subject term {other:?}"),
+        ),
     };
     let p_id = match &gqp.predicate {
         NamedNodePattern::Variable(v) => {
@@ -8429,7 +8574,10 @@ fn instantiate_ground_template_quad(
         GroundTermPattern::NamedNode(n) => lookup_iri_id(n.as_str())?,
         GroundTermPattern::Literal(lit) => lookup_literal_id(lit)?,
         #[allow(unreachable_patterns)]
-        other => panic!("sparql: DELETE WHERE template: unsupported object term {other:?}"),
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!("sparql: DELETE WHERE template: unsupported object term {other:?}"),
+        ),
     };
     let g_id = match &gqp.graph_name {
         GraphNamePattern::DefaultGraph => 0,
@@ -8538,10 +8686,17 @@ fn execute_delete_insert_where(
         );
     }
     if !ps.union_branches.is_empty() {
-        panic!("sparql: DELETE/INSERT WHERE template feature 'UNION in WHERE' not yet supported");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: DELETE/INSERT WHERE template feature 'UNION in WHERE' not yet supported"
+                .to_string(),
+        );
     }
     if ps.bgp.is_empty() {
-        panic!("sparql: DELETE/INSERT WHERE requires a non-empty WHERE pattern");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: DELETE/INSERT WHERE requires a non-empty WHERE pattern".to_string(),
+        );
     }
     ps.distinct = false;
     ps.order_by.clear();
@@ -8659,7 +8814,7 @@ fn execute_delete_insert_where(
                 })
                 .unwrap_or(0);
                 triples_deleted += n;
-                graphs_touched.insert(g_id);
+                touch_written_graph(&mut graphs_touched, g_id);
             }
 
             // INSERT half — interning path, set-semantic guard.
@@ -8667,7 +8822,7 @@ fn execute_delete_insert_where(
                 let (s_id, p_id, o_id, g_id) = instantiate_template_quad(qp, &binding);
                 insert_quad(s_id, p_id, o_id, g_id);
                 triples_inserted += 1;
-                graphs_touched.insert(g_id);
+                touch_written_graph(&mut graphs_touched, g_id);
             }
         }
     });
@@ -13249,6 +13404,84 @@ mod tests {
         assert!(trunc > 0, "count mode still bumps the counter");
         Spi::run("RESET pgrdf.path_max_depth").unwrap();
         Spi::run("RESET pgrdf.on_path_truncation").unwrap();
+    }
+
+    /// E0 negative control (LIB K10): unsupported algebra carries
+    /// 0A000 `feature_not_supported` — by ENUM — and the message names
+    /// the construct (T-MSG-1), never a Rust Debug dump. No SPI after
+    /// the catch.
+    #[pg_test]
+    fn unsupported_algebra_carries_feature_not_supported() {
+        use pgrx::pg_sys::errcodes::PgSqlErrorCode;
+        use pgrx::pg_sys::panic::CaughtError;
+        let caught = pgrx::PgTryBuilder::new(|| {
+            Spi::run(
+                "SELECT * FROM pgrdf.sparql(
+                     'SELECT ?s WHERE { ?s ?p ?o . SERVICE <http://remote/> { ?s ?p2 ?o2 } }')",
+            )
+            .unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            CaughtError::PostgresError(r)
+            | CaughtError::ErrorReport(r)
+            | CaughtError::RustPanic { ereport: r, .. } => {
+                Some((r.sql_error_code(), r.message().to_string()))
+            }
+        })
+        .execute();
+        let (code, msg) = caught.expect("SERVICE query must refuse");
+        assert_eq!(
+            code,
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "unsupported algebra must reach callers as 0A000, not XX000"
+        );
+        assert!(
+            msg.contains("SERVICE"),
+            "the refusal names the construct; got: {msg}"
+        );
+        assert!(
+            !msg.contains("NamedNode {"),
+            "no Rust Debug dump in a gate message (T-MSG-1); got: {msg}"
+        );
+    }
+
+    /// E0 negative control (LIB K10): fail-closed path truncation carries
+    /// 54000 `program_limit_exceeded` — by ENUM. The sibling test above
+    /// pins the message; SETs happen BEFORE the catch (aborted txn after).
+    #[pg_test]
+    fn truncation_error_mode_carries_program_limit_exceeded() {
+        use pgrx::pg_sys::errcodes::PgSqlErrorCode;
+        use pgrx::pg_sys::panic::CaughtError;
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+            '@prefix ex: <http://example.com/> .
+             ex:t1 ex:sub ex:t2 . ex:t2 ex:sub ex:t3 . ex:t3 ex:sub ex:t4 .',
+            9207)",
+        )
+        .unwrap();
+        Spi::run("SET pgrdf.path_max_depth = 2").unwrap();
+        Spi::run("SET pgrdf.on_path_truncation = 'error'").unwrap();
+        let code = pgrx::PgTryBuilder::new(|| {
+            Spi::run(
+                "SELECT count(*) FROM pgrdf.sparql(
+                     'PREFIX ex: <http://example.com/> \
+                      SELECT ?o WHERE { ex:t1 ex:sub+ ?o }')",
+            )
+            .unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            CaughtError::PostgresError(r)
+            | CaughtError::ErrorReport(r)
+            | CaughtError::RustPanic { ereport: r, .. } => Some(r.sql_error_code()),
+        })
+        .execute();
+        assert_eq!(
+            code,
+            Some(PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            "fail-closed truncation must reach callers as 54000, not XX000"
+        );
     }
 
     /// E3 invariant A in miniature — `*` is the reflexive-transitive

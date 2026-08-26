@@ -227,7 +227,10 @@ fn object_to_id(t: &Term, cache: &mut HashMap<DictKey, i64>, stats: &mut LoaderS
             )
         }
         #[allow(unreachable_patterns)]
-        _ => panic!("load_turtle: unsupported object term (RDF-star not in v0.2 scope)"),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "load_turtle: unsupported object term (RDF-star not in v0.2 scope)".to_string(),
+        ),
     }
 }
 
@@ -308,9 +311,12 @@ fn ingest_turtle_with_stats<R: Read>(
 ) -> LoaderStats {
     let mut parser = TurtleParser::new();
     if let Some(base) = base_iri {
-        parser = parser
-            .with_base_iri(base)
-            .unwrap_or_else(|e| panic!("load_turtle: invalid base IRI {base:?}: {e}"));
+        parser = parser.with_base_iri(base).unwrap_or_else(|e| {
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("load_turtle: invalid base IRI {base:?}: {e}"),
+            )
+        });
     }
     let parser = parser.for_reader(reader);
 
@@ -421,9 +427,12 @@ fn ingest_turtle_dict_batched<R: Read>(
     use std::collections::HashSet;
     let mut parser = TurtleParser::new();
     if let Some(base) = base_iri {
-        parser = parser
-            .with_base_iri(base)
-            .unwrap_or_else(|e| panic!("load_turtle_dict_batched: invalid base IRI {base:?}: {e}"));
+        parser = parser.with_base_iri(base).unwrap_or_else(|e| {
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("load_turtle_dict_batched: invalid base IRI {base:?}: {e}"),
+            )
+        });
     }
     let iter = parser.for_reader(reader);
 
@@ -694,9 +703,12 @@ fn ingest_turtle_combined<R: Read>(
         // Panic prefix `load_turtle:` matches `ingest_turtle_with_stats`'s
         // baseline error contract — downstream tooling routes on this
         // substring (see `tests/regression/sql/81-error-paths.sql`).
-        parser = parser
-            .with_base_iri(base)
-            .unwrap_or_else(|e| panic!("load_turtle: invalid base IRI {base:?}: {e}"));
+        parser = parser.with_base_iri(base).unwrap_or_else(|e| {
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                format!("load_turtle: invalid base IRI {base:?}: {e}"),
+            )
+        });
     }
     let iter = parser.for_reader(reader);
 
@@ -876,7 +888,10 @@ fn object_key(
             )
         }
         #[allow(unreachable_patterns)]
-        _ => panic!("{prefix}: unsupported object term"),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!("{prefix}: unsupported object term"),
+        ),
     }
 }
 
@@ -1191,7 +1206,10 @@ fn resolve_graph_id(
             let id = match existing {
                 Some(id) => id,
                 None if strict => {
-                    panic!("{prefix}: unknown graph iri {iri}");
+                    crate::refuse(
+                        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                        format!("{prefix}: unknown graph iri {iri}"),
+                    );
                 }
                 None => {
                     // Auto-allocate + create the LIST partition through
@@ -1634,7 +1652,10 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
                         ),
                     },
                     #[allow(unreachable_patterns)]
-                    _ => panic!("load_turtle: unsupported object term"),
+                    _ => crate::refuse(
+                        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        "load_turtle: unsupported object term".to_string(),
+                    ),
                 };
                 out.push((s, p, o));
             }
@@ -2003,7 +2024,7 @@ fn ingest_turtle_streaming(
                                 ),
                             },
                             #[allow(unreachable_patterns)]
-                            _ => panic!("load_turtle_streaming: unsupported object term"),
+                            _ => crate::refuse(pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED, "load_turtle_streaming: unsupported object term".to_string()),
                         };
                         out.push((s, p, o));
                     }

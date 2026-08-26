@@ -41,7 +41,7 @@ const MAX_PERMUTATION_GROUP: usize = 7;
 const MAX_RECURSION_DEPTH: usize = 32;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-enum CTerm {
+pub(crate) enum CTerm {
     Iri(String),
     BNode(String),
     Lit {
@@ -51,7 +51,7 @@ enum CTerm {
     },
 }
 
-type Triple = (CTerm, CTerm, CTerm);
+pub(crate) type Triple = (CTerm, CTerm, CTerm);
 
 /// Canonical N-Triples escaping for the literal lexical form.
 fn nt_escape(s: &str) -> String {
@@ -107,7 +107,7 @@ fn sha256_hex(data: &str) -> String {
 /// Read a graph's ASSERTED triples with full term structure — the same
 /// join shape `serialise_graph_to_ntriples` uses (shacl.rs), minus the
 /// inferred rows.
-fn read_asserted_triples(graph_id: i64) -> Vec<Triple> {
+pub(crate) fn read_asserted_triples(graph_id: i64) -> Vec<Triple> {
     let mut triples: Vec<Triple> = Vec::new();
     Spi::connect(|client| {
         let table = client
@@ -392,6 +392,31 @@ fn permutations(items: &[String]) -> Vec<Vec<String>> {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn graph_digest(graph_id: i64) -> String {
+    // T-NULL-1/2 (LIB v0.6.34, finding L9): an ABSENT graph REFUSES —
+    // 42704 undefined_object — instead of silently hashing zero triples.
+    // Measured 2026-08-25: a typo'd id and a legitimately EMPTY graph
+    // both returned sha256 of empty input (e3b0c44…), indistinguishable
+    // in the identity plane — the one place silence is most expensive.
+    // Graph 0 (the default graph) always exists and is exempt; every
+    // other id must hold a `_pgrdf_graphs` row (Slice 119 guarantees
+    // one for every add_graph path, including the raw-id form).
+    if graph_id != 0 {
+        let registered: bool = Spi::get_one_with_args(
+            "SELECT EXISTS(SELECT 1 FROM pgrdf._pgrdf_graphs WHERE graph_id = $1)",
+            &[graph_id.into()],
+        )
+        .expect("graph_digest: registry existence check failed")
+        .unwrap_or(false);
+        if !registered {
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                format!(
+                    "graph_digest: graph {graph_id} does not exist — an absent graph \
+                     has no digest (an EMPTY graph does: pgrdf.add_graph it first)"
+                ),
+            );
+        }
+    }
     let triples = read_asserted_triples(graph_id);
     let mut bnode_quads: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, t) in triples.iter().enumerate() {
@@ -602,5 +627,39 @@ mod tests {
         )
         .expect("poison load failed");
         digest(983399);
+    }
+
+    /// T-NULL-1 negative control (LIB K10): digesting an ABSENT graph
+    /// refuses with 42704 undefined_object — never the sha256 of empty
+    /// input. Code asserted by ENUM. No SPI after the catch.
+    #[pg_test]
+    fn graph_digest_absent_graph_refuses_undefined_object() {
+        use pgrx::pg_sys::errcodes::PgSqlErrorCode;
+        use pgrx::pg_sys::panic::CaughtError;
+        let code = pgrx::PgTryBuilder::new(|| {
+            Spi::run("SELECT pgrdf.graph_digest(983888)").unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            CaughtError::PostgresError(r)
+            | CaughtError::ErrorReport(r)
+            | CaughtError::RustPanic { ereport: r, .. } => Some(r.sql_error_code()),
+        })
+        .execute();
+        assert_eq!(
+            code,
+            Some(PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT),
+            "absent graph must refuse 42704, never silently digest nothing"
+        );
+    }
+
+    /// T-NULL-2 companion: an EMPTY (registered) graph still digests —
+    /// a digest is an ANSWER there. Empty and absent must be
+    /// distinguishable: one answers, the other refuses.
+    #[pg_test]
+    fn graph_digest_empty_graph_still_digests() {
+        Spi::run("SELECT pgrdf.add_graph(983889)").expect("add_graph failed");
+        let d = digest(983889);
+        assert_eq!(d.len(), 64, "empty graph digest is a real sha256 answer");
     }
 }

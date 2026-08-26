@@ -66,7 +66,10 @@ const PANIC_PREFIX: &str = "pgrdf.put_construct_row";
 /// references to one stored blank node.
 fn decode_term_cell(cell: &Value, position: &str, bnode_map: &mut HashMap<String, i64>) -> i64 {
     let obj = cell.as_object().unwrap_or_else(|| {
-        panic!("{PANIC_PREFIX}: {position}: term cell must be a JSON object, got {cell}")
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("{PANIC_PREFIX}: {position}: term cell must be a JSON object, got {cell}"),
+        )
     });
 
     let ty = obj.get("type").and_then(Value::as_str).unwrap_or_else(|| {
@@ -122,7 +125,10 @@ fn decode_term_cell(cell: &Value, position: &str, bnode_map: &mut HashMap<String
         // Forward-compat — slice 53 covers v0.4 §6.1's three encodings
         // exhaustively. Future "triple" / "quoted-triple" cells from
         // RDF 1.2 (gated on E-009 per v0.5-FUTURE §9) would land here.
-        other => panic!("{PANIC_PREFIX}: {position}: unknown term type {other:?}"),
+        other => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("{PANIC_PREFIX}: {position}: unknown term type {other:?}"),
+        ),
     }
 }
 
@@ -164,9 +170,12 @@ fn insert_quad(s_id: i64, p_id: i64, o_id: i64, g_id: i64) -> bool {
 /// batch variants. Returns `1` if the row landed a fresh quad, `0` if
 /// the `WHERE NOT EXISTS` guard found it already present.
 fn ingest_one(row: &Value, graph_id: i64, bnode_map: &mut HashMap<String, i64>) -> i64 {
-    let obj = row
-        .as_object()
-        .unwrap_or_else(|| panic!("{PANIC_PREFIX}: row must be a JSON object, got {row}"));
+    let obj = row.as_object().unwrap_or_else(|| {
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("{PANIC_PREFIX}: row must be a JSON object, got {row}"),
+        )
+    });
     let s = obj
         .get("subject")
         .unwrap_or_else(|| panic!("{PANIC_PREFIX}: missing 'subject' field"));
@@ -202,7 +211,10 @@ fn ingest_one(row: &Value, graph_id: i64, bnode_map: &mut HashMap<String, i64>) 
 #[pg_extern]
 fn put_construct_row(row: pgrx::JsonB, graph_id: default!(i64, 0)) -> i64 {
     if graph_id < 0 {
-        panic!("{PANIC_PREFIX}: graph_id must be >= 0, got {graph_id}");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("{PANIC_PREFIX}: graph_id must be >= 0, got {graph_id}"),
+        );
     }
     crate::storage::lock::require_unlocked(graph_id, "put_construct_row"); // #107
     let mut bnode_map: HashMap<String, i64> = HashMap::new();
@@ -233,7 +245,10 @@ fn put_construct_row(row: pgrx::JsonB, graph_id: default!(i64, 0)) -> i64 {
 #[pg_extern]
 fn put_construct_rows(rows: Option<Vec<Option<pgrx::JsonB>>>, graph_id: default!(i64, 0)) -> i64 {
     if graph_id < 0 {
-        panic!("{PANIC_PREFIX}: graph_id must be >= 0, got {graph_id}");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("{PANIC_PREFIX}: graph_id must be >= 0, got {graph_id}"),
+        );
     }
     crate::storage::lock::require_unlocked(graph_id, "put_construct_rows"); // #107
     let Some(rows) = rows else {
