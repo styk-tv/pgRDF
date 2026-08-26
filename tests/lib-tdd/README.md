@@ -29,7 +29,9 @@ them on exit; all are re-runnable and safe to run concurrently with other work.
 
 ## Case catalog
 
-State = the ledger as of the E0/T-NULL cut (branch `lib-0-6-34-emissions`).
+State = the ledger as of the FULL E-series close (0.6.34, branch `lib-0-6-34-emissions`):
+**14 GREEN · 1 RED (case 15 on any dirty-tree build — the honest state while iterating;
+green on clean-tree deliveries) · 0 BROKEN.**
 Every RED asserts its *specific* current failure (exact SQLSTATE, exact hash, exact
 delta), so a stale prediction surfaces as BROKEN, never as a silent pass.
 
@@ -41,12 +43,12 @@ delta), so a stale prediction surfaces as BROKEN, never as a silent pass.
 | `04-e0-truncation-fail-closed-sqlstate` | C1-1/E0 | 70-hop chain, `on_path_truncation='error'`, asserts `54000` | `executor.rs` Error arm; `#[pg_test] truncation_error_mode_carries_program_limit_exceeded` + message-pinned sibling | **GREEN** |
 | `05-tnull-digest-absent-refuses` | T-NULL-1 (L9) | `graph_digest(<absent id>)`, asserts `42704` — never sha256("") | `canon.rs` registry check; `#[pg_test] graph_digest_absent_graph_refuses_undefined_object` | **GREEN** |
 | `06-tnull-empty-vs-absent` | T-NULL-2 (L9) | empty graph digests (an answer), absent refuses — distinguishable | same gate; `#[pg_test] graph_digest_empty_graph_still_digests` | **GREEN** |
-| `07-c2-delta-cross-session-pollution` | C2-2/E2 | session A truncates between session B's two counter reads; B's delta=1 having run nothing; probes for a per-call figure | — (E2 unimplemented; the same race flakes `property_path_one_or_more_depth_guard_bumps_stat` under parallel `cargo test`) | RED |
-| `08-k6-fd1-collision-pair` | K6-1/E6 | loads the 8-triple pair (bnode 4-cycle vs two 2-cycles, non-isomorphic, fd1-colliding); expects `structural_digest` to exist AND collide. Tripwire: if a future fd1 *separates* the pair, the case goes BROKEN — that algorithm would not be fleet-fd1 | — (E6 fd1 half unimplemented) | RED |
+| `07-c2-delta-cross-session-pollution` | C2-2/E2 | demonstrates the global delta race, then asserts `last_call_stats()`: a truncating session reads ≥1, a clean session reads 0 | E2 `last_call_stats()` (session-local per-call figures); `#[pg_test] last_call_stats_is_per_call` | **GREEN** |
+| `08-k6-fd1-collision-pair` | K6-1/E6 | loads the 8-triple pair; `structural_digest` must COLLIDE on it (SAME = evidence). Tripwire: an fd1 that separates the pair is not fleet-fd1 and goes BROKEN | E6 `structural_digest()` (pgrdf-fd1-sha256, fleet byte-for-byte); fd1 unit + e2e `#[pg_test]`s | **GREEN** |
 | `09-k6-rdfc-separates-pair` | K6-2 (RET) | same pair; `graph_digest` must separate it conclusively, inside the complexity budget | `canon.rs` RDFC-1.0 (shipped 0.6.32) | **GREEN** |
-| `10-e1-inventory-surface` | C3-1/E1-1 | probes candidate inventory-verb names; the day one exists it auto-upgrades to a Q1 parity check against `_pgrdf_graphs` | — (E1 unimplemented) | RED |
-| `11-e5-surface-queryable` | E5-1 | probes `pgrdf.surface()`; when present, asserts it covers every `pg_proc` export | — (E5 emission unimplemented) | RED |
-| `12-e5-manifest-coverage` | E5-2/K9 | regenerates the live surface (`gen-surface.sh`, unit = `(proname, identity_args)`) and diffs both directions against `classification.tsv` | the manifest itself (DRAFT — operator review owed) | **GREEN** |
+| `10-e1-inventory-surface` | C3-1/E1-1 | `graph_inventory()` exists → runs Q1 parity against `_pgrdf_graphs` | E1 `graph_inventory()`/`orphan_partitions()`; parity + lock-state `#[pg_test]`s | **GREEN** |
+| `11-e5-surface-queryable` | E5-1 | `surface()` exists and covers every extension-owned export in the pgrdf schema | E5 `surface()` from `src/surface_manifest.tsv`; K9-2 both-directions `#[pg_test]` | **GREEN** |
+| `12-e5-manifest-coverage` | E5-2/K9 | regenerates the live surface (`gen-surface.sh`) and diffs both directions against `src/surface_manifest.tsv` — the same file `surface()` serves via `include_str!` | the manifest (DRAFT judgments — operator review owed) + in-engine K9-2 test | **GREEN** |
 | `13-k11-lock-cure-works` | K11-1 (RET) | provokes the lock refusal, extracts the cure it names, EXECUTES that cure, asserts the condition resolves | `lock.rs` message contract (`unlock_graph(id, reason)`) | **GREEN** |
 | `14-tmsg-no-debug-dump` | T-MSG-1 | asserts the algebra refusal names the construct (SERVICE) and carries no `NamedNode { … }` debris | `algebra_construct_name()` in `executor.rs` | **GREEN** |
 | `15-bench-identity-triple` | T-BENCH-TRIPLE (RET) | `version == extversion`, `build_id` populated, not `-dirty` — the stale-`.so` catcher (caught a pre-tag artifact on the compose bench's first boot) | `version()`/`build_id()`/catalog | RED while iterating (dirty tree — the honest state); GREEN on any clean-tree delivery |
@@ -71,8 +73,11 @@ names the gate site. Genuine invariant breaks stay `panic!` = `XX000`, deliberat
 ## Support files
 
 ```
-surface/gen-surface.sh      live surface dump from pg_proc (name, args, kind, vol, strict)
-surface/classification.tsv  DRAFT stable/internal/spike classification, all 54 exports
+surface/gen-surface.sh      live surface dump (extension-owned AND pgrdf-schema —
+                            both predicates required; test functions are
+                            extension-owned too under cargo pgrx test)
+../../src/surface_manifest.tsv  THE classification (authored judgment, DRAFT review
+                            owed) — served by pgrdf.surface() via include_str!
 gates/gen-gates.sh          mechanical census: refuse-sites (code named) + panic gates,
                             test modules excluded (the first census counted 9 path.rs
                             test assertions as gates — corrected)

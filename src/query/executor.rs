@@ -208,6 +208,9 @@ fn derived_col(k: usize) -> &'static str {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    // E2: per-call completeness figures start fresh at every query-verb
+    // entry; read them after the call with pgrdf.last_call_stats().
+    crate::storage::shmem_cache::call_stats_reset();
     pin_join_order();
     let parser = SparqlParser::new();
     match parser.parse_query(query) {
@@ -373,6 +376,7 @@ fn sparql_sql(query: &str) -> String {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    crate::storage::shmem_cache::call_stats_reset(); // E2
     // M4 coverage gap (found post-v0.6.0 audit): construct() is its own
     // entry point — without the pin a direct `pgrdf.construct(...)` with
     // a multi-pattern WHERE hits the cross-product planner blowup that
@@ -405,7 +409,7 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
         } => (template, pattern),
         Query::Select { .. } | Query::Ask { .. } | Query::Describe { .. } => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("pgrdf.construct: not a CONSTRUCT query"),
+            "pgrdf.construct: not a CONSTRUCT query".to_string(),
         ),
     };
 
@@ -458,7 +462,7 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     if template.is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("pgrdf.construct: empty template"),
+            "pgrdf.construct: empty template".to_string(),
         );
     }
 
@@ -487,7 +491,7 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     if ps.bgp.is_empty() && ps.union_branches.is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("pgrdf.construct: empty WHERE pattern"),
+            "pgrdf.construct: empty WHERE pattern".to_string(),
         );
     }
 
@@ -936,7 +940,7 @@ fn classify_template_triple_slots(tp: &TriplePattern) -> TemplateTripleSlots {
         #[allow(unreachable_patterns)]
         _ => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("pgrdf.construct: unsupported subject term shape"),
+            "pgrdf.construct: unsupported subject term shape".to_string(),
         ),
     };
     let predicate = match &tp.predicate {
@@ -958,7 +962,7 @@ fn classify_template_triple_slots(tp: &TriplePattern) -> TemplateTripleSlots {
         #[allow(unreachable_patterns)]
         _ => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("pgrdf.construct: unsupported object term shape"),
+            "pgrdf.construct: unsupported object term shape".to_string(),
         ),
     };
     TemplateTripleSlots {
@@ -1594,6 +1598,7 @@ fn dedup_construct_rows(rows: Vec<pgrx::JsonB>) -> Vec<pgrx::JsonB> {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
+    crate::storage::shmem_cache::call_stats_reset(); // E2
     // M4 coverage gap (found post-v0.6.0 audit): describe() is its own
     // entry point — pin the join order so a multi-pattern WHERE can't
     // cross-product (see construct()/sparql()).
@@ -3581,14 +3586,14 @@ fn extract_minus_triples(
                 GraphPattern::Bgp { patterns } => (patterns.clone(), Some(scope)),
                 _ => crate::refuse(
                     pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                    format!("sparql: MINUS right side must be a BGP"),
+                    "sparql: MINUS right side must be a BGP".to_string(),
                 ),
             }
         }
         GraphPattern::Bgp { patterns } => (patterns.clone(), current_scope.cloned()),
         _ => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("sparql: MINUS right side must be a BGP"),
+            "sparql: MINUS right side must be a BGP".to_string(),
         ),
     }
 }
@@ -6746,7 +6751,7 @@ fn bind_subject(
         }
         TermPattern::Literal(_) => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("sparql: literal subject is invalid in RDF"),
+            "sparql: literal subject is invalid in RDF".to_string(),
         ),
         other => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -7397,7 +7402,8 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
             }
             GraphUpdateOperation::Load { .. } => crate::refuse(
                 pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                format!("sparql: UPDATE form 'LOAD' is out of scope for v0.4 (see LLD v0.4 §14)"),
+                "sparql: UPDATE form 'LOAD' is out of scope for v0.4 (see LLD v0.4 §14)"
+                    .to_string(),
             ),
             GraphUpdateOperation::Clear { graph, silent } => {
                 // Phase C slice 78 — `CLEAR GRAPH <iri>` / `CLEAR
@@ -7636,7 +7642,7 @@ fn intern_object(t: &Term) -> i64 {
         #[allow(unreachable_patterns)]
         _ => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("sparql: UPDATE: unsupported object term (RDF-star not in v0.4 scope)"),
+            "sparql: UPDATE: unsupported object term (RDF-star not in v0.4 scope)".to_string(),
         ),
     }
 }
@@ -8017,13 +8023,13 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
         // per-branch template instantiation. Out of scope for 82.
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("sparql: INSERT WHERE template feature 'UNION in WHERE' not yet supported"),
+            "sparql: INSERT WHERE template feature 'UNION in WHERE' not yet supported".to_string(),
         );
     }
     if ps.bgp.is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("sparql: INSERT WHERE requires a non-empty WHERE pattern"),
+            "sparql: INSERT WHERE requires a non-empty WHERE pattern".to_string(),
         );
     }
     // We don't honour DISTINCT / ORDER BY / LIMIT / OFFSET from the
@@ -8210,7 +8216,7 @@ fn instantiate_template_quad(
         }
         TermPattern::Literal(_) => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("sparql: literal subject is invalid in RDF"),
+            "sparql: literal subject is invalid in RDF".to_string(),
         ),
         other => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -8332,13 +8338,13 @@ fn execute_delete_where(
     if !ps.union_branches.is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("sparql: DELETE WHERE template feature 'UNION in WHERE' not yet supported"),
+            "sparql: DELETE WHERE template feature 'UNION in WHERE' not yet supported".to_string(),
         );
     }
     if ps.bgp.is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("sparql: DELETE WHERE requires a non-empty WHERE pattern"),
+            "sparql: DELETE WHERE requires a non-empty WHERE pattern".to_string(),
         );
     }
     ps.distinct = false;
@@ -8523,7 +8529,7 @@ fn instantiate_ground_template_quad(
             // skipping.
             crate::refuse(
                 pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-                format!("sparql: literal subject is invalid in RDF"),
+                "sparql: literal subject is invalid in RDF".to_string(),
             )
         }
         #[allow(unreachable_patterns)]
@@ -8669,15 +8675,14 @@ fn execute_delete_insert_where(
     if !ps.union_branches.is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!(
-                "sparql: DELETE/INSERT WHERE template feature 'UNION in WHERE' not yet supported"
-            ),
+            "sparql: DELETE/INSERT WHERE template feature 'UNION in WHERE' not yet supported"
+                .to_string(),
         );
     }
     if ps.bgp.is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("sparql: DELETE/INSERT WHERE requires a non-empty WHERE pattern"),
+            "sparql: DELETE/INSERT WHERE requires a non-empty WHERE pattern".to_string(),
         );
     }
     ps.distinct = false;

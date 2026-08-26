@@ -75,7 +75,7 @@ fn lock_graph(graph_id: i64, reason: &str) -> bool {
     if reason.trim().is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("lock_graph: a non-empty reason is required — the reason IS the record"),
+            "lock_graph: a non-empty reason is required — the reason IS the record".to_string(),
         );
     }
     let existing = Spi::get_two_with_args::<bool, String>(
@@ -117,7 +117,7 @@ fn unlock_graph(graph_id: i64, reason: &str) -> bool {
     if reason.trim().is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("unlock_graph: a non-empty reason is required — the reason IS the record"),
+            "unlock_graph: a non-empty reason is required — the reason IS the record".to_string(),
         );
     }
     let existing = Spi::get_one_with_args::<bool>(

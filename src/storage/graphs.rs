@@ -220,7 +220,7 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
     if id == 0 {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("drop_graph: cannot drop default partition (graph_id = 0)"),
+            "drop_graph: cannot drop default partition (graph_id = 0)".to_string(),
         );
     }
 

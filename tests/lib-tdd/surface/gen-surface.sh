@@ -13,6 +13,7 @@ $PSQL -tA -F $'\t' -c "
   SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
          p.prokind, p.provolatile, p.proisstrict
   FROM pg_proc p
+  JOIN pg_namespace ns ON ns.oid = p.pronamespace AND ns.nspname = 'pgrdf'
   JOIN pg_depend d ON d.classid = 'pg_proc'::regclass
                   AND d.objid = p.oid AND d.deptype = 'e'
   JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = 'pgrdf'

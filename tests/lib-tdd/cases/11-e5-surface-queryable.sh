@@ -11,7 +11,7 @@ fi
 n="$(scalar "SELECT count(*) FROM pgrdf.surface()")"
 # Extension OWNERSHIP, not schema — the pgrdf schema is writable and test
 # helpers legitimately live beside the extension (measured 2026-08-25).
-total="$(scalar "SELECT count(*) FROM pg_proc p JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e' JOIN pg_extension e ON e.oid=d.refobjid AND e.extname='pgrdf'")"
+total="$(scalar "SELECT count(*) FROM pg_proc p JOIN pg_namespace ns ON ns.oid=p.pronamespace AND ns.nspname='pgrdf' JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e' JOIN pg_extension e ON e.oid=d.refobjid AND e.extname='pgrdf'")"
 if [ "$n" = "$total" ]; then
   green "pgrdf.surface() exists and covers all $total exports"
 else

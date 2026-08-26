@@ -31,6 +31,7 @@ use pgrx::prelude::*;
 pub mod inference;
 pub mod query;
 pub mod storage;
+pub mod surface;
 pub mod validation;
 
 /// E0 (SPEC.pgRDF.LIB.v0.6.34): raise a deliberate refusal as a Postgres

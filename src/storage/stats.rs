@@ -130,6 +130,28 @@ fn shmem_cache_prewarm(limit: default!(i64, 100000)) -> i64 {
     shmem_cache_prewarm_impl(limit)
 }
 
+/// E2 (SPEC.pgRDF.LIB.v0.6.34) — per-call completeness figures for the
+/// most recent pgrdf query verb (`sparql`/`construct`/`describe`) in
+/// THIS session. Backend-local and reset at every query-verb entry, so
+/// another session's truncation cannot appear here — the property the
+/// cumulative `stats()` counters structurally cannot offer (they are
+/// instance-global; differencing them across a call is unsound under
+/// concurrency, measured both as cross-session delta pollution and as
+/// this suite's own parallel-run flake).
+///
+/// `complete` is derivable as: both figures zero for the call just
+/// made. A caller that never ran a query verb this session reads
+/// zeros — pair with the query, never consult in isolation.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn last_call_stats() -> pgrx::JsonB {
+    let (truncations, filter_drops) = shmem_cache::call_stats();
+    pgrx::JsonB(json!({
+        "path_depth_truncations": truncations,
+        "filter_clauses_dropped": filter_drops,
+    }))
+}
+
 /// Inner SPI body of `shmem_cache_prewarm`, exposed so the loader's
 /// lazy-prewarm latch (gated by `pgrdf.shmem_prewarm_on_init` or
 /// `pgrdf.ingest_dict_path = 'shmem_warm'`) can call it without
@@ -218,5 +240,51 @@ mod tests {
             None,
             "reset must drop pre-reset entries"
         );
+    }
+
+    /// E2 (LIB C2-1/C2-3): the per-call figures are PER CALL — a
+    /// truncating query reports non-zero, and the very next clean query
+    /// reports zero. The negative control proves the figure CAN be
+    /// non-zero (a metric only ever seen at zero is indistinguishable
+    /// from one hard-coded to zero — K10).
+    #[pg_test]
+    fn last_call_stats_is_per_call() {
+        Spi::run(
+            "SELECT pgrdf.parse_turtle(
+                '@prefix ex: <http://example.com/> .
+                 ex:l1 ex:sub ex:l2 . ex:l2 ex:sub ex:l3 . ex:l3 ex:sub ex:l4 .',
+                9209)",
+        )
+        .unwrap();
+        Spi::run("SET pgrdf.path_max_depth = 2").unwrap();
+        Spi::run("SET pgrdf.on_path_truncation = 'count'").unwrap();
+        Spi::run(
+            "SELECT count(*) FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> SELECT ?o WHERE { ex:l1 ex:sub+ ?o }')",
+        )
+        .unwrap();
+        let t: i64 =
+            Spi::get_one("SELECT (pgrdf.last_call_stats()->>'path_depth_truncations')::bigint")
+                .unwrap()
+                .unwrap();
+        assert!(
+            t >= 1,
+            "truncating call must report non-zero per-call figure"
+        );
+        Spi::run("RESET pgrdf.path_max_depth").unwrap();
+        Spi::run(
+            "SELECT count(*) FROM pgrdf.sparql(
+                 'PREFIX ex: <http://example.com/> SELECT ?o WHERE { ex:l1 ex:sub+ ?o }')",
+        )
+        .unwrap();
+        let t2: i64 =
+            Spi::get_one("SELECT (pgrdf.last_call_stats()->>'path_depth_truncations')::bigint")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            t2, 0,
+            "clean call reports zero — per-call, never cumulative"
+        );
+        Spi::run("RESET pgrdf.on_path_truncation").unwrap();
     }
 }

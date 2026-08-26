@@ -1,11 +1,3 @@
-# E5/K9 surface classification — DRAFT, operator review owed (K9-2 catches
-# unclassified, never misclassified; each judgment below is a proposal).
-# Unit: (proname, identity_args) — PL-1. Classes per LIB §E5:
-#   stable     contract; removal/signature change = breaking release
-#   internal   reachable but not API (low-level term/quad primitives, tuning variants)
-#   spike      dev artifact; may vanish without notice
-#   deprecated superseded; names its replacement in the note
-# Regenerate the live list with gen-surface.sh; case 12 diffs the two.
 add_graph(g bigint)	internal	partition-ensure by raw id; consumers use the iri form
 add_graph(id bigint, iri text)	internal	synthetic-id form; deliberately unexposed by the MCP too
 add_graph(iri text)	stable	the graph-creation verb
@@ -25,7 +17,9 @@ get_term(id bigint)	internal	dictionary primitive
 graph_digest(graph_id bigint)	stable	rdfc-1.0-sha256; since 0.6.32
 graph_id(iri text)	stable	NOTE strict: NULL on unknown iri — see T-NULL-3
 graph_integrity(graph_id bigint)	stable
+graph_inventory()	stable	E1: the supported inventory surface; since 0.6.34
 graph_iri(id bigint)	stable
+last_call_stats()	stable	E2: per-call completeness figures, session-local; since 0.6.34
 load_turtle(path text, graph_id bigint, base_iri text, bulk_load boolean)	stable	file-path loader
 load_turtle_dict_batched(path text, graph_id bigint, base_iri text, dict_batch_size integer)	internal	tuning variant
 load_turtle_staged(IN path text, IN graph_id bigint, IN n_workers integer)	stable	the staged loader procedure
@@ -37,6 +31,7 @@ lock_graph(graph_id bigint, reason text)	stable	the real lifecycle lock (#107)
 materialize(graph_id bigint, profile text)	stable	OWL 2 RL entailment
 move_graph(src bigint, dst bigint)	stable
 move_graph(src_iri text, dst_iri text)	stable
+orphan_partitions()	stable	E1: partitions unreachable by SPARQL; since 0.6.34
 parse_nquads(content text, default_graph_id bigint, strict boolean)	stable
 parse_trig(content text, default_graph_id bigint, strict boolean)	stable
 parse_turtle(content text, graph_id bigint, base_iri text)	stable
@@ -57,6 +52,8 @@ spike_ta10_logged_indexed(triple_count integer, batch_size integer)	spike	TA-10 
 spike_ta10_logged_partitioned(triple_count integer, batch_size integer)	spike	TA-10 loader spike
 spike_ta11_batch_sweep(triple_count integer, batch_size integer)	spike	TA-11 loader spike
 stats()	stable	instance health; NOTE counters are global, never per-call (L2)
+structural_digest(graph_id bigint)	stable	E6: pgrdf-fd1-sha256; DIFFERENT conclusive, SAME evidence only; since 0.6.34
+surface()	stable	E5: this listing; since 0.6.34
 unlock_graph(graph_id bigint, reason text)	stable	the lock gate's named cure — K11 tested
 validate(data_graph_id bigint, shapes_graph_id bigint, mode text, strict boolean)	stable	REPORT PAYLOAD FROZEN — E0 scope guard
 version()	stable	identity triple member

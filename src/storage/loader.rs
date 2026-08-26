@@ -229,7 +229,7 @@ fn object_to_id(t: &Term, cache: &mut HashMap<DictKey, i64>, stats: &mut LoaderS
         #[allow(unreachable_patterns)]
         _ => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-            format!("load_turtle: unsupported object term (RDF-star not in v0.2 scope)"),
+            "load_turtle: unsupported object term (RDF-star not in v0.2 scope)".to_string(),
         ),
     }
 }
@@ -1654,7 +1654,7 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
                     #[allow(unreachable_patterns)]
                     _ => crate::refuse(
                         pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                        format!("load_turtle: unsupported object term"),
+                        "load_turtle: unsupported object term".to_string(),
                     ),
                 };
                 out.push((s, p, o));
@@ -2024,7 +2024,7 @@ fn ingest_turtle_streaming(
                                 ),
                             },
                             #[allow(unreachable_patterns)]
-                            _ => crate::refuse(pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED, format!("load_turtle_streaming: unsupported object term")),
+                            _ => crate::refuse(pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED, "load_turtle_streaming: unsupported object term".to_string()),
                         };
                         out.push((s, p, o));
                     }

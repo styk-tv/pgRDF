@@ -155,7 +155,7 @@ fn add_graph_iri(iri: &str) -> i64 {
     if iri.trim().is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("add_graph: iri must be non-empty"),
+            "add_graph: iri must be non-empty".to_string(),
         );
     }
 
@@ -268,7 +268,7 @@ fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
     if iri.trim().is_empty() {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
-            format!("add_graph: iri must be non-empty"),
+            "add_graph: iri must be non-empty".to_string(),
         );
     }
 

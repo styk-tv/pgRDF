@@ -259,7 +259,7 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
             #[allow(unreachable_patterns)]
             _ => crate::refuse(
                 pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
-                format!("materialize: unsupported object term (RDF-star out of scope)"),
+                "materialize: unsupported object term (RDF-star out of scope)".to_string(),
             ),
         }
     }

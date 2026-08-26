@@ -41,7 +41,7 @@ const MAX_PERMUTATION_GROUP: usize = 7;
 const MAX_RECURSION_DEPTH: usize = 32;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-enum CTerm {
+pub(crate) enum CTerm {
     Iri(String),
     BNode(String),
     Lit {
@@ -51,7 +51,7 @@ enum CTerm {
     },
 }
 
-type Triple = (CTerm, CTerm, CTerm);
+pub(crate) type Triple = (CTerm, CTerm, CTerm);
 
 /// Canonical N-Triples escaping for the literal lexical form.
 fn nt_escape(s: &str) -> String {
@@ -107,7 +107,7 @@ fn sha256_hex(data: &str) -> String {
 /// Read a graph's ASSERTED triples with full term structure — the same
 /// join shape `serialise_graph_to_ntriples` uses (shacl.rs), minus the
 /// inferred rows.
-fn read_asserted_triples(graph_id: i64) -> Vec<Triple> {
+pub(crate) fn read_asserted_triples(graph_id: i64) -> Vec<Triple> {
     let mut triples: Vec<Triple> = Vec::new();
     Spi::connect(|client| {
         let table = client
