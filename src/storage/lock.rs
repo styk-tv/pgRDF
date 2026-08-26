@@ -73,7 +73,10 @@ pub(crate) fn require_unlocked(graph_id: i64, verb: &str) {
 #[pg_extern]
 fn lock_graph(graph_id: i64, reason: &str) -> bool {
     if reason.trim().is_empty() {
-        pgrx::error!("lock_graph: a non-empty reason is required — the reason IS the record");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("lock_graph: a non-empty reason is required — the reason IS the record"),
+        );
     }
     let existing = Spi::get_two_with_args::<bool, String>(
         "SELECT locked, COALESCE(lock_reason, '') FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
@@ -82,13 +85,19 @@ fn lock_graph(graph_id: i64, reason: &str) -> bool {
     match existing {
         Ok((Some(true), prior)) => {
             let prior = prior.unwrap_or_default();
-            pgrx::error!(
-                "lock_graph: graph {graph_id} is already locked ({prior}). \
-                 Unlock first — a silent re-lock would swallow the standing reason."
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
+                format!(
+                    "lock_graph: graph {graph_id} is already locked ({prior}). \
+                     Unlock first — a silent re-lock would swallow the standing reason."
+                ),
             );
         }
         Ok((Some(false), _)) => {}
-        _ => pgrx::error!("lock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+            format!("lock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
+        ),
     }
     Spi::run_with_args(
         "UPDATE pgrdf._pgrdf_graphs \
@@ -106,7 +115,10 @@ fn lock_graph(graph_id: i64, reason: &str) -> bool {
 #[pg_extern]
 fn unlock_graph(graph_id: i64, reason: &str) -> bool {
     if reason.trim().is_empty() {
-        pgrx::error!("unlock_graph: a non-empty reason is required — the reason IS the record");
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            format!("unlock_graph: a non-empty reason is required — the reason IS the record"),
+        );
     }
     let existing = Spi::get_one_with_args::<bool>(
         "SELECT locked FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
@@ -114,10 +126,14 @@ fn unlock_graph(graph_id: i64, reason: &str) -> bool {
     );
     match existing {
         Ok(Some(true)) => {}
-        Ok(Some(false)) => {
-            pgrx::error!("unlock_graph: graph {graph_id} is not locked — nothing to unlock")
-        }
-        _ => pgrx::error!("unlock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
+        Ok(Some(false)) => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            format!("unlock_graph: graph {graph_id} is not locked — nothing to unlock"),
+        ),
+        _ => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+            format!("unlock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
+        ),
     }
     Spi::run_with_args(
         "UPDATE pgrdf._pgrdf_graphs \

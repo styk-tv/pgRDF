@@ -73,6 +73,11 @@ names the gate site. Genuine invariant breaks stay `panic!` = `XX000`, deliberat
 ```
 surface/gen-surface.sh      live surface dump from pg_proc (name, args, kind, vol, strict)
 surface/classification.tsv  DRAFT stable/internal/spike classification, all 54 exports
-gates/gen-gates.sh          mechanical census of deliberate panic-gates
-gates/gates.tsv             the snapshot: 56 rows = the E0 sweep worklist (4 done)
+gates/gen-gates.sh          mechanical census: refuse-sites (code named) + panic gates,
+                            test modules excluded (the first census counted 9 path.rs
+                            test assertions as gates — corrected)
+gates/gates.tsv             the snapshot: 74 refuse sites · 2 deliberate remainders
+                            (staged/phases.rs:590 runs in a background worker whose
+                            error protocol needs its own analysis before E0 touches it;
+                            staged/pool.rs:186 is a genuine internal invariant = XX000)
 ```
