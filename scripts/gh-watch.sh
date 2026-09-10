@@ -2,14 +2,12 @@
 # gh-watch.sh <tag> — wait for the GitHub Actions release chain for <tag>,
 # print the outcome, fire a macOS notification.
 #
-# Run it BACKGROUNDED from a Claude Code Bash call (run_in_background: true):
-# the harness re-invokes the agent with this script's output when the chain
-# settles. No hooks, no temp files, no settings.json. Pattern verified in
-# pgCK (SPEC.CLAUDE.GH-WATCH.v0.2); adapted for pgRDF's three-hop chain.
+# Can run in the background (for example from an agent session): it exits
+# when the chain settles and prints the outcome. No hooks, no temp files.
 #
-# Chain (per PROVENANCE.md): release.yml -> oci-publish.yml -> update-latest-md.yml.
+# Chain: release.yml -> oci-publish.yml -> update-latest-md.yml.
 # A release is "in" only when update-latest-md.yml has rewritten LATEST.md
-# (Rule 2 + Rule 3). SHA-keyed on the entry hop so parallel pushes of
+# SHA-keyed on the entry hop so parallel pushes of
 # different tags never cross.
 #
 #   scripts/gh-watch.sh v0.5.18

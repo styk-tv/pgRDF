@@ -1,1431 +1,318 @@
 # 03 — Querying with SPARQL
 
-`pgrdf.sparql(q TEXT) → SETOF JSONB` runs a SPARQL SELECT against
-everything in the database and returns one JSON row per solution.
-
-```sql
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?person ?name WHERE { ?person foaf:name ?name }'
-);
---  → {"person": "http://example.com/alice", "name": "Alice"}
---  → {"person": "http://example.com/bob",   "name": "Bob"}
-```
-
-Each row is a `JSONB` object keyed by the SELECT-clause variable
-names. Lexical values come back as strings. The `pgrdf.sparql`
-function is set-returning, so you can use it anywhere a normal
-SETOF Postgres function would go — `FROM`, `LATERAL`, CTEs, etc.
-
-## What works today
-
-| Form | Status |
-|---|---|
-| `SELECT ?vars WHERE { BGP }` with 1 or more triple patterns | ✅ |
-| Constants in subject, predicate, or object position (IRIs, literals) | ✅ |
-| Multi-pattern BGPs with shared variables → INNER joins | ✅ |
-| `DISTINCT`, `REDUCED` → `SELECT DISTINCT` | ✅ |
-| `LIMIT N`, `OFFSET N` | ✅ |
-| `ORDER BY ?var`, `ORDER BY ASC(?var)`, `ORDER BY DESC(?var)` — **type-aware** per SPARQL 1.1 §15.1 (numerics numerically, `xsd:dateTime` chronologically, strings by codepoint) | ✅ v0.4.6 |
-| `ORDER BY <expression>` (`ORDER BY (?a + ?b)`, `ORDER BY STRLEN(?s)`), multi-key `ORDER BY ?a DESC(?b)` | ✅ v0.4.6 |
-| `FILTER` — identity (`=`, `!=`, `sameTerm`), boolean (`&&`, `\|\|`, `!`), term-type (`isIRI`, `isLiteral`, `isBlank`), `BOUND` | ✅ |
-| `FILTER` — numeric ordering (`<`/`>`/`<=`/`>=`), `REGEX`, `IN`, `STR` passthrough | ✅ |
-| `FILTER` — arithmetic (`+`/`-`/`*`/`/`), `LANG`, `DATATYPE`, `STRLEN`, `UCASE`, `LCASE`, `CONTAINS`, `STRSTARTS`, `STRENDS` | ✅ |
-| `OPTIONAL { single-triple BGP }` → LEFT JOIN (with inner FILTER honoured) | ✅ |
-| `OPTIONAL { multi-pattern BGP }`, nested OPTIONALs (atomic, W3C §6.1) | ✅ v0.4.6 |
-| `UNION` (n-way, branches may bind different vars) | ✅ |
-| `MINUS { multi-pattern }` keyed by shared vars (no-op when no shared vars per spec) | ✅ |
-| Aggregates — `COUNT(*)`, `COUNT(?v)`, `COUNT(DISTINCT ?v)`, `SUM`, `AVG`, type-aware `MIN`/`MAX`, `GROUP_CONCAT`, `SAMPLE` with `GROUP BY` | ✅ |
-| `HAVING(?alias > c)` (after AS-alias) **and** `HAVING(SUM(?v) > c)` (inline aggregate) | ✅ |
-| `BIND(expr AS ?v)` for projection (Literal / NamedNode / Variable, STR / LANG / DATATYPE / UCASE / LCASE / STRLEN, arithmetic, CONCAT) | ✅ |
-| `ASK { … }` query form | ✅ |
-| Named-graph `GRAPH <iri> { … }` and `GRAPH ?g { … }` clauses (composes with OPTIONAL / UNION / MINUS) | ✅ |
-| `INSERT DATA { … }`, `DELETE DATA { … }` (default + named graph) | ✅ v0.4.3 |
-| `INSERT { template } WHERE { pattern }`, `DELETE { template } WHERE { pattern }` (also `DELETE WHERE { … }` shorthand) | ✅ v0.4.3 |
-| `DELETE { … } INSERT { … } WHERE { … }` atomic modify | ✅ v0.4.3 |
-| `WITH <iri>` graph scoping, `GRAPH <iri>` in templates + WHERE (cross-graph copy) | ✅ v0.4.3 |
-| Lifecycle algebra — `DROP / CLEAR / CREATE GRAPH`, plus `DEFAULT / NAMED / ALL` targets, `SILENT` flag | ✅ v0.4.3 |
-| `CONSTRUCT { template } WHERE { … }` (constant / variable / blank-node / multi-triple templates, GRAPH-scoped WHERE, `CONSTRUCT WHERE { … }` shorthand, round-trip ingest) via `pgrdf.construct(q)` | ✅ v0.4 |
-| `DESCRIBE <iri>` / `DESCRIBE ?v WHERE { … }` / mixed / `DESCRIBE *` via `pgrdf.describe(q)` (W3C §16.4 closure) | ✅ v0.4.6 |
-| Property paths — `^` inverse, `+` / `*` / `?`, `\|` alternation (incl. `(a\|b)+`/`(a\|b)*`/`(a\|b)?`/`^(a\|b)`), materialised-closure fast path | ✅ v0.4.5 |
-| `VALUES (?x) { … }` inline data (typed/lang literals, `UNDEF`) | ✅ v0.4.6 |
-| Aggregates over `UNION` (COUNT/SUM/AVG/MIN-MAX/GROUP_CONCAT/SAMPLE, GROUP BY, HAVING) | ✅ v0.4.6 |
-| `BIND` output referenced in a later FILTER / BGP / chained BIND | ✅ v0.4.6 |
-| `SERVICE` (federated SPARQL) | Out of scope for v0.x |
-
-`pgrdf.sparql_parse(q)` reports the parsed shape as JSONB and flags
-`unsupported_algebra` for everything not yet translated — use it to
-preview whether the translator will handle your query (see further down).
-
-## Examples
-
-### Single-pattern BGP
-
-```sql
--- Every triple in the database
-SELECT * FROM pgrdf.sparql('SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
-
--- All FOAF names
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?name WHERE { ?_ foaf:name ?name }'
-);
-
--- What does this specific subject have?
-SELECT * FROM pgrdf.sparql(
-  'SELECT ?p ?o WHERE { <http://example.com/alice> ?p ?o }'
-);
-```
-
-### Multi-pattern BGP — shared variables become joins
-
-```sql
--- People who have BOTH name and mbox
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?p ?n ?m
-     WHERE { ?p foaf:name ?n .
-             ?p foaf:mbox ?m }'
-);
---  → {"p": "http://example.com/alice", "n": "Alice", "m": "mailto:a@x"}
---  → {"p": "http://example.com/carol", "n": "Carol", "m": "mailto:c@x"}
---  (Bob excluded — no mbox.)
-
--- Three-pattern chain: "name of A, name of someone A knows"
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?an ?bn
-     WHERE { ?a foaf:knows ?b .
-             ?a foaf:name  ?an .
-             ?b foaf:name  ?bn }'
-);
---  → {"an": "Alice", "bn": "Bob"}
-```
-
-### Constants in any position
-
-```sql
--- Bound predicate
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s WHERE { ?s a foaf:Person }'
-);
-
--- Bound subject
-SELECT * FROM pgrdf.sparql(
-  'SELECT ?p ?o WHERE { <http://example.com/alice> ?p ?o }'
-);
-
--- Bound literal object — exact value + datatype match
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?p WHERE { ?p foaf:name "Alice" }'
-);
-
--- Typed literal
-SELECT * FROM pgrdf.sparql(
-  'PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-   PREFIX ex:  <http://example.com/>
-   SELECT ?p WHERE { ?p ex:age "30"^^xsd:integer }'
-);
-```
-
-### FILTER expressions
-
-```sql
--- Identity: literal equality (compared as dict ids — sameTerm semantics)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s WHERE { ?s foaf:name ?n FILTER(?n = "Alice") }'
-);
-
--- Identity: IRI equality (also against ?vars)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?o
-     WHERE { ?s ?p ?o FILTER(?p = foaf:knows) }'
-);
-
--- Negation
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s WHERE { ?s foaf:name ?n FILTER(?n != "Alice") }'
-);
-
--- Term-type predicates
-SELECT * FROM pgrdf.sparql(
-  'SELECT ?s ?o WHERE { ?s ?p ?o FILTER(isIRI(?o)) }'
-);
-SELECT * FROM pgrdf.sparql(
-  'SELECT ?s ?o WHERE { ?s ?p ?o FILTER(isLiteral(?o)) }'
-);
-SELECT * FROM pgrdf.sparql(
-  'SELECT ?s WHERE { ?s ?p ?o FILTER(isBlank(?s)) }'
-);
-
--- Boolean composition
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?o
-     WHERE { ?s ?p ?o FILTER(isIRI(?o) && ?p = foaf:knows) }'
-);
-
--- Self-loop detection via ?s = ?o
-SELECT * FROM pgrdf.sparql('SELECT ?s WHERE { ?s ?p ?o FILTER(?s = ?o) }');
-```
-
-#### What `=` actually means here
-
-pgRDF's FILTER `=` is implemented by comparing **dictionary ids**.
-Two terms compare equal iff their `(term_type, lexical, datatype,
-language)` quadruple matches exactly — that's RDF `sameTerm`
-semantics, which is also what SPARQL's `=` reduces to for IRIs and
-blank nodes, and matches `=` for strings of the same datatype.
-
-The XSD-value-equality cases (`"1"^^xsd:integer = "01"^^xsd:integer`,
-`"a" = "a"^^xsd:string`) currently compare as *not equal* because
-the lexical forms differ — a single-term-equality is by dict-id,
-which preserves datatype + language. Use the numeric ordering
-operators (`<`/`>`/`<=`/`>=`) for value-aware numeric comparison
-on `xsd:numeric` literals.
-
-#### `BOUND` in a BGP context
-
-`BOUND(?v)` is trivially `TRUE` for any variable `?v` that's used in
-the mandatory BGP (every mandatory BGP variable is bound on every
-result row) and `FALSE` for any variable that isn't. It earns its
-keep against `OPTIONAL`-introduced variables — `BOUND(?v)` translates
-to `qN.col IS NOT NULL`, which correctly returns FALSE for OPTIONAL
-vars that didn't match (see the OPTIONAL section below).
-
-#### Combining FILTER with multi-pattern BGPs
-
-```sql
--- All people with both name + mbox, excluding Alice
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?p ?n ?m
-     WHERE { ?p foaf:name ?n .
-             ?p foaf:mbox ?m
-             FILTER(?n != "Alice") }'
-);
-```
-
-Filters apply after the BGP joins — they're appended to the
-`WHERE` clause of the generated SQL.
-
-### Numeric ordering
-
-```sql
--- Adults only
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?age
-     WHERE { ?s foaf:age ?age FILTER(?age >= 18) }'
-);
-
--- Age range
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s
-     WHERE { ?s foaf:age ?age FILTER(?age >= 30 && ?age < 65) }'
-);
-```
-
-Both sides are cast to Postgres `NUMERIC` if and only if their
-dictionary entry's datatype is one of the XSD numeric IRIs
-(`xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:float`, the
-sized variants and unsigned variants, and the constraint subtypes).
-Anything else — `xsd:string`, untyped, IRI, blank node — compares
-NULL and is dropped from the result, matching SPARQL's "type
-error → unbound" semantics. Comparing two strings as if they were
-numbers does not raise an error; it just yields no rows.
-
-(That paragraph is about FILTER comparison `<`/`>`. Result
-*ordering* is separate and is fully handled inside the SPARQL UDF —
-see the next section.)
-
-### Type-aware ORDER BY (SPARQL 1.1 §15.1)
-
-`ORDER BY` sorts across the SPARQL value space, not by raw lexical
-string. Numeric literals compare **numerically**, so a query that
-used to need post-processing in SQL now Just Works:
-
-```sql
--- xsd:integer ranks sort 1, 2, 10, 100 — NOT the lexical
--- "1","10","100","2" you'd get from a plain string sort.
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.com/>
-   SELECT ?s ?rank
-     WHERE { ?s ex:rank ?rank } ORDER BY ?rank');
-
--- DESC, multi-key, and expression sort keys all work:
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.com/>
-   SELECT ?s ?name
-     WHERE { ?s ex:name ?name ; ex:rank ?rank }
-   ORDER BY DESC(?rank) ?name');
-
--- ORDER BY an expression (sort by string length):
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.com/>
-   SELECT ?label WHERE { ?s ex:label ?label }
-   ORDER BY STRLEN(?label)');
-```
-
-The ordering rules (SPARQL 1.1 §15.1):
-
-- Across kinds the ascending order is unbound (NULL, sorts last) <
-  blank node < IRI < literal — and within literals comparable
-  datatypes compare by value.
-- `xsd:integer` / `xsd:decimal` / `xsd:float` / `xsd:double` →
-  **numeric** comparison (`2 < 10`).
-- `xsd:dateTime` → **chronological** comparison.
-- `xsd:boolean` → `false < true`.
-- `xsd:string`, plain, and language-tagged literals → **Unicode
-  codepoint** order (locale-independent; uppercase `A` sorts before
-  lowercase `a`).
-- Cross-type-incomparable values fall back to a stable order —
-  `ORDER BY` is **total and never raises** (unlike `<` inside
-  FILTER, which can produce a type error / drop rows).
-
-`DESC(?x)` reverses; combine keys with `ORDER BY ?a DESC(?b)`; and
-the sort key may be any expression the FILTER/BIND surface supports
-(`ORDER BY (?a + ?b)`, `ORDER BY STRLEN(?s)`). One narrow exception:
-an *expression* sort key combined with an aggregate / UNION /
-aggregate-over-UNION query is not supported — bind the expression
-with `BIND(... AS ?k)` and `ORDER BY ?k` instead.
-
-### REGEX
-
-```sql
--- Case-sensitive (Postgres ~ operator)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s WHERE { ?s foaf:name ?n FILTER(REGEX(?n, "^A")) }'
-);
-
--- Case-insensitive (i flag → Postgres ~* operator)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s WHERE { ?s foaf:name ?n FILTER(REGEX(?n, "^a", "i")) }'
-);
-
--- STR() wrapper is a no-op (every term's lexical form IS its string)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s WHERE { ?s foaf:name ?n FILTER(REGEX(STR(?n), "ar", "i")) }'
-);
-```
-
-The regex pattern is a SPARQL literal at translation time and is
-embedded as a Postgres regex literal (single quotes are escaped).
-Anchors (`^`, `$`), character classes, quantifiers — anything
-Postgres POSIX regex supports. The `i` flag toggles case-insensitive;
-other flags are accepted but currently ignored (Postgres POSIX
-doesn't have a direct PCRE-flag equivalent for `x`/`m`/`s`).
-
-### IN — set membership
-
-```sql
--- Find persons in a named set
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s WHERE {
-     ?s foaf:name ?n
-     FILTER(?s IN (<http://example.com/alice>,
-                   <http://example.com/carol>,
-                   <http://example.com/dave>))
-   }'
-);
-
--- Literal membership
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s WHERE { ?s foaf:name ?n FILTER(?n IN ("Alice", "Bob")) }'
-);
-```
-
-`IN` is dict-id set membership — emits `qN.col IN (id_1, id_2, …)`
-where each id is resolved upfront. Unknown terms resolve to `-1`
-so they can never match, matching SPARQL's "not in the set" outcome.
-
-### OPTIONAL
-
-`OPTIONAL { ?s :p ?o }` translates to a `LEFT JOIN` against the
-mandatory BGP. Variables introduced inside the OPTIONAL come back
-NULL (as `JSON null` in the JSONB output) for rows where the
-optional pattern didn't match.
-
-```sql
--- Names + mbox if available
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n ?m
-     WHERE { ?s foaf:name ?n
-             OPTIONAL { ?s foaf:mbox ?m } }'
-);
---  → {"s": "...alice", "n": "Alice", "m": "mailto:a@x"}
---  → {"s": "...bob",   "n": "Bob",   "m": null}
---  → {"s": "...carol", "n": "Carol", "m": "mailto:c@x"}
-```
-
-#### OPTIONAL with an inner FILTER
-
-```sql
--- Bring back age only if >= 18; otherwise the row still surfaces
--- with ?a = null (filter rejects the optional match, not the row)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n ?a
-     WHERE { ?s foaf:name ?n
-             OPTIONAL { ?s foaf:age ?a FILTER(?a >= 18) } }'
-);
-```
-
-The OPTIONAL's filter lands in the LEFT JOIN's `ON` clause, so when
-it rejects a candidate match, `?a` comes back as `null` (rather
-than the whole row being pruned).
-
-#### Multiple chained OPTIONALs
-
-```sql
--- name (mandatory), mbox + age both OPTIONAL
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n ?m ?a
-     WHERE { ?s foaf:name ?n
-             OPTIONAL { ?s foaf:mbox ?m }
-             OPTIONAL { ?s foaf:age  ?a } }'
-);
-```
-
-Each OPTIONAL becomes its own LEFT JOIN. Variables introduced in
-one OPTIONAL aren't visible to another OPTIONAL's join condition
-(per SPARQL semantics).
-
-#### Pruning with outer FILTER(BOUND(?v))
-
-```sql
--- Persons who DO have an mbox — outer FILTER removes the unbound rows
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?m
-     WHERE { ?s foaf:name ?n
-             OPTIONAL { ?s foaf:mbox ?m }
-             FILTER(BOUND(?m)) }'
-);
-```
-
-`BOUND(?v)` translates to `qN.col IS NOT NULL`, so it correctly
-returns FALSE for OPTIONAL vars that didn't match. (For mandatory
-vars it's always TRUE since INNER joins guarantee non-null.)
-
-#### Scoping notes
-
-- **Multi-pattern OPTIONALs** (`OPTIONAL { ?s a . ?s b . }`) and
-  **nested OPTIONAL inside OPTIONAL** are both supported — each
-  group lowers to its own LEFT JOIN (nested where needed).
-- **OPTIONAL's inner FILTER** sees only that OPTIONAL's variables
-  and the mandatory anchors, not other OPTIONAL groups' variables
-  (per SPARQL scoping).
-
-### UNION
-
-`{ A } UNION { B }` combines two branches with SQL `UNION ALL`.
-Each branch is a complete sub-SELECT — its own BGP, FILTERs, and
-OPTIONALs. Variables only bound in one branch come back as
-`null` in the JSONB rows from the other branch.
-
-```sql
--- Same projected var across branches (names from either property)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n
-     WHERE { { ?s foaf:name ?n }
-             UNION
-             { ?s foaf:nick ?n } }'
-);
-
--- Different vars per branch
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n ?m
-     WHERE { { ?s foaf:name ?n }
-             UNION
-             { ?s foaf:mbox ?m } }'
-);
---  → {"s": "...alice", "n": "Alice", "m": null}
---  → {"s": "...bob",   "n": null,    "m": "mailto:b@x"}
-
--- N-way chain: A UNION B UNION C flattens to 3 branches
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?o
-     WHERE { { ?s foaf:name ?o }
-             UNION
-             { ?s foaf:nick ?o }
-             UNION
-             { ?s foaf:mbox ?o } }'
-);
-```
-
-#### How UNION composes with the rest
-
-- **FILTER inside a branch** is branch-local — it only prunes that
-  branch's rows.
-- **OPTIONAL inside a branch** works the same as in a non-UNION
-  query, scoped to that branch.
-- **DISTINCT / ORDER BY / LIMIT / OFFSET** apply to the union
-  result as a whole. ORDER BY on UNION may only reference
-  **projected** variables (the outer SELECT can't see a branch's
-  internal alias columns); the executor panics with a clear
-  message if you try.
-- Each branch is translated independently with its own `q1, q2, …`
-  alias namespace — there's no cross-branch join.
-
-#### Today's restriction
-
-- Each UNION branch is one of: BGP, FILTERed BGP, BGP with
-  OPTIONALs. Nested UNION inside a branch, or UNION inside an
-  OPTIONAL, isn't supported in this slice.
-
-### MINUS
-
-`{ A } MINUS { B }` removes rows of `A` whose shared variables are
-compatible with some row of `B`. The translator emits a
-`WHERE NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_quads qMIN WHERE …)`
-sub-SELECT keyed on those shared variables.
-
-```sql
--- Persons who DON'T have an mbox
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n
-     WHERE { ?s foaf:name ?n
-             MINUS { ?s foaf:mbox ?m } }'
-);
-
--- Persons with neither mbox nor age (chained MINUSes)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s
-     WHERE { ?s foaf:name ?n
-             MINUS { ?s foaf:mbox ?m }
-             MINUS { ?s foaf:age  ?a } }'
-);
-```
-
-#### The shared-variables rule
-
-Per SPARQL spec, MINUS only filters when the two arms share at
-least one variable. If `MINUS { ?x ex:foo ?y }` shares no variable
-with the outer query, it's a no-op — every row of the outer
-pattern survives. The translator detects this case at translation
-time and emits no SQL at all for that MINUS block.
-
-That's different from how OPTIONAL behaves with disjoint variables
-(OPTIONAL does emit a LEFT JOIN regardless). The asymmetry is
-inherited from the SPARQL semantics: MINUS without shared vars
-is defined to be the identity; OPTIONAL without shared vars is a
-cross product.
-
-#### Today's restrictions
-
-- **Nested MINUS inside MINUS** isn't supported — only flat chains.
-
-(Multi-triple MINUS sub-patterns are supported, keyed on shared
-variables with the outer query — see the surface table at the top.)
-
-### Named graphs
-
-`GRAPH <iri> { … }` and `GRAPH ?g { … }` scope a block of triple
-patterns to one or more named graphs in your dataset. Allocate the
-graphs first (see
-[02-loading-rdf.md → Named graphs by IRI](02-loading-rdf.md#named-graphs-by-iri))
-and load Turtle into them; then reference them by IRI in your
-SPARQL.
-
-#### Literal-IRI form — `GRAPH <iri> { … }`
-
-```sql
--- Only triples whose graph_id matches g1's binding
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?s ?n WHERE {
-     GRAPH <http://example.org/g1> { ?s ex:name ?n }
-   }'
-);
---  → {"s": "...alice", "n": "Alice in g1"}
-```
-
-At translate time the IRI resolves to its `graph_id` via
-`_pgrdf_graphs.iri`, and every triple alias inside the block carries
-an additional `qN.graph_id = <resolved>` constraint. An unresolved
-IRI binds to `-1` (the zero-rows sentinel) — the query returns no
-solutions rather than raising, matching SPARQL's "no solutions"
-semantics.
-
-Multi-triple BGPs inside one literal-IRI `GRAPH` block all share the
-same scope, so triples cannot stitch across graphs:
-
-```sql
--- Both ?n and ?m MUST come from g1; there is no cross-graph join
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?s ?n ?m WHERE {
-     GRAPH <http://example.org/g1> {
-       ?s ex:name ?n .
-       ?s ex:mbox ?m
-     }
-   }'
-);
-```
-
-#### Variable form — `GRAPH ?g { … }`
-
-When you want the graph IRI to come back as a binding (e.g. to group
-by graph, or to discover which graph a result came from), use the
-variable form:
-
-```sql
--- Name + the IRI of the graph each name came from
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?g ?n WHERE {
-     GRAPH ?g { ?s ex:name ?n }
-   }'
-);
---  → {"g": "http://example.org/g1", "n": "Alice in g1"}
---  → {"g": "http://example.org/g2", "n": "Alice in g2"}
-```
-
-The translator emits an INNER JOIN to `_pgrdf_graphs`, so `?g`
-binds only to graphs that have an IRI in the mapping (every graph
-allocated via `pgrdf.add_graph` does — see the loading guide).
-The projection layer substitutes the IRI string for the integer
-`graph_id`, so the JSONB row carries the IRI directly.
-
-As with the literal-IRI form, every triple inside one `GRAPH ?g`
-block shares the same graph_id binding:
-
-```sql
--- Count of (name, mbox) pairs per graph
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?g (COUNT(*) AS ?n)
-     WHERE { GRAPH ?g { ?s ex:name ?nm . ?s ex:mbox ?m } }
-   GROUP BY ?g
-   ORDER BY ?g'
-);
---  → {"g": "http://example.org/g1", "n": "1"}
---  → {"g": "http://example.org/g2", "n": "1"}
-```
-
-#### Composition with OPTIONAL / UNION / MINUS
-
-`GRAPH` blocks compose freely with the other algebra operators. Each
-`GRAPH` block carries its own scope — distinct `GRAPH` blocks within
-the same query get distinct scopes, so an OPTIONAL pulling enrichment
-from a side graph doesn't constrain the outer pattern.
-
-**OPTIONAL with a different graph scope** — common pattern for
-"enrich from a side graph if the side graph has anything":
-
-```sql
--- Names from g1, optionally enriched with mbox from g2
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?s ?n ?m WHERE {
-     GRAPH <http://example.org/g1> { ?s ex:name ?n }
-     OPTIONAL { GRAPH <http://example.org/g2> { ?s ex:mbox ?m } }
-   }'
-);
---  → {"s": "...alice", "n": "Alice", "m": "alice@x"}    -- enrichment hit
---  → {"s": "...bob",   "n": "Bob",   "m": null}         -- enrichment miss
-```
-
-If `?s` isn't bound in g2's `ex:mbox`, `?m` comes back as JSON null
-— the outer row still surfaces. This is a LEFT JOIN, not a graph
-constraint on the outer pattern.
-
-**UNION across graphs** — collect rows from several graphs into one
-result set:
-
-```sql
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?s ?n WHERE {
-     { GRAPH <http://example.org/g1> { ?s ex:name ?n } }
-     UNION
-     { GRAPH <http://example.org/g2> { ?s ex:name ?n } }
-   }'
-);
-```
-
-Each branch is its own GRAPH scope; rows from one graph do NOT
-stitch with rows from the other, even when they share a subject.
-This is the spec-correct shape — `GRAPH g1 UNION GRAPH g2` means
-"either from g1 or from g2", not "from g1 joined to g2".
-
-**MINUS against a side graph** — exclude rows whose subject is also
-present in some other graph:
-
-```sql
--- Names from the default graph, minus subjects that already appear in g1
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?s ?n WHERE {
-     ?s ex:name ?n
-     MINUS { GRAPH <http://example.org/g1> { ?s ex:mbox ?m } }
-   }'
-);
-```
-
-The MINUS body inherits its own scope (g1 here); only g1's `ex:mbox`
-rows participate in the exclusion. As with bare MINUS, the
-shared-variable rule still applies: if the GRAPH-scoped MINUS shares
-no variable with the outer pattern, the MINUS is a no-op per spec.
-
-**GRAPH wrapping a multi-shape inner pattern** — an OPTIONAL or
-MINUS inside the SAME `GRAPH` block inherits the outer scope, so
-all triples are pinned to the same graph:
-
-```sql
--- For each graph, name + optional mbox from THAT SAME graph
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?g ?n ?m WHERE {
-     GRAPH ?g { ?s ex:name ?n OPTIONAL { ?s ex:mbox ?m } }
-   }'
-);
-```
-
-The OPTIONAL's `?s ex:mbox ?m` is constrained to the same graph as
-the outer `?s ex:name ?n`. You won't see a g1-name paired with a
-g2-mbox.
-
-#### A worked end-to-end example
-
-Load two named graphs and query across them:
-
-```sql
--- Allocate two graphs by IRI
-SELECT pgrdf.add_graph('http://example.org/employees');  --  → 1
-SELECT pgrdf.add_graph('http://example.org/contractors'); --  → 2
-
--- Ingest into each
-SELECT pgrdf.parse_turtle(
-  '@prefix ex: <http://example.org/> .
-   ex:alice ex:name "Alice" ; ex:dept "Eng" .
-   ex:bob   ex:name "Bob"   ; ex:dept "Ops" .',
-  pgrdf.graph_id('http://example.org/employees')
-);
-SELECT pgrdf.parse_turtle(
-  '@prefix ex: <http://example.org/> .
-   ex:carol ex:name "Carol" ; ex:agency "Acme" .
-   ex:dave  ex:name "Dave"  ; ex:agency "Beta" .',
-  pgrdf.graph_id('http://example.org/contractors')
-);
-
--- Everyone, with the graph they came from
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?g ?name WHERE {
-     GRAPH ?g { ?s ex:name ?name }
-   }
-   ORDER BY ?g ?name'
-);
---  → {"g": "http://example.org/contractors", "name": "Carol"}
---  → {"g": "http://example.org/contractors", "name": "Dave"}
---  → {"g": "http://example.org/employees",   "name": "Alice"}
---  → {"g": "http://example.org/employees",   "name": "Bob"}
-
--- Employees only, with optional contractor-side enrichment
--- (will always miss here — disjoint subjects)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   SELECT ?name ?agency WHERE {
-     GRAPH <http://example.org/employees>  { ?s ex:name ?name }
-     OPTIONAL {
-       GRAPH <http://example.org/contractors> { ?s ex:agency ?agency }
-     }
-   }'
-);
-```
-
-### Traversing graphs with property paths
-
-A property path lets one triple pattern match a *route* through the
-graph rather than a single edge. pgRDF ships the full v0.4 surface:
-
-| Path | Means | Example |
+pgRDF runs SPARQL 1.1 inside PostgreSQL. Queries are SQL function
+calls, so their results can be filtered, joined and aggregated with
+ordinary SQL.
+
+| Function | Query forms | Returns |
 |---|---|---|
-| `^p` | the edge, reversed (`?x ^p ?y` ≡ `?y p ?x`) | `?who ^foaf:knows ex:bob` — who points an `ex:bob`? no: who does Bob `knows`? Use `ex:bob ^foaf:knows ?who` for "who knows Bob". |
-| `p+` | one-or-more hops (transitive, **not** reflexive) | `?sub rdfs:subClassOf+ ex:Animal` |
-| `p*` | zero-or-more hops (transitive **and** reflexive) | `?sub rdfs:subClassOf* ex:Animal` (includes `ex:Animal` itself) |
-| `p?` | zero or one hop | `ex:x foaf:knows? ?y` (= `ex:x`, or anyone `ex:x` directly knows) |
-| `a\|b` | either predicate (a single step) | `?c (ex:parent\|ex:guardian) ?who` |
-
-These compose: `(ex:a\|ex:b)+` transitively closes over *either*
-predicate, `^(ex:p+)` is the inverse of a transitive closure, and a
-path joins to ordinary triples / `GRAPH` scopes / `OPTIONAL` exactly
-like a plain pattern.
-
-**Worked example — a subclass hierarchy.** Seed a chain:
-
-```sql
-SELECT pgrdf.add_graph(7000);
-SELECT pgrdf.parse_turtle('
-@prefix ex:   <http://example.org/> .
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-ex:Sparrow rdfs:subClassOf ex:Bird .
-ex:Bird    rdfs:subClassOf ex:Vertebrate .
-ex:Vertebrate rdfs:subClassOf ex:Animal .
-', 7000);
-```
-
-Every (transitive) subclass of `ex:Animal`, and `ex:Animal` itself:
-
-```sql
-SELECT sparql FROM pgrdf.sparql(
-  'PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-   PREFIX ex:   <http://example.org/>
-   SELECT ?c WHERE { ?c rdfs:subClassOf* ex:Animal }');
--- → ex:Sparrow, ex:Bird, ex:Vertebrate, ex:Animal  (4 — `*` is reflexive)
-```
-
-Use `+` instead of `*` to exclude `ex:Animal` itself (the strict
-subclasses only). A guard GUC `pgrdf.path_max_depth` (default 64,
-range 1–1024) bounds recursive walks — a traversal past the cap is
-**truncated, not errored**, and `pgrdf.stats()->>'path_depth_truncations'`
-counts it.
-
-**The materialise optimisation.** If you have already run
-`pgrdf.materialize(7000)` (the OWL-RL reasoner — see
-[04-inference](04-inference.md)), the transitive `subClassOf` closure
-is stored as direct edges. pgRDF *detects* this: a `subClassOf+` /
-`subClassOf*` (or `subPropertyOf` / `owl:sameAs`) query over a
-materialised graph skips the recursive walk entirely and does a
-plain direct match — same answers, no recursion. It is automatic and
-per-query; you do not change the query.
-
-### Aggregates and GROUP BY
-
-`pgrdf.sparql` supports the SPARQL set functions `COUNT` (with or
-without `DISTINCT`), `SUM`, `AVG`, `MIN`, `MAX`, optionally with
-`GROUP BY`. Each aggregate is bound to a SPARQL variable via the
-`(EXPR AS ?var)` syntax in the SELECT clause.
-
-```sql
--- Total triples in the database
-SELECT * FROM pgrdf.sparql(
-  'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }'
-);
---  → {"n": "9"}
-
--- Distinct subjects
-SELECT * FROM pgrdf.sparql(
-  'SELECT (COUNT(DISTINCT ?s) AS ?subjects) WHERE { ?s ?p ?o }'
-);
-
--- Sum / Avg over numeric values (non-numeric literals are skipped)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT (SUM(?age) AS ?total) (AVG(?age) AS ?mean)
-     WHERE { ?s foaf:age ?age }'
-);
-
--- Type-aware MIN/MAX: numeric path on xsd:numeric, lex fallback otherwise
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT (MIN(?n) AS ?lo) (MAX(?n) AS ?hi)
-     WHERE { ?s foaf:name ?n }'
-);
-
--- GROUP BY: count of triples per predicate
-SELECT * FROM pgrdf.sparql(
-  'SELECT ?p (COUNT(?o) AS ?n)
-     WHERE { ?s ?p ?o }
-   GROUP BY ?p'
-);
---  → {"p": "http://xmlns.com/foaf/0.1/name", "n": "4"}
---  → {"p": "http://xmlns.com/foaf/0.1/age",  "n": "3"}
---  → {"p": "http://xmlns.com/foaf/0.1/mbox", "n": "2"}
-
--- GROUP BY + ORDER BY on the aggregate, then LIMIT
-SELECT * FROM pgrdf.sparql(
-  'SELECT ?p (COUNT(?o) AS ?n)
-     WHERE { ?s ?p ?o }
-   GROUP BY ?p
-   ORDER BY DESC(?n) LIMIT 1'
-);
-```
-
-#### How values come back
-
-All aggregate values are emitted as JSON **strings** in the row's
-JSONB output, consistent with the rest of `pgrdf.sparql`. For
-numeric results, parse them on the caller side
-(`CAST(j ->> 'total' AS NUMERIC)` in SQL, `int(row.sparql["n"])`
-in Python, etc.).
-
-#### SUM / AVG numeric awareness
-
-`SUM(?v)` and `AVG(?v)` cast `?v` to `NUMERIC` if and only if
-its dictionary entry's datatype is one of the XSD numeric IRIs
-(`xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:float`, plus
-the sized + unsigned + constraint subtypes). Non-numeric values
-contribute `NULL` and are ignored by the aggregate per SQL
-semantics — no Postgres cast error is raised. This matches the
-FILTER ordering semantics.
-
-If your data mixes string-encoded numbers (`"30"^^xsd:string`)
-with proper numeric literals, only the latter contribute. Re-load
-with explicit XSD datatype annotations to fix this in the
-fixture rather than working around it in the query.
-
-#### MIN / MAX — type-aware
-
-`MIN(?v)` and `MAX(?v)` are type-aware: when `?v` resolves to an
-`xsd:numeric` literal (any of the XSD numeric IRIs, including the
-sized + unsigned + constraint subtypes) the aggregate runs on the
-`NUMERIC` cast, so `MAX("10", "2") = "10"`. Non-numeric values
-contribute NULL on the numeric path; the implementation falls back
-to lexicographic `MIN`/`MAX` on the term's string form when the
-numeric path yields no rows. For string-typed literals and IRIs
-the lex fallback is the intuitive answer.
-
-#### `HAVING`, `GROUP_CONCAT`, `SAMPLE`, `BIND`
-
-`HAVING` ships in both forms: the AS-alias form
-(`SELECT (COUNT(?o) AS ?n) … GROUP BY ?p HAVING(?n > 5)`) and the
-inline-aggregate form (`HAVING(SUM(?v) > 100)`). `GROUP_CONCAT(?v
-[; SEPARATOR = "…"])` lowers to Postgres `string_agg`; `SAMPLE(?v)`
-uses `MIN(...)` as a deterministic surrogate. `BIND(expr AS ?v)`
-is supported for projection — Literal / NamedNode / Variable,
-`STR` / `LANG` / `DATATYPE` / `UCASE` / `LCASE` / `STRLEN`,
-arithmetic, `CONCAT`.
-
-#### Notes
-
-- **Aggregates over a UNION** are supported — the UNION result is
-  grouped and aggregated like any other pattern.
-- **Referencing a `BIND(expr AS ?v)` output downstream** (in a later
-  FILTER or BGP) is supported; `?v` is in scope for the rest of the
-  group.
-
-### Solution modifiers — DISTINCT / LIMIT / OFFSET / ORDER BY
-
-The four classic SPARQL modifiers all land in the generated SQL:
-
-```sql
--- DISTINCT — dedup on the projected variables
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT DISTINCT ?n WHERE { ?s foaf:name ?n }'
-);
-
--- REDUCED — treated as DISTINCT (safe over-approximation per spec)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT REDUCED ?n WHERE { ?s foaf:name ?n }'
-);
-
--- LIMIT — cap the number of returned rows
-SELECT * FROM pgrdf.sparql(
-  'SELECT ?s ?o WHERE { ?s ?p ?o } LIMIT 10'
-);
-
--- OFFSET — skip rows from the start
-SELECT * FROM pgrdf.sparql(
-  'SELECT ?s ?o WHERE { ?s ?p ?o } OFFSET 10 LIMIT 10'
-);
-
--- ORDER BY ?var — ascending lexicographic on lexical_value
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?n WHERE { ?s foaf:name ?n } ORDER BY ?n'
-);
-
--- ORDER BY DESC(?var)
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?n WHERE { ?s foaf:name ?n } ORDER BY DESC(?n)'
-);
-
--- ORDER BY ASC(?var), DESC(?other) — multiple sort keys
-SELECT * FROM pgrdf.sparql(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n
-     WHERE { ?s foaf:name ?n }
-   ORDER BY ASC(?n) DESC(?s)'
-);
-```
-
-#### How ORDER BY works under the hood
-
-For each `ORDER BY ?var`, the translator emits
-
-```sql
-ORDER BY (SELECT lexical_value FROM pgrdf._pgrdf_dictionary
-            WHERE id = qN.<col>) [ASC|DESC] NULLS LAST
-```
-
-If `?var` is in the SELECT list, the existing projected column is
-reused (no extra subselect). If `?var` is bound in the BGP but
-NOT projected, an extra hidden column is appended to the SELECT
-list and ORDER BY references it by ordinal position. The
-`execute` layer only emits the projected columns into JSONB, so
-those hidden columns are invisible to callers.
-
-This is **type-aware ordering** (SPARQL 1.1 §15.1): `xsd:numeric`
-literals sort numerically (`2` before `10`), strings and IRIs sort
-by lexical form, and the type groups order per the spec — so
-`ORDER BY ?n` over numeric literals gives the right answer with no
-wrapping needed. Aggregate `MIN`/`MAX` use the same type-aware
-path — see the aggregates section above.
-
-#### DISTINCT + ORDER BY interaction
-
-If `ORDER BY` references a variable that's NOT in the SELECT list,
-DISTINCT can't be applied — Postgres requires ORDER BY expressions
-to appear in the select list when DISTINCT is used. pgRDF panics
-with a clear message in that case rather than silently dropping
-DISTINCT or the ORDER BY. Pull the variable into the SELECT clause
-or remove DISTINCT.
-
-### Combining with regular SQL
-
-`pgrdf.sparql` is a SETOF function, so you can join its results with
-relational tables, filter them with WHERE, aggregate them, anything:
-
-```sql
--- Find FOAF persons whose name matches a regex
-SELECT j->>'p' AS person
-  FROM pgrdf.sparql(
-    'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-     SELECT ?p ?n WHERE { ?p foaf:name ?n }'
-  ) AS j
- WHERE j->>'n' ~* '^a';
---  → http://example.com/alice
-
--- Join SPARQL output to your relational data
-WITH foaf AS (
-  SELECT j->>'p' AS person_iri, j->>'n' AS name
-    FROM pgrdf.sparql(
-      'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-       SELECT ?p ?n WHERE { ?p foaf:name ?n }'
-    ) AS j
-)
-SELECT customers.email, foaf.name
-  FROM customers
-  JOIN foaf ON customers.uri = foaf.person_iri;
-```
-
-## SPARQL UPDATE
-
-`pgrdf.sparql(q)` accepts SPARQL UPDATE queries alongside SELECT /
-ASK. The function detects the form via `parse_query` first; if that
-fails it falls back to `parse_update`. UPDATE forms return a single
-summary row of shape `{"_update": …}` instead of a per-solution row
-set — `triples_inserted`, `triples_deleted`, `graphs_touched`, and
-the `form` label match the executor's runtime classification.
-
-The full surface ships as of v0.4.3:
-
-### 1. `INSERT DATA { … }`
-
-Static ground-triple block, no `WHERE`. Lands rows in the default
-graph (`graph_id = 0`) by default, or in a named graph if wrapped
-with `GRAPH <iri> { … }`. Unknown IRIs auto-allocate a fresh
-`graph_id` via `pgrdf.add_graph(iri)`.
-
-```sql
-SELECT j FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   INSERT DATA {
-     ex:alice ex:knows ex:bob .
-     GRAPH <http://example.org/social> {
-       ex:carol ex:knows ex:dave .
-     }
-   }'
-) AS j;
---  → {"_update": {"form": "INSERT_DATA",
---                  "triples_inserted": 2,
---                  "triples_deleted":  0,
---                  "graphs_touched":   ["DEFAULT", "http://example.org/social"],
---                  "elapsed_ms":       3.42}}
-```
-
-INSERT DATA is idempotent: repeating the same statement does not
-duplicate rows (the underlying SQL uses `ON CONFLICT DO NOTHING`).
-The reported `triples_inserted` count is the number ATTEMPTED, not
-the net row delta — so a duplicate INSERT still reports the
-template size.
-
-### 2. `DELETE DATA { … }`
-
-Symmetric to `INSERT DATA`: ground quads only (no variables, no
-blank nodes — the latter forbidden by W3C SPARQL 1.1 §4.1.2). Uses
-a lookup-only path through the dictionary: if any term in the
-triple is absent the delete is a spec-correct no-op (never errors).
-
-```sql
-SELECT j FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   DELETE DATA { ex:alice ex:knows ex:bob }'
-) AS j;
---  → {"_update": {"form": "DELETE_DATA",
---                  "triples_inserted": 0,
---                  "triples_deleted":  1, …}}
-```
-
-### 3. `INSERT { template } WHERE { pattern }`
-
-Pattern-driven insert: each solution of the WHERE clause produces
-one concrete triple via the template. The WHERE pattern accepts the
-same shape as a SELECT BGP (joins, FILTER, OPTIONAL, UNION, MINUS,
-GRAPH, …).
-
-```sql
-SELECT j FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   INSERT { ?s ex:tagged "yes" }
-   WHERE  { ?s ex:hasPrice ?p }'
-) AS j;
-```
-
-Template variables MUST be bound by the WHERE BGP — an unbound
-template variable panics with a `INSERT WHERE template feature
-"unbound template variable …"` prefix.
-
-### 4. `DELETE { template } WHERE { pattern }`
-
-Pattern-driven delete. Spargebra models the template as
-`Vec<GroundQuadPattern>` so the spec's "no blank nodes in DELETE"
-rule is enforced at the AST level. `triples_deleted` counts ACTUAL
-rows removed, not template instantiations attempted — important
-distinction from INSERT WHERE's "attempted insert" counter.
-
-```sql
-SELECT j FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   DELETE { ?s ex:age ?o } WHERE { ?s ex:age ?o }'
-) AS j;
-```
-
-The shorthand `DELETE WHERE { pattern }` (template equals pattern)
-is equivalent and produces the same `_update` row with
-`form: "DELETE_WHERE"`.
-
-### 5. `DELETE { … } INSERT { … } WHERE { … }`
-
-The atomic modify form. Both halves resolve against the SAME WHERE
-solutions snapshot: the executor evaluates the pattern exactly once,
-projects every variable referenced by EITHER template, and per-row
-applies DELETE then INSERT. Per W3C SPARQL 1.1 Update §3.1.3, the
-DELETE conceptually precedes the INSERT — important for status-flip
-patterns like:
-
-```sparql
-DELETE { ?x ex:status "draft" }
-INSERT { ?x ex:status "published" }
-WHERE  { ?x ex:status "draft" }
-```
-
-where the DELETE removes the old row and the INSERT adds the new
-row, atomically per Postgres's transaction model.
-
-### Graph-scoped variants
-
-Every form supports `GRAPH <iri> { … }` inside the template and/or
-the WHERE clause, scoping the operation to the named graph. The
-shorthand `WITH <iri>` selects `<iri>` as the default graph for
-BOTH the WHERE evaluation and the template's quad routing:
-
-```sql
-SELECT j FROM pgrdf.sparql(
-  'PREFIX ex: <http://example.org/>
-   WITH <http://example.org/store>
-   INSERT { ?s ex:tagged "yes" }
-   WHERE  { ?s ex:hasPrice ?p }'
-) AS j;
---  → {"_update": {…, "graphs_touched": ["http://example.org/store"]}}
-```
-
-Cross-graph copy is straightforward — name both graphs explicitly:
-
-```sparql
-INSERT { GRAPH <http://example.org/g2> { ?s ?p ?o } }
-WHERE  { GRAPH <http://example.org/g1> { ?s ?p ?o } }
-```
-
-### Lifecycle algebra — `DROP / CLEAR / CREATE GRAPH`
-
-The lifecycle operations route to the §5 graph-management UDFs
-(`pgrdf.drop_graph`, `pgrdf.clear_graph`, `pgrdf.add_graph`):
-
-```sparql
-CLEAR GRAPH <http://example.org/staging>   -- wipe rows, keep partition
-DROP  GRAPH <http://example.org/staging>   -- wipe rows + drop partition
-CREATE GRAPH <http://example.org/new>      -- allocate fresh binding
-CREATE SILENT GRAPH <http://example.org/g> -- idempotent on existing
-```
-
-`DEFAULT` / `NAMED` / `ALL` targets are recognised:
-
-```sparql
-DROP DEFAULT     -- wipe the default graph (graph_id = 0)
-DROP NAMED       -- wipe every named graph (partition + rows)
-DROP ALL         -- default + named
-CLEAR DEFAULT    -- like DROP DEFAULT today; partition stays
-CLEAR NAMED      -- wipe rows in every named graph; partitions stay
-CLEAR ALL        -- default + named
-```
-
-The `_update` summary's `form` field is one of `"CLEAR"`,
-`"CREATE"`, or `"DROP"`; the `graphs_touched` array carries the
-IRIs the operation actually visited.
-
-### Previewing UPDATE shape
-
-`pgrdf.sparql_parse(q)` (see "Inspecting queries before running
-them" below) reports `form: "UPDATE"` with a per-operation summary.
-For pattern-driven UPDATE forms it surfaces a `kind` label
-(`INSERT_WHERE` / `DELETE_WHERE` / `DELETE_INSERT_WHERE`) mirroring
-the executor's runtime `form`, plus `template_graphs` and (when
-`WITH <iri>` is present) `with_graph`. Lifecycle ops surface a
-`target` label (`DEFAULT` / `NAMED <iri>` / `NAMED_ALL` / `ALL`).
-
-## Building graphs with CONSTRUCT
-
-`CONSTRUCT` produces an RDF graph (triples) instead of a solution
-table. Because the result shape differs from `SELECT`, it has its
-own UDF — **`pgrdf.construct(q TEXT) → SETOF JSONB`** — rather than
-overloading `pgrdf.sparql`. Each returned row is one triple:
-
-```json
-{
-  "subject":   {"type": "iri",     "value": "http://example.org/alice"},
-  "predicate": {"type": "iri",     "value": "http://example.org/label"},
-  "object":    {"type": "literal", "value": "Alice",
-                "datatype": "http://www.w3.org/2001/XMLSchema#string"}
-}
-```
-
-Each term cell is `{"type": "iri"|"literal"|"bnode", "value": …}`
-with `datatype` / `language` on literals (language-tagged literals
-carry both `language` and the implicit `rdf:langString` datatype per
-RDF 1.1 §3.3).
-
-### Worked example — seed → construct → round-trip
-
-Seed a `people` graph, then reshape it into a `labels` graph:
+| `pgrdf.sparql(q)` | `SELECT`, `ASK`, and all `UPDATE` forms | one JSONB row per solution |
+| `pgrdf.construct(q)` | `CONSTRUCT` | one JSONB row per triple |
+| `pgrdf.describe(q)` | `DESCRIBE` | one JSONB row per triple |
+
+The examples on this page use this data:
 
 ```sql
 SELECT pgrdf.add_graph('http://example.org/people');
 SELECT pgrdf.parse_turtle($$
-  @prefix foaf: <http://xmlns.com/foaf/0.1/> .
-  @prefix ex:   <http://example.org/> .
-  ex:alice foaf:name "Alice" ; foaf:age 30 .
-  ex:bob   foaf:name "Bob"   ; foaf:age 25 .
+@prefix ex:   <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+ex:alice a foaf:Person ; foaf:name "Alice" ; foaf:age 34 ; foaf:knows ex:bob ;
+         foaf:mbox <mailto:alice@example.org> .
+ex:bob   a foaf:Person ; foaf:name "Bob"   ; foaf:age 41 ; foaf:knows ex:carol .
+ex:carol a foaf:Person ; foaf:name "Carol" ; foaf:nick "CJ" .
 $$, pgrdf.graph_id('http://example.org/people'));
+```
 
--- Inspect the constructed triples (one JSONB row per triple):
-SELECT jsonb_pretty(j)
-FROM pgrdf.construct($$
+## Results
+
+```sql
+SELECT * FROM pgrdf.sparql($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  SELECT ?name ?age WHERE { ?p foaf:name ?name OPTIONAL { ?p foaf:age ?age } }
+$$);
+--              sparql
+-- --------------------------------
+--  {"age": "34", "name": "Alice"}
+--  {"age": "41", "name": "Bob"}
+--  {"age": null, "name": "Carol"}
+```
+
+- Each row is a JSONB object keyed by variable name. The column is
+  called `sparql`.
+- Values are strings: IRIs, literals and numbers alike. Cast them in SQL
+  when you need a number: `(sparql->>'age')::int`.
+- A variable with no binding comes back as JSON `null`.
+- `ASK` returns one row: `{"_ask": "true"}` or `{"_ask": "false"}`.
+
+### Mixing SPARQL and SQL
+
+```sql
+-- filter and cast in SQL
+SELECT sparql->>'name' AS name, (sparql->>'age')::int AS age
+  FROM pgrdf.sparql($$
+    PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+    SELECT ?name ?age WHERE { ?p foaf:name ?name ; foaf:age ?age }
+  $$)
+ WHERE (sparql->>'age')::int > 35;
+
+-- join with a relational table
+SELECT c.email, s.sparql->>'name' AS name
+  FROM customers c
+  JOIN pgrdf.sparql($$
+         PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+         SELECT ?p ?name WHERE { ?p foaf:name ?name }
+       $$) AS s(sparql) ON s.sparql->>'p' = c.person_iri;
+```
+
+## Graph patterns
+
+| Feature | Example |
+|---|---|
+| Basic graph patterns, joins on shared variables | `?p foaf:knows ?q . ?q foaf:name ?n` |
+| `OPTIONAL`, including multi-pattern and nested | `OPTIONAL { ?p foaf:mbox ?m }` |
+| `UNION` (any number of branches) | `{ ?p foaf:name ?n } UNION { ?p foaf:nick ?n }` |
+| `MINUS` | `?p a foaf:Person MINUS { ?p foaf:mbox ?m }` |
+| `VALUES` | `VALUES ?p { ex:alice ex:carol }` |
+| `BIND` | `BIND(UCASE(?n) AS ?shout)` |
+| Expressions in the projection | `SELECT (?age * 12 AS ?months)` |
+| Subqueries | `{ SELECT ?p WHERE { … } LIMIT 10 }` |
+| Named graphs | `GRAPH <iri> { … }`, `GRAPH ?g { … }` |
+| Property paths | `foaf:knows+`, `rdfs:subClassOf*`, `^foaf:knows`, `(ex:a\|ex:b)` |
+
+```sql
+-- People without an email address
+SELECT * FROM pgrdf.sparql($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  SELECT ?name WHERE { ?p foaf:name ?name MINUS { ?p foaf:mbox ?m } }
+$$);
+--  {"name": "Bob"}
+--  {"name": "Carol"}
+
+-- A name or, failing that, a nickname
+SELECT * FROM pgrdf.sparql($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  SELECT ?p ?label WHERE { { ?p foaf:name ?label } UNION { ?p foaf:nick ?label } }
+$$);
+```
+
+## Filters and functions
+
+`FILTER` and `BIND` accept different sets of functions:
+
+| | In `FILTER` | In `BIND` and `SELECT` expressions |
+|---|---|---|
+| Comparison | `=` `!=` `<` `>` `<=` `>=`, `IN`, `sameTerm` | only as the condition of `IF` |
+| Logic | `&&` `\|\|` `!` | — |
+| Term tests | `isIRI`, `isLiteral`, `isBlank`, `BOUND` | — |
+| Arithmetic | `+` `-` `*` `/`, `ABS`, `ROUND` | `+` `-` `*` `/`, `ABS`, `ROUND`, `CEIL`, `FLOOR` |
+| Terms | `STR`, `LANG`, `DATATYPE` | `STR`, `LANG`, `DATATYPE` |
+| Strings | `STRLEN`, `UCASE`, `LCASE`, `CONTAINS`, `STRSTARTS`, `STRENDS`, `REGEX` (with `"i"`) | `STRLEN`, `UCASE`, `LCASE`, `CONCAT` |
+| Conditional | — | `IF` |
+
+```sql
+SELECT * FROM pgrdf.sparql($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  SELECT ?name ?band WHERE {
+    ?p foaf:name ?name ; foaf:age ?age
+    FILTER(REGEX(?name, "^a", "i") || ?age > 40)
+    BIND(IF(?age >= 40, "40+", "under 40") AS ?band)
+  }
+$$);
+--  {"band": "under 40", "name": "Alice"}
+--  {"band": "40+", "name": "Bob"}
+```
+
+Two semantics to know:
+
+- `=` compares RDF terms exactly: value, datatype and language tag.
+  `"1"^^xsd:integer` and `"01"^^xsd:integer` are not `=`. Ordering
+  operators (`<`, `>`, …) compare numeric literals by value.
+- A comparison that doesn't type-check (a string against a number)
+  drops the row instead of raising an error, as SPARQL specifies.
+
+Anything outside this list is refused with a message naming the
+expression. See [not supported](#not-supported).
+
+## Aggregates and ordering
+
+`COUNT` (with `DISTINCT` and `*`), `SUM`, `AVG`, `MIN`, `MAX`,
+`GROUP_CONCAT` (with `SEPARATOR`) and `SAMPLE`, with `GROUP BY` and
+`HAVING`. They also work over `UNION`.
+
+```sql
+SELECT * FROM pgrdf.sparql($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  SELECT (COUNT(?p) AS ?people) (AVG(?age) AS ?avg_age)
+  WHERE { ?p foaf:name ?n OPTIONAL { ?p foaf:age ?age } }
+$$);
+--  {"people": "3", "avg_age": "37.5000000000000000"}
+```
+
+`ORDER BY` follows SPARQL's value ordering: numbers sort numerically,
+`xsd:dateTime` values chronologically, strings by code point. It
+accepts expressions and several keys, for example
+`ORDER BY DESC(?age) ?name`. `DISTINCT`, `REDUCED`, `LIMIT` and
+`OFFSET` all work.
+
+## Named graphs
+
+A query **without** a `GRAPH` clause matches triples in every graph.
+To scope a query, name the graph:
+
+```sql
+SELECT * FROM pgrdf.sparql($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  SELECT ?name WHERE { GRAPH <http://example.org/people> { ?p foaf:name ?name } }
+$$);
+```
+
+Or bind the graph to a variable to find out where each match lives:
+
+```sql
+SELECT * FROM pgrdf.sparql($$
+  SELECT ?g (COUNT(*) AS ?triples) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g
+$$);
+--  {"g": "http://example.org/people", "triples": "16"}
+```
+
+- Triples inside one `GRAPH` block must all come from the same graph.
+- Separate `GRAPH` blocks can name different graphs, for instance data
+  in one graph enriched from another with
+  `OPTIONAL { GRAPH <…/extra> { … } }`.
+- An IRI that names no graph matches nothing. It is not an error.
+
+> **`FROM` and `FROM NAMED` are not applied.** A dataset clause is
+> currently ignored and the query runs against all graphs. Use `GRAPH`
+> to scope queries.
+
+## Property paths
+
+```sql
+-- everyone Alice reaches through foaf:knows, at any distance
+SELECT * FROM pgrdf.sparql($$
   PREFIX foaf: <http://xmlns.com/foaf/0.1/>
   PREFIX ex:   <http://example.org/>
-  CONSTRUCT { ?p ex:label ?n }
-  WHERE { GRAPH <http://example.org/people> { ?p foaf:name ?n } }
-$$) AS t(j);
+  SELECT ?who WHERE { ex:alice foaf:knows+ ?who }
+$$);
+--  {"who": "http://example.org/carol"}
+--  {"who": "http://example.org/bob"}
 ```
 
-`pgrdf.construct` does not write anything — it returns rows. To
-persist the constructed graph, pair it with the round-trip ingest
-UDF **`pgrdf.put_construct_rows(rows JSONB[], graph_id BIGINT)`**:
-
-```sql
-SELECT pgrdf.add_graph('http://example.org/labels');
-
-SELECT pgrdf.put_construct_rows(
-  (SELECT array_agg(j)
-     FROM pgrdf.construct($$
-       PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-       PREFIX ex:   <http://example.org/>
-       CONSTRUCT { ?p ex:label ?n }
-       WHERE { GRAPH <http://example.org/people> { ?p foaf:name ?n } }
-     $$) AS t(j)),
-  pgrdf.graph_id('http://example.org/labels'));   -- → 2 rows landed
-```
-
-Re-ingest is idempotent (set semantics) — running the same pairing
-twice lands the second batch as a no-op. Typed literals, language
-tags, and within-solution blank-node joining all survive the
-round-trip. A NULL array (from `array_agg` over an empty result) is
-also a safe no-op. The single-row primitive
-`pgrdf.put_construct_row(row JSONB, graph_id BIGINT)` exists for
-callers that batch coordination themselves; the plural form is the
-recommended surface.
-
-### Template forms
-
-| Form | Example | Notes |
-|---|---|---|
-| Constant template | `CONSTRUCT { ex:g ex:status "live" } WHERE { ?s ?p ?o }` | One row per solution (multiplicity preserved) |
-| Variable template | `CONSTRUCT { ?s ex:copied ?o } WHERE { ?s ?p ?o }` | Per-solution substitution through the dictionary |
-| Blank-node template | `CONSTRUCT { ?s ex:n _:v . _:v ex:val ?o } WHERE { ?s ex:p ?o }` | Fresh `_:v` per solution; shared across the solution's triples |
-| Multi-triple template | `CONSTRUCT { ?s a ex:T . ?s ex:v ?o } WHERE { ?s ex:p ?o }` | N triples → N rows per solution |
-| GRAPH-scoped WHERE | `CONSTRUCT { ?s ex:from ?g } WHERE { GRAPH ?g { ?s ?p ?o } }` | `GRAPH ?g` ranges over named graphs only (W3C §13.3) |
-| WHERE shorthand | `CONSTRUCT WHERE { ?s ?p ?o }` | Equivalent to explicit form (W3C §16.2.4); pure BGP, no blank nodes |
-
-`DISTINCT` / `ORDER BY` / `GROUP BY` / aggregates are not valid on
-`CONSTRUCT` (W3C SPARQL 1.1 §16.2) and are rejected with a stable
-`pgrdf.construct: …` error prefix. `pgrdf.sparql_parse(q)` reports
-`form: "CONSTRUCT"` with `template` / `where_shape` / `shorthand` /
-`unsupported_algebra` blocks so you can preview a CONSTRUCT before
-running it (see below).
-
-## Inspecting queries before running them
-
-`pgrdf.sparql_parse(q) → JSONB` returns the parsed shape without
-executing. Use it when you want to know whether the translator can
-handle a query, or to extract structure for code that builds queries:
-
-```sql
-SELECT pgrdf.sparql_parse(
-  'PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-   SELECT ?s ?n WHERE { ?s foaf:name ?n }'
-);
--- {
---   "form": "SELECT",
---   "variables": ["s", "n"],
---   "bgp_pattern_count": 1,
---   "bgp_patterns": [
---     {"s": {"var": "s"},
---      "p": {"iri": "http://xmlns.com/foaf/0.1/name"},
---      "o": {"var": "n"}}
---   ],
---   "unsupported_algebra": []
--- }
-```
-
-If your query uses OPTIONAL / aggregates / property paths / etc.,
-`unsupported_algebra` lists what the translator can't yet handle.
-The query itself parses fine (spargebra is feature-complete) —
-`pgrdf.sparql` just won't execute those forms yet:
-
-```sql
-SELECT pgrdf.sparql_parse(
-  'SELECT ?s ?n WHERE { ?s ?p ?o OPTIONAL { ?s <http://x/n> ?n } }'
-);
---  → {…, "unsupported_algebra": ["LeftJoin (OPTIONAL)"]}
-```
-
-The FILTER surface is broad — identity, boolean, term-type,
-`BOUND`, numeric ordering, `REGEX`, `IN`, `STR`, `LANG`,
-`DATATYPE`, `UCASE`, `LCASE`, `STRLEN`, `CONTAINS`, `STRSTARTS`,
-`STRENDS`, and arithmetic — but if the executor encounters a
-shape it doesn't yet translate, it errors with a clear message
-rather than
-silently dropping the predicate.
-
-## How the translation works
-
-For the curious / debugging — the translator generates one
-`_pgrdf_quads` alias per BGP pattern, joins shared variables via
-equality predicates, and resolves constants to dictionary ids
-*before* building the dynamic SQL. Worked example for
-
-```sparql
-PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-SELECT ?p ?n ?m
-  WHERE { ?p foaf:name ?n .
-          ?p foaf:mbox ?m }
-```
-
-becomes approximately
-
-```sql
-SELECT
-  (SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q1.subject_id) AS "p",
-  (SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q1.object_id)  AS "n",
-  (SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q2.object_id)  AS "m"
-FROM pgrdf._pgrdf_quads q1,
-     pgrdf._pgrdf_quads q2
-WHERE q1.predicate_id = 200    -- foaf:name's dict id
-  AND q2.predicate_id = 201    -- foaf:mbox's dict id
-  AND q2.subject_id   = q1.subject_id;   -- shared ?p anchor
-```
-
-Predicate / subject / object indexes on `_pgrdf_quads` (SPO, POS, OSP
-covering indexes per the hexastore design) make those equality
-lookups index-only scans. Dict resolution for the projected
-variables uses a scalar subquery so any missing term ids come back
-as NULL rather than dropping the row.
-
-### Unknown terms are NULL, not error
-
-If a constant in the query (predicate IRI, literal value, etc.) isn't
-in the dictionary, the translator inlines `-1` as the dict id, which
-matches no quad row → the query returns zero results. This is the
-correct SPARQL semantics ("no solutions exist") rather than an
-error condition:
-
-```sql
-SELECT count(*) FROM pgrdf.sparql(
-  'SELECT ?s ?o WHERE { ?s <http://nope.example/never-loaded> ?o }'
-);
---  → 0
-```
-
-## Performance posture (today)
-
-| Cost | Where it shows up |
+| Path | Meaning |
 |---|---|
-| 1× SPI lookup per **constant** in the BGP | At translation time, before the dynamic SQL runs. |
-| Dynamic SQL via SPI executes against the partitioned hexastore | One PostgreSQL plan + execute per `pgrdf.sparql` call. |
-| Dict round-trip for each projected variable in each output row | Scalar subquery on `_pgrdf_dictionary` (index-only scan on PK). |
+| `p+` | one or more steps |
+| `p*` | zero or more steps (includes the start node) |
+| `p?` | zero or one step |
+| `^p` | the edge reversed |
+| `p1\|p2` | either predicate; combines with the above, e.g. `(ex:a\|ex:b)+` |
 
-For typical "100s of rows out" queries this is sub-millisecond on
-local data. For "millions of rows out" the dict round-trips become
-the dominant cost — a future optimisation is to hash-join the
-dictionary upfront instead of per-row scalar subqueries; tracked
-as a v0.4 candidate.
+Sequence paths (`p1/p2`) are not supported. Write each step as its
+own triple pattern: `?a foaf:knows ?b . ?b foaf:name ?n`.
 
-The Postgres prepared-statement cache (LLD §4.2) **shipped in
-Phase 3 step 2**: dict-id constants in the dynamic SQL are now
-`$N` parameters and a per-backend
-`thread_local!<RefCell<HashMap<String, OwnedPreparedStatement>>>`
-keeps the prepared plan around — so repeated `pgrdf.sparql`
-calls with the same BGP shape (including parametric variations
-on IRI / literal constants) reuse the same SPI plan. Counters
-live in `pgrdf.stats()` (`plan_cache_hits` / `misses` /
-`inserts` / `local_size`). The cross-backend shmem dict cache
-from LLD §4.1 also lives in `pgrdf.stats()`
-(`shmem_hits` / `misses` / `inserts` / `evictions`).
+Recursive walks stop at `pgrdf.path_max_depth` (default 64). If a walk
+is cut short you get a `WARNING`, and `pgrdf.last_call_stats()` reports
+it. See [errors and diagnostics](08-errors-and-diagnostics.md#was-the-answer-complete).
+After `materialize`, closure paths such as `rdfs:subClassOf+` are
+answered from the materialized triples without walking.
 
-## Limits / gotchas
+## CONSTRUCT and DESCRIBE
 
-- **Blank nodes in queries are rejected.** SPARQL semantics treat
-  `?b` and `_:b` as variables of different scoping rules; pgRDF
-  refuses blank-node terms in patterns to keep semantics unambiguous.
-- **RDF-star quoted triples** are out of scope (LLD §2).
-- **Cross-graph queries**: by default every `pgrdf.sparql` call
-  searches ALL graphs (every partition). Scope to a specific graph
-  with `GRAPH <iri> { … }` or project the graph IRI with
-  `GRAPH ?g { … }` — see the Named graphs section above. SPARQL
-  dataset clauses (`FROM` / `FROM NAMED`) are still queued for a
-  later slice; allocate graphs explicitly via `pgrdf.add_graph` and
-  reference them inside the WHERE clause for now.
-- **No SPARQL 1.2** anything yet — base SPARQL 1.1 only.
+`CONSTRUCT` and `DESCRIBE` produce triples. Each row describes its terms
+with their type:
+
+```sql
+SELECT * FROM pgrdf.construct($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  PREFIX ex:   <http://example.org/>
+  CONSTRUCT { ?a ex:colleagueOf ?b } WHERE { ?a foaf:knows ?b }
+$$);
+-- {"subject":   {"type": "iri", "value": "http://example.org/alice"},
+--  "predicate": {"type": "iri", "value": "http://example.org/colleagueOf"},
+--  "object":    {"type": "iri", "value": "http://example.org/bob"}}
+-- ...
+
+SELECT * FROM pgrdf.describe('DESCRIBE <http://example.org/carol>');
+-- literals carry their datatype or language:
+-- {"object": {"type": "literal", "value": "Carol",
+--             "datatype": "http://www.w3.org/2001/XMLSchema#string"}, ...}
+```
+
+`DESCRIBE` returns the resource's Concise Bounded Description. To
+store constructed triples in a graph, use `INSERT { … } WHERE { … }`
+(below).
+
+## SPARQL UPDATE
+
+`pgrdf.sparql()` also runs updates. It returns one summary row:
+
+```sql
+SELECT * FROM pgrdf.sparql($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  PREFIX ex:   <http://example.org/>
+  INSERT DATA { GRAPH <http://example.org/people> { ex:carol foaf:age 29 } }
+$$);
+-- {"_update": {"form": "INSERT_DATA", "triples_inserted": 1, "triples_deleted": 0,
+--              "graphs_touched": ["http://example.org/people"], "elapsed_ms": 0.24}}
+```
+
+| Form | Example |
+|---|---|
+| `INSERT DATA` / `DELETE DATA` | ground triples, optionally inside `GRAPH <iri> { … }` |
+| `INSERT { … } WHERE { … }` | `INSERT { GRAPH <g> { ?p ex:senior true } } WHERE { GRAPH <g> { ?p foaf:age ?a FILTER(?a > 40) } }` |
+| `DELETE { … } WHERE { … }`, `DELETE WHERE { … }` | `DELETE WHERE { GRAPH <g> { ?p ex:senior ?x } }` |
+| `DELETE { … } INSERT { … } WHERE { … }` | change a value in one atomic step |
+| `WITH <iri>` | sets the graph for both the template and the `WHERE` |
+| `CREATE` / `CLEAR` / `DROP GRAPH`, `DEFAULT` / `NAMED` / `ALL`, `SILENT` | graph management |
+
+- `INSERT DATA` without a `GRAPH` block writes to the default graph
+  (`0`).
+- `INSERT DATA` of a triple that already exists is a no-op.
+- Updates run inside your transaction, so `BEGIN … ROLLBACK` works.
+- A write to a locked graph is refused with `55P03`. See
+  [locking](05-graphs.md#locking-a-graph).
+
+## Checking a query before running it
+
+```sql
+-- parse only: shape of the query, and anything unsupported
+SELECT pgrdf.sparql_parse('SELECT * WHERE { SERVICE <http://example.org/q> { ?s ?p ?o } }');
+-- {..., "unsupported_algebra": ["Service (federation)"]}
+
+-- the SQL pgRDF would execute (use with EXPLAIN)
+SELECT pgrdf.sparql_sql('SELECT ?s WHERE { ?s a <http://xmlns.com/foaf/0.1/Person> }');
+```
+
+## Not supported
+
+These are refused with an error that names the construct, unless noted
+otherwise:
+
+| Construct | Instead |
+|---|---|
+| `SERVICE` (federated queries) | run the remote query separately |
+| `FILTER EXISTS` / `FILTER NOT EXISTS` | a join, or `MINUS` / `OPTIONAL { … } FILTER(!BOUND(?x))` |
+| `LANGMATCHES` | `LANG(?x) = "fr"` |
+| `COALESCE`, `SUBSTR` and other functions not listed above | compute in SQL on the result rows |
+| Blank nodes in query patterns (`_:x`, `[]`) | use a variable |
+| Sequence paths (`foaf:knows/foaf:name`) | one triple pattern per step |
+| `UNION` inside `OPTIONAL` | restructure as a top-level `UNION` |
+| `VALUES` that binds a `GRAPH` variable, or a `FILTER` on it | list explicit `GRAPH <iri>` blocks, or filter the result rows in SQL |
+| `BIND` inside a `UNION` branch; `FILTER` or `UNION` inside `MINUS` | move the `BIND` out of the branch; use several `MINUS` blocks |
+| `ORDER BY` an expression together with `DISTINCT` | `BIND` the expression to a variable and order by that |
+| `FROM` / `FROM NAMED` | **ignored, not refused**; use `GRAPH` |
+| RDF-star quoted triples | not supported in data or queries |
+
+## Performance tips
+
+- Scope queries with `GRAPH <iri>` when you know where the data lives.
+- Statistics refresh automatically after loads and `materialize`
+  (setting `pgrdf.auto_analyze`).
+- Repeated queries with the same shape reuse a cached plan, even when
+  their constant IRIs or literals differ.
+- `pgrdf.sparql_sql(q)` plus `EXPLAIN` shows what PostgreSQL does with
+  a query. Queries also appear in `pg_stat_statements`.
 
 ## Next
 
-- [clients/python.md](clients/python.md) — calling `pgrdf.sparql`
-  from Python.
-- [clients/rust.md](clients/rust.md) — same from Rust.
-- The engineering side: [`docs/03-query.md`](../docs/03-query.md)
-  for the translator's algebra walk, the prepared-plan cache, and
-  the v0.4 deferred-surface notes.
+[04 — Reasoning](04-reasoning.md)

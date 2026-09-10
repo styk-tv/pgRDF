@@ -5,12 +5,12 @@
 # It replicates release.yml's pre-build assertions locally, against the
 # working tree you are about to tag. `release.yml` refuses a mismatched tag,
 # which is correct but expensive: the tag is already pushed by then, and a
-# pushed tag is never reused (only-forward-never-revert). v0.6.24 was burned
+# pushed tag is never reused. v0.6.24 was burned
 # exactly this way — META.json still read 0.6.22 while the tag said 0.6.24.
 #
-# META.json is the reason this script exists. It is a documented member of
-# the Rule 7 source set (PROVENANCE.md, "Cutting a release" step 2), and it
-# is the one member a glob over *.toml / *.control / *.yml never reaches --
+# META.json is the reason this script exists. It must carry the release
+# version like the others, and it is the one file a glob over
+# *.toml / *.control / *.yml never reaches --
 # so sweeping for version strings by filename silently skips it.
 #
 # Run it on the MERGE COMMIT, not the release branch: the merge commit is
@@ -37,7 +37,7 @@ chk(){  if [ "$2" = "$TAG_VER" ]; then ok "$1" "$2"; else bad "$1" "$2 != $TAG_V
 echo "pre-tag gate · v${TAG_VER} · $(git rev-parse --short HEAD) on $(git branch --show-current)"
 echo
 
-# --- Rule 7 source set (PROVENANCE.md "Cutting a release" step 2) ----------
+# --- files that must carry the release version -----------------------------
 chk "Cargo.toml"         "$(grep -m1 '^version'         Cargo.toml    | cut -d'"' -f2)"
 chk "Cargo.lock (pgrdf)" "$(grep -A1 '^name = "pgrdf"$' Cargo.lock    | tail -1 | cut -d'"' -f2)"
 chk "pgrdf.control"      "$(grep -m1 '^default_version' pgrdf.control | cut -d\' -f2)"

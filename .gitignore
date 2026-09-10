@@ -57,3 +57,6 @@ CK*.md
 SPEC*.md
 # ...but pgRDF's OWN published engineering specs are tracked, public, and unrelated to CKP.
 !specs/SPEC.pgRDF.*.md
+
+# Release provenance policy (maintainer copy, not published)
+/PROVENANCE.md

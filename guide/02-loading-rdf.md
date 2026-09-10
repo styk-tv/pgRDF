@@ -1,355 +1,240 @@
 # 02 — Loading RDF
 
-pgRDF ingests Turtle, TriG, and N-Quads (N-Triples are a Turtle
-subset). This page covers the Turtle entry points — file-based
-(`load_turtle`) and string-based (`parse_turtle`); the quad-bearing
-formats use `parse_trig` and `parse_nquads`, which honour the graph
-labels in the data.
+pgRDF reads **Turtle**, **N-Triples**, **TriG** and **N-Quads**, from
+a string passed in SQL or from a file on the database server.
 
-## `pgrdf.load_turtle(path, graph_id, base_iri = NULL, bulk_load = false) → BIGINT`
-
-Reads a Turtle file from a path the Postgres process can see and
-ingests every triple. Returns the count.
-
-```sql
-SELECT pgrdf.load_turtle('/fixtures/ontologies/foaf.ttl', 1);
---  → 631
-```
-
-`path` is **server-side**. With the project's compose runtime,
-`./fixtures/` on the host is bind-mounted at `/fixtures/` in the
-container, so `'/fixtures/ontologies/foaf.ttl'` works directly.
-
-For Kubernetes deployments, mount the directory containing your TTL
-files into the postgres container and refer to its in-container path.
-
-### `base_iri`
-
-Some published Turtle documents use relative IRIs like `<#>` or
-`<../foo>` that need a base URL to resolve. W3C PROV's `prov.ttl` is
-the canonical example.
-
-```sql
-SELECT pgrdf.load_turtle(
-  '/fixtures/ontologies/prov.ttl',
-  100,
-  'http://www.w3.org/ns/prov#'
-);
---  → 1789
-```
-
-Pass `NULL` or `''` when your file uses absolute IRIs only (the
-default). pgRDF parses strictly via `oxttl` 0.2 — anything that
-fails here is genuinely off-spec, not a bug we should work around.
-
-## `pgrdf.parse_turtle(content, graph_id, base_iri = NULL) → BIGINT`
-
-Same loop, but the Turtle is passed as a string. Handy for small
-ad-hoc snippets and for tests:
-
-```sql
-SELECT pgrdf.parse_turtle(
-  '@prefix ex: <http://e.com/> . ex:a ex:p ex:b .',
-  1
-);
---  → 1
-```
-
-For files larger than a megabyte or so, prefer `load_turtle` — it
-avoids copying the whole document through SQL.
-
-## Verbose variants — `*_verbose` → JSONB
-
-When you want timing or want to see the cache hit rate, swap the
-non-verbose UDF for its `_verbose` twin:
-
-```sql
-SELECT pgrdf.load_turtle_verbose(
-  '/fixtures/ontologies/prov.ttl',
-  100,
-  'http://www.w3.org/ns/prov#'
-);
---  →  {"triples": 1789,
---      "dict_cache_hits": 4612,
---      "shmem_cache_hits": 0,
---      "dict_db_calls": 783,
---      "quad_batches": 2,
---      "elapsed_ms": 142.7}
-```
-
-Field meanings:
-
-| Field | What it tells you |
+| You have | Use |
 |---|---|
-| `triples` | Same value `load_turtle` would have returned. |
-| `dict_cache_hits` | Term references resolved from the in-call HashMap. Higher = more repetition in the source. |
-| `shmem_cache_hits` | Term references served by the cross-backend shmem dict cache (LLD §4.1). Non-zero on a warm postmaster reload of the same vocabulary. |
-| `dict_db_calls` | Term references that went to the `_pgrdf_dictionary` (either a hit or an insert). Roughly = `distinct_terms_in_file`. |
-| `quad_batches` | Number of multi-row INSERT flushes (1 per ~1000 triples). |
-| `elapsed_ms` | Wall-clock time inside the function. |
+| A snippet or a document in your application | `parse_turtle(content, graph_id)` |
+| TriG or N-Quads text (several graphs at once) | `parse_trig(content)` / `parse_nquads(content)` |
+| A file on the database server | `load_turtle(path, graph_id)` |
+| A very large N-Triples dump | `load_turtle_staged_run(path, graph_id)` or `load_turtle(…, bulk_load => true)` |
+| A file bigger than the server's memory | `load_turtle_streaming(path, graph_id)` |
 
-`parse_turtle_verbose(content, graph_id, base_iri)` mirrors this for
-in-memory input.
+Loaders write into a graph you've created with
+`pgrdf.add_graph(iri)`. See [managing graphs](05-graphs.md). Always
+create the graph first. Triples loaded into a numeric id that has no
+graph are stored, and SPARQL finds them, but they have no IRI and don't
+appear in `graph_inventory()`.
 
-## Graphs
-
-Every triple belongs to a `BIGINT` graph. Use `0` (the default
-partition) for "no specific graph", or partition meaningfully:
-
-```sql
-SELECT pgrdf.add_graph(100);                   -- creates _pgrdf_quads_g100 partition
-SELECT pgrdf.load_turtle('/data/users.ttl',    100);
-SELECT pgrdf.load_turtle('/data/products.ttl', 101);  -- lands in default partition
-```
-
-`add_graph(g)` is idempotent — second call returns `false`, partition
-stays as-is. Calling `load_turtle` with a `graph_id` you haven't
-explicitly `add_graph`'d sends the tuples to the default partition;
-that still works, you just lose the ability to drop the graph in
-one DDL.
-
-To drop a whole named graph cheaply, use the lifecycle UDF — it
-removes both the partition and the `_pgrdf_graphs` row in one call:
+## From a string
 
 ```sql
-SELECT pgrdf.drop_graph(100);
---  → 4321   (count of triples that were in the graph)
+SELECT pgrdf.add_graph('http://example.org/people');
+
+SELECT pgrdf.parse_turtle($$
+@prefix ex:   <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+ex:alice a foaf:Person ; foaf:name "Alice" ; foaf:knows ex:bob .
+ex:bob   a foaf:Person ; foaf:name "Bob" .
+$$, pgrdf.graph_id('http://example.org/people'));
+--  parse_turtle
+-- --------------
+--             5
 ```
 
-This is partition-DDL-bounded, no `DELETE` scan, no autovacuum churn.
-The partition is detached + dropped and the `_pgrdf_graphs` mapping
-row is removed in the same transaction.
+It returns the number of triples read. N-Triples is a subset of
+Turtle, so `parse_turtle` loads it too. PostgreSQL's `$$ … $$`
+quoting avoids escaping quotes inside the data. From an application,
+pass the document as a bind parameter:
+`SELECT pgrdf.parse_turtle($1, $2)`.
 
-### Named graphs by IRI
+Loading appends. Load the same data again and its triples are stored a
+second time, so to reload a graph, clear it first with
+`pgrdf.clear_graph(…)`. SPARQL `INSERT DATA` is different: inserting a
+triple that is already there changes nothing.
 
-The integer `graph_id` form above is the original surface and stays
-fully supported. v0.4 adds an **IRI-keyed surface** on top: every
-graph carries an IRI in the `pgrdf._pgrdf_graphs(graph_id, iri)`
-mapping table, so you can allocate, look up, and SPARQL-query
-graphs by their RDF name rather than by an opaque integer.
+### Relative IRIs
 
-Three `pgrdf.add_graph` overloads are available:
+If a document uses relative IRIs such as `<#me>` or `<../ns>`, supply
+a base IRI:
 
 ```sql
--- 1. Integer-keyed (legacy). Auto-binds a synthetic
---    urn:pgrdf:graph:<id> IRI in _pgrdf_graphs.
-SELECT pgrdf.add_graph(100);
-
--- 2. IRI-keyed. Auto-allocates the next free graph_id, creates
---    the partition, binds the IRI. Idempotent on the IRI —
---    a second call with the same IRI returns the same id.
-SELECT pgrdf.add_graph('http://example.org/users');
---  → 1
-
--- 3. Explicit (id, iri) pair. Use when you want both sides
---    pinned. Errors if either side conflicts with an existing
---    binding; idempotent when both sides match an existing row.
-SELECT pgrdf.add_graph(200::bigint, 'http://example.org/products');
---  → true
+SELECT pgrdf.parse_turtle('<#me> <http://xmlns.com/foaf/0.1/name> "Me" .',
+                          pgrdf.graph_id('http://example.org/people'),
+                          'http://example.org/profile');
 ```
 
-Once a graph exists, load Turtle into it via the integer `graph_id`
-the same way as before — `load_turtle` and `parse_turtle` haven't
-changed:
+Without one, the load fails with `No scheme found in an absolute IRI`.
+
+## TriG and N-Quads
+
+These formats name their graphs inside the data. Triples outside any
+named graph go to `default_graph_id` (graph `0` unless you pass
+another).
 
 ```sql
--- IRI-allocated graph: feed the returned id straight into load_turtle
-WITH g AS (SELECT pgrdf.add_graph('http://example.org/users') AS id)
-SELECT pgrdf.load_turtle('/data/users.ttl', g.id) FROM g;
+SELECT pgrdf.parse_trig($$
+@prefix ex: <http://example.org/> .
+ex:x ex:p ex:y .
+GRAPH <http://example.org/trig-demo> { ex:a ex:b ex:c . }
+$$);
+-- {"triples": 2, "graphs": [0, 7], ...}
 
--- Or look up the id explicitly via graph_id(iri)
-SELECT pgrdf.load_turtle(
-  '/data/users.ttl',
-  pgrdf.graph_id('http://example.org/users')
-);
+SELECT pgrdf.parse_nquads(
+  '<http://example.org/a> <http://example.org/b> "c" <http://example.org/trig-demo> .');
 ```
 
-Two read-only lookup UDFs round out the surface:
+- By default, named graphs that don't exist yet are created.
+- With `strict => true`, every named graph must already exist, and an
+  unknown one is refused (`42704`). This keeps a typo from creating a
+  stray graph.
 
 ```sql
-SELECT pgrdf.graph_id('http://example.org/users');   --  → 1
-SELECT pgrdf.graph_iri(1::bigint);                   --  → 'http://example.org/users'
-
--- Unknown side → NULL (no error)
-SELECT pgrdf.graph_id('http://nope.example/never');  --  → NULL
-SELECT pgrdf.graph_iri(999::bigint);                 --  → NULL
+SELECT pgrdf.parse_trig('GRAPH <http://example.org/typo> { <urn:a> <urn:b> <urn:c> . }', 0, true);
+-- ERROR:  42704: parse_trig: unknown graph iri http://example.org/typo
 ```
 
-Both lookups are STRICT — `NULL` input short-circuits to `NULL`
-output without an SPI round trip. Use them to translate between the
-IRI you carry in your application and the integer id the storage
-layer keys on.
+Both functions return a JSONB report, including the list of graph ids
+they wrote to.
 
-The legacy integer overload `add_graph(id BIGINT)` still works as
-before; it now also INSERTs a synthetic `urn:pgrdf:graph:<id>`
-binding into `_pgrdf_graphs` so the IRI-keyed surface (SPARQL
-`GRAPH ?g { … }`, `graph_iri(id)`, etc.) sees every graph regardless
-of which overload created it. The synthetic IRI is an opaque URN —
-you can upgrade it later by calling the explicit `add_graph(id, iri)`
-form, which atomically rebinds the synthetic to your IRI.
+## From a file
 
-To inspect what's bound:
+`load_turtle` reads a file from the **database server's** filesystem,
+the one the PostgreSQL process can see, not the machine your client
+runs on.
 
 ```sql
-SELECT graph_id, iri FROM pgrdf._pgrdf_graphs ORDER BY graph_id;
---  graph_id |               iri
--- ----------+----------------------------------
---         0 | urn:pgrdf:graph:0
---         1 | http://example.org/users
---       100 | urn:pgrdf:graph:100            -- from add_graph(100)
---       200 | http://example.org/products
+SELECT pgrdf.add_graph('http://example.org/sample');
+SELECT pgrdf.load_turtle('/tmp/sample.ttl', pgrdf.graph_id('http://example.org/sample'));
+--  load_turtle
+-- -------------
+--            7
 ```
 
-Once a graph is allocated, scope SPARQL queries to it with
-`GRAPH <iri> { … }` or `GRAPH ?g { … }` — see
-[03-querying.md → Named graphs](03-querying.md#named-graphs).
+With the Docker setup from the [install guide](01-install.md), copy the
+file into the container first:
 
-### Graph lifecycle
+```sh
+docker cp sample.ttl pgrdf:/tmp/sample.ttl
+```
 
-Four partition-level lifecycle UDFs live alongside `add_graph` — all
-return `BIGINT` row counts and are idempotent on absent / empty
-sources. Each takes either a `BIGINT` graph id (shown below) or an
-IRI `TEXT` (the v0.5.0 IRI overloads — e.g.
-`pgrdf.drop_graph('http://example.org/g1')`, error
-`drop_graph: unknown iri` on an unbound IRI):
+Arguments: `load_turtle(path, graph_id, base_iri DEFAULT NULL, bulk_load DEFAULT false)`.
+
+The file must be readable by the PostgreSQL server process. If your
+client and server are on different machines, read the file in your
+application and use `parse_turtle` instead.
+
+### Load reports
+
+The `_verbose` variants return a JSONB report instead of a count:
 
 ```sql
--- Drop a graph entirely: detaches the partition, deletes the
--- _pgrdf_graphs row, returns the pre-drop triple count.
-SELECT pgrdf.drop_graph(100);                           -- → N
-SELECT pgrdf.drop_graph(100, cascade => false);         -- errors if inferred rows present
-
--- Wipe rows but keep the partition + IRI binding.
-SELECT pgrdf.clear_graph(100);                          -- → N (rows removed)
-
--- Copy all rows from src to dst. Auto-creates dst partition + IRI
--- if absent. Both base and inferred rows carry forward.
-SELECT pgrdf.copy_graph(100, 200);                      -- → N (rows copied)
-
--- Move = copy + drop src. The dst partition can't pre-hold data.
-SELECT pgrdf.move_graph(100, 300);                      -- → N (rows moved)
+SELECT pgrdf.load_turtle_verbose('/tmp/sample.ttl', pgrdf.graph_id('http://example.org/sample'));
+-- {"path": "combined", "triples": 7, "elapsed_ms": 0.41, "parse_skipped": 0,
+--  "dict_cache_hits": 11, "shmem_cache_hits": 7, "quad_batches": 1, ...}
 ```
 
-Stable error prefixes for downstream tooling:
-`drop_graph: cannot drop default partition`,
-`drop_graph: inferred rows present`,
-`copy_graph: src and dst must differ`,
-`move_graph: dst graph_id <N> already has data`, and the shared
-`{drop,clear,copy,move}_graph: graph_id must be >= 0` shape.
-Full reference: [docs/02-storage.md §2.4](../docs/02-storage.md#24-graph-level-lifecycle-udfs-lld-v04-5-phase-b-shipped--v042).
+`parse_turtle_verbose(content, graph_id)` does the same for strings.
+`path` names the loading strategy that ran.
 
-## Counts + sanity checks
+## Large loads
+
+For hundreds of millions to billions of triples, pgRDF has two
+parallel loaders. Both read **N-Triples** (one triple per line). For
+other formats, convert first, for example with `riot` (Apache Jena)
+or `rapper` (Raptor).
+
+### The staged loader
+
+The fastest path. It splits the file across background workers:
 
 ```sql
-SELECT pgrdf.count_quads(100);                                          -- quads in graph 100
-SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = 100;           -- same number, direct read
-
-SELECT count(DISTINCT subject_id)::int                                  -- distinct subjects in 100
-  FROM pgrdf._pgrdf_quads WHERE graph_id = 100;
-
--- Lookup a specific term's id (handy for joining)
-SELECT id FROM pgrdf._pgrdf_dictionary
- WHERE term_type = 1
-   AND lexical_value = 'http://xmlns.com/foaf/0.1/Person';
+SELECT pgrdf.add_graph('http://example.org/wikidata');
+SELECT pgrdf.load_turtle_staged_run('/data/latest-truthy.nt',
+                                    pgrdf.graph_id('http://example.org/wikidata'),
+                                    8);          -- workers; 0 = choose automatically
+-- {"ok": true, "triples": ..., "quads": ..., "n_workers": 8,
+--  "phase_ms": {"stage": ..., "dict": ..., "resolve": ..., "index": ...}}
 ```
 
-## Performance posture (today)
+Or as a procedure: `CALL pgrdf.load_turtle_staged(path, graph_id, n_workers);`
 
-- Per-triple SPI calls drop from ~7 to ~1 after the per-call HashMap
-  dict cache warms. Empirically: a 100-triple synthetic fixture hits
-  185 cache references vs 115 DB references — see
-  [`tests/regression/sql/25-bulk-ingest.sql`](../tests/regression/sql/25-bulk-ingest.sql)
-  for the empirical assertions.
-- A second load of the same Turtle (within the postmaster's
-  lifetime) hits the **cross-backend shmem dict cache** (LLD §4.1):
-  0 dictionary-table touches for already-seen terms. Counters in
-  `load_turtle_verbose.shmem_cache_hits` and cumulative
-  `pgrdf.stats()` (`shmem_hits` / `shmem_inserts`).
-- Every flush of the batched `INSERT … unnest(…)` reuses a
-  per-backend prepared plan (LLD §4.2 + §4.3 phase A); first flush
-  primes the cache, every subsequent flush reuses it.
-- The full `tests/perf/smoke-ontologies.sh` set (~17K triples across
-  24 ontologies) currently completes in a few seconds total.
-- For large fresh loads, `load_turtle(…, bulk_load => true)` runs a
-  parallel fast path — all-cores parse, in-memory term dedup,
-  self-assigned-id dictionary load, parallel triple→id resolve, and
-  batched quad insert — measured at 2.3–3.5× the streaming path on
-  LUBM-250/500. It applies to a fresh (empty) dictionary and falls
-  back to the streaming path on a populated one. A deeper
-  `heap_multi_insert` / `COPY … FORMAT BINARY` quad insert (LLD §12
-  phase B) is a tracked follow-up.
+Rules:
 
-## Tuning for large bulk loads (Tier-1, big-RAM)
+- It needs an **empty database**: use it for the first, largest load.
+  On a database that already holds data it declines and says so
+  (`"ok": false, "fallback": true`). Load the rest with `load_turtle`.
+- It commits as it goes, so it **can't run inside a transaction
+  block**. Call it as a single statement.
+- It needs `pgrdf` in `shared_preload_libraries`.
+- Malformed lines are skipped, not fatal. A Turtle file is not
+  N-Triples: given one, the staged loader reports `"ok": true` and
+  loads **zero** triples. Check `triples` in the report.
 
-When you're ingesting hundreds of millions to billions of quads into a
-**fresh** database on a big-RAM node, the defaults leave a lot on the
-table. The profile below pairs `load_turtle(…, bulk_load => true)` with
-server settings that keep the bottleneck on CPU + I/O rather than WAL
-and checkpoints.
+### `bulk_load => true`
 
-### Postgres server settings
+```sql
+SELECT pgrdf.load_turtle('/data/dump.nt', pgrdf.add_graph('http://example.org/dump'), NULL, true);
+```
 
-Set these in `postgresql.conf` (or `ALTER SYSTEM` + reload) **before**
-the load. Values assume a dedicated box with tens of GB of RAM; scale
-to your hardware.
+A parallel in-process path, also for N-Triples into a fresh database.
+It falls back to the standard loader when the database already holds
+data.
 
-| Setting | Suggested | Why |
+> **N-Triples only.** Given a Turtle file with prefixes or multi-line
+> statements, `bulk_load => true` currently skips the lines it can't
+> read and can load **zero triples without an error**. Check the
+> returned count, or `parse_skipped` in the `_verbose` report. For
+> Turtle, leave `bulk_load` off.
+
+### Files larger than memory
+
+`load_turtle_streaming(path, graph_id)` reads a file in windows of
+`window_triples` (default 20 million) so memory stays bounded.
+
+### Server settings for a big import
+
+Set these before a large load into a fresh database. Values assume a
+dedicated machine with tens of gigabytes of RAM; scale them to yours.
+
+| Setting | Suggested | Effect |
 |---|---|---|
-| `shared_buffers` | 25–40 % of RAM | Keep the dictionary + hot index pages resident. |
-| `maintenance_work_mem` | 2–8 GB | Faster index (re)builds — used by the defer-index rebuild and `ANALYZE`. |
-| `max_wal_size` | 32–64 GB | Fewer checkpoints during the load; the single biggest win for sustained write throughput. |
-| `checkpoint_timeout` | 30–60 min | Same — spread checkpoints out. |
-| `wal_compression` | `on` | Less WAL volume on a write-heavy load. |
-| `effective_io_concurrency` | 200–256 (SSD/NVMe) | Concurrent prefetch for the parallel resolve + index scans. |
-| `max_parallel_maintenance_workers` | 4–8 | Parallelises the defer-index rebuild. |
-| `max_parallel_workers` / `…_per_gather` | ≈ core count | Headroom for the parallel index build + later queries. |
+| `shared_buffers` | 25–40 % of RAM | Keeps the term dictionary and hot index pages in memory. |
+| `maintenance_work_mem` | 2–8 GB | Faster index builds. |
+| `max_wal_size` | 32–64 GB | Fewer checkpoints during the load. |
+| `checkpoint_timeout` | 30–60 min | Same. |
+| `wal_compression` | `on` | Less WAL written. |
+| `effective_io_concurrency` | 200+ on SSD / NVMe | More concurrent I/O. |
+| `max_parallel_maintenance_workers` | 4–8 | Parallel index builds. |
+| `max_parallel_workers` | about the core count | Headroom for parallel phases. |
 
-### Durability vs. speed (read the caveat)
+For an import you can simply re-run if the machine fails, you can also
+trade durability for speed with `synchronous_commit = off`, or with
+`fsync = off` together with `full_page_writes = off`. `fsync = off`
+can corrupt the cluster on a crash: only use it on a disposable
+database, and turn it back on and run `CHECKPOINT` before the data
+matters.
 
-For a **rebuildable** bulk import — a fresh load you can simply re-run
-from source if the box dies mid-load — you can trade crash durability
-for throughput:
+pgRDF settings that matter for large loads:
 
-| Setting | Bulk value | Caveat |
+| Setting | Default | Notes |
 |---|---|---|
-| `synchronous_commit` | `off` | Safe-ish: a crash loses recently-committed txns but never corrupts. Fine for a reloadable import. |
-| `fsync` | `off` | **Dangerous.** A crash can corrupt the cluster — only when the whole DB is disposable and you'll reload from scratch. Turn it back `on` (and restart) before the data matters. |
-| `full_page_writes` | `off` | Only meaningful alongside `fsync = off`; same caveat. |
+| `pgrdf.bulk_defer_index_min` | `100000` | Above this size, bulk loads drop indexes and rebuild them at the end. |
+| `pgrdf.staged_temp_tablespaces` | (empty) | Put the staged loader's temporary files on another disk. |
+| `pgrdf.auto_analyze` | `on` | Refresh planner statistics after the load. Leave it on. |
 
-Restore `synchronous_commit` / `fsync` / `full_page_writes` to their
-durable defaults — and `CHECKPOINT` — once the load completes and
-before the database goes into service.
+Suggested order:
 
-### pgRDF knobs
+1. Fresh database, server tuned.
+2. The largest N-Triples file with `load_turtle_staged_run`.
+3. Smaller or incremental files with `load_turtle` / `parse_turtle`.
+4. `pgrdf.materialize(…)` if you need inference.
+5. Restore durable settings, `CHECKPOINT`.
 
-| Knob | Default | For big loads |
-|---|---|---|
-| `bulk_load => true` (a `load_turtle` arg) | `false` | Use it. The parallel fast path fires only on a **fresh** (empty) dictionary, so load the largest file first into a clean database, then load smaller files normally. |
-| `pgrdf.bulk_defer_index_min` | `100000` | Above this row count the fast path drops the hexastore indexes + `unique_term`, loads heap-only, then rebuilds in parallel. The default is already the right call at scale. |
-| `pgrdf.dict_batch_size` | `500` | The streaming dict batch size; irrelevant on the bulk path (it batches in-Rust). |
-| `pgrdf.auto_analyze` | `on` | Leave on — the automatic post-load / post-materialize `ANALYZE` is what keeps the planner honest at scale. |
+## When a load fails
 
-### Order of operations
-
-1. Fresh database, server tuned as above, durability relaxed (only if
-   the load is rebuildable).
-2. `load_turtle('/data/big.ttl', 1, NULL, true)` — largest file first.
-3. Load any smaller / incremental files (these take the streaming path
-   once the dictionary is populated).
-4. `pgrdf.materialize(...)` if you need inference.
-5. Restore durable settings, `CHECKPOINT`, put the DB into service.
-
-## What still doesn't work
-
-| Symptom | Cause |
+| Error | Meaning |
 |---|---|
-| `load_turtle: turtle parse error: Syntax(TurtleSyntaxError ... "No scheme found in an absolute IRI")` | Document uses relative IRIs. Pass `base_iri`. |
-| `load_turtle: turtle parse error: Syntax(...) "Invalid character …"` | Genuinely off-spec IRI (e.g. colon in path segment). Fix the source — pgRDF is strict by design. |
-| `load_turtle: unsupported object term (RDF-star not in v0.2 scope)` | Document uses RDF-star quoted triples. Not supported in the v0.x series. |
-| `load_turtle: failed to open …` | Path isn't reachable from the postgres process. Check your container/bind-mount config. |
+| `turtle parse error … No scheme found in an absolute IRI` | The document uses relative IRIs. Pass a `base_iri`. |
+| `turtle parse error … Invalid character …` | The document isn't valid Turtle. Parsing is strict; fix the source. |
+| `… RDF-star …` | Quoted triples are not supported. |
+| `failed to open …` | The path isn't readable by the PostgreSQL server process. |
+| `55P03 … is locked` | The target graph is locked. See [locking](05-graphs.md#locking-a-graph). |
+| `42704 … unknown graph iri` | `strict => true` and the data names a graph that doesn't exist. |
+
+A failed load changes nothing: the statement is rolled back.
 
 ## Next
 
-Wiring this into your application: see
-[clients/python.md](clients/python.md) or
-[clients/rust.md](clients/rust.md).
+[03 — Querying](03-querying.md)

@@ -6,18 +6,13 @@ labels: enhancement
 
 ## Use case
 
-(One paragraph: what problem are you solving? Concrete example helps.)
+(One paragraph: what problem are you solving? A concrete example helps.)
 
 ## Proposed API surface
 
-(SQL signature or Rust API sketch, if you have one in mind.)
+(SQL signature, or an example of how you'd like to call it, if you have
+one in mind.)
 
-## Spec impact
+## Current workaround
 
-- [ ] Requires a v0.x LLD addition or change
-- [ ] Requires a new spec doc (e.g. SPEC.pgRDF.<area>.v0.x.md)
-- [ ] Pure implementation — no spec impact
-
-## Roadmap fit
-
-Which phase does this belong to per [docs/10-roadmap.md](../../docs/10-roadmap.md)?
+(What you do today without it, if anything.)

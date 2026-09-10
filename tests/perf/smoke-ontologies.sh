@@ -21,8 +21,8 @@
 #   Exits non-zero on any difference. Ontologies that PARSE ERROR are
 #   omitted from both sides (locked-state set is the parsing subset).
 #   Not gated in CI yet — the fetched ontology payloads are gitignored
-#   so CI can't run it without a fetch step. See TEST.ONTOLOGY-SET.md
-#   "Locked-state regression".
+#   so CI can't run it without a fetch step. Fetch them first with
+#   fixtures/ontologies.sh.
 #
 # These ontologies are work-in-progress and may contain authoring
 # errors. A parse failure here is *signal*, not noise — oxttl is

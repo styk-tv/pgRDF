@@ -1,10 +1,8 @@
-# Go clients
+# Go
 
-`pgx` is the canonical Go driver for Postgres and integrates with
-pgRDF identically to any other extension — every capability is a
-SQL function call.
-
-## pgx (v5)
+[`pgx`](https://github.com/jackc/pgx) works with pgRDF like any other
+extension: every capability is a SQL function. Examples use the Docker
+setup from the [install guide](../01-install.md).
 
 ```bash
 go get github.com/jackc/pgx/v5
@@ -15,178 +13,103 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func main() {
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, "postgres://pgrdf:pgrdf@localhost/pgrdf")
+	conn, err := pgx.Connect(ctx, "postgres://postgres:pgrdf@localhost:5432/postgres")
 	if err != nil { log.Fatal(err) }
 	defer conn.Close(ctx)
 
-	_, err = conn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS pgrdf")
-	if err != nil { log.Fatal(err) }
+	if _, err := conn.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS pgrdf"); err != nil { log.Fatal(err) }
 
-	// Load a Turtle file
+	// create a graph and load Turtle
+	var graphID int64
+	if err := conn.QueryRow(ctx, `SELECT pgrdf.add_graph($1)`,
+		"http://example.org/people").Scan(&graphID); err != nil { log.Fatal(err) }
+
 	var n int64
-	err = conn.QueryRow(ctx,
-		`SELECT pgrdf.load_turtle($1, $2)`,
-		"/fixtures/ontologies/foaf.ttl", int64(1),
-	).Scan(&n)
+	err = conn.QueryRow(ctx, `SELECT pgrdf.parse_turtle($1, $2)`,
+		`@prefix ex: <http://example.org/> .
+		 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+		 ex:alice foaf:name "Alice" ; foaf:knows ex:bob .
+		 ex:bob   foaf:name "Bob" .`, graphID).Scan(&n)
 	if err != nil { log.Fatal(err) }
-	fmt.Printf("loaded %d triples\n", n)
+	fmt.Println("loaded", n, "triples")
 
-	// Verbose stats — JSONB → map[string]any
-	var stats map[string]any
-	err = conn.QueryRow(ctx,
-		`SELECT pgrdf.load_turtle_verbose($1, $2, $3)`,
-		"/fixtures/ontologies/prov.ttl",
-		int64(100),
-		"http://www.w3.org/ns/prov#",
-	).Scan(&stats)
-	if err != nil { log.Fatal(err) }
-	fmt.Printf("prov.ttl: %v triples in %v ms\n", stats["triples"], stats["elapsed_ms"])
-
-	// SPARQL — each row's value is a map[string]any
-	rows, err := conn.Query(ctx,
-		`SELECT sparql FROM pgrdf.sparql($1)`,
+	// SPARQL: each row is a JSONB object → map[string]any
+	rows, err := conn.Query(ctx, `SELECT sparql FROM pgrdf.sparql($1)`,
 		`PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-		 SELECT ?s ?n WHERE { ?s foaf:name ?n }`,
-	)
+		 SELECT ?who ?friend WHERE { ?a foaf:name ?who ; foaf:knows ?b . ?b foaf:name ?friend }`)
 	if err != nil { log.Fatal(err) }
-	defer rows.Close()
-
 	for rows.Next() {
-		var binding map[string]any
-		if err := rows.Scan(&binding); err != nil { log.Fatal(err) }
-		fmt.Printf("%v -> %v\n", binding["s"], binding["n"])
+		var b map[string]any
+		if err := rows.Scan(&b); err != nil { log.Fatal(err) }
+		fmt.Println(b["who"], "→", b["friend"])
 	}
-	if rows.Err() != nil { log.Fatal(rows.Err()) }
-}
-```
+	if err := rows.Err(); err != nil { log.Fatal(err) }
 
-## Connection pool
-
-```go
-import "github.com/jackc/pgx/v5/pgxpool"
-
-pool, err := pgxpool.New(ctx, "postgres://pgrdf:pgrdf@localhost/pgrdf")
-if err != nil { log.Fatal(err) }
-defer pool.Close()
-
-rows, err := pool.Query(ctx,
-	`SELECT sparql FROM pgrdf.sparql($1)
-	  WHERE sparql->>'n' ~* '^a'`,
-	`PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-	 SELECT ?p ?n WHERE { ?p foaf:name ?n }`,
-)
-```
-
-The WHERE filter on the JSONB output runs server-side — pgx never
-sees rows that don't match.
-
-## Strongly-typed bindings
-
-For fixed-shape SPARQL queries, define a struct and use
-`pgx.RowToStructByName` (pgx 5.3+):
-
-```go
-type FoafBinding struct {
-	S string `json:"s"`
-	N string `json:"n"`
-}
-
-rows, err := conn.Query(ctx,
-	`SELECT sparql FROM pgrdf.sparql($1)`,
-	`PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-	 SELECT ?s ?n WHERE { ?s foaf:name ?n }`,
-)
-if err != nil { log.Fatal(err) }
-
-for rows.Next() {
-	var raw []byte
-	if err := rows.Scan(&raw); err != nil { log.Fatal(err) }
-	var fb FoafBinding
-	if err := json.Unmarshal(raw, &fb); err != nil { log.Fatal(err) }
-	fmt.Println(fb.S, fb.N)
-}
-```
-
-`raw` is the JSONB column as `[]byte`; `json.Unmarshal` into your
-struct gives you per-variable typed fields.
-
-## Bulk ingest pattern
-
-For loading many TTL files, prefer one transaction per file so a
-single parse failure doesn't roll back unrelated successes:
-
-```go
-for _, path := range paths {
-	var n int64
-	err := conn.QueryRow(ctx,
-		`SELECT pgrdf.load_turtle($1, $2)`,
-		path, graphID,
-	).Scan(&n)
-	if err != nil {
-		log.Printf("FAIL %s: %v", path, err)
-		continue
+	// refusals carry a SQLSTATE
+	_, err = conn.Exec(ctx, `SELECT pgrdf.materialize($1, 'bogus')`, graphID)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		fmt.Println(pgErr.Code, pgErr.Message)   // 22023 materialize: unknown profile ...
 	}
-	log.Printf("ok %s: %d triples", path, n)
 }
 ```
 
-## Dropping a whole graph (constant-time)
+## Typed bindings
+
+For a fixed query shape, scan the JSONB into a struct:
 
 ```go
-_, err := conn.Exec(ctx,
-	`SELECT pgrdf.drop_graph($1)`, graphID,
-)
+type Person struct {
+	Who    string `json:"who"`
+	Friend string `json:"friend"`
+}
+
+rows, _ := conn.Query(ctx, `SELECT sparql FROM pgrdf.sparql($1)`, query)
+people, err := pgx.CollectRows(rows, pgx.RowTo[Person])
 ```
 
-`pgrdf.drop_graph` drops the graph's partition **and** removes its
-`_pgrdf_graphs` mapping row in one call — use it instead of a raw
-`DROP TABLE` on the partition, which would strand the mapping row.
-It takes a bind parameter, so no string formatting is needed.
+## Was the answer complete?
 
-## sqlc + pgrdf
+Run this on the same connection, right after the query:
 
-If you're already using sqlc (`https://sqlc.dev`), the SPARQL
-returns work fine as `json.RawMessage`:
-
-```yaml
-# sqlc.yaml
-queries:
-  - name: SparqlSelect
-    sql: SELECT * FROM pgrdf.sparql($1)
-    args: [{ name: query, type: text }]
-    return:
-      - name: sparql
-        type: json.RawMessage
+```go
+var stats map[string]any
+conn.QueryRow(ctx, `SELECT pgrdf.last_call_stats()`).Scan(&stats)
+complete := stats["path_depth_truncations"] == float64(0) &&
+	stats["filter_clauses_dropped"] == float64(0)
 ```
 
-You unmarshal the per-row JSON into a struct in application code.
+With a `pgxpool.Pool`, acquire one connection (`pool.Acquire`) for the
+query and the stats call so both run in the same session.
 
-## Type mapping reference
+## Error codes
 
-| Postgres type | Go (pgx v5) |
+| Code | Meaning |
 |---|---|
-| `BIGINT` (graph id, dict id, triple count) | `int64` |
-| `SMALLINT` (term_type) | `int16` |
-| `TEXT` (lexical_value, path arg) | `string` |
-| `JSONB` (*_verbose return, sparql row) | `map[string]any` or `[]byte` |
-| `BOOLEAN` (`add_graph` return) | `bool` |
+| `55P03` | graph locked |
+| `55000` | wrong state (e.g. unlock an unlocked graph) |
+| `22023` | invalid argument |
+| `0A000` | unsupported construct |
+| `42704` | unknown graph |
+| `2BP01` | drop without cascade over inferred triples |
+| `54000` | configured limit exceeded |
 
-## Caveats
+Full list: [errors and diagnostics](../08-errors-and-diagnostics.md).
 
-- pgRDF's strict Turtle parser will reject off-spec TTL. Don't
-  swallow parse errors in your client; the source is the bug.
-- `pgrdf.sparql` searches the default union of all graphs; scope a
-  query with `GRAPH <iri> { … }` or `GRAPH ?g { … }` to target or
-  bind named graphs.
-- Set `SET search_path = pgrdf, public;` per connection to drop the
-  schema prefix on every call.
-- `pgrdf.load_turtle` holds the SPI connection for the duration of
-  the parse. Use a dedicated pool connection for bulk loads.
+## Tips
+
+- `pgrdf.load_turtle(path, …)` reads from the **database server's**
+  filesystem. For local files, read them and use `parse_turtle`.
+- SQL parameters protect the SQL call, not the SPARQL text inside it.
+  Escape user input you splice into queries.
+- Values in SPARQL results are strings. Convert numbers with `strconv`.

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# fixtures/ontologies.sh — pull every URL listed in TEST.ONTOLOGY-SET.md
-# into fixtures/ontologies/<name>.ttl and emit a manifest with sha256 +
-# size per file.
+# fixtures/ontologies.sh — pull every ontology listed in
+# fixtures/ontologies.manifest.json into fixtures/ontologies/<name>.ttl
+# and refresh the manifest (sha256 + size per file).
 #
 # Usage:
-#   fixtures/ontologies.sh             # fetch all 17
+#   fixtures/ontologies.sh             # fetch all
 #   fixtures/ontologies.sh --resume    # skip files already present
 #
 # The fixtures/ontologies/ directory is gitignored; the manifest is
@@ -15,9 +15,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LIST="${REPO_ROOT}/TEST.ONTOLOGY-SET.md"
 OUT_DIR="${REPO_ROOT}/fixtures/ontologies"
 MANIFEST="${REPO_ROOT}/fixtures/ontologies.manifest.json"
+# The URL list lives in the committed manifest; read it before the
+# manifest is rewritten below.
+URLS="$(grep -oE '"url":"[^"]+"' "${MANIFEST}" | cut -d'"' -f4)"
 RESUME="0"
 
 for arg in "$@"; do
@@ -94,7 +96,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
     printf '   FAILED\n'
     failed=$((failed + 1))
   fi
-done < "${LIST}"
+done <<< "${URLS}"
 
 # Emit the manifest. JSON pretty-printed with newlines between entries
 # for readable diffs.

@@ -1,6 +1,6 @@
 # tests/w3c-shacl — W3C SHACL conformance harness
 
-[LLD v0.5 §6](../../specs/SPEC.pgRDF.LLD.v0.5.md) (shipped in
+LLD v0.5 §6 (shipped in
 v0.5.0). The third correctness gate, alongside
 [`tests/w3c-sparql/`](../w3c-sparql/) (W3C SPARQL-shape) and
 `tests/regression/` (pg_regress). Wired into `ci.yml` on every PG
@@ -76,7 +76,7 @@ Full rationale: `specs/ERRATA.v0.5.md` **E-013**.
 
 `--sparql` runs the same Core fixtures through the upstream SPARQL
 mode surface. Per
-[`specs/ERRATA.v0.5.md`](../../specs/ERRATA.v0.5.md) **E-012**,
+`specs/ERRATA.v0.5.md` **E-012**,
 `shacl 0.3.1` has **no SHACL-SPARQL (`sh:select`) constraint
 component** and its `SparqlEngine` is an upstream stub
 (`unimplemented!()`). pgRDF therefore does **not** invoke it:

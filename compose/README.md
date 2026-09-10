@@ -1,99 +1,85 @@
-# compose/ — local-dev runtime for pgRDF
+# compose/ — development setup
 
-Stock `postgres:18-trixie` image, no image rebuild, no entrypoint
-wrapper. The locally-built extension files are placed at the
-canonical Postgres paths via **per-file bind mounts**:
+A local PostgreSQL 18 server running a pgRDF you built from this
+checkout. It's for working on pgRDF itself. To just try pgRDF, use the
+prebuilt release instead ([install guide](../guide/01-install.md)).
 
-    ./extensions/lib/pgrdf.so                       → /usr/lib/postgresql/17/lib/pgrdf.so
-    ./extensions/share/extension/pgrdf.control      → /usr/share/postgresql/17/extension/pgrdf.control
-    ./extensions/share/extension/pgrdf--<ver>.sql   → /usr/share/postgresql/17/extension/pgrdf--<ver>.sql
+It uses a stock `postgres:18-trixie` image. The extension files you
+build are mounted into it file by file, so there's no custom image to
+rebuild.
 
-A one-shot **`pgrdf-parity` init container** runs before postgres
-starts (TG-3 v2). It hashes the mounted files and verifies internal
-consistency — `.control`'s `default_version` matches the
-`pgrdf--<ver>.sql` filename; neither `.so` nor `.sql` is empty. If
-anything mismatches (the realistic case: a release cut bumped
-`pgrdf.control`'s `default_version` but `compose.yml` still mounts
-the previous SQL file), the parity check exits non-zero and postgres
-never starts — `docker compose up` fails at startup rather than
-later at `CREATE EXTENSION` time with a confusing
-"`pgrdf--<old>.sql` not found" error.
+## Prerequisites
 
-## Layout
+- Docker (or Podman) with Compose.
+- [`just`](https://github.com/casey/just).
+- About 5 GB of disk for the builder image, the first time.
 
-    compose/
-    ├── compose.yml                 # services definition (postgres + pgrdf-parity init)
-    ├── parity-check.sh             # TG-3 v2 compose-startup gate (runs inside pgrdf-parity)
-    ├── builder.Containerfile       # linux/glibc-trixie builder
-    ├── .env.example
-    ├── extensions/                 # built artifacts (gitignored, populated by `just build-ext`)
-    │   ├── lib/pgrdf.so
-    │   └── share/extension/{pgrdf.control, pgrdf--<ver>.sql}
-    └── pg-data/                    # PGDATA bind mount (gitignored)
+## Boot
 
-## One-time setup
+From the repository root:
 
-    cp compose/.env.example compose/.env
-    # edit .env if you want non-default creds
+```sh
+cp compose/.env.example compose/.env      # optional: change credentials / port
 
-## Boot sequence
+just build-ext                            # build pgrdf.so + SQL in a Linux builder container
+PGRDF_RUN_RUNTIME=docker just compose-up  # start PostgreSQL (the default runtime is podman)
+PGRDF_RUN_RUNTIME=docker just psql        # psql as pgrdf/pgrdf on the pgrdf database
+```
 
-From the repo root:
+```sql
+CREATE EXTENSION pgrdf;
+SELECT pgrdf.version(), pgrdf.build_id();
+```
 
-    just build-ext        # builds the linux .so + .control + .sql into compose/extensions/
-    just compose-up       # boots Postgres
-    just psql             # connects as pgrdf/pgrdf to the pgrdf database
-    pgrdf=# CREATE EXTENSION pgrdf;
-    pgrdf=# SELECT pgrdf.version();    -- → "0.6.17"
-    just test-artifact-parity          # prove mounted bytes match a fresh build
+`just build-ext` compiles inside a Linux container, so it also works on
+macOS. The output lands in `compose/extensions/`.
 
-By default the compose container is named `pgrdf-pgrdf-postgres`.
-Override it with `PGRDF_CONTAINER=...` if you need a workstation-local
-name.
+A small check container runs before PostgreSQL starts. It verifies
+that the mounted files belong together; the version in `pgrdf.control`
+must match the `pgrdf--<version>.sql` file. If they don't, `compose up`
+stops with an error rather than failing later at `CREATE EXTENSION`.
 
-## Why PG 17 (not 18)
+## What's where
 
-The forward path in SPEC.pgRDF.INSTALL.v0.2 §7 is to use PG 18+'s
-`extension_control_path` GUC, which lets us point Postgres at a
-side directory without touching `$libdir`/`$sharedir/extension`. That
-is the long-term shape this compose will adopt.
+```
+compose/
+├── compose.yml              # postgres + the file check
+├── parity-check.sh          # the file check
+├── builder.Containerfile    # Linux builder image
+├── .env.example
+└── extensions/              # build output (gitignored)
+    ├── lib/pgrdf.so
+    └── share/extension/{pgrdf.control, pgrdf--<version>.sql}
+```
 
-Today it pins to `postgres:18-trixie` on pgrx 0.19.1. ERRATA E-006
-(the pgrx 0.16 / PG ≤ 17 hold that blocked PG 18) is **resolved** —
-see [`specs/ERRATA.v0.6.md`](../specs/ERRATA.v0.6.md) item E-015. The
-`.so` is built inside a `rust:1.96-trixie` builder, so its glibc
-floor matches `postgres:18-trixie`; trixie is the contractual base for
-the whole downstream bundle chain (PROVENANCE.md Rule 9).
+- `./fixtures` from the repository is mounted read-only at `/fixtures`
+  in the container, so `pgrdf.load_turtle('/fixtures/…', …)` works for
+  the bundled test ontologies.
+- Data lives in the Docker volume `pgrdf-pg18-data`.
+- The container is named `pgrdf-pgrdf-postgres`; override with
+  `PGRDF_CONTAINER=…`.
 
-## Why per-file bind mounts (no init script, no entrypoint wrapper)
+When the version changes, update the `pgrdf--<version>.sql` mount line
+in `compose.yml` to match.
 
-On PG 17 there's no `extension_control_path` GUC, so the files must
-land at canonical Postgres paths. The three supported options per
-INSTALL spec are:
+## Useful targets
 
-1. Custom-built image with pgRDF baked in — rejected by §10.
-2. Init container + entrypoint wrapper that copies files at boot —
-   §4.3, used in K8s manifests. Out of scope for this local compose
-   per project direction.
-3. **Per-file bind mounts targeting `$libdir` and
-   `$sharedir/extension` directly.**
+```sh
+just smoke                  # build, boot, CREATE EXTENSION, print the version
+just test-regression        # SQL regression suite against the running server
+just test-conformance       # regression + W3C SPARQL / SHACL + LUBM checks
+just test-artifact-parity   # prove the mounted files match a fresh build
+just compose-logs           # follow the server log
+just compose-down           # stop
+```
 
-Option 3 is what this compose does. It has the same observable
-end-state as option 2 (files at canonical paths, no image rebuild,
-no source compile at runtime), with one fewer moving part. The
-files are produced on the host by `just build-ext` (a Linux
-builder container) before `compose up`.
+## Reset
 
-## Why a Linux builder container (not native cargo)
+```sh
+just compose-down
+docker volume rm compose_pgrdf-pg18-data                    # discard the database
+rm -rf compose/extensions/lib compose/extensions/share      # discard build output
+```
 
-We're cross-platform (macOS host, Linux Postgres container). Native
-`cargo pgrx run` works on macOS for fast iteration but produces a
-`.dylib`, which the Linux postgres container cannot load. The
-builder container produces a glibc-trixie `.so` matching the
-target environment exactly.
-
-## Resetting state
-
-    just compose-down
-    rm -rf compose/pg-data/*                            # discard PGDATA
-    rm -rf compose/extensions/lib compose/extensions/share  # discard built artifacts
+(The volume name carries your Compose project prefix; `docker volume ls`
+shows it.)

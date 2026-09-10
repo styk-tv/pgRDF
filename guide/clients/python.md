@@ -1,10 +1,8 @@
-# Python clients
+# Python
 
-pgRDF exposes its capabilities as SQL UDFs, so any standard Postgres
-client library works. This page covers the two most common —
-`psycopg` (sync) and `asyncpg` (async) — plus a sketch of using
-pgRDF as a backend for `rdflib` if your codebase is already invested
-in that ecosystem.
+pgRDF is plain SQL, so any PostgreSQL driver works. Examples below use
+the Docker setup from the [install guide](../01-install.md)
+(`postgres` / `pgrdf` on `localhost:5432`).
 
 ## psycopg 3
 
@@ -15,45 +13,64 @@ pip install "psycopg[binary]>=3.2"
 ```python
 import psycopg
 
-with psycopg.connect("postgresql://pgrdf:pgrdf@localhost:5432/pgrdf") as conn:
-    with conn.cursor() as cur:
-        # First-time setup (or use a migration tool).
-        cur.execute("CREATE EXTENSION IF NOT EXISTS pgrdf")
+DSN = "postgresql://postgres:pgrdf@localhost:5432/postgres"
 
-        # Load a Turtle file from the server-side filesystem.
-        cur.execute(
-            "SELECT pgrdf.load_turtle(%s, %s)",
-            ("/fixtures/ontologies/foaf.ttl", 1),
-        )
-        n_triples = cur.fetchone()[0]
-        print(f"loaded {n_triples} triples")
+TURTLE = """
+@prefix ex:   <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+ex:alice foaf:name "Alice" ; foaf:age 34 ; foaf:knows ex:bob .
+ex:bob   foaf:name "Bob"   ; foaf:age 41 .
+"""
 
-        # Parse an in-memory Turtle string.
-        cur.execute(
-            "SELECT pgrdf.parse_turtle(%s, %s)",
-            (
-                "@prefix ex: <http://example.com/> . ex:a ex:p ex:b .",
-                2,
-            ),
-        )
+with psycopg.connect(DSN) as conn:
+    cur = conn.cursor()
+    cur.execute("CREATE EXTENSION IF NOT EXISTS pgrdf")
 
-        # See structured ingest stats via the verbose variant.
-        cur.execute(
-            "SELECT pgrdf.load_turtle_verbose(%s, %s, %s)",
-            (
-                "/fixtures/ontologies/prov.ttl",
-                100,
-                "http://www.w3.org/ns/prov#",
-            ),
-        )
-        (stats,) = cur.fetchone()    # → dict
-        print(f"prov.ttl: {stats['triples']} triples in {stats['elapsed_ms']:.0f}ms")
+    # create a graph and load Turtle passed as a parameter
+    cur.execute("SELECT pgrdf.add_graph(%s)", ("http://example.org/people",))
+    (graph_id,) = cur.fetchone()
+    cur.execute("SELECT pgrdf.parse_turtle(%s, %s)", (TURTLE, graph_id))
+    print("loaded", cur.fetchone()[0], "triples")
 
-    conn.commit()
+    # SPARQL: each row is one JSONB object, adapted to a dict
+    cur.execute("""
+        SELECT sparql FROM pgrdf.sparql(%s)
+    """, ("""
+        PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+        SELECT ?name ?age WHERE { ?p foaf:name ?name ; foaf:age ?age }
+        ORDER BY ?name
+    """,))
+    for (row,) in cur:
+        print(row["name"], int(row["age"]))     # values arrive as strings
 ```
 
-Note: `pgrdf.load_turtle_verbose` returns `JSONB`; psycopg adapts
-that to a Python `dict` by default.
+JSONB results come back as Python `dict`s.
+
+### Handling refusals
+
+Refusals carry a SQLSTATE, and psycopg maps each one to an exception
+class:
+
+```python
+from psycopg import errors
+
+try:
+    cur.execute("SELECT pgrdf.materialize(%s, %s)", (graph_id, "owl-rl"))
+except errors.LockNotAvailable as e:        # 55P03: graph is locked
+    print("locked:", e)
+except psycopg.Error as e:
+    print(e.sqlstate, e)                     # e.g. 22023, 0A000, 42704
+```
+
+### Was the answer complete?
+
+Read the per-call figures on the same connection, right after the query:
+
+```python
+cur.execute("SELECT pgrdf.last_call_stats()")
+stats = cur.fetchone()[0]
+complete = stats["path_depth_truncations"] == 0 and stats["filter_clauses_dropped"] == 0
+```
 
 ## asyncpg
 
@@ -61,31 +78,27 @@ that to a Python `dict` by default.
 pip install "asyncpg>=0.30"
 ```
 
+asyncpg returns JSONB as text unless you register a codec:
+
 ```python
-import asyncio
+import asyncio, json
 import asyncpg
 
 async def main():
-    conn = await asyncpg.connect("postgresql://pgrdf:pgrdf@localhost:5432/pgrdf")
+    conn = await asyncpg.connect("postgresql://postgres:pgrdf@localhost/postgres")
+    await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads,
+                              schema="pg_catalog")
     try:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS pgrdf")
-
-        n = await conn.fetchval(
-            "SELECT pgrdf.load_turtle($1, $2)",
-            "/fixtures/ontologies/foaf.ttl", 1,
-        )
-        print(f"loaded {n} triples")
-
-        # JSONB stats come back as a dict.
-        stats = await conn.fetchval(
-            "SELECT pgrdf.load_turtle_verbose($1, $2, $3)",
-            "/fixtures/ontologies/prov.ttl", 100, "http://www.w3.org/ns/prov#",
-        )
-        print(stats["triples"], "triples in", stats["elapsed_ms"], "ms")
-
-        # Quad-count by graph
-        n_in_g1 = await conn.fetchval("SELECT pgrdf.count_quads($1)", 1)
-        print(f"graph 1 holds {n_in_g1} quads")
+        gid = await conn.fetchval("SELECT pgrdf.add_graph($1)", "http://example.org/people")
+        await conn.fetchval("SELECT pgrdf.parse_turtle($1, $2)",
+                            '<http://example.org/a> <http://example.org/p> "x" .', gid)
+        rows = await conn.fetch(
+            "SELECT sparql FROM pgrdf.sparql($1)",
+            "SELECT ?s ?o WHERE { ?s <http://example.org/p> ?o }")
+        for r in rows:
+            print(r["sparql"]["s"], r["sparql"]["o"])
+    except asyncpg.exceptions.LockNotAvailableError as e:
+        print("locked:", e)
     finally:
         await conn.close()
 
@@ -94,60 +107,38 @@ asyncio.run(main())
 
 ## SQLAlchemy
 
-If you already use SQLAlchemy, you can wire pgRDF as plain text
-SQL through the regular session. Map the JSONB return from the
-`*_verbose` UDFs to `sqlalchemy.dialects.postgresql.JSONB` so it
-deserialises to a `dict`:
-
 ```python
 from sqlalchemy import create_engine, text
-from sqlalchemy.dialects.postgresql import JSONB
 
-engine = create_engine("postgresql+psycopg://pgrdf:pgrdf@localhost/pgrdf")
+engine = create_engine("postgresql+psycopg://postgres:pgrdf@localhost/postgres")
 
 with engine.begin() as conn:
-    n = conn.scalar(
-        text("SELECT pgrdf.load_turtle(:path, :graph)"),
-        {"path": "/fixtures/ontologies/foaf.ttl", "graph": 1},
+    rows = conn.execute(
+        text("SELECT sparql FROM pgrdf.sparql(:q)"),
+        {"q": "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5"},
     )
-    print(f"loaded {n} triples")
+    for (binding,) in rows:
+        print(binding)
 ```
 
-## rdflib bridge (sketch)
+## Working with rdflib
 
-`rdflib` is the dominant Python RDF library. Today, its default
-`Memory` and `BerkeleyDB` stores keep triples client-side. A natural
-position for pgRDF is as an `rdflib.store.Store` implementation that
-delegates `add` / `remove` / `triples` to pgRDF UDFs over a regular
-psycopg connection.
-
-The shape (`pgrdf.sparql` ships in v0.3; the rdflib adapter
-package itself is not yet released):
+rdflib can parse and serialize many formats client-side. Serialize to
+N-Triples and pass the text to pgRDF:
 
 ```python
-# Conceptual — pgrdf.sparql is live, but the adapter package below
-# is a to-be-shipped sibling project.
 from rdflib import Graph
-from pgrdf_rdflib import PgRDFStore     # to-be-shipped sibling project
 
-store = PgRDFStore(dsn="postgresql://pgrdf:pgrdf@localhost/pgrdf", graph_id=1)
-g = Graph(store=store)
-
-g.parse("foaf.ttl", format="turtle")    # delegates to pgrdf.parse_turtle
-list(g.triples((None, RDF.type, FOAF.Person)))   # delegates to a server-side BGP query
+g = Graph().parse("ontology.rdf")                 # RDF/XML, JSON-LD, ...
+cur.execute("SELECT pgrdf.parse_turtle(%s, %s)", (g.serialize(format="nt"), graph_id))
 ```
 
-Until the adapter ships, you can use rdflib client-side to parse +
-manipulate graphs and pgRDF server-side for storage + bulk ops —
-they don't collide.
+## Tips
 
-## Caveats
-
-- `load_turtle` reads the path from the postgres process. Your
-  application's working directory is irrelevant.
-- pgRDF strictness: any Turtle that fails to load is genuinely
-  off-spec. Don't paper over parse errors in client code — fix the
-  TTL.
-- The extension's schema is `pgrdf`. Set
-  `search_path = pgrdf, public` once per session if you want to
-  drop the `pgrdf.` prefix on every call.
+- `pgrdf.load_turtle(path, …)` reads from the **database server's**
+  filesystem. For files on the client, read them in Python and use
+  `parse_turtle`.
+- Build SPARQL with parameters for the SQL call (`%s`), but remember
+  that the SPARQL text itself is a string. Escape any user input you
+  splice into it.
+- `SET search_path = pgrdf, public` lets you drop the `pgrdf.` prefix.

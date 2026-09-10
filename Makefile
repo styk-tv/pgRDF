@@ -39,7 +39,7 @@ check-meta:
 
 check-tools:
 	@command -v cargo >/dev/null 2>&1 || { echo "cargo is required" >&2; exit 1; }
-	@cargo pgrx --version >/dev/null 2>&1 || { echo "cargo-pgrx is required; install cargo-pgrx 0.16 and run cargo pgrx init first" >&2; exit 1; }
+	@cargo pgrx --version >/dev/null 2>&1 || { echo "cargo-pgrx is required; install cargo-pgrx 0.19.2 and run cargo pgrx init first" >&2; exit 1; }
 	@command -v "$(PG_CONFIG)" >/dev/null 2>&1 || { echo "pg_config not found: $(PG_CONFIG)" >&2; exit 1; }
 
 package: check-meta check-tools

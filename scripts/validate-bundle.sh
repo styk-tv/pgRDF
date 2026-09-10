@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# validate-bundle.sh — validate a pgRDF release bundle's MANIFEST.json (#37).
+# validate-bundle.sh — validate a pgRDF release bundle's MANIFEST.json.
 #
 # Checks the *static* version coherence of an extracted bundle (or .tar.gz):
 # the manifest's version/extversion/runtime.value agree with each other and
 # with the control file + the SQL filenames actually present. This is the
-# "one place to read a component's version" a consumer (oci-germination's
-# versions.yaml, a downstream bundle) validates against, instead of grepping
+# "one place to read a component's version" a consumer (for example a
+# downstream image build) validates against, instead of grepping
 # filenames or pinning by hand.
 #
 # It does NOT boot Postgres — the runtime `pgrdf.version()` check is the
@@ -15,8 +15,8 @@
 # the cheap static gate a consumer can run on a pulled artifact.
 #
 # Usage:
-#   tools/validate-bundle.sh <dir|tarball>           # validate
-#   tools/validate-bundle.sh <dir|tarball> <ver>     # also assert version == <ver>
+#   scripts/validate-bundle.sh <dir|tarball>           # validate
+#   scripts/validate-bundle.sh <dir|tarball> <ver>     # also assert version == <ver>
 set -euo pipefail
 
 SRC="${1:?usage: validate-bundle.sh <dir|tarball> [expected-version]}"

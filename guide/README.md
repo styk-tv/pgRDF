@@ -1,37 +1,41 @@
 # pgRDF user guide
 
-This directory is the **use documentation** — written for people who
-want to run pgRDF in their applications, not for people working on
-the extension's internals (those docs live under [`../docs/`](../docs/)).
+Everything you need to install pgRDF, load data, and use it from your
+application. The documentation site, [pgrdf.styk.tv](https://pgrdf.styk.tv),
+has feature deep dives, worked examples and the internals.
 
-The user guide is intentionally separate so changes here don't
-require touching the engineering plan, and vice versa.
+## Start here
 
-## Read in order
+1. **[What pgRDF is](00-intro.md)**: capabilities, requirements, limits.
+2. **[Install](01-install.md)**: Docker, an existing server, or from source.
+3. **[A ten-minute tour](tour.md)**: load, query, reason, validate, lock
+   and fingerprint a graph in one `psql` session.
 
-| Page | Scope |
+## Topics
+
+| Page | Covers |
 |---|---|
-| [00-intro.md](00-intro.md) | What pgRDF is, who it's for, what it does + does not do today. |
-| [01-install.md](01-install.md) | Local-dev install (compose) and Kubernetes install (init-container drop-in). |
-| [02-loading-rdf.md](02-loading-rdf.md) | `pgrdf.load_turtle`, `pgrdf.parse_turtle`, integer + IRI-keyed graph allocation (`pgrdf.add_graph` × 3 overloads, `pgrdf.graph_id`, `pgrdf.graph_iri`), the verbose stats UDFs. |
-| [03-querying.md](03-querying.md) | `pgrdf.sparql` — SPARQL SELECT over BGPs, FILTER / OPTIONAL / UNION / MINUS / aggregates / BIND / ASK, named-graph `GRAPH <iri> { … }` and `GRAPH ?g { … }` scoping, JSONB row shape, combining with regular SQL. |
+| [02 — Loading RDF](02-loading-rdf.md) | Turtle, N-Triples, TriG, N-Quads; strings and files; bulk loading and tuning |
+| [03 — Querying](03-querying.md) | SPARQL 1.1 query and update, named graphs, property paths, what's not supported |
+| [04 — Reasoning](04-reasoning.md) | OWL 2 RL and RDFS materialization, freshness |
+| [05 — Managing graphs](05-graphs.md) | inventory, copy / move / drop, carving, locks, integrity |
+| [06 — Validation](06-validation-recipes.md) | SHACL Core and SHACL-SPARQL, reports, strict mode |
+| [07 — Identity and export](07-identity-and-export.md) | canonical digests, N-Triples export, portable manifests |
+| [08 — Errors and diagnostics](08-errors-and-diagnostics.md) | SQLSTATEs, completeness, settings, version checks |
+| [09 — Function reference](09-function-reference.md) | every supported function, grouped by task |
 
-## Client integrations
+## From your application
 
-| Client | Page |
+pgRDF is plain SQL, so every PostgreSQL driver works. These pages show
+the common patterns: loading, querying, JSONB results and error codes.
+
+| Language | Page |
 |---|---|
-| Python (psycopg, asyncpg, rdflib bridge sketch) | [clients/python.md](clients/python.md) |
+| Python (psycopg, asyncpg, SQLAlchemy) | [clients/python.md](clients/python.md) |
+| Node.js / TypeScript (pg, postgres.js) | [clients/typescript.md](clients/typescript.md) |
+| Go (pgx) | [clients/go.md](clients/go.md) |
 | Rust (tokio-postgres, sqlx) | [clients/rust.md](clients/rust.md) |
-| Node.js / TypeScript (`pg`, `postgres.js`) | [clients/typescript.md](clients/typescript.md) |
-| Go (`pgx` v5) | [clients/go.md](clients/go.md) |
 
-Java (JDBC), Ruby (`pg`), and the rest of the Postgres ecosystem
-connect identically — every pgRDF capability is a SQL UDF. Example
-pages for those land as the surface stabilizes.
+## Something wrong or unclear?
 
-## Reporting back
-
-If something here is wrong or unclear, open an issue at
-[styk-tv/pgRDF](https://github.com/styk-tv/pgRDF/issues) — the user
-guide is meant to evolve with the surface, and friction reports are
-the cheapest way to improve it.
+Open an issue at [styk-tv/pgRDF](https://github.com/styk-tv/pgRDF/issues).

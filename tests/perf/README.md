@@ -25,7 +25,7 @@ to N-Triples and bulk-loaded via `pgrdf.load_file()`.
 - warm latency (ms, median of 10 runs)
 - result row count (sanity check)
 
-Tracked release-over-release in [docs/09-release.md](../../docs/09-release.md).
+Tracked release-over-release in docs/09-release.md.
 
 ## Gates per phase
 

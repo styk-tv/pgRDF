@@ -1,90 +1,85 @@
-# INSTALL
+# Building pgRDF from source
 
-## PGXN / source install
+Most people don't need to build pgRDF: prebuilt archives and a Docker
+recipe are in the [install guide](guide/01-install.md). Build from
+source to develop pgRDF, or to target a platform without a prebuilt
+archive.
 
-pgRDF ships PGXN metadata at the repository root:
+## Requirements
 
-- `META.json`
-- `Makefile`
-- `README.pgxn.md`
-- `LICENSE`
-
-The PGXN build path is source-based. It shells out to `cargo pgrx package`,
-so the build host needs the Rust and pgrx toolchain in addition to PostgreSQL.
-
-Prebuilt binary artifacts remain on the GitHub Releases page as the existing
-`pgrdf-<version>-pg<PG_MAJOR>-glibc-<arch>.tar.gz` matrix plus `SHA256SUMS`.
-The PGXN archive is the source distribution, not a replacement for those
-per-architecture binaries.
-
-## Prerequisites
-
-- PostgreSQL 14, 15, 16, or 17 development installation
-- `pg_config` for the target PostgreSQL major
-- Rust 1.91 or newer
-- `cargo-pgrx` 0.16
-- one-time `cargo pgrx init` for the target PostgreSQL installation
-
-Example one-time pgrx setup:
+- PostgreSQL 18 with its development files (`pg_config`, server
+  headers). On Debian / Ubuntu: `postgresql-server-dev-18`.
+- Rust 1.96 or newer.
+- `cargo-pgrx` **0.19.2**, which must match the `pgrx` version in
+  `Cargo.toml`.
 
 ```bash
-cargo install cargo-pgrx --locked --version '^0.16'
-cargo pgrx init --pg17 /path/to/pg_config
+cargo install cargo-pgrx --locked --version 0.19.2
+cargo pgrx init --pg18 "$(which pg_config)"
 ```
 
-## Install via PGXN client
+## Build and install
+
+From a clone of this repository:
 
 ```bash
-pgxn install pgrdf --pg_config /path/to/pg_config
+cargo pgrx install --release --pg-config "$(which pg_config)"
 ```
 
-If you prefer to build directly from the unpacked PGXN source archive:
+This builds `pgrdf.so` and copies it, together with the control and SQL
+files, into that PostgreSQL installation.
+
+### From the source archive
+
+Each release also ships a source archive (`pgrdf-<version>.zip`), the
+same one published to PGXN. Unpack it and run:
 
 ```bash
 make PG_CONFIG=/path/to/pg_config
 make PG_CONFIG=/path/to/pg_config install
 ```
 
-Either path installs the extension files (`pgrdf.so`, `pgrdf.control`, the SQL).
-**Do not run `CREATE EXTENSION pgrdf` yet** — first complete the required
-configuration below.
+or, with the PGXN client: `pgxn install pgrdf --pg_config /path/to/pg_config`.
 
-## Required PostgreSQL configuration
+## Configure and create the extension
 
-pgRDF **must** be in `shared_preload_libraries`: its `_PG_init()` registers the
-shared-memory dictionary cache and plan-cache atomics in the postmaster, which
-only happens at server startup. **Without this, `CREATE EXTENSION` succeeds but
-the first pgRDF function call panics with `PgAtomic was not initialized`.**
-
-1. Add `pgrdf` to `shared_preload_libraries` in `postgresql.conf`:
+1. Add pgRDF to `postgresql.conf`:
 
    ```ini
    shared_preload_libraries = 'pgrdf'
    ```
 
-2. **Restart** the server (a reload is not enough — preload happens at postmaster
-   startup):
+2. Restart PostgreSQL (a reload is not enough).
 
-   ```bash
-   pg_ctl restart -D /path/to/your/PGDATA      # or: systemctl restart postgresql
+3. Create the extension and check it:
+
+   ```sql
+   CREATE EXTENSION pgrdf;
+   SELECT pgrdf.version(), pgrdf.build_id();
    ```
 
-3. Verify, then create the extension:
+   A local build reports a git-based `build_id()` (for example a hash
+   ending in `-dirty` when the tree has uncommitted changes). Official
+   releases report their tag.
 
-   ```bash
-   psql -d yourdb -c "SHOW shared_preload_libraries;"   -- must contain 'pgrdf'
-   psql -d yourdb -c 'CREATE EXTENSION pgrdf;'
-   psql -d yourdb -c "SELECT pgrdf.version();"
-   ```
+## Building inside Docker
 
-## Maintainer release artifact
+To produce a Linux `.so` without installing Rust locally, for example
+on macOS, use the builder container described in
+[compose/README.md](compose/README.md).
 
-Build the PGXN-ready source archive from a tagged commit:
+## Running the tests
 
 ```bash
-make dist
+cargo pgrx test pg18       # in-database tests
 ```
 
-This emits `pgrdf-<version>.zip`, with the standard
-`pgrdf-<version>/...` directory prefix expected by PGXN Manager. The GitHub
-release workflow also attaches this zip alongside the existing binary tarballs.
+The full suites (regression, W3C SPARQL and SHACL conformance, LUBM)
+run through the `Justfile`. See
+[testing](https://pgrdf.styk.tv/v0.6/internals/testing) on the documentation site.
+
+## Maintainers: source archive
+
+```bash
+make dist        # → pgrdf-<version>.zip, the PGXN-ready source archive
+```

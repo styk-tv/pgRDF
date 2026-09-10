@@ -4,7 +4,7 @@
 Called by `.github/workflows/update-latest-md.yml` AFTER SLSA Build Provenance
 v1 attestation verification succeeds for the head digest(s). Re-renders the
 whole LATEST.md every time — pgRDF ships a single OCI surface so there is no
-"preserve the other side" logic the pgCK sibling renderer needs.
+"preserve the other side" logic.
 
 Env:
   VER                      pgRDF version (no ``v`` prefix; e.g. ``0.5.10``)
@@ -26,9 +26,9 @@ Output: full LATEST.md content on stdout.
 Bootstrap discipline: this renderer trusts the workflow's `gh attestation
 verify` step. v0.5.0–v0.5.9 will never be passed in as ``VER`` because their
 digests do not verify — the workflow exits before reaching this renderer.
-The bootstrap exception (PROVENANCE.md) is enforced upstream, not here.
+That exception is enforced upstream, not here.
 
-SPEC.OCI.BUNDLE.v0.3 §2.2 fields emitted in addition to v0.2 set:
+Provenance fields emitted:
 - per-arch ``Also tagged`` column (renders ``—`` for Shape B leaves: pgRDF
   does not currently apply aliases to per-arch leaves; only the aggregate
   index carries ``v<VER>`` as an alias of ``<VER>``).
@@ -36,8 +36,7 @@ SPEC.OCI.BUNDLE.v0.3 §2.2 fields emitted in addition to v0.2 set:
   kicked off ``oci-publish.yml``).
 - ``Built from commit`` row (linked abbreviated SHA → repo commit URL).
 - ``Release notes`` row (GitHub release URL; kept in addition to the
-  existing ``Tarball mirror`` row — v0.3 §2.2 lists them as distinct
-  semantic fields even if the URL happens to coincide for pgRDF).
+  existing ``Tarball mirror`` row even though the URLs coincide).
 """
 
 from __future__ import annotations
@@ -172,7 +171,7 @@ def render(owner: str, ver: str) -> str:
     arm_d, arm_t = find_version(pkgs, f"{ver}-pg18-arm64")
     agg_d, _ = find_version(pkgs, ver)  # the bare ``X.Y.Z`` aggregate tag
 
-    # SPEC.OCI.BUNDLE.v0.3 §2.2 fields.
+    # Provenance fields.
     built_from_sha = resolve_built_from_sha(owner, repo, ver)
     built_by_url, built_by_clean = resolve_built_by_url(
         owner, repo, built_from_sha
@@ -195,7 +194,7 @@ def render(owner: str, ver: str) -> str:
             "<!-- fallback: could not resolve specific release.yml run -->"
         )
 
-    # SPEC.OCI.BUNDLE.v0.3 §2.2 per-arch ``Also tagged`` column. pgRDF
+    # Per-arch ``Also tagged`` column. pgRDF
     # currently applies no aliases to Shape B per-arch leaves (only the
     # aggregate index carries ``v<VER>`` alongside ``<VER>``). Render
     # ``—`` for now; if aliases are introduced later, replace with a
@@ -214,11 +213,11 @@ def render(owner: str, ver: str) -> str:
 
 # pgRDF — latest published artifacts
 
-One publishable surface ships from this repo: the PostgreSQL **extension** (oras-pulled OCI artifact). This file tracks the head on **PostgreSQL 18**. Builds for pg14 / pg15 / pg16 are PAUSED during a stabilization window (see [CHANGELOG.md "Changed (stabilization window)"](./CHANGELOG.md) for context) — they will resume once the multi-PG matrix is stable again. The [Repo packages view](https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle) shows everything currently published.
+One publishable surface ships from this repo: the PostgreSQL **extension** (oras-pulled OCI artifact). This file tracks the current release for **PostgreSQL 18** on x86-64 and arm64. The [Repo packages view](https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle) shows everything currently published.
 
 ## pgRDF extension — `v{ver}` (PostgreSQL 18)
 
-Every digest below carries a verifiable SLSA Build Provenance v1 attestation per [`PROVENANCE.md`](./PROVENANCE.md). v0.5.0–v0.5.9 predate the attestation wiring and never appear here.
+Every digest below carries a verifiable SLSA Build Provenance v1 attestation.
 
 `oras pull ghcr.io/styk-tv/pgrdf-bundle:{ver}-pg18-<arch>` → drop `lib/pgrdf.so` + `share/extension/{{pgrdf.control, pgrdf--{ver}.sql}}` next to your `postgres:18` install.
 
@@ -239,12 +238,11 @@ Every digest below carries a verifiable SLSA Build Provenance v1 attestation per
 | Release notes         | https://github.com/styk-tv/pgRDF/releases/tag/v{ver}                                          |
 | Tarball mirror        | https://github.com/styk-tv/pgRDF/releases/tag/v{ver}                                          |
 | Repo packages view    | https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle                                   |
-| Older PG majors       | PAUSED during the stabilization window — pg14 / pg15 / pg16 leaves are NOT published for v{ver}. Resumes per CHANGELOG.md once matrix is stable.   |
 
 ## Verifying any artifact above
 
 ```sh
-# Aggregate index (multi-arch; pg18 only during stabilization window)
+# Aggregate index (multi-arch)
 gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:{ver} \\
   --repo styk-tv/pgRDF
 
@@ -259,8 +257,8 @@ A successful verify means: signed by GitHub's Fulcio CA against the OIDC token o
 
 - There is **no `latest` synonym** on the extension OCI artifact — pin by `pg`×`arch` explicitly (e.g. `{ver}-pg18-amd64`).
 - Tagged versions are immutable on GHCR.
-- The aggregate `vX.Y.Z` / `X.Y.Z` index references all 8 per-PG×arch leaves for that release; pull it to let your client pick.
-- Per [`PROVENANCE.md`](./PROVENANCE.md) Rule 2: do not consider an artifact "shipped" if its digest does not verify under `gh attestation verify`.
+- The aggregate `vX.Y.Z` / `X.Y.Z` index references the per-arch leaves for that release; pull it to let your client pick.
+- Do not consider an artifact "shipped" if its digest does not verify under `gh attestation verify`.
 
 See [`CHANGELOG.md`](./CHANGELOG.md) and [`RELEASE_NOTES.md`](./RELEASE_NOTES.md) for what changed per version.
 """

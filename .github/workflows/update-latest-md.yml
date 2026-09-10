@@ -184,7 +184,7 @@ jobs:
           BUILT_BY_URL:   ${{ steps.spec22.outputs.built_by_url }}
         run: |
           set -euo pipefail
-          python3 tools/render-latest-md.py > LATEST.md.new
+          python3 scripts/render-latest-md.py > LATEST.md.new
           mv LATEST.md.new LATEST.md
 
       - name: Commit refresh if changed

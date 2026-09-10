@@ -1,8 +1,7 @@
-# Node.js / TypeScript clients
+# Node.js / TypeScript
 
-pgRDF speaks plain Postgres, so any Node-side Postgres library works.
-This page covers `pg` (node-postgres — the dominant choice) and a
-short example with `postgres.js` (the modern compact alternative).
+pgRDF is plain SQL, so any PostgreSQL client for Node works. Examples
+below use the Docker setup from the [install guide](../01-install.md).
 
 ## node-postgres (`pg`)
 
@@ -14,76 +13,77 @@ npm install --save-dev @types/pg
 ```ts
 import { Client } from 'pg';
 
-const client = new Client({
-  host: 'localhost',
-  port: 5432,
-  user: 'pgrdf',
-  password: 'pgrdf',
-  database: 'pgrdf',
-});
-
+const client = new Client({ connectionString: 'postgresql://postgres:pgrdf@localhost:5432/postgres' });
 await client.connect();
 
 await client.query('CREATE EXTENSION IF NOT EXISTS pgrdf');
 
-// Load a Turtle file from the server-side filesystem
-const { rows: loadRows } = await client.query<{ load_turtle: number }>(
-  'SELECT pgrdf.load_turtle($1, $2)',
-  ['/fixtures/ontologies/foaf.ttl', 1],
-);
-console.log(`loaded ${loadRows[0].load_turtle} triples`);
+// create a graph and load Turtle
+const { rows: [{ add_graph: graphId }] } = await client.query<{ add_graph: string }>(
+  'SELECT pgrdf.add_graph($1)', ['http://example.org/people']);
 
-// Parse an inline Turtle string
-await client.query(
-  'SELECT pgrdf.parse_turtle($1, $2)',
-  [
-    '@prefix ex: <http://example.com/> . ex:a ex:p ex:b .',
-    2,
-  ],
-);
+await client.query('SELECT pgrdf.parse_turtle($1, $2)', [
+  `@prefix ex: <http://example.org/> .
+   @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+   ex:alice foaf:name "Alice" ; foaf:knows ex:bob .
+   ex:bob   foaf:name "Bob" .`,
+  graphId,
+]);
 
-// Run a SPARQL SELECT — pgrdf.sparql returns SETOF JSONB, so each
-// row's `sparql` column is the JSON object with the variable bindings.
-const { rows: solutions } = await client.query<{ sparql: Record<string, string> }>(
-  `SELECT * FROM pgrdf.sparql($1)`,
+// SPARQL: each row's `sparql` column is the parsed JSON binding
+type Binding = { who: string; friend: string };
+const { rows } = await client.query<{ sparql: Binding }>(
+  'SELECT sparql FROM pgrdf.sparql($1)',
   [`PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-    SELECT ?s ?n WHERE { ?s foaf:name ?n }`],
+    SELECT ?who ?friend WHERE { ?a foaf:name ?who ; foaf:knows ?b . ?b foaf:name ?friend }`],
 );
-for (const row of solutions) {
-  console.log(`${row.sparql.s} → ${row.sparql.n}`);
-}
-
-// Verbose ingest stats — JSONB → JS object automatically
-const { rows: statsRows } = await client.query<{ load_turtle_verbose: any }>(
-  'SELECT pgrdf.load_turtle_verbose($1, $2, $3)',
-  ['/fixtures/ontologies/prov.ttl', 100, 'http://www.w3.org/ns/prov#'],
-);
-console.log(
-  `prov.ttl: ${statsRows[0].load_turtle_verbose.triples} triples`
-  + ` in ${statsRows[0].load_turtle_verbose.elapsed_ms} ms`,
-);
+for (const { sparql } of rows) console.log(sparql.who, '→', sparql.friend);
 
 await client.end();
 ```
 
-### Connection pool
+`BIGINT` values such as graph ids arrive as strings in `pg`; pass them
+back as-is. SPARQL values are always strings; convert numbers yourself.
 
-For anything beyond a one-shot script, use `pg.Pool`:
+### Handling refusals
 
 ```ts
-import { Pool } from 'pg';
-const pool = new Pool({ connectionString: 'postgresql://pgrdf:pgrdf@localhost/pgrdf' });
-
-const { rows } = await pool.query<{ sparql: Record<string, string> }>(
-  `SELECT sparql FROM pgrdf.sparql($1) WHERE sparql->>'n' ~* '^a'`,
-  [`PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-    SELECT ?p ?n WHERE { ?p foaf:name ?n }`],
-);
+try {
+  await client.query('SELECT pgrdf.clear_graph($1)', ['http://example.org/people']);
+} catch (e: any) {
+  switch (e.code) {
+    case '55P03': /* graph is locked — e.message names the unlock */ break;
+    case '42704': /* no such graph */ break;
+    case '0A000': /* unsupported construct */ break;
+    default: throw e;
+  }
+}
 ```
 
-Note the WHERE filter on the JSONB output — once `pgrdf.sparql`
-returns its solutions you can post-process them with any normal
-Postgres JSONB operator before they reach your application.
+### Was the answer complete?
+
+Run this on the **same connection** right after the query (use a
+`Client`, or check out one client from a pool):
+
+```ts
+const { rows: [{ last_call_stats: s }] } = await client.query('SELECT pgrdf.last_call_stats()');
+const complete = s.path_depth_truncations === 0 && s.filter_clauses_dropped === 0;
+```
+
+### Large result sets
+
+Stream with `pg-cursor`:
+
+```ts
+import Cursor from 'pg-cursor';
+
+const cursor = client.query(new Cursor('SELECT sparql FROM pgrdf.sparql($1)',
+  ['SELECT ?s ?p ?o WHERE { ?s ?p ?o }']));
+for (let batch = await cursor.read(1000); batch.length; batch = await cursor.read(1000)) {
+  for (const { sparql } of batch) { /* ... */ }
+}
+await cursor.close();
+```
 
 ## postgres.js
 
@@ -93,95 +93,24 @@ npm install postgres
 
 ```ts
 import postgres from 'postgres';
-const sql = postgres('postgres://pgrdf:pgrdf@localhost/pgrdf');
+const sql = postgres('postgres://postgres:pgrdf@localhost/postgres');
 
-await sql`CREATE EXTENSION IF NOT EXISTS pgrdf`;
+const [{ add_graph: g }] = await sql`SELECT pgrdf.add_graph(${'http://example.org/people'})`;
+await sql`SELECT pgrdf.parse_turtle(${'<http://example.org/a> <http://example.org/p> "x" .'}, ${g})`;
 
-const [{ load_turtle: n }] = await sql<[{ load_turtle: number }]>`
-  SELECT pgrdf.load_turtle(${'/fixtures/ontologies/foaf.ttl'}, ${1})
-`;
-console.log(`loaded ${n} triples`);
-
-// JSONB rows decode to objects directly
-type Binding = Record<string, string>;
-const solutions = await sql<{ sparql: Binding }[]>`
-  SELECT * FROM pgrdf.sparql(${`
-    PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-    SELECT ?s ?n WHERE { ?s foaf:name ?n }
-  `})
-`;
-for (const { sparql } of solutions) {
-  console.log(sparql.s, sparql.n);
-}
+const rows = await sql<{ sparql: Record<string, string> }[]>`
+  SELECT sparql FROM pgrdf.sparql(${'SELECT ?s ?o WHERE { ?s <http://example.org/p> ?o }'})`;
+rows.forEach(({ sparql }) => console.log(sparql.s, sparql.o));
 
 await sql.end();
 ```
 
-`postgres.js` is template-tag-driven so parameter binding is implicit
-and SQL injection is impossible by construction.
+## Tips
 
-## Streaming large result sets
-
-`pg-cursor` lets you iterate millions of `pgrdf.sparql` rows without
-buffering everything in memory:
-
-```ts
-import { Client } from 'pg';
-import Cursor from 'pg-cursor';
-
-const client = new Client({ /* ... */ });
-await client.connect();
-
-const cursor = client.query(new Cursor(
-  `SELECT sparql FROM pgrdf.sparql($1)`,
-  [`SELECT ?s ?p ?o WHERE { ?s ?p ?o }`],
-));
-
-while (true) {
-  const rows = await new Promise<any[]>((resolve, reject) => {
-    cursor.read(1000, (err, rows) => (err ? reject(err) : resolve(rows)));
-  });
-  if (rows.length === 0) break;
-  for (const row of rows) {
-    // process row.sparql.{var: value}
-  }
-}
-
-await cursor.close();
-await client.end();
-```
-
-## Type narrowing
-
-`pgrdf.sparql` returns `SETOF JSONB` where the keys vary by query. If
-you have a fixed query shape, narrow the type:
-
-```ts
-type FoafBinding = { s: string; n: string };
-type FoafRow     = { sparql: FoafBinding };
-
-const { rows } = await client.query<FoafRow>(
-  `SELECT * FROM pgrdf.sparql($1)`,
-  [`PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-    SELECT ?s ?n WHERE { ?s foaf:name ?n }`],
-);
-// rows[0].sparql.s and .n are now typed
-```
-
-For dynamic queries, use `Record<string, string>` and validate keys
-against the SELECT-clause variable list (you can extract that list
-upfront via `pgrdf.sparql_parse`).
-
-## Caveats
-
-- pgRDF parses Turtle strictly through `oxttl`. Any TTL that fails
-  to load is genuinely off-spec — don't silently retry with a
-  "lenient" client; fix the source.
-- `pgrdf.sparql` searches the default union of all graphs; scope a
-  query with `GRAPH <iri> { … }` or `GRAPH ?g { … }` to target or
-  bind named graphs.
-- Set `search_path = pgrdf, public;` per connection if you want to
-  drop the `pgrdf.` prefix on every call.
-- Heavy `load_turtle` calls hold the SPI connection for the duration
-  of the parse. Use a separate connection (or `pg.Pool`) for the
-  ingest job so other queries don't queue behind it.
+- `pgrdf.load_turtle(path, …)` reads from the **database server's**
+  filesystem. For files next to your app, read them and use
+  `parse_turtle`.
+- SQL parameters (`$1`) protect the SQL call, not the SPARQL inside it.
+  Escape user input you splice into query text.
+- A long load holds its connection. Run bulk loads on a dedicated
+  connection so other queries don't queue behind them.

@@ -6,6 +6,22 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+### Documentation
+
+- README and `guide/` rewritten for new users: install routes (including a
+  two-minute Docker recipe on stock `postgres:18`), a ten-minute tour, and
+  pages for loading, querying, reasoning, managing graphs, validation,
+  identity and export, errors and diagnostics, a function reference, and
+  client examples. Every example was run against the v0.6.34 release.
+- The full documentation, including the internals formerly under `docs/`,
+  now lives at <https://pgrdf.styk.tv>. `docs/` and `specs/` are no longer
+  part of the repository.
+- `tools/` merged into `scripts/`, which now has a README; CI calls
+  `scripts/render-latest-md.py`. The LATEST.md template no longer mentions
+  paused PostgreSQL majors.
+- `fixtures/ontologies.sh` reads its URL list from
+  `fixtures/ontologies.manifest.json`.
+
 ## [0.6.34] — 2026-08-26
 
 SPEC.pgRDF.LIB.v0.6.34 — "the engine emits, every client listens." The
@@ -3217,7 +3233,7 @@ the rename when [gtfierro/reasonable#50](https://github.com/gtfierro/reasonable/
 merges and the `[patch.crates-io]` block drops. Until then, pgRDF
 distribution remains via prebuilt tarballs (`release.yml`) only;
 the existing crates.io `pgrdf 0.3.0` name-claim entry persists
-unchanged. Tracked at [`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md)
+unchanged. Tracked at `specs/ERRATA.v0.4.md`
 E-011 step 6.
 
 ### Phase A countdown closed at slice 100 — v0.4.1 shipped
@@ -3762,7 +3778,7 @@ tests** green (was 158).
 
 ### Spec — ERRATA.v0.4 file created (v0.4 cycle tracking)
 
-New [`specs/ERRATA.v0.4.md`](specs/ERRATA.v0.4.md) carries v0.4-era
+New `specs/ERRATA.v0.4.md` carries v0.4-era
 spec deltas. E-011 first entry tracks the upstream `reasonable` patch
 for RDF 1.2 coexistence (unblocks the remaining
 `rdf-12 / TermRef::Triple` half of E-009). Branch
@@ -4114,9 +4130,9 @@ first run, `CREATE EXTENSION` + `pgrdf.version()` succeeded but the
 first stateful call (`parse_turtle`) returned `ERROR: PgAtomic was
 not initialized` — the canonical signature of pgRDF not being loaded
 via `shared_preload_libraries`. This is documented in
-[`SPEC.pgRDF.INSTALL.v0.2 §6 + §7`](specs/SPEC.pgRDF.INSTALL.v0.2.md),
+`SPEC.pgRDF.INSTALL.v0.2 §6 + §7`,
 [`guide/01-install.md §3`](guide/01-install.md), and
-[`docs/06-installation.md §1.2`](docs/06-installation.md), so the
+`docs/06-installation.md §1.2`, so the
 diagnostic chain held: error → check `SHOW shared_preload_libraries`
 (empty) → re-launch with `-c shared_preload_libraries=pgrdf` → SHOW
 returns `pgrdf` → everything works. **The tarball + install docs are
@@ -5559,7 +5575,7 @@ Test bar: **93 pgrx + 31 pg_regress + 18 W3C-shape + 3 LUBM-shape
 - Test bar: **91 → 93 pgrx + 29 → 30 regression**, green.
 
 **Why a stub, not a real impl.** New ERRATA entry
-[`E-009`](specs/ERRATA.v0.2.md). Briefly:
+`E-009`. Briefly:
 - `shacl_validation 0.2.x` (latest 0.2.12) ships an unfinished
   `iri_s` → `rudof_iri` migration; `shacl_ast 0.2.9` fails to
   compile against the resolved tree
@@ -5757,7 +5773,7 @@ block Phase 4 (Inference) start.
 
 ### LLD v0.3 — Refocus
 
-- [`specs/SPEC.pgRDF.LLD.v0.3.md`](specs/SPEC.pgRDF.LLD.v0.3.md)
+- `specs/SPEC.pgRDF.LLD.v0.3.md`
   shipped. Supersedes v0.2 at the contract level; v0.2 LLD is now
   historical (still referenced for §4.1–4.3 internals that haven't
   changed). INSTALL spec (`SPEC.pgRDF.INSTALL.v0.2.md`) unchanged.
@@ -6397,4 +6413,4 @@ Infrastructure:
 - PG 18 forward path blocked on pgrx 0.17/0.18 not building on
   current Rust (E-006). Compose targets PG 17 until upstream lands
   a fix.
-- See [`specs/ERRATA.v0.2.md`](specs/ERRATA.v0.2.md) for the full set.
+- See `specs/ERRATA.v0.2.md` for the full set.
