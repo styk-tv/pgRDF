@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) pgRDF contributors — https://github.com/styk-tv/pgRDF
+#
+# pgRDF GeoSPARQL fixture. Original work, authored for pgRDF from the
+# GeoSPARQL 1.1 rule definitions catalogued in ../../RULES.md. No
+# third-party fixture text is reproduced.
+#
+# Rule:   S03-serialization-must-be-literal
+# Expect: INVALID
+# Why:    geo:asWKT points at an IRI instead of a literal
+
+@prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+@prefix ex:   <http://example.org/pgrdf/> .
+
+ex:f-quay
+    geo:hasGeometry [
+        geo:asWKT ex:not-a-literal ;
+    ] ;
+.

@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) pgRDF contributors — https://github.com/styk-tv/pgRDF
+#
+# pgRDF GeoSPARQL fixture. Original work, authored for pgRDF from the
+# GeoSPARQL 1.1 rule definitions catalogued in ../../RULES.md. No
+# third-party fixture text is reproduced.
+#
+# Rule:   S02-geometry-not-nested
+# Expect: INVALID
+# Why:    same nesting, reached through hasDefaultGeometry
+
+@prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+@prefix ex:   <http://example.org/pgrdf/> .
+
+ex:f-harbour
+    geo:hasDefaultGeometry ex:g-harbour ;
+.
+
+ex:g-harbour
+    geo:asWKT "POINT (10.5 52.3)"^^geo:wktLiteral ;
+    geo:hasGeometry [ geo:asWKT "POINT (10.6 52.4)"^^geo:wktLiteral ] ;
+.

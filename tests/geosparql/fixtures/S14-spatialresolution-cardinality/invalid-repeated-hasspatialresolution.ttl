@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) pgRDF contributors — https://github.com/styk-tv/pgRDF
+#
+# pgRDF GeoSPARQL fixture. Original work, authored for pgRDF from the
+# GeoSPARQL 1.1 rule definitions catalogued in ../../RULES.md. No
+# third-party fixture text is reproduced.
+#
+# Rule:   S14-spatialresolution-cardinality
+# Expect: INVALID
+# Why:    two geo:hasSpatialResolution values
+
+@prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+@prefix ex:   <http://example.org/pgrdf/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix qudt: <http://qudt.org/schema/qudt/> .
+
+ex:f-beacon
+    geo:hasGeometry [
+        geo:hasSpatialResolution [
+            qudt:numericValue "12.5"^^xsd:double ;
+            qudt:unit <http://qudt.org/vocab/unit/M> ;
+        ] ;
+        geo:hasSpatialResolution [
+            qudt:numericValue "1250.0"^^xsd:double ;
+            qudt:unit <http://qudt.org/vocab/unit/CentiM> ;
+        ] ;
+    ] ;
+.

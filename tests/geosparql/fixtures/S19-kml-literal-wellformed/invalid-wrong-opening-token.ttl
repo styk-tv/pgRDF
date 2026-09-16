@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) pgRDF contributors — https://github.com/styk-tv/pgRDF
+#
+# pgRDF GeoSPARQL fixture. Original work, authored for pgRDF from the
+# GeoSPARQL 1.1 rule definitions catalogued in ../../RULES.md. No
+# third-party fixture text is reproduced.
+#
+# Rule:   S19-kml-literal-wellformed
+# Expect: INVALID
+# Why:    GeoJSON text carried by geo:asKML
+
+@prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+@prefix ex:   <http://example.org/pgrdf/> .
+
+ex:f-beacon
+    geo:hasGeometry [
+        geo:asKML "{ \"type\": \"Point\", \"coordinates\": [10.5, 52.3] }"^^geo:kmlLiteral ;
+    ] ;
+.
