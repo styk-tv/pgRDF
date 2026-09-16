@@ -200,6 +200,38 @@ const UNENFORCED_SPARQL_MODE: &[(&str, &str)] = &[
     ("http://www.w3.org/ns/shacl#maxCount", "sh:maxCount"),
 ];
 
+/// Property path types whose *values* this engine does not fully evaluate.
+///
+/// Distinct from a constraint component: the path is traversed and IRI values
+/// validate normally, but a **literal** reached through one of these is absent
+/// from the value set, so no constraint fires on it. A literal partway along
+/// discards the whole value set, including sibling values still reachable.
+/// Measured 0.6.34 — see `tests/shacl-capability/PATH-MATRIX.json`.
+///
+/// Root cause is upstream in the `shacl` crate (rudof-project/rudof#818, fixed
+/// by #819); this table is the interim posture, removed once a release carries
+/// the fix and `PATH-MATRIX.json` shows the cells clean.
+///
+/// **Refusal is deliberately broader than the defect.** Whether a given shape
+/// trips it depends on the *data*, which is unknown when the shapes graph is
+/// read, so a shape that would be fine over IRI-only data is refused too.
+/// That is the fail-closed direction: a visible refusal beats a silent wrong
+/// verdict, and `strict => false` remains the opt-out for anyone who wants the
+/// current behaviour knowingly.
+///
+/// `sh:zeroOrOnePath` is NOT listed — it does not recurse from its objects and
+/// measures clean on every cell.
+const UNENFORCED_PATH_TYPES: &[(&str, &str)] = &[
+    (
+        "http://www.w3.org/ns/shacl#oneOrMorePath",
+        "sh:oneOrMorePath (literal values reached through it are not validated)",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#zeroOrMorePath",
+        "sh:zeroOrMorePath (literal values reached through it are not validated)",
+    ),
+];
+
 /// SHACL target declarations. A shapes graph carrying none of these
 /// targets nothing, so validation is vacuous: every data graph
 /// "conforms" because nothing was ever selected to check.
@@ -264,6 +296,9 @@ fn unenforced_components(
     if mode == "sparql" {
         check(UNENFORCED_SPARQL_MODE);
     }
+    // Path types are unevaluated in EVERY mode, 'pgrdf' included: the fault is
+    // in path traversal, below the constraint dispatch that mode selects.
+    check(UNENFORCED_PATH_TYPES);
     found
 }
 
@@ -418,11 +453,11 @@ fn validate(
         let skipped = unenforced_components(&shapes_preds, &mode_str);
         if !skipped.is_empty() {
             pgrx::error!(
-                "validate: unenforced constraint component in shapes graph \
-                 under mode {mode_str:?}: {}. This engine does not evaluate \
-                 it, so a verdict would be meaningless. Re-run with \
+                "validate: unenforced SHACL feature in shapes graph \
+                 under mode {mode_str:?}: {}. This engine does not fully \
+                 evaluate it, so a verdict would be meaningless. Re-run with \
                  strict => false to validate the remaining constraints \
-                 anyway (the named component stays unevaluated).",
+                 anyway (the named feature stays unevaluated).",
                 skipped.join(", ")
             );
         }
@@ -1892,6 +1927,102 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
     /// hand-built set answers in milliseconds whether the pure logic is
     /// the problem — and it is not, which is what localises the defect
     /// to the SPI read.
+    /// P2 — the capability pin. Binds this file's hand-written tables to the
+    /// measured `CAPABILITY.json`.
+    ///
+    /// The two are independent statements of one fact and had drifted: the
+    /// tables named a single unenforced feature while the harness measured
+    /// three, and nothing compared them. Nothing could — the only tests over
+    /// `unenforced_components` asserted it against the same tables that define
+    /// it, which is self-consistency, not verification.
+    ///
+    /// This test fails the build on disagreement in the direction that matters:
+    /// a feature the engine is measured NOT to enforce, and does not declare,
+    /// is a feature it fails OPEN on.
+    #[test]
+    fn declared_tables_match_the_measured_capability() {
+        use super::{UNENFORCED_ALL_MODES, UNENFORCED_PATH_TYPES, UNENFORCED_SPARQL_MODE};
+        use std::collections::HashSet;
+
+        // Compile-time include: the test binary carries the document, so this
+        // cannot pass by reading a stale file from somewhere else on disk.
+        const CAP: &str = include_str!("../../tests/shacl-capability/CAPABILITY.json");
+        let doc: serde_json::Value = serde_json::from_str(CAP).expect("CAPABILITY.json parses");
+
+        // 1. Expiry. A capability document generated against a different build
+        //    describes an engine that may no longer exist — the 0.6.22-vs-0.6.34
+        //    drift was invisible precisely because nothing asserted freshness.
+        let measured_ver = doc["pgrdf_version"].as_str().expect("pgrdf_version");
+        assert_eq!(
+            measured_ver,
+            env!("CARGO_PKG_VERSION"),
+            "CAPABILITY.json was generated against pgrdf {measured_ver}, crate is {}. \
+             Regenerate it: tests/shacl-capability/run.sh",
+            env!("CARGO_PKG_VERSION")
+        );
+
+        // 2. Completeness. The harness must have probed the whole known surface;
+        //    `not_enforced: []` over a partial probe set reads as a clean bill of
+        //    health and is not one.
+        assert_eq!(
+            doc["surface_complete"].as_bool(),
+            Some(true),
+            "CAPABILITY.json does not cover the known SHACL Core surface \
+             ({} of {} probed). Run tests/shacl-capability/completeness.sh.",
+            doc["surface_features_probed"],
+            doc["surface_features_known"]
+        );
+
+        // Probe names are the harness's; the tables are keyed by IRI. Only
+        // `sh:sparql` differs from its IRI local name, so the alias is spelled
+        // out rather than inferred.
+        let declared: HashSet<String> = UNENFORCED_ALL_MODES
+            .iter()
+            .chain(UNENFORCED_SPARQL_MODE)
+            .chain(UNENFORCED_PATH_TYPES)
+            .map(|(iri, _)| {
+                let local = iri.rsplit('#').next().unwrap_or(iri);
+                if local == "sparql" {
+                    "sparqlConstraint".to_string()
+                } else {
+                    local.to_string()
+                }
+            })
+            .collect();
+
+        // 3. Everything measured unenforced must be declared, or the engine
+        //    returns a verdict it cannot stand behind.
+        let mut undeclared: Vec<String> = doc["not_enforced"]
+            .as_array()
+            .expect("not_enforced")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|n| !declared.contains(*n))
+            .map(str::to_string)
+            .collect();
+        undeclared.sort();
+        assert!(
+            undeclared.is_empty(),
+            "measured NOT enforced but not declared in this file, so validate \
+             fails open on them: {undeclared:?}. Either add them to the tables \
+             above, or re-measure if the engine has changed."
+        );
+
+        // 4. Same for mode-dependent features: a feature only some modes
+        //    evaluate must be declared, so the modes that do not refuse.
+        let mode_only = doc["enforced_only_in_mode"]
+            .as_object()
+            .expect("enforced_only_in_mode");
+        let missing: Vec<&String> = mode_only
+            .keys()
+            .filter(|k| !declared.contains(*k))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "measured enforced only in some modes but not declared: {missing:?}"
+        );
+    }
+
     #[test]
     fn unenforced_and_target_logic_is_pure_and_correct() {
         use super::{declares_any_target, unenforced_components};
