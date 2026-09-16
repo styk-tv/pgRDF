@@ -422,11 +422,11 @@ fn validate(
         let skipped = unenforced_components(&shapes_preds, &mode_str);
         if !skipped.is_empty() {
             pgrx::error!(
-                "validate: unenforced SHACL feature in shapes graph \
-                 under mode {mode_str:?}: {}. This engine does not fully \
-                 evaluate it, so a verdict would be meaningless. Re-run with \
+                "validate: unenforced constraint component in shapes graph \
+                 under mode {mode_str:?}: {}. This engine does not evaluate \
+                 it, so a verdict would be meaningless. Re-run with \
                  strict => false to validate the remaining constraints \
-                 anyway (the named feature stays unevaluated).",
+                 anyway (the named component stays unevaluated).",
                 skipped.join(", ")
             );
         }
@@ -550,7 +550,25 @@ fn validate(
         let sparql_report =
             crate::validation::pgrdf_sparql::run_pgrdf_sparql(data_graph_id, shapes_graph_id);
         if let Some(extra) = sparql_report.get("results").and_then(|r| r.as_array()) {
-            results_json.extend(extra.iter().cloned());
+            // UNION, not concatenation. Both evaluators may now report the
+            // same violation: rudof's native validator used to skip sh:sparql
+            // outright (`validate_native` returned an empty outcome), so the
+            // two halves were disjoint by construction and a plain extend was
+            // safe. `shacl` gained sh:sparql support in the native validator
+            // (rudof a9a1a7bc), and from then on every SHACL-SPARQL violation
+            // was reported twice — once by each half — which doubled the count
+            // any consumer reads.
+            //
+            // Deduplicating on the whole result object is the conservative
+            // direction: two results that differ in ANY field (focus node,
+            // value, path, source shape, severity, message) are kept as
+            // distinct violations, so this can only ever collapse results the
+            // two evaluators agree on exactly.
+            for r in extra {
+                if !results_json.contains(r) {
+                    results_json.push(r.clone());
+                }
+            }
         }
         // A SPARQL-side error must not be swallowed into a clean pass.
         if let Some(err) = sparql_report.get("error") {
