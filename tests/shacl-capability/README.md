@@ -56,9 +56,46 @@ incomplete or the probe is misnamed). Self-tested against both. It found
 uses implicitly and nothing had ever measured on its own.
 
 **What it does not do:** it asserts a probe *exists* per feature, never that
-the probe is right. A wrong probe passes it — `oneOrMorePath` and
-`zeroOrMorePath` carried the verdict `SILENTLY-SKIPPED` from probes that
-existed and mischaracterised the defect.
+the probe is right. A wrong probe passes it — which is what the path matrix
+below exists to correct.
+
+## The path matrix — where a per-feature verdict cannot reach
+
+```bash
+bash tests/shacl-capability/path-matrix.sh            # writes PATH-MATRIX.json
+bash tests/shacl-capability/path-matrix.sh --print    # table only
+```
+
+Some faults live in the **interaction** between a path type and the term type
+of the value it reaches. One verdict per feature cannot express that, and
+`CAPABILITY.json` is wrong about paths **in both directions**:
+
+| | Says | Actually |
+|---|---|---|
+| `oneOrMorePath` / `zeroOrMorePath` | `SILENTLY-SKIPPED` | **overstated** — both are evaluated; only literal values reached through them are lost |
+| `sequencePath` | `enforced` | **understated** — a literal partway along `sh:path ( ex:p ex:q )` discards the whole value set, including a sibling IRI value still reachable |
+
+So read `PATH-MATRIX.json` for path behaviour. It measures every path type
+against three term rows — `iri`, `literal` (at the endpoint), and
+`literal-intermediate` (partway along, with a sibling IRI value that should
+survive) — asking two questions per cell: is the value in the value set at all
+(`seen`), and does a value-level constraint fire on it (`checked`).
+
+**17 cells, 5 defective** on 0.6.34. `inverse/literal` is `n/a-by-rdf` rather
+than unmeasured: the value of `^ex:p` is a subject, and a literal cannot be
+one.
+
+Two design notes worth keeping:
+
+- **`zeroOrOnePath` and `zeroOrMorePath` use `maxCount 1`, not `0`.** Both
+  include the focus node via the zero-length path, so their value set is never
+  empty and `maxCount 0` would fire whether or not the value was seen.
+- **The third term row was not in the first version of this matrix**, which
+  tested endpoints only and reported `sequence` as clean. The endpoint and
+  intermediate cases are genuinely different faults; conflating them hides one.
+
+Root cause is upstream — rudof-project/rudof#818, fixed by
+rudof-project/rudof#819.
 
 ## Method
 

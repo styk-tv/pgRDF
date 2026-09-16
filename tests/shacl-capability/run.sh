@@ -166,10 +166,17 @@ doc = {
     "warning that conforms:true could not distinguish 'validated clean' from "
     "'never evaluated' (pgRDF#80) NO LONGER HOLDS FOR COMPONENTS.",
     "IT STILL HOLDS FOR PROPERTY PATHS. The fail-closed check covers constraint "
-    "components only, not path types: sh:oneOrMorePath and sh:zeroOrMorePath "
-    "match nothing, report zero violations, and raise no error, so a shape using "
-    "either is silently unvalidated. Verdict `SILENTLY-SKIPPED`. Do not use those "
-    "two path types in a shape whose verdict matters.",
+    "components only, not path types, so a path defect produces no violation and "
+    "no error.",
+    "PATH VERDICTS IN THIS FILE ARE COARSE AND WRONG IN BOTH DIRECTIONS. Read "
+    "PATH-MATRIX.json for path behaviour. A per-feature verdict cannot express a "
+    "fault that lives in the interaction between a path type and the term type of "
+    "the value it reaches. `SILENTLY-SKIPPED` on oneOrMorePath/zeroOrMorePath "
+    "OVERSTATES the defect: both are evaluated, and only literal values reached "
+    "through them are lost. `enforced` on sequencePath UNDERSTATES it: a literal "
+    "partway along `sh:path ( ex:p ex:q )` discards the whole value set, including "
+    "a sibling IRI value that is still reachable. Root cause is upstream, "
+    "rudof-project/rudof#818.",
     "`enforced_only_in_mode` names components no default-mode probe catches but "
     "another mode evaluates correctly. sh:sparql is the case: silently skipped by "
     "'native' and 'sparql', evaluated by 'pgrdf'. Reading the native verdict alone "
