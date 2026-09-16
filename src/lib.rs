@@ -30,6 +30,7 @@ use pgrx::prelude::*;
 
 pub mod inference;
 pub mod query;
+pub mod shacl_capability;
 pub mod storage;
 pub mod surface;
 pub mod validation;

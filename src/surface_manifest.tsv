@@ -68,3 +68,4 @@ surface()	stable	this listing: every export with its stability class. Ask the en
 unlock_graph(graph_id bigint, reason text)	stable	release a graph lock with a mandatory reason — the cure the lock refusal names. Unlocking an unlocked graph refuses (55000). Since 0.6.28
 validate(data_graph_id bigint, shapes_graph_id bigint, mode text, strict boolean)	stable	SHACL validation report (modes: native, sparql, pgrdf). The report payload shape is frozen — tooling may rely on it
 version()	stable	extension version; with build_id() and pg_extension.extversion forms the identity triple a healthy deployment shows as three equal values
+shacl_capability()	stable	which SHACL features validate enforces, one row per feature of SHACL Core; verdict is enforced / not enforced / unprobed, and unprobed features are listed rather than omitted so the row count is the denominator. Since 0.6.35
