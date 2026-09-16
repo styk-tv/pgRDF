@@ -604,39 +604,69 @@ Full census of the shapes graph **[measured]**:
 risk is not missing constraints — it is **four unmeasured surfaces**, and one
 of them is load-bearing.
 
-#### The four real unknowns
+#### CORRECTION 2026-09-16 — all four were measured, and all four are enforced
 
-1. **`sh:targetObjectsOf` — 10 uses, never probed.** This is the significant
-   one. `targetSubjectsOf` is enforced; that tells us nothing about its
-   converse. Ten shapes select their focus nodes this way, including the
-   `S1-*` serialization-cardinality family. If unsupported, those ten shapes
-   target nothing and report `conforms: true` vacuously.
-2. **`sh:sparql` needs mode `pgrdf`.** `pgrdf.validate(data, shapes, mode)`
-   defaults to `'native'` **[read]**, and `CAPABILITY.json` records that
-   `'native'` and `'sparql'` **silently skip** `sh:sparql` while `'pgrdf'`
-   evaluates it. Running the corpus in the default mode drops 4 constraints
-   with no error. **The runner must pass `'pgrdf'` explicitly.**
-3. **`sh:deactivated`** — if ignored, a shape upstream deliberately switched
-   off would fire, producing a false failure rather than a false pass.
-4. **`sh:flags`** — `sh:pattern` is enforced, but flag handling is separate,
-   and pgRDF translates regex to POSIX where SHACL specifies XPath (R7).
+The four surfaces this section listed as unknown were probed on
+`0.6.34` / PG 18.4 as part of extending `tests/shacl-capability` from 17
+probes to 46 (full SHACL Core coverage). **Every one is enforced**:
+`sh:targetObjectsOf`, `sh:alternativePath`, `sh:deactivated`, and
+`sh:pattern` with `sh:flags`. **R8, which this document called blocking for
+T1, is closed.**
+
+Two findings replace them, and the first is better news than anything this
+section originally assumed.
+
+**Constraint components are FAIL-CLOSED as of 0.6.34.** An unenforced
+component does not silently skip — it **raises**, naming the component and the
+mode that does evaluate it **[measured]**:
+
+> `ERROR: validate: unenforced constraint component in shapes graph under mode
+> "native": sh:sparql (SHACL-SPARQL constraint component — use mode 'pgrdf',
+> which evaluates it). This engine does not evaluate it, so a verdict would be
+> meaningless.`
+
+The mechanism is `unenforced_components()` in `src/validation/shacl.rs`: a
+static predicate table checked against the shapes graph, under a
+`strict => true` default, raising per pgRDF#103. **So this document's original
+claim — that the OGC corpus would report `conforms: true` vacuously — is
+wrong for 0.6.34.** It would raise instead. The hazard the corpus was going to
+expose has already been closed for components.
+
+**The exposure that remains is property paths, and it fails OPEN.**
+`sh:oneOrMorePath` and `sh:zeroOrMorePath` match nothing, report zero
+violations, and raise nothing **[measured]** — a shape using either is
+silently unvalidated. The fail-closed table covers constraint components only;
+it does not extend to path types. `sh:zeroOrOnePath` is enforced, so this is
+specific to the two unbounded recursive paths.
+
+**Why this does not block T1.** None of the 24 GeoSPARQL rules uses either
+path type (`RULES.md`): the shapes graph uses `sh:path` with predicate paths,
+one `sh:alternativePath`, and `sh:inversePath` — all enforced. The exposure is
+real for pgRDF generally and irrelevant to this corpus specifically. **T1's
+gating condition is therefore satisfied**, and the remaining precondition is
+the stale instrument below, now also resolved.
 
 #### The instrument itself is stale
 
-`CAPABILITY.json` records `pgrdf_version: "0.6.22"` **[read]**; the working
-copy is at `0.6.34` **[read]**. **Twelve versions of drift.** By the same
-argument the harness makes about unenforced components, a capability document
-generated twelve versions ago describes an engine that may no longer exist.
-Regenerating it is a precondition for trusting any number in this section.
+`CAPABILITY.json` recorded `pgrdf_version: "0.6.22"` against a `0.6.34` tree —
+**twelve versions of drift**, and the drift was material: the document's
+central caveat had been falsified by the engine two waves earlier and nobody
+had re-measured.
 
-**Consequence — and this replaces the draft's "sharpest finding":** the OGC
-corpus is **not** an audit exposing a weak SHACL engine. pgRDF's SHACL engine
-is strong, and there is a credible chance it passes most of the corpus today.
-The work in T1 is therefore **measurement, not implementation**: regenerate
-the capability document at the current version, add four probes, run the
-corpus in mode `'pgrdf'`, publish per-shape results. That is a much cheaper
-tier than the draft assumed — and its value is a defensible published result
-rather than a repaired defect.
+**RESOLVED 2026-09-16.** Regenerated on 0.6.34 / PG 18.4 with 46 probes:
+**43 enforced**, `sh:sparql` enforced in mode `'pgrdf'` only, and
+`sh:oneOrMorePath` / `sh:zeroOrMorePath` not enforced. The lesson stands as
+the rule §2 already states — prefer the instrument to the source — with the
+corollary that **an instrument carries an expiry**, and a capability document
+generated twelve versions before the engine it describes is not evidence.
+
+**Consequence:** the OGC corpus is **not** an audit exposing a weak SHACL
+engine. pgRDF's SHACL engine is strong — 43 of 46 SHACL Core features
+enforced, and fail-closed about the rest at component level. T1 is
+**measurement, not implementation**, and its three original preconditions are
+now two, both discharged: the capability document is regenerated at 0.6.34 and
+the four unknown surfaces are measured. What remains for T1 is to author the
+shapes, run the corpus in mode `'pgrdf'`, and publish per-rule results.
 
 #### One entailment caveat that will bite
 
@@ -740,21 +770,24 @@ mechanism it needs, so the work is transcription against a known target rather
 than design — and the fixtures are a ready oracle for whether each shape
 behaves.
 
-**First, fix the instrument (§7.3):**
+**The instrument is fixed (§7.3, done 2026-09-16):**
 
-1. Regenerate `tests/shacl-capability/CAPABILITY.json` at the current version
-   — it is pinned at `0.6.22` against a `0.6.34` tree.
-2. Add four probes: `targetObjectsOf`, `alternativePath`, `deactivated`,
-   `pattern`-with-`flags`.
-3. Only then run the corpus, and only in mode `'pgrdf'`.
+1. ~~Regenerate `CAPABILITY.json`~~ — **done**, at 0.6.34 / PG 18.4.
+2. ~~Add four probes~~ — **done**, and the harness went from 17 probes to 46,
+   covering all of SHACL Core. All four are **enforced**.
+3. Run the corpus in mode `'pgrdf'` — still required. `'native'` refuses on
+   `sh:sparql` rather than skipping it, so a default-mode run now fails loudly
+   instead of quietly, but the right mode is still `'pgrdf'`.
 
 - Delivers a **real GeoSPARQL-facing capability with zero geometry code**.
 - Anything the four probes find missing is a **general** SHACL improvement,
   not a GeoSPARQL one (see open question 3).
-- **Risk: low.** **Cost: small** — likely measurement plus at most one or two
-  components, where the draft assumed three.
-- **[judgement]** Still the highest value-per-risk in the series, and cheaper
-  than first believed. Do this alongside T0.
+- **Risk: low**, and lower than drafted: the measurement is done and found no
+  gap that affects this corpus.
+- **Cost: small** — authoring 22 shapes and a bash runner. No SHACL engine work
+  is required for GeoSPARQL.
+- **[judgement]** Still the highest value-per-risk in the series. Do this
+  alongside T0.
 
 ### T2 — DE-9IM core and the three relation families
 
@@ -829,9 +862,10 @@ be checked.
 | R5 | **Upstream `master` is active**; `geosparql-next` may diverge from 1.1. | Pin to `f90fff13…`. Treat `geosparql-next` as a different standard. |
 | R6 | **S05–S08 have no fixtures** (§5.3) — coverage gap inherited from upstream. | Record as a known gap. Do not silently renumber. |
 | R7 | **`sh:pattern` semantics** — SHACL specifies XPath regex; pgRDF translates to POSIX, and `sh:flags` (4 uses) is unprobed. | Probe during T1. May need the same care `translate_regex` already takes. |
-| R8 | **`sh:targetObjectsOf` is unprobed and carries 10 uses** (§7.3). If unsupported, ten shapes target nothing and pass vacuously. | Highest-priority T1 probe. Until measured, **no T1 result is publishable**. |
-| R9 | **Default `'native'` mode silently skips `sh:sparql`** (§7.3). A corpus run in the default mode drops 4 constraints with no error. | Runner passes `'pgrdf'` explicitly and records the mode in every result. |
-| R10 | **`CAPABILITY.json` is 12 versions stale** (`0.6.22` vs `0.6.34`). | Regenerate before any T1 number is quoted. Treat as the instrument's own expiry. |
+| ~~R8~~ | ~~`sh:targetObjectsOf` unprobed~~ | **CLOSED 2026-09-16** — measured **enforced**, along with `alternativePath`, `deactivated` and `pattern`+`flags`. |
+| ~~R9~~ | ~~Default `'native'` silently skips `sh:sparql`~~ | **CLOSED** — 0.6.34 is fail-closed and **raises** instead of skipping (§7.3). Still run `'pgrdf'`, but a wrong-mode run can no longer pass quietly. |
+| ~~R10~~ | ~~`CAPABILITY.json` 12 versions stale~~ | **CLOSED** — regenerated at 0.6.34, 46 probes. |
+| **R12** | **`sh:oneOrMorePath` / `sh:zeroOrMorePath` fail OPEN** (§7.3) — match nothing, no violation, no error. The fail-closed table covers constraint components, not path types. | **Does not affect this corpus** — no GeoSPARQL rule uses either (`RULES.md`). Tracked as a general pgRDF defect, not a GeoSPARQL blocker. Any pgRDF-authored shape must avoid both until closed. |
 | R11 | **`sh:targetClass` matches asserted `rdf:type` only** (§7.3), and GeoSPARQL's classes are a subclass hierarchy. | Runner declares whether it calls `pgrdf.materialize` first, and records it beside every result. |
 
 **Open questions for document 2:**

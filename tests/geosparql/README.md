@@ -67,30 +67,28 @@ it. That is T1 work; the shapes do not exist yet.
 
 ## Before any result from this corpus is published
 
-Three measurements first, in order. Each can silently invalidate every number
-the corpus produces.
+**Two of the three original preconditions are discharged (2026-09-16).**
+`tests/shacl-capability` was extended from 17 probes to 46 — all of SHACL
+Core — and `CAPABILITY.json` regenerated on 0.6.34 / PG 18.4.
 
-1. **Regenerate `tests/shacl-capability/CAPABILITY.json`.** It is pinned at
-   pgRDF `0.6.22` against a `0.6.34` tree. A capability document generated
-   twelve versions before the engine it describes is not an instrument.
+| Was | Now |
+|---|---|
+| Regenerate `CAPABILITY.json` (pinned at 0.6.22) | **Done** — 0.6.34, 46 probes, 43 enforced |
+| Probe `targetObjectsOf`, `flags`, `alternativePath`, `deactivated` | **Done — all four enforced** |
+| Run in mode `'pgrdf'` | **Still required** |
 
-2. **Probe four unmeasured SHACL surfaces.** The rules use them; the
-   capability harness has never tested them:
+**Still required: run in mode `'pgrdf'`.** `pgrdf.validate(data, shapes, mode)`
+defaults to `'native'`, which does not evaluate `sh:sparql` — needed by S21.
+As of 0.6.34 a wrong-mode run **raises** rather than passing quietly, so this
+is no longer a silent hazard, but the right mode is still `'pgrdf'`. Record
+the mode in every result.
 
-   | Term | Rules affected | Why it matters |
-   |---|---|---|
-   | `sh:targetObjectsOf` | S01, S02 | `targetSubjectsOf` is enforced; that says nothing about its converse. If unsupported, those rules select no focus nodes and pass **vacuously**. |
-   | `sh:flags` | S16–S19 | `sh:pattern` is enforced, but flag handling is separate — and SHACL specifies XPath regex where pgRDF translates to POSIX. |
-   | `sh:alternativePath` | S01 family | `inversePath` is probed; this is not. |
-   | `sh:deactivated` | any | If ignored, a deliberately-disabled shape fires — a false *failure*. |
-
-3. **Run in mode `'pgrdf'`, explicitly.** `pgrdf.validate(data, shapes, mode)`
-   defaults to `'native'`, and `'native'` **silently skips `sh:sparql`** —
-   which S21 needs. A default-mode run drops that rule with no error and no
-   log line. Record the mode in every result.
-
-Until 1–3 are done, a green run means "nothing objected", not "the data was
-judged". That distinction is why `tests/shacl-capability` exists.
+**One general pgRDF defect to avoid, not inherited here.**
+`sh:oneOrMorePath` and `sh:zeroOrMorePath` fail **open** — they match nothing,
+report zero violations and raise nothing, so a shape using either is silently
+unvalidated. No GeoSPARQL rule uses either (`RULES.md`), so this corpus is
+unaffected — but **pgRDF-authored shapes must avoid both path types** until it
+is closed.
 
 ## One entailment caveat
 
