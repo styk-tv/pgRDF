@@ -83,11 +83,11 @@
       "verdict": "ok"
     },
     {
-      "checked": "NO",
+      "checked": "yes",
       "path": "zeroOrMore",
-      "seen": "NO",
+      "seen": "yes",
       "term": "literal",
-      "verdict": "value-invisible"
+      "verdict": "ok"
     },
     {
       "checked": "yes",
@@ -97,41 +97,35 @@
       "verdict": "ok"
     },
     {
-      "checked": "NO",
+      "checked": "yes",
       "path": "oneOrMore",
-      "seen": "NO",
+      "seen": "yes",
       "term": "literal",
-      "verdict": "value-invisible"
+      "verdict": "ok"
     },
     {
-      "checked": "NO",
+      "checked": "yes",
       "path": "sequence",
-      "seen": "NO",
+      "seen": "yes",
       "term": "literal-intermediate",
-      "verdict": "branch-lost"
+      "verdict": "ok"
     },
     {
-      "checked": "NO",
+      "checked": "yes",
       "path": "zeroOrMore",
-      "seen": "NO",
+      "seen": "yes",
       "term": "literal-intermediate",
-      "verdict": "branch-lost"
+      "verdict": "ok"
     },
     {
-      "checked": "NO",
+      "checked": "yes",
       "path": "oneOrMore",
-      "seen": "NO",
+      "seen": "yes",
       "term": "literal-intermediate",
-      "verdict": "branch-lost"
+      "verdict": "ok"
     }
   ],
-  "defective_cells": [
-    "zeroOrMore/literal",
-    "oneOrMore/literal",
-    "sequence/literal-intermediate",
-    "zeroOrMore/literal-intermediate",
-    "oneOrMore/literal-intermediate"
-  ],
+  "defective_cells": [],
   "generated_by": "tests/shacl-capability/path-matrix.sh",
   "hand_edited": false,
   "method": {

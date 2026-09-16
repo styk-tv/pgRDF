@@ -165,18 +165,18 @@ doc = {
     "returning a verdict. Verdict `refused-fail-closed` records that. The older "
     "warning that conforms:true could not distinguish 'validated clean' from "
     "'never evaluated' (pgRDF#80) NO LONGER HOLDS FOR COMPONENTS.",
-    "IT STILL HOLDS FOR PROPERTY PATHS. The fail-closed check covers constraint "
-    "components only, not path types, so a path defect produces no violation and "
-    "no error.",
-    "PATH VERDICTS IN THIS FILE ARE COARSE AND WRONG IN BOTH DIRECTIONS. Read "
-    "PATH-MATRIX.json for path behaviour. A per-feature verdict cannot express a "
-    "fault that lives in the interaction between a path type and the term type of "
-    "the value it reaches. `SILENTLY-SKIPPED` on oneOrMorePath/zeroOrMorePath "
-    "OVERSTATES the defect: both are evaluated, and only literal values reached "
-    "through them are lost. `enforced` on sequencePath UNDERSTATES it: a literal "
-    "partway along `sh:path ( ex:p ex:q )` discards the whole value set, including "
-    "a sibling IRI value that is still reachable. Root cause is upstream, "
-    "rudof-project/rudof#818.",
+    "THE FAIL-CLOSED CHECK COVERS CONSTRAINT COMPONENTS ONLY, NOT PATH TYPES. A "
+    "path defect would produce no violation and no error, so a per-feature verdict "
+    "here cannot be trusted for paths on its own.",
+    "READ PATH-MATRIX.json FOR PATH BEHAVIOUR. A per-feature verdict cannot "
+    "express a fault living in the interaction between a path type and the term "
+    "type of the value it reaches, and this file reported such a fault wrongly in "
+    "BOTH directions before the matrix existed: `SILENTLY-SKIPPED` overstated it "
+    "on oneOrMorePath/zeroOrMorePath, and `enforced` understated it on "
+    "sequencePath. The underlying defect (literal values lost on recursive and "
+    "sequence paths, rudof-project/rudof#818) is FIXED in the pinned build; the "
+    "matrix measures 17/17 cells clean. The matrix, not this file, is what says "
+    "so.",
     "`enforced_only_in_mode` names components no default-mode probe catches but "
     "another mode evaluates correctly. sh:sparql is the case: silently skipped by "
     "'native' and 'sparql', evaluated by 'pgrdf'. Reading the native verdict alone "

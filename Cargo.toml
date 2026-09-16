@@ -83,20 +83,29 @@ sha2       = "0.11"
 # roaring / rio_api. 0.4.1 (2026-05-10) supersedes the v0.2-LLD
 # reference to 0.2; see specs/ERRATA.v0.2.md for the rationale.
 #
-# The `features = ["rdf-12"]` opts into the passthrough feature on
-# the styk-tv/reasonable fork (branch `rdf12-passthrough`, redirected
-# via `[patch.crates-io]` at the end of this file). The passthrough
-# feature forwards to `oxrdf/rdf-12`, which then unifies workspace-wide
-# with the `rdf-12` enablement that `shacl 0.3.x` (via `rudof_rdf`)
-# pulls in non-optionally. Drop the feature + the patch once
-# gtfierro/reasonable merges the upstream PR; see ERRATA.v0.4 E-011.
-reasonable = { version = "0.4", features = ["rdf-12"] }
+# `features = ["rdf-12"]` forwards to `oxrdf/rdf-12`, which unifies
+# workspace-wide with the `rdf-12` enablement `shacl 0.3.x` (via
+# `rudof_rdf`) pulls in non-optionally.
+#
+# ERRATA.v0.4 E-011 CLOSED: the passthrough feature we carried on the
+# styk-tv/reasonable fork was merged upstream and ships on crates.io
+# from 0.4.3 (2026-05-27). The `[patch.crates-io]` redirect is gone and
+# the pin moved to 0.4.4 — the feature itself stays, since it is opt-in
+# upstream too.
+reasonable = { version = "0.4.4", features = ["rdf-12"] }
 # Phase 5: W3C-conformant SHACL Core validator from the rudof project.
 # `shacl 0.3.1` (2026-05-12) consolidated the previous `shacl_ast` +
 # `shacl_validation` 0.2.x pair into a single crate, resolving the
 # `iri_s` → `rudof_iri` migration half of ERRATA.v0.2 E-009. The
-# remaining `rdf-12` half is resolved by the fork patch on `reasonable`
-# above; see ERRATA.v0.4 E-011.
+# remaining `rdf-12` half needs `reasonable`'s own `rdf-12` feature,
+# because `rudof_rdf` hard-enables `oxrdf/rdf-12` workspace-wide and
+# `reasonable`'s match would otherwise be non-exhaustive (verified: the
+# build fails with E0004 without it). ERRATA.v0.4 E-011 is CLOSED — the
+# passthrough merged upstream (gtfierro/reasonable#50) and ships from
+# 0.4.3, so there is no longer a fork patch on `reasonable`.
+#
+# The rudof crates are themselves redirected to a fork by the
+# `[patch.crates-io]` block at the end of this file.
 #
 # `0.3.2` (2026-05-26) — adds the SHACL-SPARQL constraint component
 # (`IRComponent::Sparql` + `sh:sparql`/`sh:select` parsing) and the
@@ -139,16 +148,36 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 
-# Temporary: patches `reasonable` to handle `TermRef::Triple(_)` under
-# oxrdf's `rdf-12` feature. Required because `shacl 0.3.x` via
-# `rudof_rdf` hard-enables that feature workspace-wide, which surfaces
-# the otherwise non-exhaustive match in `reasonable`'s
-# `lib/src/common.rs:140`. The fork adds a `panic!(...)` arm gated
-# behind a new passthrough feature `rdf-12 = ["oxrdf/rdf-12"]` —
-# strictly additive when off, panics with a clear message when on.
+# Temporary: the rudof crates are taken from styk-tv/rudof rather than
+# crates.io, pinned by commit, to carry a SHACL property-path fix ahead
+# of its upstream release.
 #
-# Tracked as ERRATA.v0.4 E-011. Drop this block + pin `reasonable =
-# "0.4.2"` (or whatever ships) once gtfierro/reasonable merges the
-# upstream PR (currently held on the fork as PR-DRAFT.md).
+# The defect: a literal reached through `sh:oneOrMorePath`,
+# `sh:zeroOrMorePath`, or a `sh:path ( … )` sequence is absent from the
+# value set, and a literal partway along discards the whole set —
+# including sibling values still reachable. `objects_for` begins with
+# `term_as_subject(..)?`, which fails on a literal, and the recursing
+# branches traversed from every object without guarding that. Measured
+# per cell in `tests/shacl-capability/PATH-MATRIX.json`.
+#
+# Reported upstream as rudof-project/rudof#818 and fixed by
+# rudof-project/rudof#819, opened from this branch. All four crates are
+# patched together so their type identity unifies: `shacl` exposes its
+# API in terms of `rudof_rdf` / `rudof_iri` / `prefixmap`, and mixing a
+# crates.io `shacl` with a patched `rudof_rdf` would split it.
+#
+# Pinned by `rev`, never by branch: a branch moves, and an attested
+# build must name the exact bytes it was produced from.
+#
+# DROP THIS BLOCK once #819 merges and a `shacl` release carries the
+# fix — restore the plain crates.io versions, regenerate
+# `CAPABILITY.json` and `PATH-MATRIX.json`, and delete
+# `UNENFORCED_PATH_TYPES` from `src/validation/shacl.rs`.
 [patch.crates-io]
-reasonable = { git = "https://github.com/styk-tv/reasonable", branch = "rdf12-passthrough" }
+shacl          = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
+rudof_rdf      = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
+rudof_iri      = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
+prefixmap      = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
+sparql_service = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
+mie            = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
+rudof_config   = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }

@@ -103,9 +103,13 @@ use rudof_rdf::rdf_core::RDFFormat;
 use rudof_rdf::rdf_core::SHACLPath;
 use rudof_rdf::rdf_core::term::Object;
 use rudof_rdf::rdf_core::term::literal::ConcreteLiteral;
-use rudof_rdf::rdf_impl::{InMemoryGraph, ReaderMode};
+// `InMemoryGraph` was renamed `OxigraphInMemory` in rudof 0.3.x after our
+// 0.3.2 pin; aliased so the surrounding code and its comments still read in
+// the vocabulary this module documents.
+use rudof_rdf::rdf_impl::{OxigraphInMemory as InMemoryGraph, ReaderMode};
 use serde_json::{Value, json};
 use shacl::types::Severity;
+use shacl::validator::ShaclConfig;
 use shacl::validator::ShaclValidationMode;
 use shacl::validator::processor::{GraphValidation, ShaclProcessor};
 use shacl::validator::report::ValidationResult;
@@ -200,38 +204,6 @@ const UNENFORCED_SPARQL_MODE: &[(&str, &str)] = &[
     ("http://www.w3.org/ns/shacl#maxCount", "sh:maxCount"),
 ];
 
-/// Property path types whose *values* this engine does not fully evaluate.
-///
-/// Distinct from a constraint component: the path is traversed and IRI values
-/// validate normally, but a **literal** reached through one of these is absent
-/// from the value set, so no constraint fires on it. A literal partway along
-/// discards the whole value set, including sibling values still reachable.
-/// Measured 0.6.34 — see `tests/shacl-capability/PATH-MATRIX.json`.
-///
-/// Root cause is upstream in the `shacl` crate (rudof-project/rudof#818, fixed
-/// by #819); this table is the interim posture, removed once a release carries
-/// the fix and `PATH-MATRIX.json` shows the cells clean.
-///
-/// **Refusal is deliberately broader than the defect.** Whether a given shape
-/// trips it depends on the *data*, which is unknown when the shapes graph is
-/// read, so a shape that would be fine over IRI-only data is refused too.
-/// That is the fail-closed direction: a visible refusal beats a silent wrong
-/// verdict, and `strict => false` remains the opt-out for anyone who wants the
-/// current behaviour knowingly.
-///
-/// `sh:zeroOrOnePath` is NOT listed — it does not recurse from its objects and
-/// measures clean on every cell.
-const UNENFORCED_PATH_TYPES: &[(&str, &str)] = &[
-    (
-        "http://www.w3.org/ns/shacl#oneOrMorePath",
-        "sh:oneOrMorePath (literal values reached through it are not validated)",
-    ),
-    (
-        "http://www.w3.org/ns/shacl#zeroOrMorePath",
-        "sh:zeroOrMorePath (literal values reached through it are not validated)",
-    ),
-];
-
 /// SHACL target declarations. A shapes graph carrying none of these
 /// targets nothing, so validation is vacuous: every data graph
 /// "conforms" because nothing was ever selected to check.
@@ -296,9 +268,6 @@ fn unenforced_components(
     if mode == "sparql" {
         check(UNENFORCED_SPARQL_MODE);
     }
-    // Path types are unevaluated in EVERY mode, 'pgrdf' included: the fault is
-    // in path traversal, below the constraint dispatch that mode selects.
-    check(UNENFORCED_PATH_TYPES);
     found
 }
 
@@ -542,7 +511,12 @@ fn validate(
     //    `'sparql'` routes through `shacl 0.3.x`'s SPARQL engine so
     //    `sh:select` SPARQL-based constraints are evaluated (§5.2).
     let mut validator = GraphValidation::new(data_graph);
-    let report = match validator.validate(&schema, &validation_mode) {
+    // `validate` gained a third parameter after our 0.3.2 pin: a `ShaclConfig`
+    // controlling whether the returned report retains violations and evidence.
+    // Both are computed internally regardless, so the default keeps the prior
+    // behaviour and the report shape callers already rely on.
+    let shacl_config = ShaclConfig::default();
+    let report = match validator.validate(&schema, &validation_mode, &shacl_config) {
         Ok(r) => r,
         Err(e) => {
             let msg = format!("validation failed: {e}");
@@ -1941,7 +1915,7 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
     /// is a feature it fails OPEN on.
     #[test]
     fn declared_tables_match_the_measured_capability() {
-        use super::{UNENFORCED_ALL_MODES, UNENFORCED_PATH_TYPES, UNENFORCED_SPARQL_MODE};
+        use super::{UNENFORCED_ALL_MODES, UNENFORCED_SPARQL_MODE};
         use std::collections::HashSet;
 
         // Compile-time include: the test binary carries the document, so this
@@ -1979,7 +1953,6 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         let declared: HashSet<String> = UNENFORCED_ALL_MODES
             .iter()
             .chain(UNENFORCED_SPARQL_MODE)
-            .chain(UNENFORCED_PATH_TYPES)
             .map(|(iri, _)| {
                 let local = iri.rsplit('#').next().unwrap_or(iri);
                 if local == "sparql" {
