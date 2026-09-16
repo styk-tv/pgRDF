@@ -6,6 +6,76 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.35] — 2026-09-16
+
+SPEC.pgRDF.v0.6.35 — "capability custody." pgRDF could not state, provably and
+discoverably, which SHACL features it enforces. The harness measured 17 of 46
+SHACL Core features and reported nothing unenforced — true of the seventeen,
+and read by everything downstream as a clean bill of health for the surface.
+A green suite is not coverage; coverage is a fraction, and the denominator
+must not be computable from the numerator.
+
+### Added
+
+- `pgrdf.shacl_capability()` — which SHACL features `pgrdf.validate` enforces,
+  answerable as a query instead of by reading a test artefact that does not
+  ship. One row per feature of SHACL Core as the W3C Recommendation enumerates
+  it: `feature`, `kind`, `spec_section`, `verdict`, `mode`, `measured_on`.
+  The rows are the **denominator**, not the measured subset — anything
+  unprobed says `unprobed` rather than being absent, so a consumer counting
+  rows counts the surface and cannot mistake a partial measurement for a
+  complete one. `measured_on` is carried per row rather than assumed current.
+- `tests/shacl-capability/completeness.sh` — fails when a SHACL Core feature
+  listed in `SHACL-CORE-SURFACE.tsv` has no probe, and when a probe has no
+  listed feature. The denominator is enumerated from the W3C Recommendation,
+  deliberately not from the fixture directory: were it derived from the
+  probes, every new probe would extend the target it is measured against and
+  the fraction would always read 100%.
+- `tests/shacl-capability/path-matrix.sh` — path type × value term type, two
+  questions per cell (is the value in the value set; does a value-level
+  constraint fire on it). A per-feature verdict cannot express a fault living
+  in that interaction, and `CAPABILITY.json` was wrong about paths in both
+  directions before this existed.
+- The capability document now records its own denominator
+  (`surface_features_known` / `surface_features_probed` / `surface_complete`),
+  and a build-gating test binds it to the engine's refusal tables and to the
+  crate version — drift in either direction fails `cargo test`.
+
+### Fixed
+
+- SHACL property paths now validate **literal** values reached through
+  `sh:oneOrMorePath`, `sh:zeroOrMorePath`, and `sh:path ( … )` sequences.
+  Previously a literal endpoint was absent from the value set, so no
+  constraint fired on it, and a literal partway along a multi-hop path
+  discarded the whole value set — including sibling values still reachable,
+  which could drop a genuine violation. A shapes graph that previously
+  reported `conforms: true` over such data may now report violations: those
+  violations were always real and were not being reported. Root cause was
+  upstream (rudof-project/rudof#818, fixed by #819); pgRDF pins the fix by
+  commit until a `shacl` release carries it.
+- `mode => 'pgrdf'` no longer reports SHACL-SPARQL violations twice. That mode
+  runs both evaluators and unions their results; the union was safe while
+  rudof's native validator skipped `sh:sparql` outright, and became a
+  concatenation once upstream taught it to evaluate them. Deduplication is on
+  the whole result object, so results differing in any field remain distinct.
+
+### Changed
+
+- SHACL Core probe coverage went from 17 features to 47 — every constraint
+  component, all four target selectors, the implicit class target, every
+  property-path type, and the `sh:deactivated` / `sh:severity` shape features.
+  46 enforced; `sh:sparql` enforced in mode `'pgrdf'` only.
+- `compose/compose.yml` mounts the upgrade script as well as the install
+  script, so `ALTER EXTENSION pgrdf UPDATE` is exercisable on the bench.
+  Without it the bench could only do fresh installs and the path real
+  deployments take shipped untested.
+- `reasonable` pinned to 0.4.4 and its `[patch.crates-io]` fork redirect
+  removed — the `rdf-12` passthrough was merged upstream
+  (gtfierro/reasonable#50) and ships from 0.4.3. ERRATA.v0.4 E-011 closed.
+  The feature flag itself stays: `default = []` upstream, and dropping it
+  fails the build with E0004 non-exhaustive patterns.
+
+
 ### Documentation
 
 - README and `guide/` rewritten for new users: install routes (including a
