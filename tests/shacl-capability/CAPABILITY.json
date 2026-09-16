@@ -2,36 +2,79 @@
   "artifact": "pgrdf-shacl-capability",
   "caveats": [
     "validate does NOT entail: sh:targetClass matches ASSERTED rdf:type only. A node typed only by a subclass is not targeted by a shape on its parent unless pgrdf.materialize has run, or the parent type is stamped explicitly.",
-    "A constraint component absent from `enforced` contributes no violation and no error. conforms:true therefore does not distinguish 'validated clean' from 'never evaluated'. See pgRDF#80.",
+    "CONSTRAINT COMPONENTS ARE FAIL-CLOSED as of 0.6.34: an unenforced component raises, naming the component and the mode that does evaluate it, rather than returning a verdict. Verdict `refused-fail-closed` records that. The older warning that conforms:true could not distinguish 'validated clean' from 'never evaluated' (pgRDF#80) NO LONGER HOLDS FOR COMPONENTS.",
+    "IT STILL HOLDS FOR PROPERTY PATHS. The fail-closed check covers constraint components only, not path types: sh:oneOrMorePath and sh:zeroOrMorePath match nothing, report zero violations, and raise no error, so a shape using either is silently unvalidated. Verdict `SILENTLY-SKIPPED`. Do not use those two path types in a shape whose verdict matters.",
     "`enforced_only_in_mode` names components no default-mode probe catches but another mode evaluates correctly. sh:sparql is the case: silently skipped by 'native' and 'sparql', evaluated by 'pgrdf'. Reading the native verdict alone reports 'unsupported' about an engine that supports it."
   ],
   "enforced": [
+    "alternativePath",
+    "and",
     "class",
     "closed",
     "datatype",
+    "deactivated",
     "disjoint",
+    "equals",
     "hasValue",
+    "ignoredProperties",
+    "implicitClassTarget",
     "in",
     "inversePath",
+    "languageIn",
+    "lessThan",
+    "lessThanOrEquals",
     "maxCount",
+    "maxExclusive",
+    "maxInclusive",
+    "maxLength",
     "minCount",
+    "minExclusive",
+    "minInclusive",
     "minLength",
+    "node",
     "nodeKind",
+    "not",
+    "or",
     "pattern",
+    "patternFlags",
+    "propertyShape",
+    "qualifiedMaxCount",
     "qualifiedMinCount",
+    "qualifiedValueShapesDisjoint",
+    "sequencePath",
+    "severity",
     "targetClass",
     "targetNode",
-    "targetSubjectsOf"
+    "targetObjectsOf",
+    "targetSubjectsOf",
+    "uniqueLang",
+    "xone",
+    "zeroOrOnePath"
   ],
   "enforced_only_in_mode": {
     "sparqlConstraint": "pgrdf"
   },
   "generated_by": "tests/shacl-capability/run.sh",
   "hand_edited": false,
-  "not_enforced": [],
-  "pgrdf_version": "0.6.22",
+  "not_enforced": [
+    "oneOrMorePath",
+    "zeroOrMorePath"
+  ],
+  "pgrdf_version": "0.6.34",
   "postgres_major": 18,
   "probes": [
+    {
+      "component": "alternativePath",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "and",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
     {
       "component": "class",
       "control_conforms": true,
@@ -51,13 +94,37 @@
       "violating_conforms": false
     },
     {
+      "component": "deactivated",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "disjoint",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
     },
     {
+      "component": "equals",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "hasValue",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "ignoredProperties",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "implicitClassTarget",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
@@ -75,7 +142,43 @@
       "violating_conforms": false
     },
     {
+      "component": "languageIn",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "lessThan",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "lessThanOrEquals",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "maxCount",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "maxExclusive",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "maxInclusive",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "maxLength",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
@@ -87,7 +190,25 @@
       "violating_conforms": false
     },
     {
+      "component": "minExclusive",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "minInclusive",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "minLength",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "node",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
@@ -99,7 +220,43 @@
       "violating_conforms": false
     },
     {
+      "component": "not",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "oneOrMorePath",
+      "control_conforms": true,
+      "verdict": "SILENTLY-SKIPPED",
+      "violating_conforms": true
+    },
+    {
+      "component": "or",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "pattern",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "patternFlags",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "propertyShape",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "qualifiedMaxCount",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
@@ -111,10 +268,28 @@
       "violating_conforms": false
     },
     {
-      "component": "sparqlConstraint",
+      "component": "qualifiedValueShapesDisjoint",
       "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "sequencePath",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "severity",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "sparqlConstraint",
+      "control_conforms": "REFUSED",
       "verdict": "enforced-in-mode:pgrdf",
-      "violating_conforms": true
+      "violating_conforms": "REFUSED"
     },
     {
       "component": "targetClass",
@@ -129,7 +304,37 @@
       "violating_conforms": false
     },
     {
+      "component": "targetObjectsOf",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "targetSubjectsOf",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "uniqueLang",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "xone",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "zeroOrMorePath",
+      "control_conforms": true,
+      "verdict": "SILENTLY-SKIPPED",
+      "violating_conforms": true
+    },
+    {
+      "component": "zeroOrOnePath",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false

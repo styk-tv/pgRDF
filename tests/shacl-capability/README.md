@@ -8,12 +8,32 @@ on this build?**
 
 Consumers choose shapes against what the engine enforces, not against what
 the SHACL specification defines. Those two sets are not the same, and the
-difference is invisible: an unimplemented component contributes no violation
-**and no error**, so `conforms:true` does not distinguish *validated clean*
-from *never evaluated*.
+difference used to be invisible: an unimplemented component contributed no
+violation **and no error**, so `conforms:true` did not distinguish *validated
+clean* from *never evaluated*.
+
+**That changed for constraint components.** As of `0.6.34` the engine is
+fail-closed: an unenforced component **raises**, naming both the component and
+the mode that does evaluate it, instead of returning a verdict it cannot stand
+behind. The harness records that as `refused-fail-closed` — unsupported, but
+impossible to mistake for a clean pass.
+
+**It has not changed for property paths.** The fail-closed check covers
+constraint components only. `sh:oneOrMorePath` and `sh:zeroOrMorePath` match
+nothing, report zero violations and raise nothing, so a shape using either is
+silently unvalidated — measured 0.6.34, and the original hazard exactly. Do
+not use those two path types in a shape whose verdict matters.
 
 Before this harness the allowlist lived in prose. A shape chosen against
 prose is a shape chosen against a guess.
+
+**Coverage.** All of SHACL Core is probed — 46 probes spanning every
+constraint component, all four target selectors, the implicit class target,
+every property-path type, and the `sh:deactivated` / `sh:severity` shape
+features. 43 are enforced; `sh:sparql` is enforced in mode `'pgrdf'` only;
+`sh:oneOrMorePath` and `sh:zeroOrMorePath` are not enforced. A feature with no
+probe is a feature nobody has measured, so new SHACL surface gets a probe in
+the same commit.
 
 ## Method
 
