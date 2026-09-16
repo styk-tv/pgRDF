@@ -27,13 +27,38 @@ not use those two path types in a shape whose verdict matters.
 Before this harness the allowlist lived in prose. A shape chosen against
 prose is a shape chosen against a guess.
 
-**Coverage.** All of SHACL Core is probed — 46 probes spanning every
-constraint component, all four target selectors, the implicit class target,
-every property-path type, and the `sh:deactivated` / `sh:severity` shape
-features. 43 are enforced; `sh:sparql` is enforced in mode `'pgrdf'` only;
-`sh:oneOrMorePath` and `sh:zeroOrMorePath` are not enforced. A feature with no
-probe is a feature nobody has measured, so new SHACL surface gets a probe in
-the same commit.
+**Coverage, with its denominator.** 47 of 47 known SHACL Core features are
+probed. 44 are enforced; `sh:sparql` is enforced in mode `'pgrdf'` only;
+`sh:oneOrMorePath` and `sh:zeroOrMorePath` are not enforced.
+
+The denominator matters more than the count. This harness measured **17 of 46**
+features for a year and reported `not_enforced: []` — true of the seventeen,
+and read by everything downstream as a clean bill of health for the surface.
+
+> A green suite is not coverage. Coverage is a fraction, and the denominator
+> must not be computable from the numerator.
+
+`completeness.sh` enforces that. Its denominator is `SHACL-CORE-SURFACE.tsv`,
+enumerated from the W3C SHACL Recommendation with a spec section per row —
+**not** from this directory. Adding a probe cannot extend the target it is
+measured against; only a change to the specification, or a corrected reading
+of it, can, and that is a reviewable edit rather than a side effect of writing
+a test.
+
+```bash
+bash tests/shacl-capability/completeness.sh   # run in CI, and before any release
+```
+
+It fails in both directions: a listed feature with no probe (**UNMEASURED**),
+and a probe with no listed feature (**UNLISTED** — either the enumeration is
+incomplete or the probe is misnamed). Self-tested against both. It found
+`predicatePath` unmeasured on its first run — the basic path every other probe
+uses implicitly and nothing had ever measured on its own.
+
+**What it does not do:** it asserts a probe *exists* per feature, never that
+the probe is right. A wrong probe passes it — `oneOrMorePath` and
+`zeroOrMorePath` carried the verdict `SILENTLY-SKIPPED` from probes that
+existed and mischaracterised the defect.
 
 ## Method
 

@@ -130,9 +130,12 @@ done
 
 (( PRINT_ONLY )) && exit 0
 
-python3 - "$OUT" "$PGRDF_VER" "$PG_VER" "${rows%,}" <<'PY'
+SURFACE_TOTAL="$(grep -cvE '^#|^$' "${HERE}/SHACL-CORE-SURFACE.tsv" 2>/dev/null || echo 0)"
+
+python3 - "$OUT" "$PGRDF_VER" "$PG_VER" "${rows%,}" "$SURFACE_TOTAL" <<'PY'
 import json, sys
 out, pgrdf, pg, rows = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+surface_total = int(sys.argv[5])
 probes = json.loads("["+rows+"]")
 doc = {
   "artifact": "pgrdf-shacl-capability",
@@ -146,6 +149,13 @@ doc = {
   "not_enforced": sorted(p["component"] for p in probes
                          if not p["verdict"].startswith("enforced")),
   "probes": probes,
+  # Coverage carries its denominator on purpose. "43 enforced" is a claim;
+  # "43 enforced of 47 probed, 47 of 47 known" is a measurement. The harness
+  # reported the first form for a year while it was measuring 17 of 46.
+  "surface_source": "SHACL-CORE-SURFACE.tsv (W3C SHACL Recommendation)",
+  "surface_features_known": surface_total,
+  "surface_features_probed": len(probes),
+  "surface_complete": len(probes) == surface_total,
   "caveats": [
     "validate does NOT entail: sh:targetClass matches ASSERTED rdf:type only. "
     "A node typed only by a subclass is not targeted by a shape on its parent "
@@ -168,5 +178,6 @@ doc = {
 }
 with open(out, "w") as f:
     json.dump(doc, f, indent=2, sort_keys=True); f.write("\n")
-print(f"\nwrote {out}: {len(doc['enforced'])} enforced, {len(doc['not_enforced'])} not enforced")
+print(f"\nwrote {out}: {len(doc['enforced'])} enforced, {len(doc['not_enforced'])} not enforced, "
+      f"{len(probes)}/{surface_total} of the known surface probed")
 PY

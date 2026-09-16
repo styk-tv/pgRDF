@@ -37,6 +37,7 @@
     "or",
     "pattern",
     "patternFlags",
+    "predicatePath",
     "propertyShape",
     "qualifiedMaxCount",
     "qualifiedMinCount",
@@ -250,6 +251,12 @@
       "violating_conforms": false
     },
     {
+      "component": "predicatePath",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "propertyShape",
       "control_conforms": true,
       "verdict": "enforced",
@@ -339,5 +346,9 @@
       "verdict": "enforced",
       "violating_conforms": false
     }
-  ]
+  ],
+  "surface_complete": true,
+  "surface_features_known": 47,
+  "surface_features_probed": 47,
+  "surface_source": "SHACL-CORE-SURFACE.tsv (W3C SHACL Recommendation)"
 }
