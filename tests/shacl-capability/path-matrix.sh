@@ -90,7 +90,31 @@ SQL
 )")"
   grep -q 'unenforced constraint component' <<<"$out" && { echo REFUSED; return; }
   local v; v="$(sed -n 's/^NOTICE:  R=//p' <<<"$out" | head -1)"
-  echo "${v:-ERROR}"
+  # No verdict came back. Report a SENTINEL, never a cell value: an
+  # unreachable database would otherwise be indistinguishable from a real
+  # defect -- an instrument that reports findings when it cannot measure,
+  # which is the exact failure mode this harness exists to prevent.
+  #
+  # The sentinel is returned rather than exiting here because this function
+  # runs inside $( ), where `exit` would end only the subshell and the run
+  # would carry on reporting NO for every cell. Measured: it did.
+  if [ -z "$v" ]; then
+    printf 'NOCONN\t%s' "$(head -3 <<<"$out" | tr '\n' ' ')"
+    return
+  fi
+  echo "$v"
+}
+
+# Abort the whole run the first time a cell cannot be measured.
+die_if_unmeasurable() {
+  case "$1" in
+    NOCONN*)
+      printf '\033[31m%s\033[0m\n' "FATAL: pgrdf.validate did not answer -- nothing was measured." >&2
+      printf '\033[31m%s\033[0m\n' "  Set PGHOST/PGPORT/PGUSER/PGDATABASE/PGPASSWORD for the pgRDF bench." >&2
+      printf '\033[31m%s\033[0m\n' "  psql: ${1#NOCONN	}" >&2
+      exit 2
+      ;;
+  esac
 }
 
 rows=""; printf '%-12s %-8s %-10s %-10s %s\n' PATH TERM SEEN CHECKED NOTE
@@ -110,14 +134,14 @@ $(printf '%b' "${datatpl//VALUE/$val}")"
     # seen: cardinality bound exceeded only if the value is in the value set
     s_shapes="$PFX
 ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path $pathexpr ; sh:maxCount $bound ] ."
-    seen_raw="$(validate "$s_shapes" "$data")"
+    seen_raw="$(validate "$s_shapes" "$data")"; die_if_unmeasurable "$seen_raw"
     [[ "$seen_raw" == "false" ]] && seen=yes || seen=NO
 
     # checked: nodeKind must reject the opposite kind
     [[ "$term" == iri ]] && nk="sh:Literal" || nk="sh:IRI"
     c_shapes="$PFX
 ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path $pathexpr ; sh:nodeKind $nk ] ."
-    chk_raw="$(validate "$c_shapes" "$data")"
+    chk_raw="$(validate "$c_shapes" "$data")"; die_if_unmeasurable "$chk_raw"
     [[ "$chk_raw" == "false" ]] && checked=yes || checked=NO
 
     if [[ "$seen" == yes && "$checked" == yes ]]; then v=ok; note=""
@@ -137,11 +161,11 @@ for spec in "${intermediates[@]}"; do
 $(printf '%b' "$datatpl")"
   s_shapes="$PFX
 ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path $pathexpr ; sh:maxCount $bound ] ."
-  r="$(validate "$s_shapes" "$data")"
+  r="$(validate "$s_shapes" "$data")"; die_if_unmeasurable "$r"
   [[ "$r" == "false" ]] && seen=yes || seen=NO
   c_shapes="$PFX
 ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path $pathexpr ; sh:nodeKind sh:Literal ] ."
-  r2="$(validate "$c_shapes" "$data")"
+  r2="$(validate "$c_shapes" "$data")"; die_if_unmeasurable "$r2"
   [[ "$r2" == "false" ]] && checked=yes || checked=NO
   if [[ "$seen" == yes && "$checked" == yes ]]; then v=ok; note=""
   else v=branch-lost; note="a literal partway along discards the sibling IRI value"; fi

@@ -69,6 +69,15 @@ must not be computable from the numerator.
   script, so `ALTER EXTENSION pgrdf UPDATE` is exercisable on the bench.
   Without it the bench could only do fresh installs and the path real
   deployments take shipped untested.
+- **`pgrdf.validate` no longer refuses anything.** Both refusal tables are
+  empty as of this release, and that is a measurement. They held `sh:sparql`
+  (skipped by `'native'` and `'sparql'`) and `sh:minCount`/`sh:maxCount`
+  (skipped by `'sparql'`); both gaps were closed upstream and re-measured on
+  the bench, so all three modes now evaluate every SHACL Core component.
+  Keeping the entries would have refused shapes the engine can evaluate. The
+  mechanism stays for the next time a dependency drops a component — the
+  capability harness is what tells you an entry is needed, and a build-gating
+  test fails if the tables and the measurement disagree.
 - `reasonable` pinned to 0.4.4 and its `[patch.crates-io]` fork redirect
   removed — the `rdf-12` passthrough was merged upstream
   (gtfierro/reasonable#50) and ships from 0.4.3. ERRATA.v0.4 E-011 closed.

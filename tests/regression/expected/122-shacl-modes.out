@@ -1,9 +1,9 @@
-a_strict_guard_raises: OK
+false
 native
 native
 b_unknown_mode: OK
 false
-1
+2
 sparql
 f
 boolean

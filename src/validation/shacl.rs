@@ -190,19 +190,34 @@ use std::time::Instant;
 /// (`conforms:false`, 1 result) on a constraint the other two skip
 /// silently. Refusing it there would reject the one mode built to
 /// support it.
-const UNENFORCED_ALL_MODES: &[(&str, &str)] = &[(
-    "http://www.w3.org/ns/shacl#sparql",
-    "sh:sparql (SHACL-SPARQL constraint component — use mode 'pgrdf', which evaluates it)",
-)];
+const UNENFORCED_ALL_MODES: &[(&str, &str)] = &[];
 
-/// Additionally unevaluated under `'sparql'` mode: rudof ships no
-/// `SparqlValidator` impl for the cardinality constraints, so a shape
-/// relying on them reports `conforms:true` under `'sparql'` while the
-/// same shape reports `conforms:false` under `'native'`.
-const UNENFORCED_SPARQL_MODE: &[(&str, &str)] = &[
-    ("http://www.w3.org/ns/shacl#minCount", "sh:minCount"),
-    ("http://www.w3.org/ns/shacl#maxCount", "sh:maxCount"),
-];
+/// Constraint components this engine does not evaluate, by mode.
+///
+/// **Both tables are EMPTY as of 0.6.35, and that is a measurement, not an
+/// oversight.** They carried two entries against `shacl 0.3.2`:
+///
+/// * `sh:sparql` — skipped by `'native'` and `'sparql'`, which returned an
+///   empty outcome rather than a verdict.
+/// * `sh:minCount` / `sh:maxCount` under `'sparql'` — rudof shipped no
+///   `SparqlValidator` for the cardinality constraints, so the same shape
+///   reported `conforms:true` under `'sparql'` and `conforms:false` under
+///   `'native'`.
+///
+/// Both were closed upstream between 0.3.2 and 0.3.21 and re-measured on the
+/// bench: all three modes now evaluate `sh:sparql`, and `'sparql'` mode now
+/// evaluates the cardinality constraints. Keeping the entries would have made
+/// `validate` refuse shapes it can in fact evaluate — a false refusal, and a
+/// capability claim contradicted by the very harness that measures it
+/// (`tests/shacl-capability/CAPABILITY.json`, reconciled against these tables
+/// by `declared_tables_match_the_measured_capability`).
+///
+/// The MECHANISM stays. If a future dependency drops a component again, add
+/// its IRI here and `validate` refuses under the default `strict => true`
+/// rather than returning a verdict it cannot stand behind (pgRDF#103). The
+/// capability harness is what tells you an entry is needed, and the
+/// reconciliation test is what fails if this disagrees with it.
+const UNENFORCED_SPARQL_MODE: &[(&str, &str)] = &[];
 
 /// SHACL target declarations. A shapes graph carrying none of these
 /// targets nothing, so validation is vacuous: every data graph
@@ -285,6 +300,56 @@ fn declares_any_target(preds: &std::collections::HashSet<String>, shapes_nt: &st
     }
     shapes_nt.contains("<http://www.w3.org/ns/shacl#NodeShape>")
         && shapes_nt.contains("<http://www.w3.org/2000/01/rdf-schema#Class>")
+}
+
+/// The `sh:SPARQLConstraintComponent` IRI, as it appears in both halves of the
+/// `'pgrdf'`-mode report.
+const SH_SPARQL_CC: &str = "http://www.w3.org/ns/shacl#SPARQLConstraintComponent";
+
+/// True when `candidate` is the violation an existing result already reports.
+///
+/// `'pgrdf'` mode unions two evaluators. That union was disjoint by
+/// construction while rudof's native validator skipped `sh:sparql` outright;
+/// `shacl` gained native `sh:sparql` support (rudof a9a1a7bc) and both halves
+/// now report the same violations, so the merge has to recognise them.
+///
+/// Exact equality is not enough, and the reason is narrow: on a solution that
+/// binds no `?value`, the two halves disagree about the `value` field — one
+/// leaves it null, the other falls back to the focus node. Everything else
+/// matches. So a SPARQL-constraint result also counts as present when it
+/// agrees on focus node, path, source shape and component, and the two values
+/// are *compatible* — equal, or one of them null.
+///
+/// Deliberately narrow in three ways, because a wrong dedupe hides real
+/// violations:
+/// * only `sh:SPARQLConstraintComponent` results are compared this way; core
+///   constraint results must still match exactly.
+/// * two results with DIFFERENT non-null values are never merged, which is
+///   what keeps genuinely distinct violations on one focus node apart (the
+///   same professor colliding on two different courses, say).
+/// * the message and severity must match too.
+fn sparql_result_already_present(existing: &[Value], candidate: &Value) -> bool {
+    fn cc(v: &Value) -> Option<&str> {
+        v.get("sourceConstraintComponent").and_then(Value::as_str)
+    }
+    if cc(candidate) != Some(SH_SPARQL_CC) {
+        return existing.contains(candidate);
+    }
+    fn f(v: &Value, k: &str) -> Value {
+        v.get(k).cloned().unwrap_or(Value::Null)
+    }
+    existing.iter().any(|e| {
+        cc(e) == Some(SH_SPARQL_CC)
+            && f(e, "focusNode") == f(candidate, "focusNode")
+            && f(e, "resultPath") == f(candidate, "resultPath")
+            && f(e, "sourceShape") == f(candidate, "sourceShape")
+            && f(e, "resultMessage") == f(candidate, "resultMessage")
+            && f(e, "resultSeverity") == f(candidate, "resultSeverity")
+            && {
+                let (a, b) = (f(e, "value"), f(candidate, "value"));
+                a == b || a.is_null() || b.is_null()
+            }
+    })
 }
 
 #[search_path(pgrdf, pg_temp)]
@@ -565,7 +630,7 @@ fn validate(
             // distinct violations, so this can only ever collapse results the
             // two evaluators agree on exactly.
             for r in extra {
-                if !results_json.contains(r) {
+                if !sparql_result_already_present(&results_json, r) {
                     results_json.push(r.clone());
                 }
             }
@@ -1752,29 +1817,39 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         )
         .unwrap();
 
-        // Strict (the default): refused by RAISING (#103) — an in-band
-        // null was readable as a pass at the call site.
-        let err = strict_validate_err(&format!("{g_data}, {g_shapes}"));
-        assert!(
-            err.starts_with("validate: unenforced constraint component"),
-            "error must carry the documented prefix, got: {err}"
-        );
-        assert!(
-            err.contains("sh:sparql"),
-            "error must NAME the component, got: {err}"
-        );
-
-        // Explicit opt-out restores the old behaviour, and only then.
-        let loose = Spi::get_one::<pgrx::JsonB>(&format!(
-            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'native', false)"
-        ))
-        .unwrap()
-        .unwrap();
-        assert!(
-            loose.0["conforms"].is_boolean(),
-            "strict => false must still return a Boolean verdict: {}",
-            loose.0
-        );
+        // HISTORY: until 0.6.35 this refused under the default strict, because
+        // rudof's native validator returned an empty outcome for sh:sparql and
+        // a verdict would have been meaningless. `shacl` gained native
+        // sh:sparql support (rudof a9a1a7bc); measured on the bench, all three
+        // modes now evaluate it, so UNENFORCED_ALL_MODES is empty and there is
+        // nothing left to refuse. The test now asserts the capability rather
+        // than the refusal — the data violates the constraint (ex:p = 20 > 10)
+        // and every mode must say so.
+        for mode in ["native", "sparql", "pgrdf"] {
+            let rep = Spi::get_one::<pgrx::JsonB>(&format!(
+                "SELECT pgrdf.validate({g_data}, {g_shapes}, '{mode}')"
+            ))
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                rep.0["conforms"],
+                serde_json::json!(false),
+                "{mode}: sh:sparql constraint must be evaluated, not skipped: {}",
+                rep.0
+            );
+            let names_sparql = rep.0["results"].as_array().is_some_and(|a| {
+                a.iter().any(|r| {
+                    r["sourceConstraintComponent"]
+                        .as_str()
+                        .is_some_and(|c| c.ends_with("SPARQLConstraintComponent"))
+                })
+            });
+            assert!(
+                names_sparql,
+                "{mode}: the violation must be attributed to sh:sparql: {}",
+                rep.0
+            );
+        }
     }
 
     /// #80 — the unenforced set is MODE-DEPENDENT. rudof ships no
@@ -1822,19 +1897,34 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
             native.0
         );
 
-        // 'sparql' does NOT evaluate it, so strict mode refuses — by
-        // RAISING (#103).
+        // HISTORY: 'sparql' mode used to skip the cardinality constraints —
+        // rudof shipped no SparqlValidator for them, so the same shape
+        // reported conforms:true under 'sparql' and conforms:false under
+        // 'native', and strict mode refused the asymmetry rather than
+        // reporting the weaker verdict. Closed upstream between shacl 0.3.2
+        // and 0.3.21 and re-measured on the bench, so UNENFORCED_SPARQL_MODE
+        // is empty and the asymmetry is gone.
         //
-        // THREE args, deliberately: the point of this assertion is that
-        // `strict` DEFAULTS to true. A PASS-13 bulk edit appended
-        // `, false` here while adding the opt-out to the three
-        // pre-existing sparql tests, and this test then spent three CI
-        // rounds asserting that a guard fires while explicitly switching
-        // it off. Do not add a fourth argument to this call.
-        let err = strict_validate_err(&format!("{g_data}, {g_shapes}, 'sparql'"));
-        assert!(
-            err.contains("sh:minCount"),
-            "sparql mode cannot evaluate sh:minCount and must refuse naming it: {err}"
+        // THREE args, deliberately: `strict` must DEFAULT to true here. A
+        // PASS-13 bulk edit once appended `, false` while adding the opt-out
+        // to the neighbouring sparql tests, and this test then spent three CI
+        // rounds asserting a guard fires while explicitly switching it off.
+        // The assertion has changed but the trap has not — do not add a
+        // fourth argument to this call.
+        let sparql = Spi::get_one::<pgrx::JsonB>(&format!(
+            "SELECT pgrdf.validate({g_data}, {g_shapes}, 'sparql')"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            sparql.0["conforms"],
+            serde_json::json!(false),
+            "sparql mode must now evaluate sh:minCount, and agree with native: {}",
+            sparql.0
+        );
+        assert_eq!(
+            native.0["conforms"], sparql.0["conforms"],
+            "native and sparql must no longer disagree on a cardinality shape"
         );
     }
 
@@ -2014,9 +2104,16 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         );
     }
 
+    /// The refusal tables are empty as of 0.6.35, and the target logic is
+    /// unchanged. Both halves matter: an empty table must mean "nothing is
+    /// refused", and `declares_any_target` must still refuse a vacuous shapes
+    /// graph, which is a separate guard that did NOT go away.
     #[test]
     fn unenforced_and_target_logic_is_pure_and_correct() {
-        use super::{declares_any_target, unenforced_components};
+        use super::{
+            UNENFORCED_ALL_MODES, UNENFORCED_SPARQL_MODE, declares_any_target,
+            unenforced_components,
+        };
         use std::collections::HashSet;
         let set = |v: &[&str]| -> HashSet<String> { v.iter().map(|s| (*s).to_string()).collect() };
 
@@ -2024,29 +2121,26 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         const TC: &str = "http://www.w3.org/ns/shacl#targetClass";
         const SP: &str = "http://www.w3.org/ns/shacl#sparql";
 
-        // sh:minCount is unevaluated under 'sparql' and fine under 'native'.
-        assert_eq!(
-            unenforced_components(&set(&[MIN, TC]), "sparql"),
-            vec!["sh:minCount"]
-        );
-        assert!(unenforced_components(&set(&[MIN, TC]), "native").is_empty());
+        assert!(UNENFORCED_ALL_MODES.is_empty());
+        assert!(UNENFORCED_SPARQL_MODE.is_empty());
 
-        // sh:sparql is skipped by both rudof modes and evaluated by 'pgrdf'.
-        assert_eq!(unenforced_components(&set(&[SP]), "native").len(), 1);
-        assert_eq!(unenforced_components(&set(&[SP]), "sparql").len(), 1);
-        assert!(
-            unenforced_components(&set(&[SP]), "pgrdf").is_empty(),
-            "'pgrdf' evaluates sh:sparql — refusing it there rejects the only mode that supports it"
-        );
+        // Nothing is refused in any mode — measured, not assumed; see the
+        // note on the tables and CAPABILITY.json.
+        for mode in ["native", "sparql", "pgrdf"] {
+            assert!(
+                unenforced_components(&set(&[MIN, TC, SP]), mode).is_empty(),
+                "{mode} must refuse nothing while the tables are empty"
+            );
+        }
 
-        // Targeting: an explicit target predicate is enough.
+        // The vacuity guard is untouched: explicit targets count, the
+        // NodeShape+rdfs:Class co-occurrence counts, and neither present is a
+        // shapes graph that targets nothing.
         assert!(declares_any_target(&set(&[TC]), ""));
         assert!(!declares_any_target(&set(&[MIN]), ""));
-
-        // Implicit class targeting is detected from the serialisation.
         assert!(declares_any_target(
-            &set(&[]),
-            "_:b <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#NodeShape> .\n             _:b <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> ."
+            &set(&[MIN]),
+            "<http://www.w3.org/ns/shacl#NodeShape> <http://www.w3.org/2000/01/rdf-schema#Class>"
         ));
     }
 
@@ -2091,18 +2185,28 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         //   native, strict=false-> conforms false, Core only
         //   pgrdf,  strict      -> conforms false, Core AND sh:sparql
         //
-        // The first line is #80 and #86 interacting, and it is correct:
-        // this shapes graph carries sh:sparql, which 'native' does not
-        // evaluate, so 'native' refuses rather than returning a verdict
-        // over constraints it skipped. An earlier version of this test
-        // asserted native returns false here — written before that guard
-        // existed, by me, and it is exactly the premise-invalidation this
-        // suite keeps catching.
-        // #103: the strict refusal RAISES.
-        let n_err = strict_validate_err(&format!("{g}, {g}, 'native'"));
-        assert!(
-            n_err.contains("sh:sparql"),
-            "'native' cannot evaluate sh:sparql, so it must refuse this graph: {n_err}"
+        // That first line has now changed TWICE, which is worth recording.
+        // Originally this test asserted 'native' returns false. #80/#86 added
+        // the guard — 'native' could not evaluate sh:sparql, so it refused
+        // rather than returning a verdict over constraints it skipped — and
+        // the assertion became "it must refuse". `shacl` then gained native
+        // sh:sparql support (rudof a9a1a7bc); measured on the bench, 'native'
+        // evaluates it, the refusal tables are empty, and there is nothing to
+        // refuse. So the assertion returns to a verdict, for a different
+        // reason than the first time.
+        //
+        // Both flips came from the same place: an assumption about what the
+        // dependency does, encoded as a test, outliving the dependency. That
+        // is what the capability harness exists to measure instead.
+        let n_strict =
+            Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({g}, {g}, 'native')"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            n_strict.0["conforms"],
+            serde_json::json!(false),
+            "'native' under default strict must now return a verdict, not refuse: {}",
+            n_strict.0
         );
 
         let n = Spi::get_one::<pgrx::JsonB>(&format!(
@@ -2120,15 +2224,46 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
         assert_eq!(n.0["conforms"], serde_json::json!(false), "native: {}", n.0);
         assert_eq!(p.0["conforms"], serde_json::json!(false), "pgrdf: {}", p.0);
 
-        // The #86 invariant: 'pgrdf' evaluates everything 'native' does
-        // PLUS the SHACL-SPARQL constraints, so on a mixed shapes graph
-        // it must see strictly more.
+        // The #86 invariant was `p_count > n_count`: 'pgrdf' evaluated
+        // everything 'native' did PLUS the SHACL-SPARQL constraints, because
+        // rudof's native validator skipped `sh:sparql` outright. `shacl`
+        // gained native `sh:sparql` support (rudof a9a1a7bc) and closed that
+        // gap, so the two modes now agree on this shapes graph and STRICTLY
+        // MORE no longer holds. Weakened to `>=`, which is the invariant that
+        // survives: 'pgrdf' never sees less.
+        //
+        // Both modes must still enforce BOTH constraint kinds — that is what
+        // the test is really for, and it is asserted below on components
+        // rather than on a count, so this cannot pass vacuously if one kind
+        // stops being evaluated.
         assert!(
-            p_count > n_count,
-            "mode 'pgrdf' must report strictly more than 'native' on a mixed shapes graph \
+            p_count >= n_count,
+            "mode 'pgrdf' must not report fewer than 'native' \
              — native={n_count}, pgrdf={p_count}: {}",
             p.0
         );
+        for (label, rep) in [("native", &n.0), ("pgrdf", &p.0)] {
+            let comps: Vec<&str> = rep["results"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| r["sourceConstraintComponent"].as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert!(
+                comps
+                    .iter()
+                    .any(|c| c.ends_with("SPARQLConstraintComponent")),
+                "{label} must report the SHACL-SPARQL violation: {rep}"
+            );
+            assert!(
+                comps
+                    .iter()
+                    .any(|c| c.ends_with("MinCountConstraintComponent")),
+                "{label} must report the core violation: {rep}"
+            );
+        }
         assert_eq!(p.0["mode"], serde_json::json!("pgrdf"));
     }
 }

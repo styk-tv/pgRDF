@@ -46,6 +46,7 @@
     "qualifiedValueShapesDisjoint",
     "sequencePath",
     "severity",
+    "sparqlConstraint",
     "targetClass",
     "targetNode",
     "targetObjectsOf",
@@ -55,9 +56,7 @@
     "zeroOrMorePath",
     "zeroOrOnePath"
   ],
-  "enforced_only_in_mode": {
-    "sparqlConstraint": "pgrdf"
-  },
+  "enforced_only_in_mode": {},
   "generated_by": "tests/shacl-capability/run.sh",
   "hand_edited": false,
   "not_enforced": [],
@@ -294,9 +293,9 @@
     },
     {
       "component": "sparqlConstraint",
-      "control_conforms": null,
-      "verdict": "enforced-in-mode:pgrdf",
-      "violating_conforms": null
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
     },
     {
       "component": "targetClass",

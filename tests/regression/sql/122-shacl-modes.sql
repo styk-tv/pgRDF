@@ -92,15 +92,14 @@ BEGIN
 END $$;
 
 -- ─── A — mode field present; default-arg form ⇒ "native" ────────
--- #103 (0.6.26): graph 12202 deliberately carries sh:sparql, and a
--- STRICT 'native' call now RAISES on it instead of returning an
--- in-band conforms:null (which NOT(conforms)::bool read as a pass).
--- Pin the raise once, then do the mode-echo checks under
--- strict => false — the echo is what this section is about.
-SELECT _check_error(
-  'a_strict_guard_raises',
-  $q$ SELECT pgrdf.validate(12201, 12202) $q$,
-  'validate: unenforced constraint component');
+-- #103 (0.6.26): graph 12202 deliberately carries sh:sparql. A STRICT
+-- 'native' call used to RAISE on it, because the engine could not evaluate
+-- sh:sparql and an in-band conforms:null read as a pass at the call site.
+-- 0.6.35: the engine evaluates sh:sparql in every mode (measured; the refusal
+-- tables in src/validation/shacl.rs are empty), so there is nothing to refuse
+-- and the strict default returns a verdict. Assert the VERDICT, not a
+-- non-event — "no error raised" on its own would assert nothing at all.
+SELECT (pgrdf.validate(12201, 12202) ->> 'conforms') AS a_strict_returns_verdict;
 -- The 2-arg-equivalent (v0.4) form defaults mode => 'native'.
 SELECT (pgrdf.validate(12201, 12202, 'native', false) ->> 'mode') AS a_default_mode;
 -- Explicit 'native' echoes "native".
@@ -112,14 +111,14 @@ SELECT _check_error(
   $q$ SELECT pgrdf.validate(12201, 12202, 'endpoint') $q$,
   'validate: unknown mode');
 
--- ─── C — 'native' ignores the sh:sparql block, still flags Core ──
--- conforms = false (Alice lacks ex:age) and the violation focus
--- node is ex:alice. The sh:select block is a no-op (E-012 Gap 1):
--- it neither breaks the parse nor adds/removes a Core violation.
--- strict => false: graph 12202 deliberately carries sh:sparql ALONGSIDE a Core
--- constraint, and 'native' does not evaluate sh:sparql. The fail-closed guard
--- refuses that combination by design. This section compares MODE BEHAVIOUR on a
--- deliberately mixed shape, so it opts out; the guard has its own coverage.
+-- ─── C — 'native' evaluates the sh:sparql block AND flags Core ──
+-- conforms = false (Alice lacks ex:age) and the violation focus node is
+-- ex:alice.
+-- strict => false is retained so this section keeps comparing MODE BEHAVIOUR
+-- under identical conditions regardless of what the guard does. As of 0.6.35
+-- 'native' DOES evaluate sh:sparql, so Alice now carries two violations — the
+-- Core one (no ex:age) and the SHACL-SPARQL one — where she carried one while
+-- the sh:select block was a no-op (E-012 Gap 1).
 SELECT (pgrdf.validate(12201, 12202, 'native', false) ->> 'conforms') AS c_conforms;
 SELECT count(*)::int AS c_alice_violation
   FROM jsonb_array_elements(pgrdf.validate(12201, 12202, 'native', false) -> 'results') r
