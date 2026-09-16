@@ -1,0 +1,138 @@
+{
+  "artifact": "pgrdf-shacl-path-matrix",
+  "axes": {
+    "path": "SHACL 2.3.1 path types",
+    "term": "iri | literal (at the path endpoint) | literal-intermediate (partway along a multi-hop path, with a sibling IRI value that should survive)"
+  },
+  "cells": [
+    {
+      "checked": "yes",
+      "path": "predicate",
+      "seen": "yes",
+      "term": "iri",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "predicate",
+      "seen": "yes",
+      "term": "literal",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "sequence",
+      "seen": "yes",
+      "term": "iri",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "sequence",
+      "seen": "yes",
+      "term": "literal",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "alternative",
+      "seen": "yes",
+      "term": "iri",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "alternative",
+      "seen": "yes",
+      "term": "literal",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "inverse",
+      "seen": "yes",
+      "term": "iri",
+      "verdict": "ok"
+    },
+    {
+      "checked": null,
+      "path": "inverse",
+      "seen": null,
+      "term": "literal",
+      "verdict": "n/a-by-rdf"
+    },
+    {
+      "checked": "yes",
+      "path": "zeroOrOne",
+      "seen": "yes",
+      "term": "iri",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "zeroOrOne",
+      "seen": "yes",
+      "term": "literal",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "zeroOrMore",
+      "seen": "yes",
+      "term": "iri",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "zeroOrMore",
+      "seen": "yes",
+      "term": "literal",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "oneOrMore",
+      "seen": "yes",
+      "term": "iri",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "oneOrMore",
+      "seen": "yes",
+      "term": "literal",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "sequence",
+      "seen": "yes",
+      "term": "literal-intermediate",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "zeroOrMore",
+      "seen": "yes",
+      "term": "literal-intermediate",
+      "verdict": "ok"
+    },
+    {
+      "checked": "yes",
+      "path": "oneOrMore",
+      "seen": "yes",
+      "term": "literal-intermediate",
+      "verdict": "ok"
+    }
+  ],
+  "defective_cells": [],
+  "generated_by": "tests/shacl-capability/path-matrix.sh",
+  "hand_edited": false,
+  "method": {
+    "bound": "0, except zeroOrOne/zeroOrMore which include the focus node (zero-length path) and use 1",
+    "checked": "sh:nodeKind rejects the opposite kind => a value-level constraint fires on it",
+    "seen": "sh:maxCount bound exceeded => the value is in the value set"
+  },
+  "note": "A per-feature verdict cannot express this: the fault is in the interaction between a path type and the term type of the value it reaches. SILENTLY-SKIPPED in CAPABILITY.json overstates it -- these paths are evaluated, and literal values reached through them are not.",
+  "pgrdf_version": "0.6.35"
+}

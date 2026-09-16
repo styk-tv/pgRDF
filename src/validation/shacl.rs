@@ -103,9 +103,13 @@ use rudof_rdf::rdf_core::RDFFormat;
 use rudof_rdf::rdf_core::SHACLPath;
 use rudof_rdf::rdf_core::term::Object;
 use rudof_rdf::rdf_core::term::literal::ConcreteLiteral;
-use rudof_rdf::rdf_impl::{InMemoryGraph, ReaderMode};
+// `InMemoryGraph` was renamed `OxigraphInMemory` in rudof 0.3.x after our
+// 0.3.2 pin; aliased so the surrounding code and its comments still read in
+// the vocabulary this module documents.
+use rudof_rdf::rdf_impl::{OxigraphInMemory as InMemoryGraph, ReaderMode};
 use serde_json::{Value, json};
 use shacl::types::Severity;
+use shacl::validator::ShaclConfig;
 use shacl::validator::ShaclValidationMode;
 use shacl::validator::processor::{GraphValidation, ShaclProcessor};
 use shacl::validator::report::ValidationResult;
@@ -507,7 +511,12 @@ fn validate(
     //    `'sparql'` routes through `shacl 0.3.x`'s SPARQL engine so
     //    `sh:select` SPARQL-based constraints are evaluated (§5.2).
     let mut validator = GraphValidation::new(data_graph);
-    let report = match validator.validate(&schema, &validation_mode) {
+    // `validate` gained a third parameter after our 0.3.2 pin: a `ShaclConfig`
+    // controlling whether the returned report retains violations and evidence.
+    // Both are computed internally regardless, so the default keeps the prior
+    // behaviour and the report shape callers already rely on.
+    let shacl_config = ShaclConfig::default();
+    let report = match validator.validate(&schema, &validation_mode, &shacl_config) {
         Ok(r) => r,
         Err(e) => {
             let msg = format!("validation failed: {e}");
@@ -541,7 +550,25 @@ fn validate(
         let sparql_report =
             crate::validation::pgrdf_sparql::run_pgrdf_sparql(data_graph_id, shapes_graph_id);
         if let Some(extra) = sparql_report.get("results").and_then(|r| r.as_array()) {
-            results_json.extend(extra.iter().cloned());
+            // UNION, not concatenation. Both evaluators may now report the
+            // same violation: rudof's native validator used to skip sh:sparql
+            // outright (`validate_native` returned an empty outcome), so the
+            // two halves were disjoint by construction and a plain extend was
+            // safe. `shacl` gained sh:sparql support in the native validator
+            // (rudof a9a1a7bc), and from then on every SHACL-SPARQL violation
+            // was reported twice — once by each half — which doubled the count
+            // any consumer reads.
+            //
+            // Deduplicating on the whole result object is the conservative
+            // direction: two results that differ in ANY field (focus node,
+            // value, path, source shape, severity, message) are kept as
+            // distinct violations, so this can only ever collapse results the
+            // two evaluators agree on exactly.
+            for r in extra {
+                if !results_json.contains(r) {
+                    results_json.push(r.clone());
+                }
+            }
         }
         // A SPARQL-side error must not be swallowed into a clean pass.
         if let Some(err) = sparql_report.get("error") {
@@ -1892,6 +1919,101 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
     /// hand-built set answers in milliseconds whether the pure logic is
     /// the problem — and it is not, which is what localises the defect
     /// to the SPI read.
+    /// P2 — the capability pin. Binds this file's hand-written tables to the
+    /// measured `CAPABILITY.json`.
+    ///
+    /// The two are independent statements of one fact and had drifted: the
+    /// tables named a single unenforced feature while the harness measured
+    /// three, and nothing compared them. Nothing could — the only tests over
+    /// `unenforced_components` asserted it against the same tables that define
+    /// it, which is self-consistency, not verification.
+    ///
+    /// This test fails the build on disagreement in the direction that matters:
+    /// a feature the engine is measured NOT to enforce, and does not declare,
+    /// is a feature it fails OPEN on.
+    #[test]
+    fn declared_tables_match_the_measured_capability() {
+        use super::{UNENFORCED_ALL_MODES, UNENFORCED_SPARQL_MODE};
+        use std::collections::HashSet;
+
+        // Compile-time include: the test binary carries the document, so this
+        // cannot pass by reading a stale file from somewhere else on disk.
+        const CAP: &str = include_str!("../../tests/shacl-capability/CAPABILITY.json");
+        let doc: serde_json::Value = serde_json::from_str(CAP).expect("CAPABILITY.json parses");
+
+        // 1. Expiry. A capability document generated against a different build
+        //    describes an engine that may no longer exist — the 0.6.22-vs-0.6.34
+        //    drift was invisible precisely because nothing asserted freshness.
+        let measured_ver = doc["pgrdf_version"].as_str().expect("pgrdf_version");
+        assert_eq!(
+            measured_ver,
+            env!("CARGO_PKG_VERSION"),
+            "CAPABILITY.json was generated against pgrdf {measured_ver}, crate is {}. \
+             Regenerate it: tests/shacl-capability/run.sh",
+            env!("CARGO_PKG_VERSION")
+        );
+
+        // 2. Completeness. The harness must have probed the whole known surface;
+        //    `not_enforced: []` over a partial probe set reads as a clean bill of
+        //    health and is not one.
+        assert_eq!(
+            doc["surface_complete"].as_bool(),
+            Some(true),
+            "CAPABILITY.json does not cover the known SHACL Core surface \
+             ({} of {} probed). Run tests/shacl-capability/completeness.sh.",
+            doc["surface_features_probed"],
+            doc["surface_features_known"]
+        );
+
+        // Probe names are the harness's; the tables are keyed by IRI. Only
+        // `sh:sparql` differs from its IRI local name, so the alias is spelled
+        // out rather than inferred.
+        let declared: HashSet<String> = UNENFORCED_ALL_MODES
+            .iter()
+            .chain(UNENFORCED_SPARQL_MODE)
+            .map(|(iri, _)| {
+                let local = iri.rsplit('#').next().unwrap_or(iri);
+                if local == "sparql" {
+                    "sparqlConstraint".to_string()
+                } else {
+                    local.to_string()
+                }
+            })
+            .collect();
+
+        // 3. Everything measured unenforced must be declared, or the engine
+        //    returns a verdict it cannot stand behind.
+        let mut undeclared: Vec<String> = doc["not_enforced"]
+            .as_array()
+            .expect("not_enforced")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|n| !declared.contains(*n))
+            .map(str::to_string)
+            .collect();
+        undeclared.sort();
+        assert!(
+            undeclared.is_empty(),
+            "measured NOT enforced but not declared in this file, so validate \
+             fails open on them: {undeclared:?}. Either add them to the tables \
+             above, or re-measure if the engine has changed."
+        );
+
+        // 4. Same for mode-dependent features: a feature only some modes
+        //    evaluate must be declared, so the modes that do not refuse.
+        let mode_only = doc["enforced_only_in_mode"]
+            .as_object()
+            .expect("enforced_only_in_mode");
+        let missing: Vec<&String> = mode_only
+            .keys()
+            .filter(|k| !declared.contains(*k))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "measured enforced only in some modes but not declared: {missing:?}"
+        );
+    }
+
     #[test]
     fn unenforced_and_target_logic_is_pure_and_correct() {
         use super::{declares_any_target, unenforced_components};

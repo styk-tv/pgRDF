@@ -56,7 +56,7 @@ probe() {
   local dg="urn:pgrdf-capability:${comp}:${kind}:${mode}:data"
   local shapes; shapes="$(cat "${FIX}/${comp}.shapes.ttl")"
   local data;   data="$(cat "${FIX}/${comp}.${kind}.ttl")"
-  psql_q "$(cat <<SQL
+  local out; out="$(psql_q "$(cat <<SQL
 DO \$probe\$
 DECLARE sg bigint; dg bigint; rep jsonb;
 BEGIN
@@ -70,7 +70,15 @@ BEGIN
   RAISE NOTICE 'PROBE=%', coalesce(rep->>'conforms','null');
 END \$probe\$;
 SQL
-)" 2>&1 | sed -n 's/^NOTICE:  PROBE=//p'
+)" 2>&1 || true)"
+  # 0.6.34 is FAIL-CLOSED on unenforced constraint components: it raises
+  # rather than returning a verdict it cannot stand behind. That is correct
+  # behaviour, not a probe failure, so it is captured as its own result.
+  # Older builds returned conforms:true silently; both must be distinguishable.
+  if grep -q 'unenforced constraint component' <<<"$out"; then
+    echo "REFUSED"; return 0
+  fi
+  sed -n 's/^NOTICE:  PROBE=//p' <<<"$out"
 }
 
 PG_VER="$(psql_q 'SHOW server_version;' | cut -d. -f1)"
@@ -101,21 +109,33 @@ for c in "${components[@]}"; do
     verdict="enforced";      enforced+=( "$c" )
   elif [[ -n "$alt" ]]; then
     verdict="enforced-in-mode:$alt"; enforced+=( "$c" )
+  elif [[ "$bad" == "REFUSED" ]]; then
+    # The engine declined to answer and said why. Unsupported, but fail-closed:
+    # no caller can mistake this for a clean validation.
+    verdict="refused-fail-closed"; not_enforced+=( "$c" )
   elif [[ "$bad" == "true" ]]; then
+    # The dangerous one: no violation AND no error. A caller reading
+    # conforms:true cannot tell "validated clean" from "never evaluated".
     verdict="SILENTLY-SKIPPED"; not_enforced+=( "$c" )
   else
     verdict="INDETERMINATE";    not_enforced+=( "$c" )
   fi
   printf '  %-22s violating=%-5s control=%-5s  %s\n' "$c" "$bad" "$good" "$verdict"
+  # `conforms` is a JSON boolean; REFUSED / empty are not, so they are
+  # emitted as a JSON string / null rather than pasted in bare.
+  jsonval() { case "$1" in true|false) printf '%s' "$1";; "") printf 'null';; *) printf '"%s"' "$1";; esac; }
   rows+="$(printf '{"component":"%s","violating_conforms":%s,"control_conforms":%s,"verdict":"%s"}' \
-            "$c" "${bad:-null}" "${good:-null}" "$verdict"),"
+            "$c" "$(jsonval "$bad")" "$(jsonval "$good")" "$verdict"),"
 done
 
 (( PRINT_ONLY )) && exit 0
 
-python3 - "$OUT" "$PGRDF_VER" "$PG_VER" "${rows%,}" <<'PY'
+SURFACE_TOTAL="$(grep -cvE '^#|^$' "${HERE}/SHACL-CORE-SURFACE.tsv" 2>/dev/null || echo 0)"
+
+python3 - "$OUT" "$PGRDF_VER" "$PG_VER" "${rows%,}" "$SURFACE_TOTAL" <<'PY'
 import json, sys
 out, pgrdf, pg, rows = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+surface_total = int(sys.argv[5])
 probes = json.loads("["+rows+"]")
 doc = {
   "artifact": "pgrdf-shacl-capability",
@@ -129,13 +149,34 @@ doc = {
   "not_enforced": sorted(p["component"] for p in probes
                          if not p["verdict"].startswith("enforced")),
   "probes": probes,
+  # Coverage carries its denominator on purpose. "43 enforced" is a claim;
+  # "43 enforced of 47 probed, 47 of 47 known" is a measurement. The harness
+  # reported the first form for a year while it was measuring 17 of 46.
+  "surface_source": "SHACL-CORE-SURFACE.tsv (W3C SHACL Recommendation)",
+  "surface_features_known": surface_total,
+  "surface_features_probed": len(probes),
+  "surface_complete": len(probes) == surface_total,
   "caveats": [
     "validate does NOT entail: sh:targetClass matches ASSERTED rdf:type only. "
     "A node typed only by a subclass is not targeted by a shape on its parent "
     "unless pgrdf.materialize has run, or the parent type is stamped explicitly.",
-    "A constraint component absent from `enforced` contributes no violation and "
-    "no error. conforms:true therefore does not distinguish 'validated clean' "
-    "from 'never evaluated'. See pgRDF#80.",
+    "CONSTRAINT COMPONENTS ARE FAIL-CLOSED as of 0.6.34: an unenforced component "
+    "raises, naming the component and the mode that does evaluate it, rather than "
+    "returning a verdict. Verdict `refused-fail-closed` records that. The older "
+    "warning that conforms:true could not distinguish 'validated clean' from "
+    "'never evaluated' (pgRDF#80) NO LONGER HOLDS FOR COMPONENTS.",
+    "THE FAIL-CLOSED CHECK COVERS CONSTRAINT COMPONENTS ONLY, NOT PATH TYPES. A "
+    "path defect would produce no violation and no error, so a per-feature verdict "
+    "here cannot be trusted for paths on its own.",
+    "READ PATH-MATRIX.json FOR PATH BEHAVIOUR. A per-feature verdict cannot "
+    "express a fault living in the interaction between a path type and the term "
+    "type of the value it reaches, and this file reported such a fault wrongly in "
+    "BOTH directions before the matrix existed: `SILENTLY-SKIPPED` overstated it "
+    "on oneOrMorePath/zeroOrMorePath, and `enforced` understated it on "
+    "sequencePath. The underlying defect (literal values lost on recursive and "
+    "sequence paths, rudof-project/rudof#818) is FIXED in the pinned build; the "
+    "matrix measures 17/17 cells clean. The matrix, not this file, is what says "
+    "so.",
     "`enforced_only_in_mode` names components no default-mode probe catches but "
     "another mode evaluates correctly. sh:sparql is the case: silently skipped by "
     "'native' and 'sparql', evaluated by 'pgrdf'. Reading the native verdict alone "
@@ -144,5 +185,6 @@ doc = {
 }
 with open(out, "w") as f:
     json.dump(doc, f, indent=2, sort_keys=True); f.write("\n")
-print(f"\nwrote {out}: {len(doc['enforced'])} enforced, {len(doc['not_enforced'])} not enforced")
+print(f"\nwrote {out}: {len(doc['enforced'])} enforced, {len(doc['not_enforced'])} not enforced, "
+      f"{len(probes)}/{surface_total} of the known surface probed")
 PY

@@ -1,0 +1,63 @@
+# SHACL Core surface — the DENOMINATOR for capability coverage.
+#
+# Enumerated from the W3C SHACL Recommendation (https://www.w3.org/TR/shacl/),
+# NOT from this directory's fixtures. That direction is the whole point: if the
+# list were derived from the probes, every probe would extend the target it is
+# measured against and the fraction would always read 100%.
+#
+# Adding a probe does NOT belong in this file. This file changes only when the
+# specification does, or when a reading of it is corrected — and such a change
+# is a reviewable event, not a side effect of writing a test.
+#
+# feature<TAB>spec section<TAB>kind
+#
+# Kind: component | target | path | shape-feature
+# A row is MEASURED when fixtures/<feature>.shapes.ttl exists.
+
+class	4.1.1	component
+datatype	4.1.2	component
+nodeKind	4.1.3	component
+minCount	4.2.1	component
+maxCount	4.2.2	component
+minExclusive	4.3.1	component
+minInclusive	4.3.2	component
+maxExclusive	4.3.3	component
+maxInclusive	4.3.4	component
+minLength	4.4.1	component
+maxLength	4.4.2	component
+pattern	4.4.3	component
+patternFlags	4.4.3	component
+languageIn	4.4.4	component
+uniqueLang	4.4.5	component
+equals	4.5.1	component
+disjoint	4.5.2	component
+lessThan	4.5.3	component
+lessThanOrEquals	4.5.4	component
+not	4.6.1	component
+and	4.6.2	component
+or	4.6.3	component
+xone	4.6.4	component
+node	4.7.1	component
+propertyShape	4.7.2	component
+qualifiedMinCount	4.7.3	component
+qualifiedMaxCount	4.7.3	component
+qualifiedValueShapesDisjoint	4.7.3	component
+closed	4.8.1	component
+ignoredProperties	4.8.1	component
+hasValue	4.8.2	component
+in	4.8.3	component
+sparqlConstraint	6.2	component
+targetClass	2.1.3.1	target
+targetNode	2.1.3.2	target
+targetObjectsOf	2.1.3.3	target
+targetSubjectsOf	2.1.3.4	target
+implicitClassTarget	2.1.3.5	target
+predicatePath	2.3.1.1	path
+sequencePath	2.3.1.2	path
+alternativePath	2.3.1.3	path
+inversePath	2.3.1.4	path
+zeroOrMorePath	2.3.1.5	path
+oneOrMorePath	2.3.1.6	path
+zeroOrOnePath	2.3.1.7	path
+deactivated	2.1.1.3	shape-feature
+severity	2.1.2.3	shape-feature

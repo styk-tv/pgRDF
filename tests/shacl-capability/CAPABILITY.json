@@ -2,26 +2,58 @@
   "artifact": "pgrdf-shacl-capability",
   "caveats": [
     "validate does NOT entail: sh:targetClass matches ASSERTED rdf:type only. A node typed only by a subclass is not targeted by a shape on its parent unless pgrdf.materialize has run, or the parent type is stamped explicitly.",
-    "A constraint component absent from `enforced` contributes no violation and no error. conforms:true therefore does not distinguish 'validated clean' from 'never evaluated'. See pgRDF#80.",
+    "CONSTRAINT COMPONENTS ARE FAIL-CLOSED as of 0.6.34: an unenforced component raises, naming the component and the mode that does evaluate it, rather than returning a verdict. Verdict `refused-fail-closed` records that. The older warning that conforms:true could not distinguish 'validated clean' from 'never evaluated' (pgRDF#80) NO LONGER HOLDS FOR COMPONENTS.",
+    "THE FAIL-CLOSED CHECK COVERS CONSTRAINT COMPONENTS ONLY, NOT PATH TYPES. A path defect would produce no violation and no error, so a per-feature verdict here cannot be trusted for paths on its own.",
+    "READ PATH-MATRIX.json FOR PATH BEHAVIOUR. A per-feature verdict cannot express a fault living in the interaction between a path type and the term type of the value it reaches, and this file reported such a fault wrongly in BOTH directions before the matrix existed: `SILENTLY-SKIPPED` overstated it on oneOrMorePath/zeroOrMorePath, and `enforced` understated it on sequencePath. The underlying defect (literal values lost on recursive and sequence paths, rudof-project/rudof#818) is FIXED in the pinned build; the matrix measures 17/17 cells clean. The matrix, not this file, is what says so.",
     "`enforced_only_in_mode` names components no default-mode probe catches but another mode evaluates correctly. sh:sparql is the case: silently skipped by 'native' and 'sparql', evaluated by 'pgrdf'. Reading the native verdict alone reports 'unsupported' about an engine that supports it."
   ],
   "enforced": [
+    "alternativePath",
+    "and",
     "class",
     "closed",
     "datatype",
+    "deactivated",
     "disjoint",
+    "equals",
     "hasValue",
+    "ignoredProperties",
+    "implicitClassTarget",
     "in",
     "inversePath",
+    "languageIn",
+    "lessThan",
+    "lessThanOrEquals",
     "maxCount",
+    "maxExclusive",
+    "maxInclusive",
+    "maxLength",
     "minCount",
+    "minExclusive",
+    "minInclusive",
     "minLength",
+    "node",
     "nodeKind",
+    "not",
+    "oneOrMorePath",
+    "or",
     "pattern",
+    "patternFlags",
+    "predicatePath",
+    "propertyShape",
+    "qualifiedMaxCount",
     "qualifiedMinCount",
+    "qualifiedValueShapesDisjoint",
+    "sequencePath",
+    "severity",
     "targetClass",
     "targetNode",
-    "targetSubjectsOf"
+    "targetObjectsOf",
+    "targetSubjectsOf",
+    "uniqueLang",
+    "xone",
+    "zeroOrMorePath",
+    "zeroOrOnePath"
   ],
   "enforced_only_in_mode": {
     "sparqlConstraint": "pgrdf"
@@ -29,9 +61,21 @@
   "generated_by": "tests/shacl-capability/run.sh",
   "hand_edited": false,
   "not_enforced": [],
-  "pgrdf_version": "0.6.22",
+  "pgrdf_version": "0.6.35",
   "postgres_major": 18,
   "probes": [
+    {
+      "component": "alternativePath",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "and",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
     {
       "component": "class",
       "control_conforms": true,
@@ -51,13 +95,37 @@
       "violating_conforms": false
     },
     {
+      "component": "deactivated",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "disjoint",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
     },
     {
+      "component": "equals",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "hasValue",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "ignoredProperties",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "implicitClassTarget",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
@@ -75,7 +143,43 @@
       "violating_conforms": false
     },
     {
+      "component": "languageIn",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "lessThan",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "lessThanOrEquals",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "maxCount",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "maxExclusive",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "maxInclusive",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "maxLength",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
@@ -87,7 +191,25 @@
       "violating_conforms": false
     },
     {
+      "component": "minExclusive",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "minInclusive",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "minLength",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "node",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
@@ -99,7 +221,49 @@
       "violating_conforms": false
     },
     {
+      "component": "not",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "oneOrMorePath",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "or",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "pattern",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "patternFlags",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "predicatePath",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "propertyShape",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "qualifiedMaxCount",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
@@ -111,10 +275,28 @@
       "violating_conforms": false
     },
     {
-      "component": "sparqlConstraint",
+      "component": "qualifiedValueShapesDisjoint",
       "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "sequencePath",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "severity",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "sparqlConstraint",
+      "control_conforms": null,
       "verdict": "enforced-in-mode:pgrdf",
-      "violating_conforms": true
+      "violating_conforms": null
     },
     {
       "component": "targetClass",
@@ -129,10 +311,44 @@
       "violating_conforms": false
     },
     {
+      "component": "targetObjectsOf",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
       "component": "targetSubjectsOf",
       "control_conforms": true,
       "verdict": "enforced",
       "violating_conforms": false
+    },
+    {
+      "component": "uniqueLang",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "xone",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "zeroOrMorePath",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
+    },
+    {
+      "component": "zeroOrOnePath",
+      "control_conforms": true,
+      "verdict": "enforced",
+      "violating_conforms": false
     }
-  ]
+  ],
+  "surface_complete": true,
+  "surface_features_known": 47,
+  "surface_features_probed": 47,
+  "surface_source": "SHACL-CORE-SURFACE.tsv (W3C SHACL Recommendation)"
 }
