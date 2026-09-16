@@ -6,7 +6,7 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
-## [0.6.35] — 2026-09-16
+## [0.6.36] — 2026-09-16
 
 SPEC.pgRDF.v0.6.35 — "capability custody." pgRDF could not state, provably and
 discoverably, which SHACL features it enforces. The harness measured 17 of 46

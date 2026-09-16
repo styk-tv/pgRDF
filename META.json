@@ -1,51 +1,51 @@
 {
-  "name": "pgrdf",
-  "abstract": "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning",
-  "description": "pgRDF turns one PostgreSQL instance into a complete semantic-web engine — dictionary-encoded hexastore storage, a SPARQL 1.1 query and update engine, a W3C-conformant SHACL Core validator (25/25), and an OWL 2 RL / RDFS reasoner — with no sidecar triple store and no second system to operate. Load Turtle, TriG or N-Quads, then reason over it, validate it, and query it in place, each step a single function call inside one PostgreSQL session. Supports PostgreSQL 14–18; every release is CI-built and signed with SLSA Build Provenance v1.",
-  "version": "0.6.34",
-  "maintainer": [
-    "Peter Styk"
-  ],
-  "license": "mit",
-  "release_status": "stable",
-  "provides": {
-    "pgrdf": {
-      "abstract": "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning",
-      "file": "pgrdf.control",
-      "docfile": "README.pgxn.md",
-      "version": "0.6.34"
-    }
-  },
-  "prereqs": {
-    "runtime": {
-      "requires": {
-        "PostgreSQL": "14.0.0"
+   "name": "pgrdf",
+   "abstract": "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning",
+   "description": "pgRDF turns one PostgreSQL instance into a complete semantic-web engine \u2014 dictionary-encoded hexastore storage, a SPARQL 1.1 query and update engine, a W3C-conformant SHACL Core validator (25/25), and an OWL 2 RL / RDFS reasoner \u2014 with no sidecar triple store and no second system to operate. Load Turtle, TriG or N-Quads, then reason over it, validate it, and query it in place, each step a single function call inside one PostgreSQL session. Supports PostgreSQL 14\u201318; every release is CI-built and signed with SLSA Build Provenance v1.",
+   "version": "0.6.36",
+   "maintainer": [
+      "Peter Styk"
+   ],
+   "license": "mit",
+   "release_status": "stable",
+   "provides": {
+      "pgrdf": {
+         "abstract": "Rust-native PostgreSQL extension for RDF, SPARQL, SHACL and OWL reasoning",
+         "file": "pgrdf.control",
+         "docfile": "README.pgxn.md",
+         "version": "0.6.36"
       }
-    }
-  },
-  "resources": {
-    "homepage": "https://pgrdf.styk.tv/",
-    "bugtracker": {
-      "web": "https://github.com/styk-tv/pgRDF/issues"
-    },
-    "repository": {
-      "url": "git://github.com/styk-tv/pgRDF.git",
-      "web": "https://github.com/styk-tv/pgRDF",
-      "type": "git"
-    }
-  },
-  "meta-spec": {
-    "version": "1.0.0",
-    "url": "https://pgxn.org/meta/spec.txt"
-  },
-  "generated_by": "pgRDF repository metadata",
-  "tags": [
-    "rdf",
-    "sparql",
-    "shacl",
-    "owl",
-    "postgresql",
-    "pgrx",
-    "knowledge graph"
-  ]
+   },
+   "prereqs": {
+      "runtime": {
+         "requires": {
+            "PostgreSQL": "14.0.0"
+         }
+      }
+   },
+   "resources": {
+      "homepage": "https://pgrdf.styk.tv/",
+      "bugtracker": {
+         "web": "https://github.com/styk-tv/pgRDF/issues"
+      },
+      "repository": {
+         "url": "git://github.com/styk-tv/pgRDF.git",
+         "web": "https://github.com/styk-tv/pgRDF",
+         "type": "git"
+      }
+   },
+   "meta-spec": {
+      "version": "1.0.0",
+      "url": "https://pgxn.org/meta/spec.txt"
+   },
+   "generated_by": "pgRDF repository metadata",
+   "tags": [
+      "rdf",
+      "sparql",
+      "shacl",
+      "owl",
+      "postgresql",
+      "pgrx",
+      "knowledge graph"
+   ]
 }

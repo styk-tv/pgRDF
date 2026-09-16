@@ -1,4 +1,8 @@
--- pgRDF 0.6.34 -> 0.6.35 — SPEC.pgRDF.v0.6.35: capability custody.
+-- pgRDF 0.6.34 -> 0.6.36 — SPEC.pgRDF.v0.6.35: capability custody.
+--
+-- 0.6.35 was cut and burned: the release gate refused it because META.json
+-- had not been bumped, so nothing was built or attested. Versions are never
+-- reused, so the content ships as 0.6.36 and 0.6.35 does not exist.
 --
 -- The release closes one question: pgRDF could not state, provably and
 -- discoverably, which SHACL features it enforces.
