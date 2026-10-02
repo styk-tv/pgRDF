@@ -61,15 +61,17 @@ else is using this name".
 ### Who may create graphs
 
 Creating a graph needs `SELECT` and `INSERT` on `pgrdf._pgrdf_quads` and
-`pgrdf._pgrdf_graphs`; dropping one needs `SELECT` and `DELETE` on both.
-Table ownership is not required: the one step PostgreSQL reserves for
-the table owner (creating or removing the graph's storage partition)
-runs as the owner inside `add_graph` / `drop_graph`, and nothing else
-does. A role without the grants is refused with `42501` and the exact
-`GRANT` in the hint. Ask the server directly:
+`pgrdf._pgrdf_graphs`; dropping one needs `SELECT` and `DELETE` on both;
+clearing one needs `SELECT` and `DELETE` on `pgrdf._pgrdf_quads`.
+Table ownership is not required: the steps PostgreSQL reserves for the
+table owner (creating, emptying or removing the graph's storage
+partition) run as the owner inside `add_graph` / `clear_graph` /
+`drop_graph`, and nothing else does. A role without the grants is
+refused with `42501` and the exact `GRANT` in the hint. Ask the server
+directly:
 
 ```sql
-SELECT pgrdf.can_create_graphs(), pgrdf.can_drop_graphs();
+SELECT pgrdf.can_create_graphs(), pgrdf.can_clear_graphs(), pgrdf.can_drop_graphs();
 ```
 
 ## The inventory

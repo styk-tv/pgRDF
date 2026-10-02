@@ -2209,7 +2209,7 @@ fn streaming_load_guarded(
     let empty = Spi::get_one::<bool>("SELECT NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_dictionary)")
         .expect("load_turtle_streaming: empty-dict probe")
         .unwrap_or(false);
-    if empty {
+    if empty && fast_path_owner_or_notice("load_turtle_streaming") {
         ingest_turtle_streaming(path, graph_id, window_triples, id_reserve_block)
     } else {
         let file = File::open(path)
@@ -2562,6 +2562,22 @@ fn staged_load_default(path: &str, graph_id: i64) -> i64 {
         .unwrap_or(0)
 }
 
+/// The empty-database fast paths (`bulk_load => TRUE`, `load_turtle_streaming`)
+/// drop and rebuild the quad indexes and the dictionary constraint, which
+/// PostgreSQL reserves for the table owner (#145). For any other caller
+/// they take the standard path, the same fallback a populated dictionary
+/// already gets, and say so in a NOTICE; the load itself is unchanged.
+fn fast_path_owner_or_notice(caller: &str) -> bool {
+    if crate::storage::partition::caller_owns_storage() {
+        return true;
+    }
+    pgrx::notice!(
+        "{caller}: the empty-database fast path rebuilds indexes and needs the owner of \
+         pgrdf._pgrdf_quads; loading through the standard path"
+    );
+    false
+}
+
 /// Guard for `load_turtle(..., bulk_load => TRUE)`. The self-assigned-id
 /// fast path is correct ONLY on an empty dictionary: it dedups within
 /// the input (not against existing rows) and `unique_term` is
@@ -2577,7 +2593,7 @@ fn bulk_load_guarded(path: &str, graph_id: i64, base_iri: Option<&str>) -> Loade
     let empty = Spi::get_one::<bool>("SELECT NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_dictionary)")
         .expect("bulk_load: empty-dict probe")
         .unwrap_or(false);
-    if empty {
+    if empty && fast_path_owner_or_notice("load_turtle: bulk_load") {
         ingest_turtle_parallel_bulk(path, graph_id)
     } else {
         let file = File::open(path)
