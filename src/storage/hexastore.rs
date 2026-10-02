@@ -242,6 +242,70 @@ fn add_graph_iri(iri: &str) -> i64 {
     next
 }
 
+/// Create a NEW graph by IRI, or refuse (#143, 0.6.37). `add_graph(iri)`
+/// is get-or-create, so two loaders choosing the same IRI silently share
+/// (or overwrite) one graph. `create_graph` claims the IRI or refuses
+/// 42710 duplicate_object, with a HINT naming the existing graph and what
+/// it was loaded from — enough to choose "reuse it" or "pick another
+/// IRI" without another round trip. The check and the create run under
+/// the same `_pgrdf_graphs` lock `add_graph` takes, so of two
+/// simultaneous claims exactly one wins. Authority as `add_graph`:
+/// SELECT + INSERT on the quad and graph tables.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn create_graph(iri: &str) -> i64 {
+    if iri.trim().is_empty() {
+        crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "create_graph: iri must be non-empty".to_string(),
+        );
+    }
+    crate::storage::partition::require_graph_ddl_privilege(
+        crate::storage::partition::GraphDdl::Create,
+        "create_graph",
+    );
+    acquire_partition_ddl_gate();
+    crate::storage::partition::as_storage_owner(|| {
+        Spi::run("LOCK TABLE pgrdf._pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE")
+            .unwrap_or_else(|e| panic!("create_graph: lock _pgrdf_graphs failed: {e}"));
+    });
+    let existing: Option<(Option<i64>, Option<String>, Option<i32>)> = Spi::connect(|c| {
+        c.select(
+            "SELECT graph_id, source_sha256, source_loads FROM pgrdf._pgrdf_graphs \
+             WHERE iri = $1 LIMIT 1",
+            None,
+            &[iri.into()],
+        )
+        .expect("create_graph: lookup failed")
+        .next()
+        .map(|r| {
+            (
+                r.get::<i64>(1).unwrap(),
+                r.get::<String>(2).unwrap(),
+                r.get::<i32>(3).unwrap(),
+            )
+        })
+    });
+    if let Some((id, sha, loads)) = existing {
+        let id = id.unwrap_or_default();
+        let source = match (sha, loads) {
+            (Some(s), Some(n)) => format!("source_sha256 {s} (loads {n})"),
+            _ => "no recorded source".to_string(),
+        };
+        crate::refuse_with_hint(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+            format!("create_graph: graph <{iri}> already exists (graph_id {id})"),
+            format!(
+                "existing graph_id {id}, {source}: reuse it if that is the same content, \
+                 or choose another IRI"
+            ),
+        );
+    }
+    Spi::get_one_with_args::<i64>("SELECT pgrdf.add_graph($1)", &[iri.into()])
+        .unwrap_or_else(|e| panic!("create_graph: create failed: {e}"))
+        .expect("create_graph: add_graph returned NULL")
+}
+
 /// Bind a specific `(graph_id, iri)` pair into `_pgrdf_graphs`,
 /// creating the partition if absent. Returns `id` on success.
 ///

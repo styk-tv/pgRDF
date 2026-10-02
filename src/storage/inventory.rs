@@ -43,6 +43,9 @@ fn graph_inventory() -> TableIterator<
         name!(locked, bool),
         name!(lock_reason, Option<String>),
         name!(materialization, String),
+        name!(source_sha256, Option<String>),
+        name!(source_loads, Option<i32>),
+        name!(identity_digest, Option<String>),
     ),
 > {
     let mut rows = Vec::new();
@@ -60,7 +63,21 @@ fn graph_inventory() -> TableIterator<
                           WHEN COALESCE(c.a, 0) IS DISTINCT FROM g.materialized_base_count
                             THEN 'stale'
                           ELSE 'current'
-                        END AS materialization
+                        END AS materialization,
+                        g.source_sha256,
+                        g.source_loads,
+                        -- 0.6.37: a locked graph's cached rdfc-1.0 digest,
+                        -- shown only while lock custody holds (both
+                        -- partition triggers present) — the same rule
+                        -- graph_digest uses to trust its cache.
+                        CASE WHEN g.locked AND (
+                               SELECT count(*) FROM pg_trigger t
+                               JOIN pg_class c ON c.oid = t.tgrelid
+                               WHERE c.relnamespace = 'pgrdf'::regnamespace
+                                 AND c.relname = format('_pgrdf_quads_g%s', g.graph_id)
+                                 AND t.tgname IN ('pgrdf_lock_row', 'pgrdf_lock_truncate')
+                             ) = 2
+                             THEN g.locked_digest END AS identity_digest
                  FROM pgrdf._pgrdf_graphs g
                  LEFT JOIN (
                      SELECT graph_id,
@@ -84,6 +101,9 @@ fn graph_inventory() -> TableIterator<
                 row.get::<String>(7)
                     .unwrap()
                     .unwrap_or_else(|| "unknown".into()),
+                row.get::<String>(8).unwrap(),
+                row.get::<i32>(9).unwrap(),
+                row.get::<String>(10).unwrap(),
             ));
         }
     });
@@ -173,5 +193,135 @@ mod tests {
         .unwrap();
         assert_eq!(locked, Some(true));
         assert_eq!(reason.as_deref(), Some("inv test"));
+    }
+
+    fn sha_hex(s: &str) -> String {
+        Spi::get_one_with_args(
+            "SELECT encode(sha256(convert_to($1, 'UTF8')), 'hex')",
+            &[s.into()],
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn inv_row(iri: &str) -> (Option<String>, Option<i32>, Option<String>) {
+        Spi::get_three_with_args(
+            "SELECT source_sha256, source_loads, identity_digest \
+             FROM pgrdf.graph_inventory() WHERE iri = $1",
+            &[iri.into()],
+        )
+        .unwrap()
+    }
+
+    /// #143: the inventory shows each graph's source digest and load count,
+    /// and — for a locked graph whose digest was computed — its identity.
+    #[pg_test]
+    fn inventory_exposes_source_digest_and_identity() {
+        let ttl = "<urn:inv:s> <urn:inv:p> <urn:inv:o> .\n";
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:inv:a')")
+            .unwrap()
+            .unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle_verbose($1, $2)",
+            &[ttl.into(), g.into()],
+        )
+        .unwrap();
+        let (sha, loads, ident) = inv_row("urn:tdd:inv:a");
+        assert_eq!(sha.as_deref(), Some(sha_hex(ttl).as_str()));
+        assert_eq!(loads, Some(1));
+        assert_eq!(ident, None, "an open graph has no cached identity");
+        Spi::run(&format!("SELECT pgrdf.lock_graph({g}, 'checkpoint')")).unwrap();
+        let d: String = Spi::get_one(&format!("SELECT pgrdf.graph_digest({g})"))
+            .unwrap()
+            .unwrap();
+        let (_, _, ident) = inv_row("urn:tdd:inv:a");
+        assert_eq!(ident.as_deref(), Some(d.as_str()));
+    }
+
+    /// #143: parse_nquads / parse_trig record the source digest — sha256
+    /// of the UTF-8 content — when every quad landed in the target graph;
+    /// a multi-graph load records nothing and leaves the count unchanged.
+    #[pg_test]
+    fn quad_parsers_record_source_digest_for_single_graph_loads() {
+        let nq = "<urn:nq:s> <urn:nq:p> <urn:nq:o> .\n";
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:inv:nq')")
+            .unwrap()
+            .unwrap();
+        Spi::run_with_args("SELECT pgrdf.parse_nquads($1, $2)", &[nq.into(), g.into()]).unwrap();
+        let (sha, loads, _) = inv_row("urn:tdd:inv:nq");
+        assert_eq!(sha.as_deref(), Some(sha_hex(nq).as_str()));
+        assert_eq!(loads, Some(1));
+
+        let trig_one = "<urn:tg:s> <urn:tg:p> <urn:tg:o> .\n";
+        let gt: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:inv:trig')")
+            .unwrap()
+            .unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_trig($1, $2)",
+            &[trig_one.into(), gt.into()],
+        )
+        .unwrap();
+        let (sha, loads, _) = inv_row("urn:tdd:inv:trig");
+        assert_eq!(sha.as_deref(), Some(sha_hex(trig_one).as_str()));
+        assert_eq!(loads, Some(1));
+
+        Spi::run("SELECT pgrdf.add_graph('urn:tdd:inv:named')").unwrap();
+        let multi = "<urn:tg:s2> <urn:tg:p> <urn:tg:o> .\n\
+                     <urn:tdd:inv:named> { <urn:tg:s3> <urn:tg:p> <urn:tg:o> . }\n";
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_trig($1, $2)",
+            &[multi.into(), gt.into()],
+        )
+        .unwrap();
+        let (sha, loads, _) = inv_row("urn:tdd:inv:trig");
+        assert_eq!(
+            sha.as_deref(),
+            Some(sha_hex(trig_one).as_str()),
+            "unchanged"
+        );
+        assert_eq!(
+            loads,
+            Some(1),
+            "a multi-graph load is not this graph's source"
+        );
+    }
+
+    /// #143: create_graph claims a NEW IRI or refuses 42710; the HINT
+    /// names the existing graph and what it was loaded from, so the
+    /// caller can choose "reuse" or "rename" without another round trip.
+    #[pg_test]
+    fn create_graph_refuses_an_existing_iri_with_its_identity() {
+        let id: i64 = Spi::get_one("SELECT pgrdf.create_graph('urn:tdd:cg:a')")
+            .unwrap()
+            .unwrap();
+        let ttl = "<urn:cg:s> <urn:cg:p> <urn:cg:o> .\n";
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle_verbose($1, $2)",
+            &[ttl.into(), id.into()],
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.cg_try(q text) RETURNS text \
+             LANGUAGE plpgsql AS $$ DECLARE st text; h text; BEGIN \
+               EXECUTE q; RETURN 'ok'; \
+             EXCEPTION WHEN OTHERS THEN \
+               GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, h = PG_EXCEPTION_HINT; \
+               RETURN st || '|' || coalesce(h, ''); END $$",
+        )
+        .unwrap();
+        let got: String =
+            Spi::get_one("SELECT pg_temp.cg_try('SELECT pgrdf.create_graph(''urn:tdd:cg:a'')')")
+                .unwrap()
+                .unwrap();
+        assert!(got.starts_with("42710|"), "{got}");
+        assert!(got.contains(&format!("graph_id {id}")), "{got}");
+        assert!(
+            got.contains(&sha_hex(ttl)),
+            "the HINT carries the source digest: {got}"
+        );
+        let other: i64 = Spi::get_one("SELECT pgrdf.create_graph('urn:tdd:cg:b')")
+            .unwrap()
+            .unwrap();
+        assert_ne!(other, id);
     }
 }

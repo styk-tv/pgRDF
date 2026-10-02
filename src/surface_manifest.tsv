@@ -19,6 +19,7 @@ carve_graph(src bigint, predicate text, dst bigint)	stable	copy the subgraph mat
 carve_graph(src bigint, seeds text[], dst bigint, max_hops integer)	stable	copy the neighbourhood reachable from seed IRIs within max_hops from src into dst
 clear_graph(id bigint)	stable	remove every triple from a graph; the graph itself remains
 clear_graph(iri text)	stable	remove every triple from a graph by IRI; unknown IRI refuses (42704)
+create_graph(iri text)	stable	create a NEW graph by IRI, or refuse 42710 if the IRI exists; the HINT names the existing graph_id and its recorded source digest, so a caller can reuse it or choose another IRI. Atomic against concurrent claims. Needs SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs. add_graph(iri) stays get-or-create. Since 0.6.37
 construct(query text)	stable	SPARQL CONSTRUCT; rows are JSONB triples suitable for put_construct_rows
 copy_graph(src bigint, dst bigint)	stable	copy src into dst. Caution: appends, and carries inferred triples with it — clear dst first for a clean copy, re-materialize after
 copy_graph(src_iri text, dst_iri text)	stable	copy by IRI; same append-and-carry caution as the id form
@@ -31,7 +32,7 @@ graph_digest(graph_id bigint)	stable	canonical graph identity, method rdfc-1.0-s
 graph_id(iri text)	stable	graph_id for an IRI, or NULL when unknown — check before feeding into strict functions, which silently pass NULL through
 graph_integrity(graph_id bigint)	stable	term-position integrity report (non-IRI predicates, literal subjects); unclean graphs validate vacuously and should be reloaded
 export_graph(graph_id bigint)	stable	a graph's asserted triples as canonical N-Triples, byte-sorted, one line per triple; inferred rows never export (they re-derive). Absent graph refuses (42704). Since 0.6.34
-graph_inventory()	stable	every registered graph with IRI, asserted/inferred counts, lock state and materialization freshness (current/stale/never/unknown) — the supported alternative to reading private tables. Since 0.6.34
+graph_inventory()	stable	every registered graph with IRI, asserted/inferred counts, lock state, materialization freshness (current/stale/never/unknown), source_sha256 and source_loads (what the graph was loaded from; since 0.6.37) and identity_digest (a locked graph's cached rdfc-1.0 digest while lock custody holds; since 0.6.37) — the supported alternative to reading private tables. Since 0.6.34
 graph_manifest(graph_id bigint)	stable	portable manifest of one graph: three digests each carrying its method (bytes / rdfc-1.0 identity / fd1 structure), counts, engine identity, and what is NOT carried. Pair with export_graph to build a redistributable package. Since 0.6.34
 graph_iri(id bigint)	stable	IRI bound to a graph_id, or NULL when unknown
 last_call_stats()	stable	per-call completeness figures (path_depth_truncations, filter_clauses_dropped) for the most recent sparql/construct/describe call in THIS session; session-local, so other sessions cannot pollute it. Read it right after the query. Since 0.6.34

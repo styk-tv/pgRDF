@@ -528,4 +528,31 @@ mod tests {
         assert_eq!(consistent, Some(false), "a missing trigger is drift");
         assert_eq!(clean, Some(false), "drift makes the graph unclean");
     }
+
+    /// F5 closes the documented v0.6.28 limitation: a graph named INSIDE
+    /// a TriG payload was never lock-checked. Its insert now meets the
+    /// partition trigger, so a locked graph refuses it like any write.
+    #[pg_test]
+    fn locked_graph_named_inside_a_trig_payload_refuses() {
+        let gid = 980505;
+        setup(gid); // locked, reason 'test lock'
+        f5_try_fn();
+        let iri: String = Spi::get_one(&format!("SELECT pgrdf.graph_iri({gid})"))
+            .unwrap()
+            .unwrap();
+        let target: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:f5:trig-target')")
+            .unwrap()
+            .unwrap();
+        let payload = format!("<{iri}> {{ <urn:l:x> <urn:l:p> <urn:l:y> . }}");
+        let got = f5_try(&format!(
+            "SELECT pgrdf.parse_trig({}, {target})",
+            Spi::get_one_with_args::<String>("SELECT quote_literal($1)", &[payload.into()])
+                .unwrap()
+                .unwrap()
+        ));
+        assert!(
+            got.starts_with("55P03|"),
+            "the payload-named locked graph refuses: {got}"
+        );
+    }
 }

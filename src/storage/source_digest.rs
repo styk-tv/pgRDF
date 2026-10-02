@@ -118,6 +118,23 @@ pub fn finish_source_record(graph_id: i64, hasher: &Rc<RefCell<Sha256>>) {
     .expect("source_digest: recording the load digest failed");
 }
 
+/// Close a load record opened by [`begin_source_record`] for a content
+/// loader that holds its input as one slice (`parse_nquads`,
+/// `parse_trig`): the digest is sha256 of exactly those bytes.
+pub fn finish_source_record_bytes(graph_id: i64, bytes: &[u8]) {
+    let hex: String = Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    pgrx::Spi::run_with_args(
+        "UPDATE pgrdf._pgrdf_graphs
+            SET source_sha256 = $1
+          WHERE graph_id = $2",
+        &[hex.into(), graph_id.into()],
+    )
+    .expect("source_digest: recording the load digest failed");
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
