@@ -417,7 +417,17 @@ fn graph_digest(graph_id: i64) -> String {
             );
         }
     }
-    let triples = read_asserted_triples(graph_id);
+    canonicalize(read_asserted_triples(graph_id)).1
+}
+
+/// RDFC-1.0 over an arbitrary triple set: returns the sorted canonical
+/// N-Triples lines (each `\n`-terminated, blank nodes labelled `_:c14nN`)
+/// and the `rdfc-1.0-sha256` digest of their concatenation. This is the
+/// algorithm `graph_digest` runs over a whole graph, factored out so a
+/// caller can canonicalize a SUBSET — `graph_diff` canonicalizes each
+/// blank-node component on its own (SPEC 0.6.37 §3.5). The complexity
+/// budget is per call: an adversarial input raises `pgRDF#117`.
+pub(crate) fn canonicalize(triples: Vec<Triple>) -> (Vec<String>, String) {
     let mut bnode_quads: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, t) in triples.iter().enumerate() {
         for term in [&t.0, &t.2] {
@@ -487,7 +497,8 @@ fn graph_digest(graph_id: i64) -> String {
         })
         .collect();
     lines.sort();
-    sha256_hex(&lines.concat())
+    let digest = sha256_hex(&lines.concat());
+    (lines, digest)
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -608,6 +619,35 @@ mod tests {
             let want = super::sha256_hex(expected);
             assert_eq!(got, want, "W3C rdfc10 test{name} diverged from the suite");
         }
+    }
+
+    /// The extracted `canonicalize` is the same algorithm `graph_digest`
+    /// runs, exposed for per-component use (graph_diff, 0.6.37 §3.5): its
+    /// sorted canonical lines must equal the W3C suite's expected document
+    /// line-for-line, and its digest must equal `graph_digest` of the same
+    /// graph.
+    #[pg_test]
+    fn canonicalize_matches_w3c_lines_and_graph_digest() {
+        let input = include_str!("../../tests/fixtures/rdfc10/test017-in.nq");
+        let expected = include_str!("../../tests/fixtures/rdfc10/test017-rdfc10.nq");
+        let gid = 983399;
+        Spi::run(&format!("SELECT pgrdf.add_graph({gid})")).expect("add_graph failed");
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[input.into(), gid.into()],
+        )
+        .expect("fixture load failed");
+        let (lines, digest_hex) = super::canonicalize(super::read_asserted_triples(gid));
+        let want: Vec<String> = expected.lines().map(|l| format!("{l}\n")).collect();
+        assert_eq!(
+            lines, want,
+            "canonical lines must equal the W3C expected document"
+        );
+        assert_eq!(
+            digest_hex,
+            digest(gid),
+            "canonicalize digest must equal graph_digest"
+        );
     }
 
     /// test074 — the poison graph (RDFC10NegativeEvalTest): a highly
