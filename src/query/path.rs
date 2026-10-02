@@ -577,19 +577,17 @@ pub(crate) fn analysis_triple(
     }
 }
 
-/// A `+` (one-or-more) path lowered to a recursive-CTE-derived
-/// relation. `executor.rs` substitutes this for a `_pgrdf_quads`
-/// alias in its FROM list: the relation exposes the same
-/// `subject_id` / `object_id` column names a quad alias would, so the
-/// existing var-binder (`bind_var` on `q{qi}.subject_id` /
-/// `q{qi}.object_id`) joins it unchanged.
+/// A `+` / `*` / `?` / `|` path lowered to a derived relation that
+/// `executor.rs` substitutes for a `_pgrdf_quads` alias in its FROM list:
+/// it exposes the same `subject_id` / `object_id` column names a quad
+/// alias would, so the var-binder joins it unchanged.
 ///
-/// `from_fragment` is the parenthesised derived table WITHOUT the
-/// trailing alias (executor appends `AS q{qi}(...)`). `probe_sql` is
-/// the standalone truncation-detection query (run post-execution; if
-/// it returns `t`, the depth guard actually cut a path → bump
-/// `path_depth_truncations`). `probe_params` are the `$N` dict ids
-/// the probe binds, in order.
+/// `from_fragment` is the parenthesised derived table WITHOUT the trailing
+/// alias (executor appends `AS q{qi}(...)`). For `+` / `*` it is the walk
+/// rendered with no variable seed — a constant endpoint, when the path
+/// has one, is already baked in. `walk` lets the emitter re-render it
+/// seeded from a variable an earlier pattern bound (SPEC 0.6.37 §3.2) and
+/// names the path id the executor checks for truncation.
 #[derive(Clone)]
 pub(crate) struct PathRelation {
     pub from_fragment: String,
@@ -598,8 +596,106 @@ pub(crate) struct PathRelation {
     /// walk, `(subject_id, object_id, graph_id)` when a `GRAPH ?g`
     /// variable scope needs the per-row graph id surfaced.
     pub columns: &'static str,
-    pub probe_sql: String,
-    pub probe_params: Vec<i64>,
+    /// `Some` for the recursive operators (`+`, `*`), walked by
+    /// `pgrdf._path_walk`.
+    pub walk: Option<WalkSpec>,
+}
+
+/// Which endpoint of a walked path is already bound, as a SQL
+/// expression: a dict-id placeholder (`$N`) for a constant, or an
+/// earlier alias's column (`q2.subject_id`) for a join-bound variable.
+pub(crate) enum Seed<'a> {
+    Subject(&'a str),
+    Object(&'a str),
+}
+
+/// Everything needed to (re-)render a `+` / `*` walk.
+#[derive(Clone)]
+pub(crate) struct WalkSpec {
+    /// Index of this path pattern within its statement; the walk records
+    /// a depth cut under it and the executor applies
+    /// `pgrdf.on_path_truncation` once per truncated pattern.
+    pub path_id: i32,
+    /// Dict-id placeholders of the predicate set, e.g. `$3` or `$3, $4`.
+    preds_sql: String,
+    /// `Literal` scope: the graph-id placeholder.
+    graph_sql: Option<String>,
+    /// `GRAPH ?g`: walk each named graph separately; never seeded.
+    variable_scope: bool,
+    /// `^p+` / `(^p)+`: the walk follows edges object → subject.
+    swapped: bool,
+    max_depth: i32,
+    /// `*` (zero-or-more) — adds the W3C §9.3 zero-length pairs.
+    reflexive: bool,
+    /// The unseeded zero-length node set (for `*` with no bound end).
+    zero_unseeded: String,
+    /// A constant endpoint is already baked into `from_fragment`.
+    pub const_seeded: bool,
+}
+
+impl WalkSpec {
+    /// Can the emitter seed this walk from a join-bound variable? Not when
+    /// a constant already seeds it, and never under `GRAPH ?g`.
+    pub(crate) fn seedable(&self) -> bool {
+        !self.const_seeded && !self.variable_scope
+    }
+
+    /// Render the walk as a parenthesised derived table yielding
+    /// `(src, dst[, gid])`. With a seed the walk starts at that node:
+    /// forward from a bound subject, backward (edges reversed) from a
+    /// bound object — `src` / `dst` keep the path's direction either way.
+    pub(crate) fn render(&self, seed: Option<Seed<'_>>) -> String {
+        let (seed_expr, from_object) = match &seed {
+            None => ("NULL::bigint".to_string(), false),
+            // COALESCE: a seed column can be NULL at run time (a variable
+            // only an earlier OPTIONAL bound). NULL must mean "no node" —
+            // as an unbound join variable equals nothing — never
+            // "unseeded", which would walk the whole graph per row.
+            Some(Seed::Subject(e)) => (format!("COALESCE({e}, -1)::bigint"), false),
+            Some(Seed::Object(e)) => (format!("COALESCE({e}, -1)::bigint"), true),
+        };
+        // `GRAPH ?g` walks are never seeded (the seed's graph would have
+        // to be the walk's graph); they walk every named graph.
+        let seeded = seed.is_some() && !self.variable_scope;
+        let seed_expr = if seeded {
+            seed_expr
+        } else {
+            "NULL::bigint".to_string()
+        };
+        let from_object = seeded && from_object;
+        let follow_inverse = self.swapped ^ from_object;
+        let graph = self
+            .graph_sql
+            .as_deref()
+            .map(|g| format!("{g}::bigint"))
+            .unwrap_or_else(|| "NULL::bigint".to_string());
+        let (src, dst) = if from_object {
+            ("w.reached", "w.start")
+        } else {
+            ("w.start", "w.reached")
+        };
+        let gid = if self.variable_scope { ", w.gid" } else { "" };
+        let walk = format!(
+            "SELECT {src} AS src, {dst} AS dst{gid} FROM pgrdf._path_walk(\
+             ARRAY[{preds}]::bigint[], {graph}, {seed_expr}, {follow_inverse}, \
+             {max}, {id}, {per_graph}) w",
+            preds = self.preds_sql,
+            max = self.max_depth,
+            id = self.path_id,
+            per_graph = self.variable_scope,
+        );
+        if !self.reflexive {
+            return format!("({walk})");
+        }
+        let zero = if seeded {
+            // A bound endpoint x contributes (x, x) unconditionally
+            // (W3C §9.3), even when x is not a node of the graph.
+            format!("SELECT {seed_expr} AS src, {seed_expr} AS dst")
+        } else {
+            self.zero_unseeded.clone()
+        };
+        format!("({walk} UNION {zero})")
+    }
 }
 
 /// Graph-scope flavour the recursive CTE must honour. Mirrors the
@@ -624,242 +720,84 @@ pub(crate) enum PathGraphScope {
     Variable,
 }
 
-/// Build the recursive-CTE-derived relation for a `+` path (LLD v0.4
-/// §7.2), also serving the E4 `(a|b)+` alternation step. `pred_match`
-/// is the predicate-match SQL fragment using the OUTER `$N`
-/// placeholders the caller appended to the param buffer — exactly
-/// `predicate_id = $N` for a plain `p+` (one-element set) or
-/// `predicate_id IN ($N1, $N2, …)` for `(a|b)+` (the LLD §7.2
-/// "union of per-predicate scans" done as a single scan over a
-/// predicate set). `probe_pred_match` is the SAME match but written
-/// with the probe-local `$1[, $2, …]` placeholders; `probe_params`
-/// are the dict ids the probe binds in that order. `graph_placeholder`
-/// is the optional `$M` for the `Literal` scope's resolved graph id.
-/// `max_depth` is `query::guc::path_max_depth()` (read once at
-/// translate time — the depth guard is a hard cap baked into the
-/// recursive arm's `WHERE`).
+/// Build the relation for a `+` path (also the E4 `(a|b)+` step): a
+/// breadth-first `pgrdf._path_walk` (SPEC 0.6.37 §3.2, issue #138) in
+/// place of the old `UNION ALL` + `CYCLE … USING path` CTE, which
+/// enumerated every simple path up to the depth cap.
 ///
-/// The CTE matches LLD v0.4 §7.2 (adapted to pgRDF's
-/// `_pgrdf_quads(subject_id, predicate_id, object_id, graph_id)`
-/// schema and dict-id placeholders):
-///
-/// ```text
-/// SELECT subject_id, object_id [, graph_id], 1 FROM _pgrdf_quads
-///   WHERE <pred_match> [graph predicate]
-/// UNION
-/// SELECT w.src, q.object_id [, w.gid], w.depth + 1
-///   FROM walk w JOIN _pgrdf_quads q ON q.subject_id = w.dst
-///   WHERE q.<pred_match> AND w.depth < $MAX [AND same-graph]
-/// ```
-///
-/// `swapped` (the `^p+` / `(^p)+` / `^((a|b)+)` case) flips the edge
-/// direction: the base arm reads `object_id, subject_id` and the
-/// recursive arm joins `q.object_id = w.dst` projecting
-/// `q.subject_id`. `UNION` (not `UNION ALL`) makes cycles terminate
-/// (a revisited (src,dst) pair is deduped); `w.depth < $MAX` is the
-/// hard depth cap. The predicate-set generalisation is transparent to
-/// the cycle clause, the depth guard, and the truncation probe — they
-/// are all predicate-match-agnostic.
+/// `pred_ids_sql` is the predicate-set placeholder list (`$3` or
+/// `$3, $4`), `graph_placeholder` the `Literal` scope's graph-id
+/// placeholder, `max_depth` the `pgrdf.path_max_depth` read once at
+/// translate time, `path_id` this pattern's index within the statement.
+/// `const_seed` bakes a constant endpoint in; otherwise the emitter may
+/// re-render the walk seeded from a join-bound variable.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_one_or_more_relation_sql(
     pred_ids_sql: &str,
-    probe_pred_ids_sql: &str,
-    probe_params: Vec<i64>,
     graph_placeholder: Option<&str>,
     scope: &PathGraphScope,
     swapped: bool,
     max_depth: i32,
-    probe_graph_id: Option<i64>,
+    path_id: i32,
+    const_seed: Option<Seed<'_>>,
 ) -> PathRelation {
-    // Predicate match. `IN (…)` over the resolved dict-id placeholder
-    // list — a single-element `IN ($1)` is identical (semantically
-    // and to the planner) to `= $1`, so plain `p+` is unchanged and
-    // `(a|b)+` just widens the set (LLD §7.2 "union of per-predicate
-    // scans" as one scan over the predicate set).
-    let base_pred = format!("predicate_id IN ({pred_ids_sql})");
-    let rec_pred = format!("q.predicate_id IN ({pred_ids_sql})");
-    // Edge endpoints depend on direction. Forward `p+`: walk
-    // subject → object. Inverse `^p+`: walk object → subject.
-    let (base_src, base_dst, rec_join_col, rec_proj_col) = if swapped {
-        ("object_id", "subject_id", "object_id", "subject_id")
-    } else {
-        ("subject_id", "object_id", "subject_id", "object_id")
-    };
+    walk_relation(
+        pred_ids_sql,
+        graph_placeholder,
+        scope,
+        swapped,
+        max_depth,
+        path_id,
+        const_seed,
+        false,
+    )
+}
 
-    // Per-scope graph predicates + whether the CTE carries a `gid`
-    // column (only the `Variable` scope needs it surfaced).
-    let (base_graph_pred, rec_graph_pred, carries_gid, columns): (
-        String,
-        String,
-        bool,
-        &'static str,
-    ) = match scope {
-        PathGraphScope::AllGraphs => (
-            String::new(),
-            String::new(),
-            false,
-            "(subject_id, object_id)",
+#[allow(clippy::too_many_arguments)]
+fn walk_relation(
+    pred_ids_sql: &str,
+    graph_placeholder: Option<&str>,
+    scope: &PathGraphScope,
+    swapped: bool,
+    max_depth: i32,
+    path_id: i32,
+    const_seed: Option<Seed<'_>>,
+    reflexive: bool,
+) -> PathRelation {
+    let variable_scope = matches!(scope, PathGraphScope::Variable);
+    let graph_sql = match scope {
+        PathGraphScope::Literal(_) => Some(
+            graph_placeholder
+                .expect("Literal scope needs a graph placeholder")
+                .to_string(),
         ),
-        PathGraphScope::Literal(_) => {
-            let g = graph_placeholder.expect("Literal scope needs a graph placeholder");
-            (
-                format!(" AND graph_id = {g}"),
-                format!(" AND q.graph_id = {g}"),
-                false,
-                "(subject_id, object_id)",
-            )
-        }
-        PathGraphScope::Variable => (
-            // Named graphs only (W3C §13.3): exclude the default
-            // graph from the base arm so `?g` never binds graph 0.
-            " AND graph_id <> 0".to_string(),
-            // Recursive hop must stay in the SAME named graph the
-            // base row started in.
-            " AND q.graph_id = w.gid".to_string(),
-            true,
-            "(subject_id, object_id, graph_id)",
-        ),
+        _ => None,
     };
-
-    let base_gid = if carries_gid { ", graph_id" } else { "" };
-    let rec_gid = if carries_gid { ", w.gid" } else { "" };
-    let walk_cols = if carries_gid {
-        "walk(src, dst, gid, depth)"
+    let columns = if variable_scope {
+        "(subject_id, object_id, graph_id)"
     } else {
-        "walk(src, dst, depth)"
+        "(subject_id, object_id)"
     };
-    let final_cols = if carries_gid {
-        "src, dst, gid"
-    } else {
-        "src, dst"
+    let const_seeded = const_seed.is_some() && !variable_scope;
+    let spec = WalkSpec {
+        path_id,
+        preds_sql: pred_ids_sql.to_string(),
+        graph_sql,
+        variable_scope,
+        swapped,
+        max_depth,
+        reflexive,
+        zero_unseeded: if reflexive {
+            zero_length_node_set_sql(scope, &[])
+        } else {
+            String::new()
+        },
+        const_seeded,
     };
-
-    // The whole relation is a self-contained parenthesised subquery
-    // with its OWN `WITH RECURSIVE` (Postgres allows a CTE local to a
-    // derived table) — no top-level WITH plumbing in executor.rs, so
-    // every non-path query is byte-identical to before.
-    //
-    // Cycle handling (LLD v0.4 §7.2 intent — "natural cycle
-    // handling"): the spec sketch used bare `UNION`, but the working
-    // tuple has to carry `depth` for the guard, and `UNION` dedups on
-    // the FULL row — so `(a,b,1)` and `(a,b,4)` are distinct and a
-    // cycle would spin up to the depth cap (O(MAX) work + a spurious
-    // truncation report). Postgres's `CYCLE src, dst SET is_cycle
-    // USING path` clause (PG14+) is the correct mechanism: it stops
-    // extending a path the moment a `(src, dst)` pair repeats ON THAT
-    // PATH, so a cycle terminates after one lap regardless of the
-    // depth cap. `UNION ALL` is required by the CYCLE clause; the
-    // final `SELECT DISTINCT … WHERE NOT is_cycle` drops the
-    // cycle-closing marker row and dedups the (src,dst) projection.
-    // The depth cap stays as the bound for genuinely-long ACYCLIC
-    // paths (the truncation case).
-    let from_fragment = format!(
-        "(WITH RECURSIVE {walk_cols} AS (\
-           SELECT {base_src}, {base_dst}{base_gid}, 1 \
-             FROM pgrdf._pgrdf_quads \
-            WHERE {base_pred}{base_graph_pred} \
-         UNION ALL \
-           SELECT w.src, q.{rec_proj_col}{rec_gid}, w.depth + 1 \
-             FROM walk w \
-             JOIN pgrdf._pgrdf_quads q ON q.{rec_join_col} = w.dst \
-            WHERE {rec_pred} \
-              AND w.depth < {max_depth}{rec_graph_pred}\
-         ) CYCLE src, dst SET is_cycle USING path \
-         SELECT DISTINCT {final_cols} FROM walk WHERE NOT is_cycle)"
-    );
-
-    // ─── Truncation probe (LLD v0.4 §7.2 depth-guard accounting) ──
-    //
-    // Precise detector: did ANY walk row land at `depth == $MAX`
-    // whose `dst` still has an outgoing `$P` edge (in the active
-    // graph scope) — i.e. the guard cut a path that could have
-    // continued? This NEVER under-counts: if a continuation exists
-    // past the cap the EXISTS fires. It can only slightly OVER-count
-    // (the benign §7.2-permitted case where the continuation node
-    // was already reached via a shorter path); over-counting is
-    // explicitly acceptable, claiming-complete-when-truncated is not.
-    //
-    // The probe rebuilds the same bounded walk, then asks the
-    // continuation question. It is a standalone scalar
-    // `SELECT CASE WHEN EXISTS(…) THEN 1 ELSE 0 END` returning a
-    // BIGINT — `executor.rs` reads it with the same `.select(...,
-    // Some(1), ...)` + `get::<i64>(1)` idiom every other scalar probe
-    // in this file uses (avoids any bool text-vs-typed ambiguity).
-    let probe_walk_cols = if carries_gid {
-        "pwalk(src, dst, gid, depth)"
-    } else {
-        "pwalk(src, dst, depth)"
-    };
-    let (probe_base_graph, probe_rec_graph, probe_cont_graph): (String, String, String) =
-        match scope {
-            PathGraphScope::AllGraphs => (String::new(), String::new(), String::new()),
-            PathGraphScope::Literal(gid) => (
-                format!(" AND graph_id = {gid}"),
-                format!(" AND q.graph_id = {gid}"),
-                format!(" AND c.graph_id = {gid}"),
-            ),
-            PathGraphScope::Variable => (
-                " AND graph_id <> 0".to_string(),
-                " AND q.graph_id = w.gid".to_string(),
-                " AND c.graph_id = w.gid".to_string(),
-            ),
-        };
-    let p_base_gid = if carries_gid { ", graph_id" } else { "" };
-    let p_rec_gid = if carries_gid { ", w.gid" } else { "" };
-    // Probe predicate match — same `IN (…)` set as the relation, but
-    // written with the probe-local `$1[, $2, …]` placeholders the
-    // caller bound in `probe_params` order. Plain `p+` is `IN ($1)`
-    // (identical to the old `= $1`); `(a|b)+` widens to `IN ($1,$2)`.
-    let probe_base_pred = format!("predicate_id IN ({probe_pred_ids_sql})");
-    let probe_rec_pred = format!("q.predicate_id IN ({probe_pred_ids_sql})");
-    let probe_cont_pred = format!("c.predicate_id IN ({probe_pred_ids_sql})");
-    // The probe mirrors the relation's `UNION ALL` + `CYCLE` walk
-    // (same cycle-safety), then asks: is there a NON-cycle row at
-    // exactly the depth cap whose `dst` still has an outgoing edge
-    // in the predicate set? A cycle terminates before the cap (CYCLE
-    // clause), so it never produces a `depth == MAX` row → a
-    // fully-resolved cyclic query correctly reports NO truncation.
-    // Only a genuinely long ACYCLIC path that the cap actually
-    // severed fires the probe.
-    let probe_sql = format!(
-        "SELECT CASE WHEN EXISTS (\
-           WITH RECURSIVE {probe_walk_cols} AS (\
-             SELECT {base_src}, {base_dst}{p_base_gid}, 1 \
-               FROM pgrdf._pgrdf_quads \
-              WHERE {probe_base_pred}{probe_base_graph} \
-           UNION ALL \
-             SELECT w.src, q.{rec_proj_col}{p_rec_gid}, w.depth + 1 \
-               FROM pwalk w \
-               JOIN pgrdf._pgrdf_quads q ON q.{rec_join_col} = w.dst \
-              WHERE {probe_rec_pred} \
-                AND w.depth < {max_depth}{probe_rec_graph}\
-           ) CYCLE src, dst SET is_cycle USING path \
-           SELECT 1 FROM pwalk w \
-            WHERE NOT w.is_cycle \
-              AND w.depth = {max_depth} \
-              AND EXISTS (\
-                SELECT 1 FROM pgrdf._pgrdf_quads c \
-                 WHERE c.{rec_join_col} = w.dst \
-                   AND {probe_cont_pred}{probe_cont_graph}\
-              )\
-         ) THEN 1::bigint ELSE 0::bigint END"
-    );
-    // The probe binds ONLY the predicate dict id(s) as `$1[, $2…]`.
-    // The Literal scope's resolved graph id is a translate-time
-    // integer constant (not user input) and is inlined directly into
-    // `probe_base_graph` / `probe_rec_graph` / `probe_cont_graph`
-    // above — keeping it out of the param vec keeps the probe's
-    // placeholder numbering aligned with `probe_params`.
-    // `probe_graph_id` is accepted for call-site symmetry with the
-    // main relation builder; it is intentionally not threaded into
-    // the param vec (see the inlining above).
-    let _ = probe_graph_id;
-
     PathRelation {
-        from_fragment,
+        from_fragment: spec.render(const_seed),
         columns,
-        probe_sql,
-        probe_params,
+        walk: Some(spec),
     }
 }
 
@@ -941,65 +879,31 @@ fn zero_length_node_set_sql(scope: &PathGraphScope, bound_self_pairs: &[String])
     parts.join(" UNION ")
 }
 
-/// Build the relation for a `*` (zero-or-more) path — LLD v0.4 §7.2,
-/// W3C SPARQL 1.1 §9.3. It is the E2 cycle-safe recursive `+` walk
-/// (the transitive part) `UNION` the W3C zero-length node-set (the
-/// reflexive part). Reuses [`build_one_or_more_relation_sql`] for the
-/// transitive arm — same `CYCLE` termination, same depth guard, same
-/// truncation probe (the reflexive arm is a single non-recursive scan
-/// and cannot truncate, so the probe is unchanged from `+`).
-///
-/// `bound_self_pairs` carries the resolved dict id placeholders for
-/// any *bound* (IRI) endpoint — see [`zero_length_node_set_sql`].
-/// `pred_ids_sql` / `probe_pred_ids_sql` / `probe_params` are the
-/// predicate-set fragments (E4 `(a|b)*` widens the set; plain `p*`
-/// is a 1-element set) — see [`build_one_or_more_relation_sql`].
+/// Build the relation for a `*` (zero-or-more) path — W3C SPARQL 1.1
+/// §9.3: the `+` walk `UNION` the zero-length pairs. Unseeded, those are
+/// the node set of the active scope; seeded from a bound endpoint x, the
+/// single pair (x, x), which holds even when x is not a node of the
+/// graph. The zero-length arm is a plain scan and cannot truncate.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_zero_or_more_relation_sql(
     pred_ids_sql: &str,
-    probe_pred_ids_sql: &str,
-    probe_params: Vec<i64>,
     graph_placeholder: Option<&str>,
     scope: &PathGraphScope,
     swapped: bool,
     max_depth: i32,
-    probe_graph_id: Option<i64>,
-    bound_self_pairs: &[String],
+    path_id: i32,
+    const_seed: Option<Seed<'_>>,
 ) -> PathRelation {
-    // The transitive part is exactly the `+` relation. Reuse it so
-    // there is ONE recursive-CTE + cycle-safety + probe implementation.
-    let plus = build_one_or_more_relation_sql(
+    walk_relation(
         pred_ids_sql,
-        probe_pred_ids_sql,
-        probe_params,
         graph_placeholder,
         scope,
         swapped,
         max_depth,
-        probe_graph_id,
-    );
-    // `+`'s `from_fragment` is a fully parenthesised derived table.
-    // Strip its outer parens and `UNION` the zero-length node-set so
-    // the whole `*` relation is a single parenthesised subquery the
-    // executor aliases exactly like the `+` one. (`+`'s final SELECT
-    // is `SELECT DISTINCT src, dst[, gid]` so the column shapes line
-    // up for the `UNION`; `UNION` also dedups the reflexive pairs
-    // that the transitive walk already produced for cyclic data.)
-    let plus_inner = plus
-        .from_fragment
-        .strip_prefix('(')
-        .and_then(|s| s.strip_suffix(')'))
-        .expect("+ relation from_fragment is parenthesised");
-    let zero = zero_length_node_set_sql(scope, bound_self_pairs);
-    let from_fragment = format!("({plus_inner} UNION {zero})");
-    PathRelation {
-        from_fragment,
-        columns: plus.columns,
-        // Truncation accounting is identical to `+` — only the
-        // recursive transitive arm can hit the depth cap.
-        probe_sql: plus.probe_sql,
-        probe_params: plus.probe_params,
-    }
+        path_id,
+        const_seed,
+        true,
+    )
 }
 
 /// Build the relation for a `?` (zero-or-one) path — LLD v0.4 §7.2,
@@ -1061,8 +965,7 @@ pub(crate) fn build_zero_or_one_relation_sql(
         columns,
         // `?` is non-recursive — nothing can truncate. An empty
         // probe means `collect_truncation_probes` skips it.
-        probe_sql: String::new(),
-        probe_params: Vec::new(),
+        walk: None,
     }
 }
 
@@ -1115,8 +1018,7 @@ pub(crate) fn build_alternation_relation_sql(
         from_fragment,
         columns,
         // Non-recursive single step — nothing can truncate.
-        probe_sql: String::new(),
-        probe_params: Vec::new(),
+        walk: None,
     }
 }
 
@@ -1488,32 +1390,26 @@ mod tests {
 
     #[test]
     fn star_relation_is_plus_walk_union_zero_length_set() {
-        // `p*` unscoped, both-var (no bound self-pairs): the E2 `+`
-        // cycle-safe recursive walk UNION the W3C §9.3 node-set
-        // (subject∪object of the active scope).
+        // `p*` unscoped, both-var: the breadth-first walk (no CTE, no
+        // path enumeration) UNION the W3C §9.3 node-set.
         let r = build_zero_or_more_relation_sql(
             "$1",
-            "$1",
-            vec![42],
             None,
             &PathGraphScope::AllGraphs,
             false,
             64,
+            0,
             None,
-            &[],
-        );
-        // Transitive part is the `+` relation verbatim …
-        assert!(
-            r.from_fragment
-                .contains("WITH RECURSIVE walk(src, dst, depth)")
         );
         assert!(
+            r.from_fragment.contains(
+                "pgrdf._path_walk(ARRAY[$1]::bigint[], NULL::bigint, NULL::bigint, false, 64, 0, false)"
+            ),
+            "unseeded forward walk: {}",
             r.from_fragment
-                .contains("CYCLE src, dst SET is_cycle USING path"),
-            "`*` reuses E2's cycle-safe walk for its transitive part"
         );
-        assert!(r.from_fragment.contains("w.depth < 64"), "depth guard");
-        // … UNION the zero-length node-set (subject ∪ object).
+        assert!(!r.from_fragment.contains("WITH RECURSIVE"));
+        assert!(!r.from_fragment.contains("CYCLE"), "no path enumeration");
         assert!(
             r.from_fragment
                 .contains("SELECT subject_id AS src, subject_id AS dst FROM pgrdf._pgrdf_quads"),
@@ -1525,65 +1421,105 @@ mod tests {
             "reflexive set over object nodes"
         );
         assert_eq!(r.columns, "(subject_id, object_id)");
-        // Truncation accounting is inherited unchanged from `+`.
-        assert_eq!(r.probe_params, vec![42]);
-        assert!(r.probe_sql.contains("w.depth = 64"));
+        assert_eq!(r.walk.as_ref().map(|w| w.path_id), Some(0));
     }
 
     #[test]
-    fn star_bound_endpoint_injects_unconditional_self_pair() {
-        // `<x> p* ?o` with x bound (placeholder $7): the W3C §9.3
-        // bound-endpoint self-pair holds even if x is not a graph
-        // node — injected as a constant `SELECT $7,$7`.
+    fn star_bound_endpoint_seeds_walk_and_self_pair() {
+        // `<x> p* ?o` with x bound ($7): the walk starts at x and the
+        // zero-length arm is the single pair (x, x) — W3C §9.3 holds it
+        // even when x is not a graph node.
         let r = build_zero_or_more_relation_sql(
             "$1",
-            "$1",
-            vec![42],
             None,
             &PathGraphScope::AllGraphs,
             false,
             64,
-            None,
-            &["$7".to_string()],
+            3,
+            Some(Seed::Subject("$7")),
         );
         assert!(
             r.from_fragment
-                .contains("SELECT $7::bigint AS src, $7::bigint AS dst"),
+                .contains("NULL::bigint, COALESCE($7, -1)::bigint, false, 64, 3, false)"),
+            "seeded forward from the bound subject: {}",
+            r.from_fragment
+        );
+        assert!(
+            r.from_fragment.contains(
+                "UNION SELECT COALESCE($7, -1)::bigint AS src, COALESCE($7, -1)::bigint AS dst"
+            ),
             "unconditional bound-endpoint self-pair"
+        );
+        assert!(r.walk.as_ref().unwrap().const_seeded);
+    }
+
+    #[test]
+    fn plus_seeded_from_object_walks_backward() {
+        // `?s p+ <x>`: start at x and follow edges object → subject;
+        // the columns keep the path's own direction (src = reached).
+        let r = build_one_or_more_relation_sql(
+            "$1",
+            Some("$2"),
+            &PathGraphScope::Literal(5),
+            false,
+            8,
+            1,
+            Some(Seed::Object("$9")),
+        );
+        assert!(
+            r.from_fragment
+                .contains("SELECT w.reached AS src, w.start AS dst")
+        );
+        assert!(
+            r.from_fragment.contains(
+                "ARRAY[$1]::bigint[], $2::bigint, COALESCE($9, -1)::bigint, true, 8, 1, false)"
+            ),
+            "{}",
+            r.from_fragment
+        );
+        // `^p+` seeded from the object follows edges forward again.
+        let s = build_one_or_more_relation_sql(
+            "$1",
+            Some("$2"),
+            &PathGraphScope::Literal(5),
+            true,
+            8,
+            1,
+            Some(Seed::Object("$9")),
+        );
+        assert!(
+            s.from_fragment
+                .contains("COALESCE($9, -1)::bigint, false, 8, 1, false)")
         );
     }
 
     #[test]
-    fn star_variable_scope_carries_gid_no_constant_self_pair() {
-        // `GRAPH ?g` `*`: per-named-graph identity (carries gid,
-        // excludes graph 0); a bound endpoint flows through the
-        // scoped node-set, so NO constant self-pair even if provided.
+    fn star_variable_scope_walks_per_graph_unseeded() {
+        // `GRAPH ?g` `*`: walks each named graph (per_graph = true),
+        // carries gid, excludes graph 0 — and is never seeded, even when
+        // an endpoint is bound (the seed's graph is not the walk's).
         let r = build_zero_or_more_relation_sql(
             "$2",
-            "$1",
-            vec![9],
             None,
             &PathGraphScope::Variable,
             false,
             32,
-            None,
-            &["$9".to_string()],
+            0,
+            Some(Seed::Subject("$9")),
         );
         assert_eq!(r.columns, "(subject_id, object_id, graph_id)");
-        assert!(r.from_fragment.contains("q.graph_id = w.gid"));
+        assert!(r.from_fragment.contains(", w.gid FROM pgrdf._path_walk("));
+        assert!(
+            r.from_fragment
+                .contains("NULL::bigint, false, 32, 0, true)")
+        );
         assert!(
             r.from_fragment
                 .contains("SELECT subject_id AS src, subject_id AS dst, graph_id AS gid"),
             "per-graph reflexive set"
         );
-        assert!(
-            r.from_fragment.contains("WHERE graph_id <> 0"),
-            "named graphs only (W3C §13.3)"
-        );
-        assert!(
-            !r.from_fragment.contains("$9::bigint"),
-            "Variable scope does not inject a constant self-pair"
-        );
+        assert!(r.from_fragment.contains("WHERE graph_id <> 0"));
+        assert!(!r.from_fragment.contains("$9"));
     }
 
     #[test]
@@ -1609,8 +1545,7 @@ mod tests {
             !r.from_fragment.contains("WITH RECURSIVE"),
             "`?` is non-recursive"
         );
-        assert!(r.probe_sql.is_empty(), "`?` cannot truncate — empty probe");
-        assert!(r.probe_params.is_empty());
+        assert!(r.walk.is_none(), "`?` is not walked and cannot truncate");
         assert_eq!(r.columns, "(subject_id, object_id)");
 
         // Inverse `(^p)?`: direct arm reads object_id → subject_id.
@@ -1655,7 +1590,7 @@ mod tests {
             !r.from_fragment.contains("subject_id AS dst"),
             "`|` is non-reflexive — no identity pairs"
         );
-        assert!(r.probe_sql.is_empty(), "non-recursive — empty probe");
+        assert!(r.walk.is_none(), "non-recursive — not walked");
         assert_eq!(r.columns, "(subject_id, object_id)");
 
         // Inverse `^(a|b)`: swapped endpoints.
@@ -1673,104 +1608,75 @@ mod tests {
 
     #[test]
     fn relation_sql_shapes_forward_and_inverse() {
-        // Forward `p+`, unscoped: walk subject→object, no graph pred,
-        // 2-column relation, UNION (cycle-safe), depth cap present.
+        // Forward `p+`, unscoped and unseeded: one breadth-first walk
+        // from every source; no recursive CTE, no path enumeration.
         let r = build_one_or_more_relation_sql(
             "$1",
-            "$1",
-            vec![42],
             None,
             &PathGraphScope::AllGraphs,
             false,
             64,
+            0,
             None,
         );
         assert!(
+            r.from_fragment.contains(
+                "(SELECT w.start AS src, w.reached AS dst FROM pgrdf._path_walk(\
+                 ARRAY[$1]::bigint[], NULL::bigint, NULL::bigint, false, 64, 0, false) w)"
+            ),
+            "{}",
             r.from_fragment
-                .contains("WITH RECURSIVE walk(src, dst, depth)")
         );
-        assert!(r.from_fragment.contains("SELECT subject_id, object_id"));
-        assert!(
-            r.from_fragment.contains("WHERE predicate_id IN ($1)"),
-            "1-elem predicate set = old `= $1`"
-        );
-        // Cycle-safe termination via Postgres `CYCLE` (UNION ALL is
-        // required by the CYCLE clause; the final WHERE NOT is_cycle
-        // drops the cycle-closing marker).
-        assert!(
-            r.from_fragment.contains(" UNION ALL "),
-            "UNION ALL required by the CYCLE clause"
-        );
-        assert!(
-            r.from_fragment
-                .contains("CYCLE src, dst SET is_cycle USING path"),
-            "CYCLE clause terminates cyclic walks"
-        );
-        assert!(
-            r.from_fragment.contains("WHERE NOT is_cycle"),
-            "drop the cycle-closing marker row"
-        );
-        assert!(r.from_fragment.contains("w.depth < 64"), "depth guard cap");
+        assert!(!r.from_fragment.contains("UNION"), "`+` is non-reflexive");
         assert_eq!(r.columns, "(subject_id, object_id)");
-        assert_eq!(r.probe_params, vec![42]);
-        assert!(r.probe_sql.contains("w.depth = 64"));
+        assert!(!r.walk.as_ref().unwrap().const_seeded);
 
-        // Inverse `^p+`: base arm reads object_id, subject_id.
+        // Inverse `^p+`: the walk follows edges object → subject.
         let ri = build_one_or_more_relation_sql(
             "$1",
-            "$1",
-            vec![7],
             None,
             &PathGraphScope::AllGraphs,
             true,
             64,
+            0,
             None,
         );
-        assert!(ri.from_fragment.contains("SELECT object_id, subject_id"));
-        assert!(ri.from_fragment.contains("q.subject_id"));
+        assert!(
+            ri.from_fragment
+                .contains("NULL::bigint, true, 64, 0, false)")
+        );
 
-        // GRAPH ?g (Variable) carries gid + same-graph recursive hop.
+        // GRAPH ?g (Variable): per-graph walk carrying gid.
         let rv = build_one_or_more_relation_sql(
             "$2",
-            "$1",
-            vec![9],
             None,
             &PathGraphScope::Variable,
             false,
             32,
+            2,
             None,
         );
         assert_eq!(rv.columns, "(subject_id, object_id, graph_id)");
-        assert!(rv.from_fragment.contains("q.graph_id = w.gid"));
-        assert!(rv.from_fragment.contains("graph_id <> 0"));
+        assert!(rv.from_fragment.contains(", w.gid FROM pgrdf._path_walk("));
+        assert!(rv.from_fragment.contains("false, 32, 2, true)"));
     }
 
     #[test]
-    fn plus_predicate_set_widens_relation_and_probe() {
-        // `(a|b)+` — both the recursive CTE and the truncation probe
-        // range over the predicate SET (`IN (...)`), not a single id.
+    fn plus_predicate_set_widens_walk() {
+        // `(a|b)+` — the walk ranges over the predicate SET.
         let r = build_one_or_more_relation_sql(
             "$1, $2",
-            "$1, $2",
-            vec![10, 20],
             None,
             &PathGraphScope::AllGraphs,
             false,
             64,
+            0,
             None,
         );
         assert!(
-            r.from_fragment.contains("WHERE predicate_id IN ($1, $2)"),
-            "base arm scans the predicate set"
-        );
-        assert!(
-            r.from_fragment.contains("q.predicate_id IN ($1, $2)"),
-            "recursive arm scans the predicate set"
-        );
-        assert_eq!(r.probe_params, vec![10, 20]);
-        assert!(
-            r.probe_sql.contains("predicate_id IN ($1, $2)"),
-            "probe binds the full predicate set"
+            r.from_fragment
+                .contains("pgrdf._path_walk(ARRAY[$1, $2]::bigint[]"),
+            "the walk follows every predicate of the set"
         );
     }
 }

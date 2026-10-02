@@ -7,6 +7,7 @@
 # Notes are CONSUMER-FACING: they describe what the function is and how to
 # use it well, in words that stand alone. A completeness test enforces this
 # file covers every extension-owned function in both directions.
+_path_walk(preds bigint[], graph_id bigint, seed bigint, follow_inverse boolean, max_depth integer, path_id integer, per_graph boolean)	internal	the breadth-first walk behind SPARQL + and * property paths (visited set per start, exact depth truncation, memory budget pgrdf.path_max_pairs); called by translated SQL, not an API. Since 0.6.37
 add_graph(g bigint)	internal	ensures the quad partition for a raw graph id; consumers create graphs by IRI with add_graph(iri)
 add_graph(id bigint, iri text)	internal	binds an explicit id/IRI pair; refuses rebinding either side. Consumers create graphs by IRI
 add_graph(iri text)	stable	create (or ensure) a graph by IRI; returns its graph_id; idempotent. Creating a new graph needs SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs (42501 otherwise, HINT names the grant); the partition DDL itself runs as the storage owner. Since 0.6.37
