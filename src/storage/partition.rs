@@ -264,6 +264,19 @@ pub(crate) fn as_storage_owner<R>(f: impl FnOnce() -> R) -> R {
     .execute()
 }
 
+/// Does `current_user` hold the privileges of the storage owner (the
+/// owner of `_pgrdf_quads`)? The staged loader is an owner lane: its
+/// internal DDL (staging tables, CTAS, ATTACH) runs in background workers
+/// as the caller, which needs this.
+pub(crate) fn caller_owns_storage() -> bool {
+    Spi::get_one::<bool>(
+        "SELECT pg_has_role(current_user, c.relowner, 'USAGE') \
+           FROM pg_catalog.pg_class c WHERE c.oid = 'pgrdf._pgrdf_quads'::regclass",
+    )
+    .expect("storage owner check failed")
+    .unwrap_or(false)
+}
+
 /// Can `current_user` create graphs? True when it holds SELECT and INSERT on both
 /// `_pgrdf_quads` and `_pgrdf_graphs` — the exact rule `add_graph`
 /// enforces. Consumers read this instead of inferring from ownership.

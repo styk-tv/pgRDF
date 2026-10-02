@@ -114,7 +114,11 @@ pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
     let w = jobctl::read_worker(slot);
     let job = jobctl::read_job(w.job_idx as usize);
     let db_oid = pg_sys::Oid::from_u32(job.db_oid);
-    BackgroundWorker::connect_worker_to_spi_by_oid(Some(db_oid), None);
+    // The worker runs as the CALLER's role (recorded by the coordinator),
+    // so every table and partition act it performs carries the caller's
+    // own privileges — never the bootstrap superuser's.
+    let role_oid = pg_sys::Oid::from_u32(job.role_oid);
+    BackgroundWorker::connect_worker_to_spi_by_oid(Some(db_oid), Some(role_oid));
 
     let job_id = job.job_id;
     let pid = unsafe { pg_sys::MyProcPid };
@@ -312,7 +316,8 @@ fn load_turtle_staged_ping(n_workers: i32) -> pgrx::JsonB {
     // takes NO conflicting lock on it (see module docs: TRUNCATE here would deadlock against
     // wait_for_shutdown). Each worker's row carries this run's job_id so the count is isolated.
     let db_oid: u32 = unsafe { pg_sys::MyDatabaseId }.to_u32();
-    let job_idx = jobctl::create_job("<ping>", 0, db_oid, want as u16, 0)
+    let role_oid: u32 = unsafe { pg_sys::GetUserId() }.to_u32();
+    let job_idx = jobctl::create_job("<ping>", 0, db_oid, role_oid, want as u16, 0)
         .unwrap_or_else(|| error!("pgrdf staged loader: no free job slot (MAX_JOBS reached)"));
     let job_id = jobctl::job_id_of(job_idx);
 
@@ -564,6 +569,27 @@ fn run_phase(job_idx: usize, phase: u8, specs: &[WorkerSpec]) -> PhaseOutcome {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)) -> pgrx::JsonB {
+    crate::storage::loader::require_server_file_read("load_turtle_staged_run");
+    // The staged loader is an OWNER lane: its workers run as the caller
+    // (never the bootstrap superuser), and their staging-table, CTAS and
+    // ATTACH DDL needs the storage owner's privileges. Refused up front,
+    // before any worker is spawned, so nothing is half-done.
+    if !crate::storage::partition::caller_owns_storage() {
+        let role: String = Spi::get_one("SELECT quote_ident(current_user::text)")
+            .expect("current_user lookup failed")
+            .unwrap_or_default();
+        crate::refuse_with_hint(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+            format!(
+                "load_turtle_staged_run: the staged loader runs its partition DDL in \
+                 workers as the caller and needs the privileges of the storage owner; \
+                 role {role} does not hold them"
+            ),
+            "load as the storage owner, or use pgrdf.load_turtle / the parse_* content \
+             loaders, which need only table grants"
+                .to_string(),
+        );
+    }
     crate::storage::lock::require_unlocked(graph_id, "load_turtle_staged_run"); // #107
     // #123: staged workers COMMIT their own transactions; inside a caller
     // transaction block the coordinator waits on workers that wait on the
@@ -608,8 +634,9 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
     };
 
     let db_oid: u32 = unsafe { pg_sys::MyDatabaseId }.to_u32();
-    let job_idx =
-        jobctl::create_job(path, graph_id, db_oid, requested as u16, 0).unwrap_or_else(|| {
+    let role_oid: u32 = unsafe { pg_sys::GetUserId() }.to_u32();
+    let job_idx = jobctl::create_job(path, graph_id, db_oid, role_oid, requested as u16, 0)
+        .unwrap_or_else(|| {
             error!(
                 "pgrdf staged loader: no free job slot (MAX_JOBS reached) or path exceeds PATH_CAP"
             )
