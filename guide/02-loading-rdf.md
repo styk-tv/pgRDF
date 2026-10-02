@@ -115,6 +115,18 @@ The file must be readable by the PostgreSQL server process. If your
 client and server are on different machines, read the file in your
 application and use `parse_turtle` instead.
 
+Reading a server file needs the privileges of the built-in role
+`pg_read_server_files` (a superuser has them), the same rule PostgreSQL
+applies to `COPY … FROM 'file'`. Without it every file loader refuses
+with SQLSTATE `42501` and the fix in the hint:
+
+```sql
+GRANT pg_read_server_files TO loader_role;
+```
+
+The string loaders (`parse_turtle`, `parse_nquads`, `parse_trig`) need
+no such role: the content arrives as a query argument.
+
 ### Load reports
 
 The `_verbose` variants return a JSONB report instead of a count:
@@ -161,6 +173,11 @@ Rules:
 - Malformed lines are skipped, not fatal. A Turtle file is not
   N-Triples: given one, the staged loader reports `"ok": true` and
   loads **zero** triples. Check `triples` in the report.
+- It is an **owner lane**. Its background workers run as the calling
+  role, and the staging and partition work they do needs the privileges
+  of the owner of the pgRDF tables. Any other role is refused up front
+  (`42501`), before a worker starts; `load_turtle` given an N-Triples
+  file by such a role takes the standard parser instead of this one.
 
 ### `bulk_load => true`
 

@@ -13,9 +13,11 @@ directly, as listed.
 | Function | Returns | Purpose |
 |---|---|---|
 | `add_graph(iri text)` | `bigint` | Create a graph (or find the existing one) and return its id. |
+| `create_graph(iri text)` | `bigint` | Create a graph, or refuse (`42710`) if the IRI exists; the hint names the existing graph and its source digest. |
+| `can_create_graphs()` · `can_drop_graphs()` | `boolean` | Whether the current role holds the grants `add_graph` / `drop_graph` require. |
 | `graph_id(iri text)` | `bigint` | Id for an IRI, or `NULL` if there is no such graph. |
 | `graph_iri(id bigint)` | `text` | IRI for an id, or `NULL`. |
-| `graph_inventory()` | table | Every graph: `graph_id`, `iri`, `asserted`, `inferred`, `locked`, `lock_reason`, `materialization`. |
+| `graph_inventory()` | table | Every graph: `graph_id`, `iri`, `asserted`, `inferred`, `locked`, `lock_reason`, `materialization`, `source_sha256`, `source_loads`, `identity_digest`. |
 | `count_quads(g bigint DEFAULT 0)` | `bigint` | Asserted + inferred triples in one graph. |
 | `clear_graph(id bigint)` · `clear_graph(iri text)` | `bigint` | Remove all triples; keep the graph. |
 | `copy_graph(src bigint, dst bigint)` · `copy_graph(src_iri text, dst_iri text)` | `bigint` | Append `src` into `dst`, inferred triples included. The IRI form needs `dst` to exist. |
@@ -23,9 +25,9 @@ directly, as listed.
 | `drop_graph(id bigint, cascade boolean DEFAULT true)` · `drop_graph(iri text, cascade boolean DEFAULT true)` | `bigint` | Remove a graph. With `cascade => false`, refuses if it holds inferred triples. |
 | `carve_graph(src bigint, predicate text, dst bigint)` | `bigint` | Copy every triple using one predicate. |
 | `carve_graph(src bigint, seeds text[], dst bigint, max_hops integer DEFAULT 1)` | `bigint` | Copy the neighbourhood of seed IRIs, up to `max_hops` steps. |
-| `lock_graph(graph_id bigint, reason text)` | `boolean` | Make a graph read-only for every write path. |
+| `lock_graph(graph_id bigint, reason text)` | `boolean` | Make a graph read-only for every write path, plain SQL included. |
 | `unlock_graph(graph_id bigint, reason text)` | `boolean` | Release a lock. |
-| `graph_integrity(graph_id bigint)` | `jsonb` | Check every triple is well-formed. |
+| `graph_integrity(graph_id bigint)` | `jsonb` | Check every triple is well-formed and lock custody is consistent. |
 | `orphan_partitions()` | table | Storage partitions with no graph. Normally empty. |
 
 Guide: [05 — Managing graphs](05-graphs.md)
@@ -38,10 +40,10 @@ Guide: [05 — Managing graphs](05-graphs.md)
 | `parse_turtle_verbose(content text, graph_id bigint, base_iri text DEFAULT NULL)` | `jsonb` | Same, with a load report. |
 | `parse_trig(content text, default_graph_id bigint DEFAULT 0, strict boolean DEFAULT false)` | `jsonb` | Load TriG. Named graphs in the data are created as needed; with `strict => true` they must already exist. |
 | `parse_nquads(content text, default_graph_id bigint DEFAULT 0, strict boolean DEFAULT false)` | `jsonb` | Load N-Quads, same rules. |
-| `load_turtle(path text, graph_id bigint, base_iri text DEFAULT NULL, bulk_load boolean DEFAULT false)` | `bigint` | Load a file from the server's filesystem. |
+| `load_turtle(path text, graph_id bigint, base_iri text DEFAULT NULL, bulk_load boolean DEFAULT false)` | `bigint` | Load a file from the server's filesystem. All file loaders need the `pg_read_server_files` role. |
 | `load_turtle_verbose(path text, graph_id bigint, base_iri text DEFAULT NULL, bulk_load boolean DEFAULT false)` | `jsonb` | Same, with a load report. |
 | `load_turtle_streaming(path text, graph_id bigint, window_triples integer DEFAULT 20000000, id_reserve_block integer DEFAULT 1000000, base_iri text DEFAULT NULL)` | `jsonb` | Windowed load for files larger than memory. |
-| `load_turtle_staged_run(path text, graph_id bigint, n_workers integer DEFAULT 0)` | `jsonb` | Parallel multi-worker load of a large N-Triples file into an empty database. |
+| `load_turtle_staged_run(path text, graph_id bigint, n_workers integer DEFAULT 0)` | `jsonb` | Parallel multi-worker load of a large N-Triples file into an empty database. Owner of the pgRDF tables only. |
 | `load_turtle_staged(path text, graph_id bigint, n_workers integer DEFAULT 0)` | procedure | Same, as a `CALL`-able procedure. |
 
 Guide: [02 — Loading RDF](02-loading-rdf.md)
@@ -77,6 +79,8 @@ Guides: [04 — Reasoning](04-reasoning.md) · [06 — Validation](06-validation
 | `structural_digest(graph_id bigint)` | `text` | First-degree structural digest (`pgrdf-fd1-sha256`). An unequal result proves the graphs differ. |
 | `export_graph(graph_id bigint)` | `SETOF text` | Asserted triples as sorted canonical N-Triples. |
 | `graph_manifest(graph_id bigint)` | `jsonb` | Digests, counts, engine version, and what a copy doesn't carry. |
+| `graph_diff_summary(a bigint, b bigint)` | `jsonb` | What changed from `a` to `b`: counts of ground triples and blank-node components, by predicate and by class. |
+| `graph_diff(a bigint, b bigint, side text DEFAULT NULL, predicate text DEFAULT NULL, class text DEFAULT NULL)` | table | The differing triples (`side`, `subject`, `predicate`, `object`, `component`), in a fixed order; blank-node components whole. |
 
 Guide: [07 — Identity and export](07-identity-and-export.md)
 

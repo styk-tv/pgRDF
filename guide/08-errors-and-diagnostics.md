@@ -17,9 +17,10 @@ plus a message that names what was refused and usually how to fix it.
 | `22023` | Invalid argument or content | unknown `materialize` profile or `validate` mode; negative graph id |
 | `0A000` | Unsupported construct | `SERVICE`, `FILTER EXISTS`, `LANGMATCHES` |
 | `42704` | Unknown graph | `graph_digest` of a graph that doesn't exist; `drop_graph` of an unknown IRI |
-| `42710` | Binding conflict | binding an IRI or id already bound to another graph |
+| `42710` | Already exists / binding conflict | `create_graph` of a taken IRI; binding an IRI or id already bound to another graph |
+| `42501` | Missing privilege | creating a graph without `INSERT` on the pgRDF tables; a file loader without `pg_read_server_files`; the hint names the `GRANT` |
 | `2BP01` | Dependent objects | `drop_graph(g, cascade => false)` on a graph with inferred triples |
-| `54000` | A configured limit was exceeded | property-path truncation with `pgrdf.on_path_truncation = 'error'` |
+| `54000` | A configured limit was exceeded | property-path truncation with `pgrdf.on_path_truncation = 'error'`; a walk past `pgrdf.path_max_pairs`; a diff past `pgrdf.diff_max_rows` |
 | `XX000` | Internal error | a genuine fault |
 
 Match on the code, not the message text. Messages are written for
@@ -120,8 +121,10 @@ All settings can be changed per session with `SET`.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `pgrdf.path_max_depth` | `64` | Maximum depth of property-path (`+`, `*`) walks. |
+| `pgrdf.path_max_depth` | `64` | Maximum distance of property-path (`+`, `*`) walks from a start node. |
 | `pgrdf.on_path_truncation` | `warn` | `warn` returns partial results with a warning; `error` refuses them (`54000`); `count` returns them silently and only records the truncation in `last_call_stats()` / `stats()`. |
+| `pgrdf.path_max_pairs` | `1000000` | How many (start, reached) pairs one property-path walk may hold in memory; past it the query refuses (`54000`). Bind an endpoint of the path and the walk starts there instead. |
+| `pgrdf.diff_max_rows` | `5000000` | Memory bound of `graph_diff` / `graph_diff_summary`; past it the call refuses (`54000`). |
 | `pgrdf.auto_analyze` | `on` | Refresh planner statistics after loads and `materialize`. |
 | `pgrdf.bulk_defer_index_min` | `100000` | Above this many triples, bulk loads drop and rebuild indexes instead of maintaining them row by row. |
 | `pgrdf.dict_batch_size` | `500` | Terms per dictionary batch in the standard loader. |

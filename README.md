@@ -45,7 +45,7 @@ With Docker and nothing else, run the extension in a stock
 `postgres:18` container:
 
 ```sh
-VER=0.6.34
+VER=0.6.37
 ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 curl -fsSL https://github.com/styk-tv/pgRDF/releases/download/v$VER/pgrdf-$VER-pg18-glibc-$ARCH.tar.gz | tar -xz
 
@@ -76,8 +76,8 @@ from source) are in the [install guide](guide/01-install.md).
 | **Update** | SPARQL 1.1 UPDATE: `INSERT` / `DELETE` `DATA`, `INSERT` / `DELETE … WHERE`, `CREATE` / `CLEAR` / `DROP GRAPH`. Transactional like any SQL. → [Update](guide/03-querying.md#sparql-update) |
 | **Reason** | OWL 2 RL or RDFS materialization, stored beside your data and never mixed into it, with a freshness flag that tells you when to re-run. → [Reasoning](guide/04-reasoning.md) |
 | **Validate** | W3C SHACL Core (passes the 25/25 conformance suite) plus SHACL-SPARQL, with the report returned as JSONB. → [Validation](guide/06-validation-recipes.md) |
-| **Manage graphs** | Inventory, copy / move / clear / drop, carve out subgraphs by predicate or neighbourhood, write locks, integrity checks. → [Graphs](guide/05-graphs.md) |
-| **Identify and export** | Canonical graph digests (W3C RDFC-1.0), canonical N-Triples export, and a manifest anyone can check offline with `sha256sum`. → [Identity](guide/07-identity-and-export.md) |
+| **Manage graphs** | Inventory with source digests, copy / move / clear / drop, carve out subgraphs by predicate or neighbourhood, write locks that hold against plain SQL too, integrity checks. Any role with table grants can create graphs. → [Graphs](guide/05-graphs.md) |
+| **Identify, compare, export** | Canonical graph digests (W3C RDFC-1.0), a blank-node-aware diff between two graphs, canonical N-Triples export, and a manifest anyone can check offline with `sha256sum`. → [Identity](guide/07-identity-and-export.md) |
 | **Diagnose** | Standard SQLSTATE error codes, per-query completeness figures, and a queryable list of supported functions. → [Diagnostics](guide/08-errors-and-diagnostics.md) |
 
 ## Scale
@@ -112,7 +112,7 @@ The current version, per-architecture digests and pull commands are in
 - a signed OCI bundle whose origin you can verify with one command:
 
   ```sh
-  gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.34 --repo styk-tv/pgRDF
+  gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.37 --repo styk-tv/pgRDF
   ```
 
 ## Building from source

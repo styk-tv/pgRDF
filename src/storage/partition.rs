@@ -552,6 +552,44 @@ mod tests {
         assert!(!ro, "SELECT only reads false/false");
     }
 
+    /// F1 through the SPARQL route: CREATE GRAPH / DROP GRAPH dispatch to
+    /// add_graph / drop_graph as the caller, so a granted non-owner can do
+    /// both through pgrdf.sparql() as well as SQL, and an ungranted one is
+    /// refused with the same cure.
+    #[pg_test]
+    fn nonowner_creates_and_drops_graphs_through_sparql_update() {
+        writer_role("pgrdf_f1_sparql", "SELECT, INSERT, DELETE");
+        let (code, _h, restored) = as_role_caught(
+            "pgrdf_f1_sparql",
+            "SELECT * FROM pgrdf.sparql('CREATE GRAPH <urn:tdd:f1:sparql>')",
+        );
+        assert_eq!(code, None, "CREATE GRAPH as a granted non-owner");
+        assert!(restored);
+        Spi::run("RESET ROLE").unwrap();
+        let exists: bool = Spi::get_one(
+            "SELECT EXISTS(SELECT 1 FROM pgrdf._pgrdf_graphs WHERE iri = 'urn:tdd:f1:sparql')",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(exists);
+        let (code, _h, _r) = as_role_caught(
+            "pgrdf_f1_sparql",
+            "SELECT * FROM pgrdf.sparql('DROP GRAPH <urn:tdd:f1:sparql>')",
+        );
+        assert_eq!(code, None, "DROP GRAPH as a granted non-owner");
+        Spi::run("RESET ROLE").unwrap();
+        writer_role("pgrdf_f1_sparql_ro", "SELECT");
+        let (code, hint, _r) = as_role_caught(
+            "pgrdf_f1_sparql_ro",
+            "SELECT * FROM pgrdf.sparql('CREATE GRAPH <urn:tdd:f1:sparql2>')",
+        );
+        assert_eq!(code.as_deref(), Some("ERRCODE_INSUFFICIENT_PRIVILEGE"));
+        assert!(
+            hint.unwrap_or_default()
+                .contains("GRANT SELECT, INSERT ON pgrdf._pgrdf_quads")
+        );
+    }
+
     /// A partition created after a grant on the parent carries that
     /// grant. This is issue #96: without it a downstream `SECURITY
     /// DEFINER` function owned by a non-superuser role reads the parent

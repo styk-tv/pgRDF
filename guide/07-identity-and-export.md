@@ -60,6 +60,62 @@ reproduce. An **unequal** result proves the graphs differ. An
 blank-node structures can collide, for example a cycle of four blank
 nodes and two cycles of two. When you need proof, use `graph_digest`.
 
+### Locked graphs remember their digest
+
+A locked graph cannot change, so its `graph_digest` is computed once
+and then served from the stored value (visible as `identity_digest` in
+`graph_inventory()`). Unlocking clears it. Open graphs are digested on
+every call, so the answer is always current.
+
+## What changed between two graphs
+
+`graph_diff_summary(a, b)` and `graph_diff(a, b)` compare two graphs
+and are exact for graphs with blank nodes, which a `MINUS` query is
+not: every load gives blank nodes new internal ids, so a triple-by-
+triple comparison reports each blank-node triple as both removed and
+added.
+
+```sql
+SELECT pgrdf.graph_diff_summary(pgrdf.graph_id('http://example.org/v1'),
+                                pgrdf.graph_id('http://example.org/v2'));
+-- {"method": "ground set difference + blank-node components by RDFC-1.0 component digest; …",
+--  "ground": {"removed": 2, "added": 1, "common": 1102763},
+--  "components": {"removed": 1, "added": 1, "common": 37, "triples_removed": 3, "triples_added": 3},
+--  "by_predicate": [{"p": "http://www.w3.org/ns/shacl#minCount", "removed": 1, "added": 1}, …],
+--  "by_type": [{"class": "http://example.org/C", "removed": 0, "added": 1}]}
+```
+
+- **Ground triples** (no blank node) are compared exactly, one by one.
+- **Blank-node components** are the triples connected through shared
+  blank nodes: one RDF list, one SHACL property shape. Each is
+  canonicalised on its own (RDFC-1.0) and compared as a whole, so a
+  changed `sh:minCount` shows up as that property shape removed and
+  added, never as a renumbered mess.
+- The diff is empty exactly when the two graphs are isomorphic, the
+  same test `graph_digest` makes.
+- Counts: `ground.*` and `components.triples_*` are triples;
+  `components.removed/added/common` are components; `by_predicate`
+  covers both kinds of triples; `by_type` counts `rdf:type` triples per
+  class.
+
+`graph_diff` returns the triples themselves, `side` `-` (only in `a`)
+or `+` (only in `b`), as N-Triples terms, with `component` set to the
+component's digest for blank-node triples (their labels print as
+`_:<digest>_c14n0`, stable across calls). Rows come in a fixed order,
+so `OFFSET` / `LIMIT` paging is deterministic, and three optional
+arguments narrow the result: `side`, `predicate` (an IRI) and `class`
+(an `rdf:type` object). A component is returned whole when any of its
+triples matches.
+
+```sql
+SELECT side, subject, object
+  FROM pgrdf.graph_diff(1, 2, class => 'http://example.org/C');
+```
+
+Memory is bounded by `pgrdf.diff_max_rows` (default 5,000,000);
+pathological blank-node structures are refused with `54000`, as for
+`graph_digest`.
+
 ### Edge cases
 
 - An empty graph has a digest: the SHA-256 of empty input

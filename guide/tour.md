@@ -118,14 +118,16 @@ Inferred triples are stored beside your data, never mixed into it. The
 inventory keeps them apart:
 
 ```sql
-SELECT * FROM pgrdf.graph_inventory();
---  graph_id |            iri            | asserted | inferred | locked | lock_reason | materialization
--- ----------+---------------------------+----------+----------+--------+-------------+-----------------
---         0 | urn:pgrdf:graph:0         |        0 |        0 | f      |             | never
---         1 | http://example.org/people |       13 |        8 | f      |             | current
+SELECT graph_id, iri, asserted, inferred, locked, materialization
+  FROM pgrdf.graph_inventory();
+--  graph_id |            iri            | asserted | inferred | locked | materialization
+-- ----------+---------------------------+----------+----------+--------+-----------------
+--         0 | urn:pgrdf:graph:0         |        0 |        0 | f      | never
+--         1 | http://example.org/people |       13 |        8 | f      | current
 ```
 
-(Graph `0` is the built-in default graph.)
+(Graph `0` is the built-in default graph. The inventory also reports
+what each graph was loaded from; see [managing graphs](05-graphs.md#the-inventory).)
 
 ## 4. Validate it with SHACL
 

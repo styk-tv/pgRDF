@@ -104,9 +104,6 @@ reasonable = { version = "0.4.4", features = ["rdf-12"] }
 # passthrough merged upstream (gtfierro/reasonable#50) and ships from
 # 0.4.3, so there is no longer a fork patch on `reasonable`.
 #
-# The rudof crates are themselves redirected to a fork by the
-# `[patch.crates-io]` block at the end of this file.
-#
 # `0.3.2` (2026-05-26) — adds the SHACL-SPARQL constraint component
 # (`IRComponent::Sparql` + `sh:sparql`/`sh:select` parsing) and the
 # `SparqlEngine` target-resolution methods (target_node, target_class,
@@ -115,13 +112,13 @@ reasonable = { version = "0.4.4", features = ["rdf-12"] }
 # `mode => 'sparql'` is no longer an upstream-gated short-circuit and
 # the dual-path Track H roadmap (rudof + pgRDF-native) becomes
 # implementable. See ROADMAP.md §4 Track H.
-shacl = "0.3.2"
+shacl = "0.3.24"
 # rudof's RDF abstraction layer. `shacl 0.3` exposes its API in terms
 # of `rudof_rdf::rdf_core::{RDFFormat, term::Object, ...}` and
 # `rudof_rdf::rdf_impl::InMemoryGraph` — none of which `shacl`
 # re-exports. The dep is pinned to the same 0.3.x major as `shacl`
 # so the type identity unifies workspace-wide.
-rudof_rdf = "0.3"
+rudof_rdf = "0.3.24"
 # v0.7.0 parallel bulk-ingest fast path (`load_turtle(..., bulk_load => true)`).
 # rayon drives the all-cores PASS-1 parse + PASS-3 triple→id resolve of the
 # bulk loader. The parallel regions are PURE-CPU — no SPI / palloc / Postgres
@@ -137,7 +134,7 @@ pgrx-tests = "=0.19.2"
 # `shacl::ir::IRSchema::new(PrefixMap)` requires a `PrefixMap` and
 # `shacl` does not re-export it. Pinned to the same 0.3.x major as
 # `shacl` / `rudof_rdf` so the type identity is workspace-wide.
-prefixmap = "0.3"
+prefixmap = "0.3.24"
 
 [profile.dev]
 panic = "unwind"
@@ -148,36 +145,10 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 
-# Temporary: the rudof crates are taken from styk-tv/rudof rather than
-# crates.io, pinned by commit, to carry a SHACL property-path fix ahead
-# of its upstream release.
-#
-# The defect: a literal reached through `sh:oneOrMorePath`,
-# `sh:zeroOrMorePath`, or a `sh:path ( … )` sequence is absent from the
-# value set, and a literal partway along discards the whole set —
-# including sibling values still reachable. `objects_for` begins with
-# `term_as_subject(..)?`, which fails on a literal, and the recursing
-# branches traversed from every object without guarding that. Measured
-# per cell in `tests/shacl-capability/PATH-MATRIX.json`.
-#
-# Reported upstream as rudof-project/rudof#818 and fixed by
-# rudof-project/rudof#819, opened from this branch. All four crates are
-# patched together so their type identity unifies: `shacl` exposes its
-# API in terms of `rudof_rdf` / `rudof_iri` / `prefixmap`, and mixing a
-# crates.io `shacl` with a patched `rudof_rdf` would split it.
-#
-# Pinned by `rev`, never by branch: a branch moves, and an attested
-# build must name the exact bytes it was produced from.
-#
-# DROP THIS BLOCK once #819 merges and a `shacl` release carries the
-# fix — restore the plain crates.io versions, regenerate
-# `CAPABILITY.json` and `PATH-MATRIX.json`, and delete
-# `UNENFORCED_PATH_TYPES` from `src/validation/shacl.rs`.
-[patch.crates-io]
-shacl          = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
-rudof_rdf      = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
-rudof_iri      = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
-prefixmap      = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
-sparql_service = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
-mie            = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
-rudof_config   = { git = "https://github.com/styk-tv/rudof", rev = "20894fa1cebf7fa41464ee1bcd911e707856738d" }
+# ERRATA.v0.6 E-014 history: SHACL property paths dropped literal
+# endpoints (sh:oneOrMorePath, sh:zeroOrMorePath, sequences) — reported
+# as rudof-project/rudof#818, fixed by rudof-project/rudof#819 (merged
+# 2026-09-17) and shipped in rudof 0.3.24 (2026-09-27). 0.6.36 carried
+# the fix as a `[patch.crates-io]` pin on a fork; 0.6.37 retires the pin
+# and takes the crates.io release (the `0.3.24` floors above), so an
+# attested build names only published crates again.

@@ -1319,8 +1319,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mie"
-version = "0.3.21"
-source = "git+https://github.com/styk-tv/rudof?rev=20894fa1cebf7fa41464ee1bcd911e707856738d#20894fa1cebf7fa41464ee1bcd911e707856738d"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeb361b5fc801ac3f5af289b9e209ca124efb4cc9cd14100f8dec05888cab0f2"
 dependencies = [
  "hashlink",
  "rudof_iri",
@@ -1518,6 +1519,7 @@ checksum = "7f6632dd080bd07676f06e70254ff5862c9943e9483d700fa7258df73a3f9a6a"
 dependencies = [
  "dashmap",
  "getrandom 0.3.4",
+ "js-sys",
  "libc",
  "oxhttp",
  "oxiri 0.2.11",
@@ -1617,6 +1619,7 @@ version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c17c2ae62ac34fda465f6331105906c0e17b4e088dac3249e1f229b962062503"
 dependencies = [
+ "js-sys",
  "thiserror 2.0.20",
 ]
 
@@ -1962,8 +1965,9 @@ dependencies = [
 
 [[package]]
 name = "prefixmap"
-version = "0.3.21"
-source = "git+https://github.com/styk-tv/rudof?rev=20894fa1cebf7fa41464ee1bcd911e707856738d#20894fa1cebf7fa41464ee1bcd911e707856738d"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09fe6e54f7ebe4dfe628e177d5df8e900c24096c039088c3e5153eac051fa249"
 dependencies = [
  "colored",
  "indexmap",
@@ -2383,8 +2387,9 @@ dependencies = [
 
 [[package]]
 name = "rudof_config"
-version = "0.3.21"
-source = "git+https://github.com/styk-tv/rudof?rev=20894fa1cebf7fa41464ee1bcd911e707856738d#20894fa1cebf7fa41464ee1bcd911e707856738d"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c48b6c7d63b8563eb97086ce425dadd21988030b5a98cad98d7c9e49d3c12a44"
 dependencies = [
  "dirs",
  "serde",
@@ -2394,8 +2399,9 @@ dependencies = [
 
 [[package]]
 name = "rudof_iri"
-version = "0.3.21"
-source = "git+https://github.com/styk-tv/rudof?rev=20894fa1cebf7fa41464ee1bcd911e707856738d#20894fa1cebf7fa41464ee1bcd911e707856738d"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d94635d3a2bb6767292b982ec2cd45c5d7c136187b7c6d367fba9238f38052c"
 dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.3",
@@ -2411,8 +2417,9 @@ dependencies = [
 
 [[package]]
 name = "rudof_rdf"
-version = "0.3.21"
-source = "git+https://github.com/styk-tv/rudof?rev=20894fa1cebf7fa41464ee1bcd911e707856738d#20894fa1cebf7fa41464ee1bcd911e707856738d"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300359eb9033b3e3585de4d7010c64b4b38cb3e0e4e04a9c071fb5b35a060fec"
 dependencies = [
  "colored",
  "const_format",
@@ -2452,16 +2459,18 @@ dependencies = [
 
 [[package]]
 name = "rudof_typing"
-version = "0.3.21"
-source = "git+https://github.com/styk-tv/rudof?rev=20894fa1cebf7fa41464ee1bcd911e707856738d#20894fa1cebf7fa41464ee1bcd911e707856738d"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1dd9bbacd9c8e12771fb82ad26a6fa98c18d133ed9422c416ed15f1e12a3060"
 dependencies = [
  "either",
 ]
 
 [[package]]
 name = "rudof_viz"
-version = "0.3.21"
-source = "git+https://github.com/styk-tv/rudof?rev=20894fa1cebf7fa41464ee1bcd911e707856738d#20894fa1cebf7fa41464ee1bcd911e707856738d"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb154830e17aec381147874f31605c0164754d4495e1dece85a3808bd637e6db"
 dependencies = [
  "serde",
  "tempfile",
@@ -2766,8 +2775,9 @@ dependencies = [
 
 [[package]]
 name = "shacl"
-version = "0.3.21"
-source = "git+https://github.com/styk-tv/rudof?rev=20894fa1cebf7fa41464ee1bcd911e707856738d#20894fa1cebf7fa41464ee1bcd911e707856738d"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "686d8efa18fa0d43f540ce7f079e18dd39cb913f47d3ae7bbe7d584f340a65c9"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -2918,8 +2928,9 @@ dependencies = [
 
 [[package]]
 name = "sparql_service"
-version = "0.3.21"
-source = "git+https://github.com/styk-tv/rudof?rev=20894fa1cebf7fa41464ee1bcd911e707856738d#20894fa1cebf7fa41464ee1bcd911e707856738d"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "310b50486bcbe276829a42b8facb3648df8a8dfa9d3416a20ed59a5cf0bdcddc"
 dependencies = [
  "colored",
  "const_format",

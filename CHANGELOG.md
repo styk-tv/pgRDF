@@ -104,6 +104,12 @@ would have caught them.
   drops and recreates the function). No stable export is removed.
 - Upgrade: `ALTER EXTENSION pgrdf UPDATE` in place; graph ids, partitions and
   consumer schemas survive.
+- The rudof crates come from crates.io again (`shacl`, `rudof_rdf`,
+  `prefixmap` and their siblings at 0.3.24). 0.6.36 pinned them to a fork
+  carrying the sh:path literal-endpoint fix (rudof-project/rudof#819); that
+  fix shipped upstream in 0.3.24, so the `[patch.crates-io]` block is gone and
+  an attested build names only published crates. The SHACL capability and
+  path-matrix measurements were re-run on the released crates.
 
 ## [0.6.36] — 2026-09-16
 

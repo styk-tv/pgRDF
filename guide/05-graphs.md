@@ -40,18 +40,51 @@ SELECT pgrdf.graph_iri(1);  -- http://example.org/people
 > `copy_graph(iri, iri)`, `move_graph(iri, iri)`) refuse unknown IRIs
 > with SQLSTATE `42704` instead.
 
-## The inventory
+### Claiming a new IRI
 
-`pgrdf.graph_inventory()` lists every graph with its size, lock state
-and reasoning freshness:
+`add_graph` returns the existing graph when the IRI is already taken,
+which is what you want for "make sure this graph exists" and not what
+you want when two people load into one database. `create_graph` claims
+a **new** IRI or refuses:
 
 ```sql
-SELECT * FROM pgrdf.graph_inventory();
---  graph_id |            iri            | asserted | inferred | locked | lock_reason | materialization
--- ----------+---------------------------+----------+----------+--------+-------------+-----------------
---         0 | urn:pgrdf:graph:0         |        0 |        0 | f      |             | never
---         1 | http://example.org/people |       14 |        8 | f      |             | stale
---         2 | http://example.org/shapes |       10 |        0 | f      |             | never
+SELECT pgrdf.create_graph('http://example.org/people');
+-- ERROR:  42710: create_graph: graph <http://example.org/people> already exists (graph_id 1)
+-- HINT:  existing graph_id 1, source_sha256 3f2a… (loads 1): reuse it if that
+--        is the same content, or choose another IRI
+```
+
+The hint carries the digest of what the existing graph was loaded
+from, so you can tell "someone already loaded this file" from "someone
+else is using this name".
+
+### Who may create graphs
+
+Creating a graph needs `SELECT` and `INSERT` on `pgrdf._pgrdf_quads` and
+`pgrdf._pgrdf_graphs`; dropping one needs `SELECT` and `DELETE` on both.
+Table ownership is not required: the one step PostgreSQL reserves for
+the table owner (creating or removing the graph's storage partition)
+runs as the owner inside `add_graph` / `drop_graph`, and nothing else
+does. A role without the grants is refused with `42501` and the exact
+`GRANT` in the hint. Ask the server directly:
+
+```sql
+SELECT pgrdf.can_create_graphs(), pgrdf.can_drop_graphs();
+```
+
+## The inventory
+
+`pgrdf.graph_inventory()` lists every graph with its size, lock state,
+reasoning freshness and what it was loaded from:
+
+```sql
+SELECT graph_id, iri, asserted, inferred, locked, materialization, source_loads
+  FROM pgrdf.graph_inventory();
+--  graph_id |            iri            | asserted | inferred | locked | materialization | source_loads
+-- ----------+---------------------------+----------+----------+--------+-----------------+--------------
+--         0 | urn:pgrdf:graph:0         |        0 |        0 | f      | never           |
+--         1 | http://example.org/people |       14 |        8 | f      | stale           |            1
+--         2 | http://example.org/shapes |       10 |        0 | f      | never           |            1
 ```
 
 | Column | Meaning |
@@ -60,6 +93,8 @@ SELECT * FROM pgrdf.graph_inventory();
 | `inferred` | Triples produced by `materialize`. |
 | `locked`, `lock_reason` | Whether the graph is write-locked, and why (see below). |
 | `materialization` | `never` / `current` / `stale` / `unknown`. See [reasoning](04-reasoning.md#is-the-materialization-current). |
+| `source_sha256`, `source_loads` | SHA-256 of the bytes the last load read, and how many loads the graph has had. `NULL` until a load records it. With one load, the digest identifies the source file; with more, the graph is the sum of several. |
+| `identity_digest` | A locked graph's `graph_digest`, once computed. `NULL` for open graphs: their identity is computed on request. |
 
 Because it's a normal set-returning function, you can filter, join and
 aggregate it like a table:
@@ -163,9 +198,10 @@ than at the edge of the data.
 
 A lock makes a graph read-only until someone unlocks it. While it's
 held, **every** write path refuses with SQLSTATE `55P03`: loading,
-SPARQL UPDATE, `clear_graph`, `drop_graph`, `materialize`, and being
-the destination of `copy_graph` / `move_graph` / `carve_graph`. Reads
-keep working.
+SPARQL UPDATE, `clear_graph`, `drop_graph`, `materialize`, being the
+destination of `copy_graph` / `move_graph` / `carve_graph`, and plain
+SQL against the storage tables (`lock_graph` installs triggers on the
+graph's partition; `unlock_graph` removes them). Reads keep working.
 
 ```sql
 SELECT pgrdf.lock_graph(pgrdf.graph_id('http://example.org/people'), 'frozen for audit');
@@ -182,8 +218,13 @@ SELECT pgrdf.unlock_graph(pgrdf.graph_id('http://example.org/people'), 'audit do
   reason is never overwritten. Unlocking an unlocked graph refuses
   (`55000`).
 - The inventory's `locked` / `lock_reason` columns show current locks.
-- A lock is a coordination tool, not a security boundary. Use normal
-  PostgreSQL roles and privileges to control who may write.
+- Every refusal carries the cure as a hint: `pgrdf.unlock_graph(<id>,
+  '<reason>')`.
+- A locked graph's `graph_digest` is computed once and then served from
+  the inventory's `identity_digest`; unlocking clears it.
+- A lock holds against every role except the owner of the pgRDF tables
+  and superusers, who can drop its triggers. Use normal PostgreSQL roles
+  and privileges to decide who those are.
 
 ## Checking a graph's health
 
@@ -194,8 +235,13 @@ no references to missing terms.
 ```sql
 SELECT pgrdf.graph_integrity(pgrdf.graph_id('http://example.org/people'));
 -- {"clean": true, "graph_id": 1, "illegal_terms": 0, "dangling_refs": 0,
---  "counts": {"quads": 22, "subject_literal": 0, "predicate_bnode": 0, ...}}
+--  "counts": {"quads": 22, "subject_literal": 0, "predicate_bnode": 0, ...},
+--  "lock_custody": {"locked": false, "write_triggers": 0, "consistent": true}}
 ```
+
+`lock_custody` checks that a locked graph carries its write triggers
+and an open one carries none; a mismatch (someone removed a trigger by
+hand) makes the graph not clean.
 
 A graph that is not clean should be reloaded from source. Validation
 results on such a graph can't be trusted.

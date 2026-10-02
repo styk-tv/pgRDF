@@ -71,6 +71,7 @@ SELECT c.email, s.sparql->>'name' AS name
 |---|---|
 | Basic graph patterns, joins on shared variables | `?p foaf:knows ?q . ?q foaf:name ?n` |
 | `OPTIONAL`, including multi-pattern and nested | `OPTIONAL { ?p foaf:mbox ?m }` |
+| Blank nodes in patterns, as anonymous variables | `?p foaf:knows [ foaf:name ?n ]` |
 | `UNION` (any number of branches) | `{ ?p foaf:name ?n } UNION { ?p foaf:nick ?n }` |
 | `MINUS` | `?p a foaf:Person MINUS { ?p foaf:mbox ?m }` |
 | `VALUES` | `VALUES ?p { ex:alice ex:carol }` |
@@ -207,12 +208,29 @@ $$);
 | `^p` | the edge reversed |
 | `p1\|p2` | either predicate; combines with the above, e.g. `(ex:a\|ex:b)+` |
 
-Sequence paths (`p1/p2`) are not supported. Write each step as its
-own triple pattern: `?a foaf:knows ?b . ?b foaf:name ?n`.
+A sequence path at the top level (`p1/p2`, including the RDF list idiom
+`rdf:rest*/rdf:first`) works: it is the same as writing each step as
+its own triple pattern. A sequence *inside* a repetition (`(p1/p2)*`)
+is not supported; `sparql_parse` lists it and the query is refused with
+`0A000`.
 
-Recursive walks stop at `pgrdf.path_max_depth` (default 64). If a walk
-is cut short you get a `WARNING`, and `pgrdf.last_call_stats()` reports
-it. See [errors and diagnostics](08-errors-and-diagnostics.md#was-the-answer-complete).
+`p+` and `p*` compute reachability: each node is visited once, so a
+cycle is walked once, and the walk starts from whichever end of the
+path is already known, a constant or a variable bound by an earlier
+pattern. Put the selective pattern first and the walk stays small:
+
+```sql
+-- walks only from the few ?state nodes, not from every node in the graph
+SELECT ?caller WHERE { ?state ex:code "22012" . ?caller ex:calls+ ?state }
+```
+
+Walks stop at `pgrdf.path_max_depth` (default 64) steps from a start
+node. If some node is reachable only beyond that, you get a `WARNING`
+and `pgrdf.last_call_stats()` reports the cut; a cycle alone never
+counts as one. A walk with neither end known over a large predicate
+is the whole transitive closure; `pgrdf.path_max_pairs` (default
+1,000,000) bounds what it may hold and refuses with `54000` past that.
+See [errors and diagnostics](08-errors-and-diagnostics.md#was-the-answer-complete).
 After `materialize`, closure paths such as `rdfs:subClassOf+` are
 answered from the materialized triples without walking.
 
@@ -294,8 +312,7 @@ otherwise:
 | `FILTER EXISTS` / `FILTER NOT EXISTS` | a join, or `MINUS` / `OPTIONAL { … } FILTER(!BOUND(?x))` |
 | `LANGMATCHES` | `LANG(?x) = "fr"` |
 | `COALESCE`, `SUBSTR` and other functions not listed above | compute in SQL on the result rows |
-| Blank nodes in query patterns (`_:x`, `[]`) | use a variable |
-| Sequence paths (`foaf:knows/foaf:name`) | one triple pattern per step |
+| Sequence paths inside a repetition (`(foaf:knows/foaf:name)*`) | one triple pattern per step, then `*` on the single predicate |
 | `UNION` inside `OPTIONAL` | restructure as a top-level `UNION` |
 | `VALUES` that binds a `GRAPH` variable, or a `FILTER` on it | list explicit `GRAPH <iri>` blocks, or filter the result rows in SQL |
 | `BIND` inside a `UNION` branch; `FILTER` or `UNION` inside `MINUS` | move the `BIND` out of the branch; use several `MINUS` blocks |

@@ -27,19 +27,19 @@ Each release on the [releases page](https://github.com/styk-tv/pgRDF/releases)
 has one archive per CPU architecture, plus checksums:
 
 ```
-pgrdf-0.6.34-pg18-glibc-amd64.tar.gz
-pgrdf-0.6.34-pg18-glibc-arm64.tar.gz
+pgrdf-0.6.37-pg18-glibc-amd64.tar.gz
+pgrdf-0.6.37-pg18-glibc-arm64.tar.gz
 SHA256SUMS
 ```
 
 Inside each archive:
 
 ```
-pgrdf-0.6.34-pg18-glibc-amd64/
+pgrdf-0.6.37-pg18-glibc-amd64/
 ├── lib/pgrdf.so
 └── share/extension/
     ├── pgrdf.control
-    ├── pgrdf--0.6.34.sql
+    ├── pgrdf--0.6.37.sql
     └── pgrdf--<old>--<new>.sql     (upgrade scripts)
 ```
 
@@ -51,7 +51,7 @@ No image build: copy the files into a stock `postgres:18` container
 before its first start.
 
 ```sh
-VER=0.6.34
+VER=0.6.37
 ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 curl -fsSL https://github.com/styk-tv/pgRDF/releases/download/v$VER/pgrdf-$VER-pg18-glibc-$ARCH.tar.gz | tar -xz
 
@@ -73,7 +73,7 @@ to, say, `-p 5433:5432`.
 
 ```dockerfile
 FROM postgres:18
-ARG PGRDF_VERSION=0.6.34
+ARG PGRDF_VERSION=0.6.37
 ARG TARGETARCH
 ADD https://github.com/styk-tv/pgRDF/releases/download/v${PGRDF_VERSION}/pgrdf-${PGRDF_VERSION}-pg18-glibc-${TARGETARCH}.tar.gz /tmp/pgrdf.tar.gz
 RUN tar -xzf /tmp/pgrdf.tar.gz -C /tmp \
@@ -96,7 +96,7 @@ script to `/docker-entrypoint-initdb.d/` that runs
 ## C. An existing PostgreSQL server
 
 ```sh
-VER=0.6.34
+VER=0.6.37
 ARCH=amd64                       # or arm64
 curl -fLO https://github.com/styk-tv/pgRDF/releases/download/v$VER/pgrdf-$VER-pg18-glibc-$ARCH.tar.gz
 curl -fLO https://github.com/styk-tv/pgRDF/releases/download/v$VER/SHA256SUMS
@@ -149,10 +149,10 @@ artifact holds the same files as the archives.
 
 ```sh
 # check where it came from (GitHub CLI)
-gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.34 --repo styk-tv/pgRDF
+gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.37 --repo styk-tv/pgRDF
 
 # fetch the files for your architecture (oras CLI)
-oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.34-pg18-amd64      # or -arm64
+oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.37-pg18-amd64      # or -arm64
 ```
 
 A successful verification means the artifact was built by this
@@ -173,7 +173,7 @@ SELECT pgrdf.version(), pgrdf.build_id(),
        (SELECT extversion FROM pg_extension WHERE extname = 'pgrdf');
 --  version | build_id | extversion
 -- ---------+----------+------------
---  0.6.34  | v0.6.34  | 0.6.34
+--  0.6.37  | v0.6.37  | 0.6.37
 
 SELECT pgrdf.stats() -> 'shmem_ready';   -- true when shared_preload_libraries is set
 ```
@@ -191,13 +191,26 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgrdf TO app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgrdf TO app;
 ```
 
-Creating a graph (`add_graph`) also creates a table partition. Do that
-as the extension owner, or additionally grant `CREATE` on schema
-`pgrdf`. For a read-only role, grant only `USAGE` and `SELECT`.
+Those grants are also enough to create and drop graphs: `add_graph`
+needs `SELECT` and `INSERT` on `pgrdf._pgrdf_quads` and
+`pgrdf._pgrdf_graphs`, `drop_graph` needs `SELECT` and `DELETE` on them.
+The one step PostgreSQL reserves for the table owner (creating or
+removing a graph's storage partition) runs as the owner inside those
+two functions and nowhere else. A role without the grants gets `42501`
+with the exact `GRANT` in the hint; `pgrdf.can_create_graphs()` answers
+the question up front. For a read-only role, grant only `USAGE` and
+`SELECT`.
 
 The file loaders (`load_turtle` and its variants) read files from the
-database server's filesystem. Give write access only to roles you
-trust with that. An application sending data over the connection needs
+database server's filesystem, so they require the built-in role
+`pg_read_server_files`, as `COPY … FROM 'file'` does:
+
+```sql
+GRANT pg_read_server_files TO app;   -- only for roles you trust with the server's files
+```
+
+The staged loader additionally needs the privileges of the owner of the
+pgRDF tables. An application sending data over the connection needs
 only `parse_turtle`, `parse_trig` and `parse_nquads`.
 
 ## Upgrading
