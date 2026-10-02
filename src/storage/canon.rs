@@ -72,7 +72,7 @@ fn nt_escape(s: &str) -> String {
 /// Serialize one term; blank nodes go through `label` so callers control
 /// the substitution (`_:a`/`_:z` during first-degree hashing, issued
 /// canonical ids at the end).
-fn nt_term(t: &CTerm, label: &dyn Fn(&str) -> String) -> String {
+pub(crate) fn nt_term(t: &CTerm, label: &dyn Fn(&str) -> String) -> String {
     match t {
         CTerm::Iri(i) => format!("<{i}>"),
         CTerm::BNode(b) => format!("_:{}", label(b)),
@@ -89,7 +89,7 @@ fn nt_term(t: &CTerm, label: &dyn Fn(&str) -> String) -> String {
     }
 }
 
-fn nt_triple(t: &Triple, label: &dyn Fn(&str) -> String) -> String {
+pub(crate) fn nt_triple(t: &Triple, label: &dyn Fn(&str) -> String) -> String {
     format!(
         "{} {} {} .\n",
         nt_term(&t.0, label),
@@ -108,22 +108,33 @@ fn sha256_hex(data: &str) -> String {
 /// join shape `serialise_graph_to_ntriples` uses (shacl.rs), minus the
 /// inferred rows.
 pub(crate) fn read_asserted_triples(graph_id: i64) -> Vec<Triple> {
+    read_asserted_triples_where(graph_id, "")
+}
+
+/// The term-structured triple read behind `graph_digest`, narrowed by an
+/// extra SQL condition over the aliases `q` (quad), `s` / `p` / `o`
+/// (dictionary rows) — `graph_diff` reads only the blank-node-bearing
+/// triples this way. `extra` is engine-built, never user input.
+pub(crate) fn read_asserted_triples_where(graph_id: i64, extra: &str) -> Vec<Triple> {
     let mut triples: Vec<Triple> = Vec::new();
+    let sql = format!(
+        "SELECT
+            s.term_type,        s.lexical_value,
+            p.lexical_value     AS p_iri,
+            o.term_type,        o.lexical_value,
+            dt.lexical_value    AS o_dt,
+            o.language_tag      AS o_lang
+         FROM pgrdf._pgrdf_quads q
+         JOIN pgrdf._pgrdf_dictionary s  ON s.id  = q.subject_id
+         JOIN pgrdf._pgrdf_dictionary p  ON p.id  = q.predicate_id
+         JOIN pgrdf._pgrdf_dictionary o  ON o.id  = q.object_id
+         LEFT JOIN pgrdf._pgrdf_dictionary dt ON dt.id = o.datatype_iri_id
+         WHERE q.graph_id = $1 AND q.is_inferred = FALSE {extra}"
+    );
     Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT
-                    s.term_type,        s.lexical_value,
-                    p.lexical_value     AS p_iri,
-                    o.term_type,        o.lexical_value,
-                    dt.lexical_value    AS o_dt,
-                    o.language_tag      AS o_lang
-                 FROM pgrdf._pgrdf_quads q
-                 JOIN pgrdf._pgrdf_dictionary s  ON s.id  = q.subject_id
-                 JOIN pgrdf._pgrdf_dictionary p  ON p.id  = q.predicate_id
-                 JOIN pgrdf._pgrdf_dictionary o  ON o.id  = q.object_id
-                 LEFT JOIN pgrdf._pgrdf_dictionary dt ON dt.id = o.datatype_iri_id
-                 WHERE q.graph_id = $1 AND q.is_inferred = FALSE",
+                &sql,
                 None,
                 &[unsafe {
                     pgrx::datum::DatumWithOid::new(
@@ -417,7 +428,61 @@ fn graph_digest(graph_id: i64) -> String {
             );
         }
     }
-    let triples = read_asserted_triples(graph_id);
+    // 0.6.37 (#142/#143): a locked graph whose lock custody holds — the
+    // engine fence plus both partition triggers — cannot change, so its
+    // digest is cached on first computation (lazily: locking stays cheap)
+    // and served from the cache after. Custody drift (a trigger dropped by
+    // hand) means "do not trust the cache": recompute. Open graphs are
+    // never cached. A caller who cannot write the cache — read-only
+    // transaction, no UPDATE on _pgrdf_graphs — still gets the digest.
+    let (locked, cached): (Option<bool>, Option<String>) = Spi::get_two_with_args(
+        "SELECT locked, locked_digest FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
+        &[graph_id.into()],
+    )
+    .unwrap_or((None, None));
+    let custody_holds =
+        locked == Some(true) && crate::storage::lock::lock_trigger_count(graph_id) == Some(2);
+    if custody_holds && let Some(d) = cached {
+        return d;
+    }
+    let digest = canonicalize(read_asserted_triples(graph_id)).1;
+    if custody_holds {
+        let can_cache = Spi::get_one::<bool>(
+            "SELECT current_setting('transaction_read_only') = 'off' \
+                AND has_table_privilege('pgrdf._pgrdf_graphs', 'UPDATE')",
+        )
+        .expect("graph_digest: cache-write check failed")
+        .unwrap_or(false);
+        if can_cache {
+            Spi::run_with_args(
+                "UPDATE pgrdf._pgrdf_graphs SET locked_digest = $2 \
+                 WHERE graph_id = $1 AND locked",
+                &[graph_id.into(), digest.as_str().into()],
+            )
+            .expect("graph_digest: cache write failed");
+        }
+    }
+    digest
+}
+
+/// RDFC-1.0 over an arbitrary triple set: returns the sorted canonical
+/// N-Triples lines (each `\n`-terminated, blank nodes labelled `_:c14nN`)
+/// and the `rdfc-1.0-sha256` digest of their concatenation. This is the
+/// algorithm `graph_digest` runs over a whole graph, factored out so a
+/// caller can canonicalize a SUBSET — `graph_diff` canonicalizes each
+/// blank-node component on its own (SPEC 0.6.37 §3.5). The complexity
+/// budget is per call: an adversarial input raises `pgRDF#117`.
+pub(crate) fn canonicalize(triples: Vec<Triple>) -> (Vec<String>, String) {
+    let (lines, digest, _labels) = canonicalize_labeled(triples);
+    (lines, digest)
+}
+
+/// [`canonicalize`] plus the label map: each input blank-node label →
+/// its canonical `c14nN` label. `graph_diff` renders a component's rows
+/// with these labels.
+pub(crate) fn canonicalize_labeled(
+    triples: Vec<Triple>,
+) -> (Vec<String>, String, HashMap<String, String>) {
     let mut bnode_quads: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, t) in triples.iter().enumerate() {
         for term in [&t.0, &t.2] {
@@ -487,7 +552,8 @@ fn graph_digest(graph_id: i64) -> String {
         })
         .collect();
     lines.sort();
-    sha256_hex(&lines.concat())
+    let digest = sha256_hex(&lines.concat());
+    (lines, digest, canonical.issued.clone())
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -608,6 +674,107 @@ mod tests {
             let want = super::sha256_hex(expected);
             assert_eq!(got, want, "W3C rdfc10 test{name} diverged from the suite");
         }
+    }
+
+    /// The extracted `canonicalize` is the same algorithm `graph_digest`
+    /// runs, exposed for per-component use (graph_diff, 0.6.37 §3.5): its
+    /// sorted canonical lines must equal the W3C suite's expected document
+    /// line-for-line, and its digest must equal `graph_digest` of the same
+    /// graph.
+    #[pg_test]
+    fn canonicalize_matches_w3c_lines_and_graph_digest() {
+        let input = include_str!("../../tests/fixtures/rdfc10/test017-in.nq");
+        let expected = include_str!("../../tests/fixtures/rdfc10/test017-rdfc10.nq");
+        let gid = 983399;
+        Spi::run(&format!("SELECT pgrdf.add_graph({gid})")).expect("add_graph failed");
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[input.into(), gid.into()],
+        )
+        .expect("fixture load failed");
+        let (lines, digest_hex) = super::canonicalize(super::read_asserted_triples(gid));
+        let want: Vec<String> = expected.lines().map(|l| format!("{l}\n")).collect();
+        assert_eq!(
+            lines, want,
+            "canonical lines must equal the W3C expected document"
+        );
+        assert_eq!(
+            digest_hex,
+            digest(gid),
+            "canonicalize digest must equal graph_digest"
+        );
+    }
+
+    fn cached_digest(graph_id: i64) -> Option<String> {
+        Spi::get_one_with_args(
+            "SELECT locked_digest FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
+            &[graph_id.into()],
+        )
+        .unwrap()
+    }
+
+    /// #142/#143 (0.6.37): a locked graph cannot change, so its digest is
+    /// cached on first computation and served from the cache after; unlock
+    /// clears it. Open graphs are never cached.
+    #[pg_test]
+    fn digest_is_cached_while_locked_and_cleared_on_unlock() {
+        seed(983501, BNODE_TTL);
+        let open = digest(983501);
+        assert_eq!(cached_digest(983501), None, "open graphs are never cached");
+        Spi::run("SELECT pgrdf.lock_graph(983501, 'checkpoint')").unwrap();
+        let first = digest(983501);
+        assert_eq!(first, open, "locking does not change identity");
+        assert_eq!(cached_digest(983501).as_deref(), Some(first.as_str()));
+        assert_eq!(digest(983501), first, "served from the cache");
+        Spi::run("SELECT pgrdf.unlock_graph(983501, 'reopen')").unwrap();
+        assert_eq!(cached_digest(983501), None, "unlock clears the cache");
+    }
+
+    /// The cache is trusted only while lock custody holds. If an owner
+    /// drops a lock trigger and changes the graph, graph_digest recomputes
+    /// instead of serving the stale value.
+    #[pg_test]
+    fn cached_digest_is_not_trusted_after_custody_drift() {
+        seed(983502, BNODE_TTL);
+        Spi::run("SELECT pgrdf.lock_graph(983502, 'checkpoint')").unwrap();
+        let cached = digest(983502);
+        Spi::run("DROP TRIGGER pgrdf_lock_row ON pgrdf._pgrdf_quads_g983502").unwrap();
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_quads (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+             SELECT subject_id, predicate_id, predicate_id, graph_id, false \
+             FROM pgrdf._pgrdf_quads WHERE graph_id = 983502 LIMIT 1",
+        )
+        .unwrap();
+        assert_ne!(
+            digest(983502),
+            cached,
+            "drift: recompute, never serve stale"
+        );
+    }
+
+    /// A caller without UPDATE on _pgrdf_graphs still gets the digest of a
+    /// locked graph; the cache is simply not written.
+    #[pg_test]
+    fn digest_of_locked_graph_works_for_a_reader() {
+        seed(983503, BNODE_TTL);
+        Spi::run("SELECT pgrdf.lock_graph(983503, 'checkpoint')").unwrap();
+        Spi::run("CREATE ROLE pgrdf_digest_reader NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_digest_reader").unwrap();
+        Spi::run(
+            "GRANT SELECT ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs, pgrdf._pgrdf_dictionary \
+             TO pgrdf_digest_reader",
+        )
+        .unwrap();
+        Spi::run("GRANT SELECT ON pgrdf._pgrdf_quads_g983503 TO pgrdf_digest_reader").unwrap();
+        Spi::run("SET ROLE pgrdf_digest_reader").unwrap();
+        let d = digest(983503);
+        Spi::run("RESET ROLE").unwrap();
+        assert_eq!(d.len(), 64);
+        assert_eq!(
+            cached_digest(983503),
+            None,
+            "no UPDATE privilege: no cache write"
+        );
     }
 
     /// test074 — the poison graph (RDFC10NegativeEvalTest): a highly

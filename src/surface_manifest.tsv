@@ -7,27 +7,34 @@
 # Notes are CONSUMER-FACING: they describe what the function is and how to
 # use it well, in words that stand alone. A completeness test enforces this
 # file covers every extension-owned function in both directions.
+_path_walk(preds bigint[], graph_id bigint, seed bigint, follow_inverse boolean, max_depth integer, path_id integer, per_graph boolean)	internal	the breadth-first walk behind SPARQL + and * property paths (visited set per start, exact depth truncation, memory budget pgrdf.path_max_pairs); called by translated SQL, not an API. Since 0.6.37
+_refuse_locked_write()	internal	trigger function lock_graph installs on a locked graph's partition: refuses direct SQL INSERT/UPDATE/DELETE/TRUNCATE with 55P03 and the unlock cure as HINT. Not callable as an API. Since 0.6.37
 add_graph(g bigint)	internal	ensures the quad partition for a raw graph id; consumers create graphs by IRI with add_graph(iri)
 add_graph(id bigint, iri text)	internal	binds an explicit id/IRI pair; refuses rebinding either side. Consumers create graphs by IRI
-add_graph(iri text)	stable	create (or ensure) a graph by IRI; returns its graph_id; idempotent
+add_graph(iri text)	stable	create (or ensure) a graph by IRI; returns its graph_id; idempotent. Creating a new graph needs SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs (42501 otherwise, HINT names the grant); the partition DDL itself runs as the storage owner. Since 0.6.37
 build_id()	stable	which build of version() this binary is (git describe at compile time); 'unknown' means the build did not supply one. Since 0.6.29
+can_create_graphs()	stable	can the current role create graphs? true when it holds SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs, the exact rule add_graph enforces. Read this rather than inferring from table ownership. Since 0.6.37
+can_drop_graphs()	stable	can the current role drop graphs? true when it holds SELECT and DELETE on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs, the exact rule drop_graph enforces. Since 0.6.37
 carve_graph(src bigint, predicate text, dst bigint)	stable	copy the subgraph matching one predicate from src into dst
 carve_graph(src bigint, seeds text[], dst bigint, max_hops integer)	stable	copy the neighbourhood reachable from seed IRIs within max_hops from src into dst
 clear_graph(id bigint)	stable	remove every triple from a graph; the graph itself remains
 clear_graph(iri text)	stable	remove every triple from a graph by IRI; unknown IRI refuses (42704)
+create_graph(iri text)	stable	create a NEW graph by IRI, or refuse 42710 if the IRI exists; the HINT names the existing graph_id and its recorded source digest, so a caller can reuse it or choose another IRI. Atomic against concurrent claims. Needs SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs. add_graph(iri) stays get-or-create. Since 0.6.37
 construct(query text)	stable	SPARQL CONSTRUCT; rows are JSONB triples suitable for put_construct_rows
 copy_graph(src bigint, dst bigint)	stable	copy src into dst. Caution: appends, and carries inferred triples with it — clear dst first for a clean copy, re-materialize after
 copy_graph(src_iri text, dst_iri text)	stable	copy by IRI; same append-and-carry caution as the id form
 count_quads(g bigint)	stable	total quads (asserted + inferred) in one graph; graph 0 is the default graph
 describe(query text)	stable	SPARQL DESCRIBE; rows are JSONB triples
-drop_graph(id bigint, cascade boolean)	stable	drop a graph and its partition; refuses over inferred rows unless cascade (2BP01); cannot drop the default partition
+drop_graph(id bigint, cascade boolean)	stable	drop a graph and its partition; refuses over inferred rows unless cascade (2BP01); cannot drop the default partition. Needs SELECT and DELETE on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs (42501 otherwise); the partition DDL runs as the storage owner. Since 0.6.37
 drop_graph(iri text, cascade boolean)	stable	drop by IRI; unknown IRI refuses (42704)
 get_term(id bigint)	stable	lexical value of a dictionary term id, as returned in query results and inventory
+graph_diff(a bigint, b bigint, side text, predicate text, class text)	stable	the triples that differ from graph a to graph b, blank-node-aware: side '-' (only in a) or '+' (only in b), terms in N-Triples form, component NULL for a ground triple else its blank-node component's rdfc-1.0 digest. Ordered side then canonical line, so OFFSET/LIMIT paging is deterministic. predicate/class narrow the comparison; a component is returned whole if any triple matches. Empty iff the graphs are isomorphic. Since 0.6.37
+graph_diff_summary(a bigint, b bigint)	stable	counts of what changed from graph a to graph b, with its method label: ground removed/added/common (triples), components removed/added/common (a multiset of rdfc-1.0 component digests) and their triples, by_predicate (ground + component triples) and by_type (rdf:type triples per class). Since 0.6.37
 graph_digest(graph_id bigint)	stable	canonical graph identity, method rdfc-1.0-sha256: survives reload and blank-node relabelling; equal AND unequal are both conclusive. Absent graph refuses (42704); empty graph answers. Not comparable with structural_digest values. Since 0.6.32
 graph_id(iri text)	stable	graph_id for an IRI, or NULL when unknown — check before feeding into strict functions, which silently pass NULL through
 graph_integrity(graph_id bigint)	stable	term-position integrity report (non-IRI predicates, literal subjects); unclean graphs validate vacuously and should be reloaded
 export_graph(graph_id bigint)	stable	a graph's asserted triples as canonical N-Triples, byte-sorted, one line per triple; inferred rows never export (they re-derive). Absent graph refuses (42704). Since 0.6.34
-graph_inventory()	stable	every registered graph with IRI, asserted/inferred counts, lock state and materialization freshness (current/stale/never/unknown) — the supported alternative to reading private tables. Since 0.6.34
+graph_inventory()	stable	every registered graph with IRI, asserted/inferred counts, lock state, materialization freshness (current/stale/never/unknown), source_sha256 and source_loads (what the graph was loaded from; since 0.6.37) and identity_digest (a locked graph's cached rdfc-1.0 digest while lock custody holds; since 0.6.37) — the supported alternative to reading private tables. Since 0.6.34
 graph_manifest(graph_id bigint)	stable	portable manifest of one graph: three digests each carrying its method (bytes / rdfc-1.0 identity / fd1 structure), counts, engine identity, and what is NOT carried. Pair with export_graph to build a redistributable package. Since 0.6.34
 graph_iri(id bigint)	stable	IRI bound to a graph_id, or NULL when unknown
 last_call_stats()	stable	per-call completeness figures (path_depth_truncations, filter_clauses_dropped) for the most recent sparql/construct/describe call in THIS session; session-local, so other sessions cannot pollute it. Read it right after the query. Since 0.6.34

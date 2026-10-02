@@ -24,6 +24,7 @@
 pub mod canon;
 pub mod construct_ingest;
 pub mod dict;
+pub mod diff;
 pub mod export;
 pub mod fd1;
 pub mod freshness;

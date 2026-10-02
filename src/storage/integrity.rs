@@ -79,16 +79,36 @@ fn graph_integrity(graph_id: i64) -> pgrx::JsonB {
         .map(|k| counts.get(k).and_then(|v| v.as_i64()).unwrap_or(0))
         .sum::<i64>();
 
+    // F5 (0.6.37): a locked graph's partition must carry both refuse-
+    // triggers and an unlocked one none; anything else is drift (a
+    // trigger dropped by hand, a lock that predates the upgrade).
+    let locked = Spi::get_one_with_args::<bool>(
+        "SELECT locked FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
+        &[graph_id.into()],
+    )
+    .expect("graph_integrity: lock state lookup failed")
+    .unwrap_or(false);
+    let triggers = crate::storage::lock::lock_trigger_count(graph_id);
+    let lock_consistent = match triggers {
+        Some(n) => n == if locked { 2 } else { 0 },
+        None => true, // no dedicated partition: engine fence only
+    };
+
     pgrx::JsonB(json!({
         "graph_id": graph_id,
         "counts":   counts,
         "illegal_terms": illegal,
         "dangling_refs": dangling,
+        "lock_custody": {
+            "locked": locked,
+            "write_triggers": triggers,
+            "consistent": lock_consistent,
+        },
         // The one-field answer a monitor alarms on. `clean` is a
         // statement about structure only — it does not claim the data
         // is right, only that every term sits in a position its kind
         // is allowed to occupy and resolves to a dictionary row.
-        "clean": illegal == 0 && dangling == 0,
+        "clean": illegal == 0 && dangling == 0 && lock_consistent,
     }))
 }
 

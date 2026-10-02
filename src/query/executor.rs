@@ -133,10 +133,22 @@ use std::collections::{HashMap, HashSet};
 
 thread_local! {
     static PARAM_BUF: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
+    /// Next path-pattern id within the statement being translated (the
+    /// walk records a depth cut under it; SPEC 0.6.37 §3.2).
+    static NEXT_PATH_ID: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
 fn params_clear() {
     PARAM_BUF.with(|b| b.borrow_mut().clear());
+    NEXT_PATH_ID.with(|n| n.set(0));
+}
+
+fn next_path_id() -> i32 {
+    NEXT_PATH_ID.with(|n| {
+        let id = n.get();
+        n.set(id + 1);
+        id
+    })
 }
 
 fn params_take() -> Vec<i64> {
@@ -406,7 +418,7 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     let (template, pattern) = match parsed {
         Query::Construct {
             template, pattern, ..
-        } => (template, pattern),
+        } => (template, hide_query_bnodes(&pattern)),
         Query::Select { .. } | Query::Ask { .. } | Query::Describe { .. } => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
             "pgrdf.construct: not a CONSTRUCT query".to_string(),
@@ -1608,7 +1620,7 @@ fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
         .unwrap_or_else(|e| panic!("pgrdf.describe: parse error: {e}"));
 
     let pattern = match parsed {
-        Query::Describe { pattern, .. } => pattern,
+        Query::Describe { pattern, .. } => hide_query_bnodes(&pattern),
         Query::Select { .. } | Query::Ask { .. } | Query::Construct { .. } => {
             panic!("pgrdf.describe: not a DESCRIBE query")
         }
@@ -1995,22 +2007,19 @@ struct ExecPlan {
     /// depth-cap row still has an outgoing edge); it may benignly
     /// over-count per §7.2 (continuation already reached via a
     /// shorter path) — which the spec explicitly permits.
-    truncation_probes: Vec<(String, Vec<i64>)>,
+    truncation_probes: Vec<i32>,
 }
 
 /// Collect every `+` path's truncation probe from a parsed query
 /// (single-branch BGP + every UNION branch's BGP). Each becomes a
 /// post-execution probe in the `ExecPlan` (LLD v0.4 §7.2).
-fn collect_truncation_probes(ps: &ParsedSelect) -> Vec<(String, Vec<i64>)> {
-    let mut out: Vec<(String, Vec<i64>)> = Vec::new();
+fn collect_truncation_probes(ps: &ParsedSelect) -> Vec<i32> {
+    let mut out: Vec<i32> = Vec::new();
     let mut take = |st: &ScopedTriple| {
-        if let Some(rel) = &st.path {
-            // A `?` (zero-or-one) path is non-recursive and carries an
-            // empty probe — nothing can truncate, so skip it (an empty
-            // prepared statement would error at probe time).
-            if !rel.probe_sql.is_empty() {
-                out.push((rel.probe_sql.clone(), rel.probe_params.clone()));
-            }
+        // Only the walked operators (`+`, `*`) can be cut by the depth
+        // cap; `?` and `|` are single steps.
+        if let Some(walk) = st.path.as_ref().and_then(|rel| rel.walk.as_ref()) {
+            out.push(walk.path_id);
         }
     };
     for st in &ps.bgp {
@@ -2307,7 +2316,7 @@ fn translate(q: &Query) -> ExecPlan {
     params_clear();
     match q {
         Query::Select { pattern, .. } => {
-            let ps = parse_select(pattern);
+            let ps = parse_select(&hide_query_bnodes(pattern));
             if ps.bgp.is_empty() && ps.union_branches.is_empty() {
                 panic!("sparql: empty BGP");
             }
@@ -2323,7 +2332,7 @@ fn translate(q: &Query) -> ExecPlan {
         Query::Ask { pattern, .. } => {
             // ASK reuses the SELECT pattern walk but only cares
             // whether the resulting solution sequence is non-empty.
-            let mut ps = parse_select(pattern);
+            let mut ps = parse_select(&hide_query_bnodes(pattern));
             if ps.bgp.is_empty() && ps.union_branches.is_empty() {
                 panic!("sparql: ASK with empty BGP");
             }
@@ -2586,6 +2595,134 @@ fn subst_triple(tp: &TriplePattern, binds: &HashMap<String, Expression>) -> Trip
 /// `Join`, `LeftJoin`, or a chained `Extend`). So we rewrite bottom-up
 /// — recurse into `inner`/arms first, then apply the accumulated map
 /// to the current node's own expressions / triples.
+/// List paths / blank nodes in queries (SPEC 0.6.37 §3.3a). SPARQL treats
+/// a blank node in a graph pattern as a variable that is never projected
+/// (§4.1.4), and spargebra introduces one for every top-level sequence path
+/// `a/b` (the `_:` joining the two halves — so `rdf:rest*/rdf:first`
+/// arrives as a `rest*` path and a `first` triple sharing one). The binder
+/// had no such notion and refused every query blank node. This renames
+/// each to a hidden variable `pgrdf-bn-<label>` before translation: `-` is
+/// illegal in a SPARQL VARNAME, so no user variable can collide, and
+/// spargebra refuses a label reused across groups, so one name per label
+/// keeps exactly the joins the query wrote. Only WHERE patterns go through
+/// here — CONSTRUCT templates keep their mint-per-solution blank nodes —
+/// and a Project's variable list is fixed at parse, so `SELECT *` never
+/// shows a hidden name. Blank nodes inside FILTER EXISTS are left as-is
+/// (EXISTS is not translatable).
+pub(crate) fn hide_query_bnodes(p: &GraphPattern) -> GraphPattern {
+    fn term(t: &TermPattern) -> TermPattern {
+        match t {
+            TermPattern::BlankNode(b) => {
+                TermPattern::Variable(Variable::new_unchecked(format!("pgrdf-bn-{}", b.as_str())))
+            }
+            other => other.clone(),
+        }
+    }
+    fn triple(tp: &TriplePattern) -> TriplePattern {
+        TriplePattern {
+            subject: term(&tp.subject),
+            predicate: tp.predicate.clone(),
+            object: term(&tp.object),
+        }
+    }
+    let b = |inner: &GraphPattern| Box::new(hide_query_bnodes(inner));
+    match p {
+        GraphPattern::Bgp { patterns } => GraphPattern::Bgp {
+            patterns: patterns.iter().map(triple).collect(),
+        },
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => GraphPattern::Path {
+            subject: term(subject),
+            path: path.clone(),
+            object: term(object),
+        },
+        GraphPattern::Join { left, right } => GraphPattern::Join {
+            left: b(left),
+            right: b(right),
+        },
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => GraphPattern::LeftJoin {
+            left: b(left),
+            right: b(right),
+            expression: expression.clone(),
+        },
+        GraphPattern::Lateral { left, right } => GraphPattern::Lateral {
+            left: b(left),
+            right: b(right),
+        },
+        GraphPattern::Filter { expr, inner } => GraphPattern::Filter {
+            expr: expr.clone(),
+            inner: b(inner),
+        },
+        GraphPattern::Union { left, right } => GraphPattern::Union {
+            left: b(left),
+            right: b(right),
+        },
+        GraphPattern::Graph { name, inner } => GraphPattern::Graph {
+            name: name.clone(),
+            inner: b(inner),
+        },
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => GraphPattern::Extend {
+            inner: b(inner),
+            variable: variable.clone(),
+            expression: expression.clone(),
+        },
+        GraphPattern::Minus { left, right } => GraphPattern::Minus {
+            left: b(left),
+            right: b(right),
+        },
+        GraphPattern::OrderBy { inner, expression } => GraphPattern::OrderBy {
+            inner: b(inner),
+            expression: expression.clone(),
+        },
+        GraphPattern::Project { inner, variables } => GraphPattern::Project {
+            inner: b(inner),
+            variables: variables.clone(),
+        },
+        GraphPattern::Distinct { inner } => GraphPattern::Distinct { inner: b(inner) },
+        GraphPattern::Reduced { inner } => GraphPattern::Reduced { inner: b(inner) },
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => GraphPattern::Slice {
+            inner: b(inner),
+            start: *start,
+            length: *length,
+        },
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => GraphPattern::Group {
+            inner: b(inner),
+            variables: variables.clone(),
+            aggregates: aggregates.clone(),
+        },
+        GraphPattern::Service {
+            name,
+            inner,
+            silent,
+        } => GraphPattern::Service {
+            name: name.clone(),
+            inner: b(inner),
+            silent: *silent,
+        },
+        // Values carries no triple patterns.
+        other => other.clone(),
+    }
+}
+
 fn substitute_binds(
     p: &GraphPattern,
     binds: &mut HashMap<String, Expression>,
@@ -3089,7 +3226,26 @@ fn scoped_triple_from_path(
     // consistent), and build the placeholder triple (subject/object
     // drive var-binding + SELECT-*; predicate slot is unused for path
     // rows). Only the relation builder called at the end differs.
-    let plan = classify_path(subject, path, object);
+    // `classify_path` is pure Rust and panics with a stable message on
+    // the gated shapes (a sequence inside `*`/`+`, negated sets, nested
+    // recursion) — its plain unit tests rely on that, and it must not
+    // reach Postgres error machinery outside a backend. Here, inside one,
+    // the panic becomes a typed refusal: 0A000 feature_not_supported,
+    // message byte-identical (SPEC 0.6.37 §3.3a step 5).
+    let plan = match std::panic::catch_unwind(|| classify_path(subject, path, object)) {
+        Ok(plan) => plan,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "sparql: unsupported property path".to_string());
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                msg,
+            )
+        }
+    };
     if let PathPlan::Triple(tp) = plan {
         return ScopedTriple {
             triple: *tp,
@@ -3125,12 +3281,11 @@ fn scoped_triple_from_path(
         .iter()
         .map(|p| lookup_iri_id(p.as_str()).unwrap_or(-1))
         .collect();
-    let (path_scope, graph_ph, probe_gid): (PathGraphScope, Option<String>, Option<i64>) =
-        match &scope {
-            None => (PathGraphScope::AllGraphs, None, None),
-            Some(GraphScope::Literal(gid)) => (PathGraphScope::Literal(*gid), None, Some(*gid)),
-            Some(GraphScope::Variable { .. }) => (PathGraphScope::Variable, None, None),
-        };
+    let (path_scope, graph_ph): (PathGraphScope, Option<String>) = match &scope {
+        None => (PathGraphScope::AllGraphs, None),
+        Some(GraphScope::Literal(gid)) => (PathGraphScope::Literal(*gid), None),
+        Some(GraphScope::Variable { .. }) => (PathGraphScope::Variable, None),
+    };
     // The predicate-set placeholder list for the relation SQL — each
     // resolved id appended to PARAM_BUF in order, joined as
     // `$N1, $N2, …` (a 1-element list is just `$N`, identical to the
@@ -3191,7 +3346,7 @@ fn scoped_triple_from_path(
             lookup_iri_id(iri).unwrap_or(-1)
         }
     };
-    let bound_self_pairs: Vec<String> =
+    let bound_self_pairs = || -> Vec<String> {
         if reflexive && !matches!(path_scope, PathGraphScope::Variable) {
             let mut v = Vec::new();
             if let TermPattern::NamedNode(n) = subject {
@@ -3203,18 +3358,39 @@ fn scoped_triple_from_path(
             v
         } else {
             Vec::new()
-        };
-    // Probe predicate-set placeholders — the probe binds its OWN
-    // `$1[, $2, …]` (independent of PARAM_BUF), and `probe_params`
-    // carries the same dict ids in that order. The Literal scope's
-    // graph id stays a translate-time constant inlined inside
-    // path.rs (see the truncation-probe doc), so the probe binds
-    // ONLY the predicate ids.
-    let probe_pred_ids_sql = (1..=pred_ids.len())
-        .map(|n| format!("${n}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let probe_params: Vec<i64> = pred_ids.clone();
+        }
+    };
+    // F2 (SPEC 0.6.37 §3.2): a constant endpoint seeds the walk —
+    // forward from a bound subject, backward from a bound object — so a
+    // selective query walks from its bound node, not the whole graph.
+    // Reflexive `*` interns it (above) so its zero-length self-pair
+    // resolves. A variable endpoint is seeded later, at FROM emission,
+    // when it is known which earlier pattern binds it.
+    let const_seed_ph: Option<(bool, String)> = if matches!(
+        plan,
+        PathPlan::OneOrMore { .. } | PathPlan::ZeroOrMore { .. }
+    ) {
+        match (subject, object) {
+            (TermPattern::NamedNode(n), _) => {
+                Some((false, id_placeholder(resolve_endpoint(n.as_str()))))
+            }
+            (_, TermPattern::NamedNode(n)) => {
+                Some((true, id_placeholder(resolve_endpoint(n.as_str()))))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let const_seed = || {
+        const_seed_ph.as_ref().map(|(from_object, ph)| {
+            if *from_object {
+                crate::query::path::Seed::Object(ph.as_str())
+            } else {
+                crate::query::path::Seed::Subject(ph.as_str())
+            }
+        })
+    };
     let max_depth = crate::query::guc::path_max_depth();
 
     // ── Materialised-closure no-CTE fallback (LLD v0.4 §7.2 / §7.3) ─
@@ -3270,38 +3446,35 @@ fn scoped_triple_from_path(
                     graph_placeholder.as_deref(),
                     &path_scope,
                     swapped,
-                    &bound_self_pairs,
+                    &bound_self_pairs(),
                 ),
                 _ => unreachable!("closure_materialised gates `+`/`*` only"),
             }
         }
         PathPlan::OneOrMore { .. } => build_one_or_more_relation_sql(
             &pred_ids_sql,
-            &probe_pred_ids_sql,
-            probe_params,
             graph_placeholder.as_deref(),
             &path_scope,
             swapped,
             max_depth,
-            probe_gid,
+            next_path_id(),
+            const_seed(),
         ),
         PathPlan::ZeroOrMore { .. } => build_zero_or_more_relation_sql(
             &pred_ids_sql,
-            &probe_pred_ids_sql,
-            probe_params,
             graph_placeholder.as_deref(),
             &path_scope,
             swapped,
             max_depth,
-            probe_gid,
-            &bound_self_pairs,
+            next_path_id(),
+            const_seed(),
         ),
         PathPlan::ZeroOrOne { .. } => build_zero_or_one_relation_sql(
             &pred_ids_sql,
             graph_placeholder.as_deref(),
             &path_scope,
             swapped,
-            &bound_self_pairs,
+            &bound_self_pairs(),
         ),
         PathPlan::Alternation { .. } => build_alternation_relation_sql(
             &pred_ids_sql,
@@ -5446,14 +5619,15 @@ fn build_from_and_where(
         // still tie `?g` consistently — keep the Variable scope clause.
         let (from_src, mut clauses) = if let Some(rel) = &st.path {
             let mut c = Vec::new();
+            let (frag, lateral) = path_from_fragment(rel, &st.triple, anchors);
             bind_path_subject_object(&st.triple, qi, anchors, &mut c);
             if let Some(GraphScope::Variable { .. }) = &st.scope {
                 scope_constraint_clauses_anchor_q(st.scope.as_ref().unwrap(), qi, &plan, &mut c);
             }
             (
                 format!(
-                    "{frag} AS q{qi}{cols}",
-                    frag = rel.from_fragment,
+                    "{lat}{frag} AS q{qi}{cols}",
+                    lat = if lateral && i > 0 { "LATERAL " } else { "" },
                     cols = rel.columns
                 ),
                 c,
@@ -5628,7 +5802,13 @@ fn connected_order(bgp: &[ScopedTriple]) -> Vec<usize> {
         let set: std::collections::HashSet<String> = v.into_iter().collect();
         // 3 term slots; constant positions = 3 − distinct variable
         // positions. Higher = more bound = more selective seed/candidate.
-        boundness.push(3 - set.len() as i32);
+        // F2: a walked path with two variable endpoints walks the whole
+        // graph unless something binds one end first, so it never seeds
+        // the order and loses ties to plain triples.
+        let open_path = st.path.as_ref().is_some_and(|rel| rel.walk.is_some())
+            && matches!(st.triple.subject, TermPattern::Variable(_))
+            && matches!(st.triple.object, TermPattern::Variable(_));
+        boundness.push(3 - set.len() as i32 - i32::from(open_path));
         vars.push(set);
     }
     let mut placed = vec![false; n];
@@ -5831,6 +6011,8 @@ fn emit_optional_lateral(
 
     let mut inner_from = String::new();
     let mut inner_where: Vec<String> = Vec::new();
+    // Shared vars re-pointed to their first inner alias (F3 chaining).
+    let mut chained: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // ---- inner triples (atomic INNER-join group) ----
     let mut emitted_first = false;
@@ -5839,12 +6021,17 @@ fn emit_optional_lateral(
         *next_qi += 1;
         let (from_src, mut clauses) = if let Some(rel) = &st.path {
             let mut c = Vec::new();
+            let (frag, lateral) = path_from_fragment(rel, &st.triple, &local);
             bind_path_subject_object(&st.triple, qi, &mut local, &mut c);
             optional_scope_clauses(&st.scope, qi, outer_plan, &mut c);
             (
                 format!(
-                    "{frag} AS q{qi}{cols}",
-                    frag = rel.from_fragment,
+                    "{lat}{frag} AS q{qi}{cols}",
+                    lat = if lateral && emitted_first {
+                        "LATERAL "
+                    } else {
+                        ""
+                    },
                     cols = rel.columns
                 ),
                 c,
@@ -5854,6 +6041,7 @@ fn emit_optional_lateral(
             optional_scope_clauses(&st.scope, qi, outer_plan, &mut c);
             (format!("pgrdf._pgrdf_quads q{qi}"), c)
         };
+        chain_shared_vars_into_group(&st.triple, qi, &pre_existing, &mut chained, &mut local);
         if !emitted_first {
             inner_from.push_str(&from_src);
             inner_where.append(&mut clauses);
@@ -5953,6 +6141,11 @@ fn emit_optional_lateral(
         sql.push_str(" WHERE ");
         sql.push_str(&inner_where.join(" AND "));
     }
+    // F3 fence: OFFSET 0 keeps the planner from pulling this LATERAL
+    // group up into the outer join problem, where pin_join_order()'s
+    // collapse limits would force its own syntactic join order. It runs
+    // as a per-outer-row parameterised subquery instead.
+    sql.push_str(" OFFSET 0");
     sql
 }
 
@@ -6038,6 +6231,34 @@ fn scope_constraint_clauses_anchor_q(
 /// outer projection (a fresh GRAPH inside MINUS binds locally;
 /// MINUS-inherited scope is keyed by the outer `g{S}` and would have
 /// already been registered by the BGP/OPTIONAL scan).
+/// F3 (SPEC 0.6.37 §3.3): inside an OPTIONAL or MINUS group, a variable
+/// shared with the outer query is correlated to the outer alias once, by
+/// the group's first triple that mentions it; every later triple in the
+/// group joins that inner alias instead. Without this each inner alias is
+/// tied only to the outer query, the group's own join has no clause, and
+/// under `pin_join_order()` the planner can flatten it into a cross
+/// product (measured on 1.1M-triple graphs: ~424M rows, 16 GB of temp).
+fn chain_shared_vars_into_group(
+    tp: &TriplePattern,
+    qi: usize,
+    outer: &std::collections::HashSet<String>,
+    chained: &mut std::collections::HashSet<String>,
+    local: &mut HashMap<String, (usize, &'static str)>,
+) {
+    for (var, col) in [
+        (tp_subject_var(tp), "subject_id"),
+        (tp_predicate_var(tp), "predicate_id"),
+        (tp_object_var(tp), "object_id"),
+    ] {
+        if let Some(v) = var
+            && outer.contains(&v)
+            && chained.insert(v.clone())
+        {
+            local.insert(v, (qi, col));
+        }
+    }
+}
+
 fn translate_minus(
     minus: &MinusBlock,
     outer_anchors: &HashMap<String, (usize, &'static str)>,
@@ -6069,6 +6290,8 @@ fn translate_minus(
     // New vars introduced inside the MINUS get fresh local aliases;
     // shared vars internal to the sub-pattern also tie together.
     let mut local_anchors = outer_anchors.clone();
+    let outer_vars: std::collections::HashSet<String> = outer_anchors.keys().cloned().collect();
+    let mut chained: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut all_clauses: Vec<String> = Vec::new();
     let mut from_aliases: Vec<String> = Vec::with_capacity(triples.len());
     // First qN inside the MINUS for the Variable scope, if any —
@@ -6083,6 +6306,7 @@ fn translate_minus(
             minus_first_qi = Some(qi);
         }
         let mut clauses = pattern_clauses(tp, qi, &mut local_anchors);
+        chain_shared_vars_into_group(tp, qi, &outer_vars, &mut chained, &mut local_anchors);
         match &minus.scope {
             Some(GraphScope::Literal(gid)) => {
                 let p = id_placeholder(*gid);
@@ -6723,6 +6947,34 @@ fn pattern_clauses(
 /// across the join exactly as for a plain triple. There is no
 /// predicate column (the walked predicate is fixed inside the CTE),
 /// so `bind_predicate` is deliberately NOT called.
+/// F2 (SPEC 0.6.37 §3.2): the FROM fragment for a path relation. A
+/// walked path whose endpoint an earlier alias already bound is seeded
+/// from that column — forward from a bound subject, backward from a bound
+/// object — so it walks from the nodes the query actually reached, not
+/// the whole graph. Returns the fragment and whether it references a
+/// sibling alias (the caller adds LATERAL). Must run BEFORE the path's
+/// own endpoint binding, which would add its variables to `anchors`.
+fn path_from_fragment(
+    rel: &crate::query::path::PathRelation,
+    tp: &TriplePattern,
+    anchors: &HashMap<String, (usize, &'static str)>,
+) -> (String, bool) {
+    use crate::query::path::Seed;
+    if let Some(walk) = rel.walk.as_ref().filter(|w| w.seedable()) {
+        let bound = |t: &TermPattern| match t {
+            TermPattern::Variable(v) => anchors.get(v.as_str()).map(|(a, c)| format!("q{a}.{c}")),
+            _ => None,
+        };
+        if let Some(col) = bound(&tp.subject) {
+            return (walk.render(Some(Seed::Subject(&col))), true);
+        }
+        if let Some(col) = bound(&tp.object) {
+            return (walk.render(Some(Seed::Object(&col))), true);
+        }
+    }
+    (rel.from_fragment.clone(), false)
+}
+
 fn bind_path_subject_object(
     tp: &TriplePattern,
     qi: usize,
@@ -6746,9 +6998,10 @@ fn bind_subject(
             let p = id_placeholder(id);
             clauses.push(format!("q{qi}.subject_id = {p}"));
         }
-        TermPattern::BlankNode(_) => {
-            panic!("sparql: blank-node subject in query not supported")
-        }
+        TermPattern::BlankNode(_) => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: blank-node subject in query not supported".to_string(),
+        ),
         TermPattern::Literal(_) => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
             "sparql: literal subject is invalid in RDF".to_string(),
@@ -6794,9 +7047,10 @@ fn bind_object(
             let p = id_placeholder(id);
             clauses.push(format!("q{qi}.object_id = {p}"));
         }
-        TermPattern::BlankNode(_) => {
-            panic!("sparql: blank-node object in query not supported")
-        }
+        TermPattern::BlankNode(_) => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: blank-node object in query not supported".to_string(),
+        ),
         other => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             format!("sparql: unsupported object term {other:?}"),
@@ -7042,6 +7296,8 @@ fn lookup_literal_id(lit: &Literal) -> Option<i64> {
 // ─────────────────────────────────────────────────────────────────────
 
 fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
+    // The walk records depth cuts per path id while the query runs.
+    crate::query::walk::reset_truncations();
     Spi::connect_mut(|client| {
         // Phase 3 step 2 (LLD §4.2): consult the per-backend plan
         // cache before paying for parse + plan. Hit ⇒ reuse the
@@ -7087,34 +7343,12 @@ fn execute(plan: &ExecPlan) -> Vec<pgrx::JsonB> {
             }
         });
 
-        // Phase E group E2 (LLD v0.4 §7.2): depth-guard accounting.
-        // Run each `+` path's truncation probe AFTER the main result.
-        // The probe returns `1` iff a `walk` row sat at the depth cap
-        // with a still-continuable `$P` edge — i.e. the guard cut a
-        // path. Bump `path_depth_truncations` once per such probe.
-        // The detector never under-counts (any continuation past the
-        // cap fires it); benign over-count per §7.2 is acceptable. A
-        // probe is a standalone read with its own single `$1` (the
-        // predicate dict id) — graph scope is inlined. Uses the same
-        // `.select(_, Some(1), _)` + `get::<i64>(1)` scalar idiom as
-        // every other probe in this file.
-        for (probe_sql, probe_params) in &plan.truncation_probes {
-            let arg_oids: Vec<PgOid> =
-                vec![PgOid::BuiltIn(PgBuiltInOids::INT8OID); probe_params.len()];
-            let prepared = client
-                .prepare(probe_sql.as_str(), &arg_oids)
-                .expect("sparql: path truncation probe prepare failed");
-            let pdatums: Vec<DatumWithOid<'_>> = probe_params
-                .iter()
-                .map(|id| unsafe { DatumWithOid::new(*id, int8_oid) })
-                .collect();
-            let hit = client
-                .select(&prepared, Some(1), &pdatums)
-                .expect("sparql: path truncation probe failed")
-                .into_iter()
-                .next()
-                .and_then(|r| r.get::<i64>(1).ok().flatten())
-                .unwrap_or(0);
+        // Depth-guard accounting (SPEC 0.6.37 §3.2): the walk recorded,
+        // per path pattern, whether `pgrdf.path_max_depth` cut a node
+        // that is reachable only beyond it. Exact — no over-count, and a
+        // cycle never registers. Applied once per truncated pattern.
+        for &path_id in &plan.truncation_probes {
+            let hit = i64::from(crate::query::walk::was_truncated(path_id));
             if hit != 0 {
                 crate::storage::shmem_cache::note_path_depth_truncation();
                 // Issue #14 — fail-closed truncation. The counter is
@@ -13302,9 +13536,9 @@ mod tests {
         .unwrap();
 
         // Complete-under-cap walk (chain depth 5 < default cap 64).
-        // Reset immediately before so the stat read measures ONLY
-        // this query: it must NOT bump (no false positive).
-        Spi::run("SELECT pgrdf.shmem_reset()").unwrap();
+        // last_call_stats() is per-session and reset at every query
+        // verb, so the read measures ONLY this query — no shared
+        // counter, no race with parallel tests. It must NOT bump.
         let pre: i64 = Spi::get_one(
             "SELECT count(*)::bigint FROM pgrdf.sparql(
                  'PREFIX ex: <http://example.com/> \
@@ -13314,7 +13548,7 @@ mod tests {
         .unwrap();
         assert_eq!(pre, 5, "d1 reaches d2..d6 (5 nodes) under the default cap");
         let trunc_clean: i64 =
-            Spi::get_one("SELECT (pgrdf.stats()->>'path_depth_truncations')::bigint")
+            Spi::get_one("SELECT (pgrdf.last_call_stats()->>'path_depth_truncations')::bigint")
                 .unwrap()
                 .unwrap();
         assert_eq!(
@@ -13322,10 +13556,9 @@ mod tests {
             "a traversal completing under the cap must NOT bump the stat"
         );
 
-        // Cap at 3 — the length-5 chain is cut. Reset immediately
-        // before so the post-read measures ONLY this capped query.
+        // Cap at 3 — the length-5 chain is cut; last_call_stats()
+        // measures ONLY this capped query.
         Spi::run("SET pgrdf.path_max_depth = 3").unwrap();
-        Spi::run("SELECT pgrdf.shmem_reset()").unwrap();
         let capped: i64 = Spi::get_one(
             "SELECT count(*)::bigint FROM pgrdf.sparql(
                  'PREFIX ex: <http://example.com/> \
@@ -13338,7 +13571,7 @@ mod tests {
             "depth cap 3 → only d2,d3,d4 (truncated, not errored)"
         );
         let trunc_after: i64 =
-            Spi::get_one("SELECT (pgrdf.stats()->>'path_depth_truncations')::bigint")
+            Spi::get_one("SELECT (pgrdf.last_call_stats()->>'path_depth_truncations')::bigint")
                 .unwrap()
                 .unwrap();
         assert!(
@@ -14884,6 +15117,429 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(n, 1, "branch-local filters must keep applying");
+    }
+
+    /// F3 fixture (SPEC 0.6.37 §3.3): graph A has N functions each raising
+    /// one state; graph B has the same functions typed and labelled, and
+    /// all but every 100th still raise it. The anti-join below has an
+    /// OPTIONAL group of two triples sharing ONLY the outer ?f — the shape
+    /// that, under pin_join_order(), the planner flattened into an
+    /// unconstrained cross product of B's labels × B's mayRaise rows.
+    fn seed_f3_pair(n: usize) -> i64 {
+        let mut a = String::new();
+        let mut b = String::new();
+        for i in 0..n {
+            let s = i % 50;
+            a.push_str(&format!(
+                "<urn:f3:f{i}> <urn:f3:mayRaise> <urn:f3:s{s}> ; <urn:f3:label> \"f{i}\" .\n"
+            ));
+            b.push_str(&format!(
+                "<urn:f3:f{i}> a <urn:f3:Function> ; <urn:f3:label> \"f{i}\" .\n"
+            ));
+            if i % 100 != 0 {
+                b.push_str(&format!(
+                    "<urn:f3:f{i}> <urn:f3:mayRaise> <urn:f3:s{s}> .\n"
+                ));
+            }
+        }
+        for s in 0..50 {
+            a.push_str(&format!(
+                "<urn:f3:s{s}> <urn:f3:label> \"s{s}\" ; <urn:f3:code> \"C{s}\" .\n"
+            ));
+        }
+        let ga: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:f3:a')")
+            .unwrap()
+            .unwrap();
+        let gb: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:f3:b')")
+            .unwrap()
+            .unwrap();
+        Spi::get_one_with_args::<i64>("SELECT pgrdf.parse_turtle($1, $2)", &[a.into(), ga.into()])
+            .unwrap();
+        Spi::get_one_with_args::<i64>("SELECT pgrdf.parse_turtle($1, $2)", &[b.into(), gb.into()])
+            .unwrap();
+        Spi::run("ANALYZE pgrdf._pgrdf_quads").unwrap();
+        (n / 100) as i64
+    }
+
+    const F3_ANTI_JOIN: &str = "SELECT ?function WHERE { \
+         GRAPH <urn:tdd:f3:a> { ?f <urn:f3:mayRaise> ?s ; <urn:f3:label> ?function . \
+                                ?s <urn:f3:label> ?n ; <urn:f3:code> ?c . } \
+         GRAPH <urn:tdd:f3:b> { ?f a <urn:f3:Function> } \
+         OPTIONAL { GRAPH <urn:tdd:f3:b> { ?f <urn:f3:mayRaise> ?s . ?f <urn:f3:label> ?still } } \
+         FILTER(!BOUND(?still)) }";
+
+    /// F3 guard: the anti-join answers exactly inside a temp budget a
+    /// cross product (≈9M rows here) would blow through. Synthetic data
+    /// does NOT reproduce the bench's misestimated plan even with
+    /// enable_nestloop off — the planner still finds a clause-carrying
+    /// order — so this guards the answer and the budget; the red/green
+    /// test for the fix is the structural one below, and the real-data
+    /// proof is the bench measurement (16 GB → 134–236 ms).
+    #[pg_test]
+    fn f3_optional_group_does_not_cross_product() {
+        let expected = seed_f3_pair(3000);
+        Spi::run("SET LOCAL temp_file_limit = '8MB'").unwrap();
+        Spi::run("SET LOCAL enable_nestloop = off").unwrap();
+        let got: i64 = Spi::get_one_with_args(
+            "SELECT count(*) FROM pgrdf.sparql($1)",
+            &[F3_ANTI_JOIN.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(got, expected, "exactly the functions that stopped raising");
+    }
+
+    /// F3: the emitted OPTIONAL subquery is fenced (OFFSET 0) and its
+    /// second triple joins the group's first alias, not only the outer.
+    #[pg_test]
+    fn f3_optional_lateral_is_fenced_and_chained() {
+        seed_f3_pair(10);
+        let sql: String =
+            Spi::get_one_with_args("SELECT pgrdf.sparql_sql($1)", &[F3_ANTI_JOIN.into()])
+                .unwrap()
+                .unwrap();
+        let lateral = sql
+            .split("LEFT JOIN LATERAL (")
+            .nth(1)
+            .expect("the OPTIONAL group is a LATERAL subquery");
+        let body = lateral.split(") q").next().unwrap();
+        assert!(
+            body.contains("OFFSET 0"),
+            "LATERAL group must be fenced: {body}"
+        );
+        let first = body
+            .split("FROM pgrdf._pgrdf_quads ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .expect("first inner alias");
+        let join_on = body
+            .split(" ON (")
+            .nth(1)
+            .expect("second inner triple joins");
+        assert!(
+            join_on.contains(&format!("{first}.subject_id")),
+            "the second triple must chain to {first}: {join_on}"
+        );
+    }
+
+    /// F3 audit: a multi-triple MINUS whose triples share only an outer
+    /// variable answers within the same budget.
+    #[pg_test]
+    fn f3_multi_triple_minus_within_budget() {
+        let expected = seed_f3_pair(3000);
+        Spi::run("SET LOCAL temp_file_limit = '8MB'").unwrap();
+        Spi::run("SET LOCAL enable_nestloop = off").unwrap();
+        let q = "SELECT ?f WHERE { \
+             GRAPH <urn:tdd:f3:a> { ?f <urn:f3:mayRaise> ?s } \
+             MINUS { GRAPH <urn:tdd:f3:b> { ?f <urn:f3:mayRaise> ?s . ?f <urn:f3:label> ?l } } }";
+        let got: i64 = Spi::get_one_with_args("SELECT count(*) FROM pgrdf.sparql($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, expected);
+    }
+
+    /// List paths (SPEC 0.6.37 §3.3a): blank nodes in a query pattern are
+    /// non-projected variables — both the `[ … ]` form and an explicit
+    /// `_:label`.
+    #[pg_test]
+    fn query_blank_nodes_join_as_hidden_variables() {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:bn:join')")
+            .unwrap()
+            .unwrap();
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &["<urn:bn:s1> <urn:bn:p> [ <urn:bn:q> \"o1\" ] . <urn:bn:s2> <urn:bn:p> <urn:bn:iri> .".into(), g.into()],
+        )
+        .unwrap();
+        for q in [
+            "SELECT ?s ?o WHERE { GRAPH <urn:tdd:bn:join> { ?s <urn:bn:p> [ <urn:bn:q> ?o ] } }",
+            "SELECT ?s ?o WHERE { GRAPH <urn:tdd:bn:join> { ?s <urn:bn:p> _:x . _:x <urn:bn:q> ?o } }",
+        ] {
+            let n: i64 =
+                Spi::get_one_with_args("SELECT count(*) FROM pgrdf.sparql($1)", &[q.into()])
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(n, 1, "the blank node must join its two triples: {q}");
+        }
+        let keys: String = Spi::get_one(
+            "SELECT string_agg(DISTINCT k, ',') FROM pgrdf.sparql( \
+               'SELECT * WHERE { GRAPH <urn:tdd:bn:join> { ?s <urn:bn:p> [ <urn:bn:q> ?o ] } }') r, \
+               jsonb_object_keys(r) k",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            keys, "o,s",
+            "SELECT * never projects a hidden blank-node variable"
+        );
+    }
+
+    const SHIN_QUERY: &str = "SELECT ?head (SUM(IF(isIRI(?m), 1, 0)) AS ?iri_members) \
+         (SUM(IF(isLiteral(?m), 1, 0)) AS ?literal_members) \
+         WHERE { GRAPH <urn:tdd:shin> { \
+           ?head <http://www.w3.org/ns/shacl#in> ?list . \
+           ?list <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>*/<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> ?m } } \
+         GROUP BY ?head";
+
+    /// Load the sh:in fixture and run the acceptance query (pgrdf-mcp's
+    /// RESIDUAL-1 shape) at `cap`; returns (head, iri, literal) sorted,
+    /// plus the call's path_depth_truncations.
+    fn shin_rows(cap: i32) -> (Vec<(String, i64, i64)>, i64) {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:shin')")
+            .unwrap()
+            .unwrap();
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                include_str!("../../tests/fixtures/shin/sh-in-lists.ttl").into(),
+                g.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run(&format!("SET LOCAL pgrdf.path_max_depth = {cap}")).unwrap();
+        let mut rows: Vec<(String, i64, i64)> = Vec::new();
+        Spi::connect(|c| {
+            let t = c
+                .select(
+                    "SELECT r->>'head', (r->>'iri_members')::bigint, (r->>'literal_members')::bigint \
+                     FROM pgrdf.sparql($1) r",
+                    None,
+                    &[SHIN_QUERY.into()],
+                )
+                .unwrap();
+            for row in t {
+                let head: String = row.get(1).unwrap().unwrap();
+                rows.push((
+                    head.rsplit('#').next().unwrap().to_string(),
+                    row.get(2).unwrap().unwrap(),
+                    row.get(3).unwrap().unwrap(),
+                ));
+            }
+        });
+        let truncations: i64 =
+            Spi::get_one("SELECT (pgrdf.last_call_stats()->>'path_depth_truncations')::bigint")
+                .unwrap()
+                .unwrap();
+        rows.sort();
+        (rows, truncations)
+    }
+
+    /// RESIDUAL-1 acceptance at a sufficient cap: 7 rows · 110 · 6.
+    #[pg_test]
+    fn list_path_sh_in_at_cap_1024() {
+        let (rows, truncations) = shin_rows(1024);
+        let want: Vec<(String, i64, i64)> = vec![
+            ("Cyclic".into(), 2, 0),
+            ("Level".into(), 0, 4),
+            ("Long".into(), 100, 0),
+            ("Mixed".into(), 1, 2),
+            ("SharedA".into(), 2, 0),
+            ("SharedB".into(), 2, 0),
+            ("Status".into(), 3, 0),
+        ];
+        assert_eq!(rows, want);
+        assert_eq!(
+            truncations, 0,
+            "nothing is cut at 1024, and a cycle never truncates"
+        );
+    }
+
+    /// RESIDUAL-1 at the default cap: ex:Long reads 65 and the cut is
+    /// STATED; every other head is whole.
+    #[pg_test]
+    fn list_path_sh_in_at_cap_64_states_truncation() {
+        let (rows, truncations) = shin_rows(64);
+        let long = rows.iter().find(|r| r.0 == "Long").expect("ex:Long row");
+        assert_eq!(long.1, 65, "distance 0..64 = 65 cells");
+        assert!(truncations > 0, "the cut must be stated, never a silent 65");
+        assert_eq!(rows.iter().map(|r| r.1).sum::<i64>(), 75);
+        assert_eq!(rows.iter().map(|r| r.2).sum::<i64>(), 6);
+    }
+
+    /// A sequence inside a recursive operator stays out of scope, but it
+    /// refuses TYPED (0A000) and sparql_parse reports it — parse and
+    /// execution agree.
+    #[pg_test]
+    fn sequence_inside_star_refuses_typed_and_parse_agrees() {
+        let q = "SELECT ?x WHERE { <urn:a> (<urn:p>/<urn:q>)* ?x }";
+        let unsupported: i64 = Spi::get_one_with_args(
+            "SELECT jsonb_array_length(pgrdf.sparql_parse($1)->'unsupported_algebra')",
+            &[q.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            unsupported > 0,
+            "sparql_parse must report what execution refuses"
+        );
+        let code = pgrx::PgTryBuilder::new(|| {
+            Spi::run(&format!("SELECT * FROM pgrdf.sparql('{q}')")).unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            pgrx::pg_sys::panic::CaughtError::PostgresError(r)
+            | pgrx::pg_sys::panic::CaughtError::ErrorReport(r)
+            | pgrx::pg_sys::panic::CaughtError::RustPanic { ereport: r, .. } => {
+                Some(format!("{:?}", r.sql_error_code()))
+            }
+        })
+        .execute();
+        assert_eq!(code.as_deref(), Some("ERRCODE_FEATURE_NOT_SUPPORTED"));
+    }
+
+    fn load_walk_graph(iri: &str, ttl: &str) {
+        let g: i64 = Spi::get_one_with_args("SELECT pgrdf.add_graph($1)", &[iri.into()])
+            .unwrap()
+            .unwrap();
+        Spi::get_one_with_args::<i64>("SELECT pgrdf.parse_turtle($1, $2)", &[ttl.into(), g.into()])
+            .unwrap();
+    }
+
+    fn count_and_truncations(q: &str) -> (i64, i64) {
+        let n: i64 = Spi::get_one_with_args("SELECT count(*) FROM pgrdf.sparql($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        let t: i64 =
+            Spi::get_one("SELECT (pgrdf.last_call_stats()->>'path_depth_truncations')::bigint")
+                .unwrap()
+                .unwrap();
+        (n, t)
+    }
+
+    /// F2 (#138): a 40-rung ladder has 2^40 distinct paths from its first
+    /// node but only 80 reachable nodes. Reachability answers at once;
+    /// the old path-enumerating CTE could never finish.
+    #[pg_test]
+    fn walk_ladder_is_reachability_not_enumeration() {
+        let mut ttl = String::new();
+        for i in 0..40 {
+            for (x, y) in [("a", "a"), ("a", "b"), ("b", "a"), ("b", "b")] {
+                ttl.push_str(&format!(
+                    "<urn:lad:{x}{i}> <urn:lad:p> <urn:lad:{y}{}> .\n",
+                    i + 1
+                ));
+            }
+        }
+        load_walk_graph("urn:tdd:walk:ladder", &ttl);
+        let started = std::time::Instant::now();
+        let (n, t) = count_and_truncations(
+            "SELECT ?o WHERE { GRAPH <urn:tdd:walk:ladder> { <urn:lad:a0> <urn:lad:p>+ ?o } }",
+        );
+        assert_eq!(n, 80, "a1..a40 and b1..b40");
+        assert_eq!(t, 0);
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "reachability, not enumeration"
+        );
+    }
+
+    /// F2: no generated SQL enumerates paths any more.
+    #[pg_test]
+    fn walk_generated_sql_has_no_cycle_clause() {
+        load_walk_graph("urn:tdd:walk:sql", "<urn:w:a> <urn:w:p> <urn:w:b> .");
+        for q in [
+            "SELECT ?s ?o WHERE { ?s <urn:w:p>+ ?o }",
+            "SELECT ?s ?o WHERE { GRAPH <urn:tdd:walk:sql> { ?s <urn:w:p>* ?o } }",
+            "SELECT ?s ?o WHERE { GRAPH ?g { ?s <urn:w:p>+ ?o } }",
+        ] {
+            let sql: String = Spi::get_one_with_args("SELECT pgrdf.sparql_sql($1)", &[q.into()])
+                .unwrap()
+                .unwrap();
+            assert!(sql.contains("pgrdf._path_walk("), "{sql}");
+            assert!(!sql.contains("CYCLE"), "no path enumeration: {sql}");
+            assert!(!sql.contains("WITH RECURSIVE"), "{sql}");
+        }
+    }
+
+    /// F2: the walk seeds from the end an earlier pattern bound. In the
+    /// reported query shape (state → raisers → transitive callers →
+    /// SQL functions) the raisers bind the path's object, so the walk
+    /// starts at them and follows calls backward.
+    #[pg_test]
+    fn walk_seeds_from_join_bound_object() {
+        load_walk_graph(
+            "urn:tdd:walk:calls",
+            "<urn:c:r1> <urn:c:mayRaise> <urn:c:X> . <urn:c:r2> <urn:c:mayRaise> <urn:c:X> . \
+             <urn:c:X> <urn:c:code> \"22012\" . \
+             <urn:c:f1> <urn:c:calls> <urn:c:f2> . <urn:c:f2> <urn:c:calls> <urn:c:r1> . \
+             <urn:c:f3> <urn:c:calls> <urn:c:r1> . <urn:c:f4> <urn:c:calls> <urn:c:f5> . \
+             <urn:c:f6> <urn:c:calls> <urn:c:r2> . \
+             <urn:c:f1> <urn:c:impl> <urn:c:s1> . <urn:c:f3> <urn:c:impl> <urn:c:s3> . \
+             <urn:c:f4> <urn:c:impl> <urn:c:s4> . <urn:c:f6> <urn:c:impl> <urn:c:s6> .",
+        );
+        let q = "SELECT DISTINCT ?sql WHERE { GRAPH <urn:tdd:walk:calls> { \
+                   ?state <urn:c:code> \"22012\" . ?raiser <urn:c:mayRaise> ?state . \
+                   ?f <urn:c:impl> ?sql ; <urn:c:calls>+ ?raiser } }";
+        let (n, _) = count_and_truncations(q);
+        assert_eq!(n, 3, "s1 (via f2), s3, s6 — not s4");
+        let sql: String = Spi::get_one_with_args("SELECT pgrdf.sparql_sql($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        assert!(
+            sql.contains("LATERAL (SELECT w.reached AS src, w.start AS dst"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("COALESCE(q"),
+            "seeded from an earlier alias: {sql}"
+        );
+    }
+
+    /// F2: truncation is exact. A cycle of length 3 walked with a cap of
+    /// exactly 3 reaches every node, so nothing is cut — the old probe
+    /// over-counted this case.
+    #[pg_test]
+    fn walk_cycle_at_the_cap_is_not_truncation() {
+        load_walk_graph(
+            "urn:tdd:walk:cycle",
+            "<urn:y:a> <urn:y:p> <urn:y:b> . <urn:y:b> <urn:y:p> <urn:y:c> . \
+             <urn:y:c> <urn:y:p> <urn:y:a> .",
+        );
+        Spi::run("SET LOCAL pgrdf.path_max_depth = 3").unwrap();
+        let (n, t) = count_and_truncations(
+            "SELECT ?o WHERE { GRAPH <urn:tdd:walk:cycle> { <urn:y:a> <urn:y:p>+ ?o } }",
+        );
+        assert_eq!(n, 3, "b, c, and a itself (round the cycle)");
+        assert_eq!(t, 0, "every node is reached under the cap");
+        Spi::run("SET LOCAL pgrdf.path_max_depth = 2").unwrap();
+        let (n, t) = count_and_truncations(
+            "SELECT ?o WHERE { GRAPH <urn:tdd:walk:cycle> { <urn:y:a> <urn:y:p>+ ?o } }",
+        );
+        assert_eq!(n, 2);
+        assert_eq!(t, 1, "a is reachable only at distance 3 — a genuine cut");
+    }
+
+    /// F2: the pairs a walk holds in backend memory are capped; past the
+    /// budget the query refuses 54000 instead of exhausting the backend.
+    #[pg_test]
+    fn walk_memory_budget_refuses_54000() {
+        let mut ttl = String::new();
+        for i in 0..100 {
+            ttl.push_str(&format!("<urn:m:n{i}> <urn:m:p> <urn:m:n{}> .\n", i + 1));
+        }
+        load_walk_graph("urn:tdd:walk:budget", &ttl);
+        Spi::run("SET LOCAL pgrdf.path_max_pairs = 1000").unwrap();
+        let code = pgrx::PgTryBuilder::new(|| {
+            Spi::run(
+                "SELECT count(*) FROM pgrdf.sparql( \
+                 'SELECT ?s ?o WHERE { GRAPH <urn:tdd:walk:budget> { ?s <urn:m:p>+ ?o } }')",
+            )
+            .unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            pgrx::pg_sys::panic::CaughtError::PostgresError(r)
+            | pgrx::pg_sys::panic::CaughtError::ErrorReport(r)
+            | pgrx::pg_sys::panic::CaughtError::RustPanic { ereport: r, .. } => {
+                Some(format!("{:?}", r.sql_error_code()))
+            }
+        })
+        .execute();
+        assert_eq!(
+            code.as_deref(),
+            Some("ERRCODE_PROGRAM_LIMIT_EXCEEDED"),
+            "an unbound closure of 5,050 pairs exceeds a 1,000-pair budget"
+        );
     }
 
     /// stats() carries the #114 counter and the refusal increments it

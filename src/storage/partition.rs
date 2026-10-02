@@ -138,18 +138,145 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
         return;
     }
 
-    // (4) Create it. `part_name` is caller-built from a BIGINT (no
-    // user input in identifier position); `graph_id` is a constant
-    // in the LIST value position which Postgres accepts in DDL.
+    // (4) Authority: creating a partition is authorised by the caller's
+    // INSERT on the quad + graph tables, not by owning the parent
+    // (SPEC 0.6.37 §3.1). Refuses 42501 with the cure before any DDL.
+    require_graph_ddl_privilege(GraphDdl::Create, "add_graph");
+
+    // (5) Create it, as the storage owner. `part_name` is caller-built
+    // from a BIGINT (no user input in identifier position); `graph_id`
+    // is a constant in the LIST value position which Postgres accepts
+    // in DDL.
     let sql = format!(
         "CREATE TABLE IF NOT EXISTS pgrdf.{} \
          PARTITION OF pgrdf._pgrdf_quads FOR VALUES IN ({})",
         part_name, graph_id
     );
-    Spi::run(&sql).expect("create_quads_partition: CREATE TABLE failed");
+    as_storage_owner(|| {
+        Spi::run(&sql).expect("create_quads_partition: CREATE TABLE failed");
+        // (6) Replicate the parent's ACL onto the new partition.
+        inherit_parent_acl(part_name);
+    });
+}
 
-    // (5) Replicate the parent's ACL onto the new partition.
-    inherit_parent_acl(part_name);
+/// The two graph-DDL acts, each authorised by a table privilege the
+/// caller already holds on BOTH `_pgrdf_quads` and `_pgrdf_graphs`.
+#[derive(Clone, Copy)]
+pub(crate) enum GraphDdl {
+    Create,
+    Drop,
+}
+
+impl GraphDdl {
+    fn privilege(self) -> &'static str {
+        match self {
+            GraphDdl::Create => "INSERT",
+            GraphDdl::Drop => "DELETE",
+        }
+    }
+    fn act(self) -> &'static str {
+        match self {
+            GraphDdl::Create => "creating",
+            GraphDdl::Drop => "dropping",
+        }
+    }
+}
+
+/// Does `current_user` hold the privilege that authorises `kind`?
+fn holds_graph_ddl_privilege(kind: GraphDdl) -> bool {
+    Spi::get_one_with_args::<bool>(
+        // SELECT too: every graph-DDL path reads both tables before it
+        // writes. A comma list in has_table_privilege means ANY, so each
+        // privilege is asked separately.
+        "SELECT has_table_privilege('pgrdf._pgrdf_quads', 'SELECT') \
+            AND has_table_privilege('pgrdf._pgrdf_graphs', 'SELECT') \
+            AND has_table_privilege('pgrdf._pgrdf_quads', $1) \
+            AND has_table_privilege('pgrdf._pgrdf_graphs', $1)",
+        &[kind.privilege().into()],
+    )
+    .expect("graph DDL privilege check failed")
+    .unwrap_or(false)
+}
+
+/// Refuse 42501 unless `current_user` holds the privilege for `kind`.
+/// The HINT is the exact GRANT that cures it.
+pub(crate) fn require_graph_ddl_privilege(kind: GraphDdl, caller: &str) {
+    if holds_graph_ddl_privilege(kind) {
+        return;
+    }
+    let role: String = Spi::get_one("SELECT quote_ident(current_user::text)")
+        .expect("current_user lookup failed")
+        .unwrap_or_default();
+    let privilege = kind.privilege();
+    crate::refuse_with_hint(
+        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+        format!(
+            "{caller}: {} a graph requires SELECT and {privilege} on pgrdf._pgrdf_quads \
+             and pgrdf._pgrdf_graphs; role {role} does not hold them",
+            kind.act()
+        ),
+        format!("GRANT SELECT, {privilege} ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs TO {role}"),
+    );
+}
+
+/// Run `f` as the owner of `_pgrdf_quads`, for partition DDL only.
+///
+/// PostgreSQL demands ownership of the parent to create, attach or drop
+/// a partition, and no GRANT confers it. Callers authorise themselves
+/// first with [`require_graph_ddl_privilege`]; this then switches the
+/// user id the way PostgreSQL does for maintenance commands:
+/// `SECURITY_RESTRICTED_OPERATION` + `SECURITY_LOCAL_USERID_CHANGE`, a
+/// new GUC nest level, and `search_path = pg_catalog, pg_temp`. The
+/// caller is restored in a `finally`, so an ERROR caught in the same
+/// transaction (PgTryBuilder) never leaves the session elevated. `f`
+/// must run fixed, engine-built statements only. This is the one
+/// elevation in the add/drop path, disclosed in the elevation census.
+pub(crate) fn as_storage_owner<R>(f: impl FnOnce() -> R) -> R {
+    let owner: pgrx::pg_sys::Oid = Spi::get_one(
+        "SELECT relowner FROM pg_catalog.pg_class \
+         WHERE oid = 'pgrdf._pgrdf_quads'::regclass",
+    )
+    .expect("storage owner lookup failed")
+    .expect("pgrdf._pgrdf_quads has no owner");
+    let mut save_userid = pgrx::pg_sys::InvalidOid;
+    let mut save_sec: std::ffi::c_int = 0;
+    let nest_level;
+    unsafe {
+        pgrx::pg_sys::GetUserIdAndSecContext(&mut save_userid, &mut save_sec);
+        pgrx::pg_sys::SetUserIdAndSecContext(
+            owner,
+            save_sec
+                | (pgrx::pg_sys::SECURITY_LOCAL_USERID_CHANGE
+                    | pgrx::pg_sys::SECURITY_RESTRICTED_OPERATION)
+                    as std::ffi::c_int,
+        );
+        nest_level = pgrx::pg_sys::NewGUCNestLevel();
+    }
+    pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
+            .expect("owner switch: restricting search_path failed");
+        f()
+    }))
+    .finally(|| unsafe {
+        pgrx::pg_sys::AtEOXact_GUC(false, nest_level);
+        pgrx::pg_sys::SetUserIdAndSecContext(save_userid, save_sec);
+    })
+    .execute()
+}
+
+/// Can `current_user` create graphs? True when it holds SELECT and INSERT on both
+/// `_pgrdf_quads` and `_pgrdf_graphs` — the exact rule `add_graph`
+/// enforces. Consumers read this instead of inferring from ownership.
+#[pg_extern]
+fn can_create_graphs() -> bool {
+    holds_graph_ddl_privilege(GraphDdl::Create)
+}
+
+/// Can `current_user` drop graphs? True when it holds SELECT and DELETE on both
+/// `_pgrdf_quads` and `_pgrdf_graphs` — the rule `drop_graph` enforces.
+#[pg_extern]
+fn can_drop_graphs() -> bool {
+    holds_graph_ddl_privilege(GraphDdl::Drop)
 }
 
 /// Copy `pgrdf._pgrdf_quads`'s grants onto a freshly created partition.
@@ -231,7 +358,186 @@ pub(crate) fn create_quads_partition_named(part_name: &str, graph_id: i64) {
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
+    use pgrx::pg_sys::panic::CaughtError;
     use pgrx::prelude::*;
+
+    /// A NOLOGIN role holding `privs` on the quad and graph tables — the
+    /// shape of a trusted non-owner writer (the MCP role on the bench).
+    /// The partition-DDL gate is taken FIRST: GRANT locks the parent, and
+    /// the module rule is that the advisory gate is the outermost lock.
+    fn writer_role(name: &str, privs: &str) {
+        crate::storage::partition::acquire_partition_ddl_gate();
+        Spi::run(&format!("CREATE ROLE {name} NOLOGIN")).unwrap();
+        Spi::run(&format!("GRANT USAGE ON SCHEMA pgrdf TO {name}")).unwrap();
+        Spi::run(&format!(
+            "GRANT {privs} ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs, \
+             pgrdf._pgrdf_dictionary TO {name}"
+        ))
+        .unwrap();
+    }
+
+    /// Run `sql` as `role` and return the SQLSTATE and HINT it raised, or
+    /// None when it succeeded. The caller identity is read straight from
+    /// `GetUserId()` after the catch (no SPI on a caught error), so the
+    /// test also proves the owner switch restored the caller.
+    fn as_role_caught(role: &str, sql: &str) -> (Option<String>, Option<String>, bool) {
+        Spi::run(&format!("SET ROLE {role}")).unwrap();
+        let caller = unsafe { pgrx::pg_sys::GetUserId() };
+        let sql = sql.to_string();
+        let (code, hint) = pgrx::PgTryBuilder::new(|| {
+            Spi::run(&sql).unwrap();
+            (None, None)
+        })
+        .catch_others(|e| match &e {
+            CaughtError::PostgresError(r)
+            | CaughtError::ErrorReport(r)
+            | CaughtError::RustPanic { ereport: r, .. } => (
+                Some(format!("{:?}", r.sql_error_code())),
+                r.hint().map(str::to_string),
+            ),
+        })
+        .execute();
+        let restored = unsafe { pgrx::pg_sys::GetUserId() } == caller;
+        (code, hint, restored)
+    }
+
+    /// F1 (SPEC 0.6.37 §3.1): a trusted non-owner holding INSERT on the
+    /// quad + graph tables creates a graph. Only the fixed partition DDL
+    /// runs as the storage owner; the partition is owned by the parent's
+    /// owner, keeps the #96 ACL inheritance, and the caller is restored.
+    #[pg_test]
+    fn nonowner_with_insert_creates_graph() {
+        writer_role("pgrdf_f1_writer", "SELECT, INSERT, DELETE");
+        let (code, _hint, restored) = as_role_caught(
+            "pgrdf_f1_writer",
+            "SELECT pgrdf.add_graph('urn:tdd:f1:created')",
+        );
+        assert_eq!(
+            code, None,
+            "a writer with INSERT must be able to create a graph"
+        );
+        assert!(
+            restored,
+            "the caller must be restored after the owner switch"
+        );
+        Spi::run("RESET ROLE").unwrap();
+        let owned_like_parent = Spi::get_one::<bool>(
+            "SELECT c.relowner = p.relowner FROM pg_class c, pg_class p \
+             WHERE p.oid = 'pgrdf._pgrdf_quads'::regclass AND c.oid = ( \
+               SELECT format('pgrdf._pgrdf_quads_g%s', graph_id)::regclass \
+               FROM pgrdf._pgrdf_graphs WHERE iri = 'urn:tdd:f1:created')",
+        )
+        .unwrap()
+        .unwrap_or(false);
+        assert!(
+            owned_like_parent,
+            "the partition is owned by the storage owner"
+        );
+        let writer_can_insert = Spi::get_one::<bool>(
+            "SELECT has_table_privilege('pgrdf_f1_writer', ( \
+               SELECT format('pgrdf._pgrdf_quads_g%s', graph_id) \
+               FROM pgrdf._pgrdf_graphs WHERE iri = 'urn:tdd:f1:created'), 'INSERT')",
+        )
+        .unwrap()
+        .unwrap_or(false);
+        assert!(writer_can_insert, "#96 ACL inheritance still applies");
+    }
+
+    /// F1: without INSERT the create refuses 42501 before any DDL, and the
+    /// HINT carries the exact grant that cures it.
+    #[pg_test]
+    fn nonowner_without_insert_refused_with_cure() {
+        writer_role("pgrdf_f1_reader", "SELECT");
+        let (code, hint, restored) = as_role_caught(
+            "pgrdf_f1_reader",
+            "SELECT pgrdf.add_graph('urn:tdd:f1:refused')",
+        );
+        assert_eq!(code.as_deref(), Some("ERRCODE_INSUFFICIENT_PRIVILEGE"));
+        assert!(restored, "the caller identity is unchanged after a refusal");
+        let hint = hint.expect("the refusal must carry a HINT");
+        assert!(
+            hint.contains(
+                "GRANT SELECT, INSERT ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs TO pgrdf_f1_reader"
+            ),
+            "the HINT names the cure, got: {hint}"
+        );
+    }
+
+    /// F1: a writer holding DELETE drops a graph; without DELETE the drop
+    /// refuses 42501 with the DELETE grant as the cure.
+    #[pg_test]
+    fn nonowner_drop_needs_delete() {
+        Spi::run("SELECT pgrdf.add_graph('urn:tdd:f1:to-drop')").unwrap();
+        Spi::run("SELECT pgrdf.add_graph('urn:tdd:f1:kept')").unwrap();
+        writer_role("pgrdf_f1_dropper", "SELECT, INSERT, DELETE");
+        let (code, _h, restored) = as_role_caught(
+            "pgrdf_f1_dropper",
+            "SELECT pgrdf.drop_graph('urn:tdd:f1:to-drop', true)",
+        );
+        assert_eq!(
+            code, None,
+            "a writer with DELETE must be able to drop a graph"
+        );
+        assert!(restored);
+        Spi::run("RESET ROLE").unwrap();
+        writer_role("pgrdf_f1_nodelete", "SELECT, INSERT");
+        let (code, hint, _r) = as_role_caught(
+            "pgrdf_f1_nodelete",
+            "SELECT pgrdf.drop_graph('urn:tdd:f1:kept', true)",
+        );
+        assert_eq!(code.as_deref(), Some("ERRCODE_INSUFFICIENT_PRIVILEGE"));
+        assert!(hint.unwrap_or_default().contains(
+            "GRANT SELECT, DELETE ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs TO pgrdf_f1_nodelete"
+        ));
+    }
+
+    /// F1: an ERROR raised INSIDE the owner switch, caught in the same
+    /// transaction, must not leave the session running as the storage
+    /// owner. An event trigger refuses the partition CREATE TABLE, so
+    /// the failure happens while the switch is active.
+    #[pg_test]
+    fn error_inside_owner_switch_restores_caller() {
+        Spi::run(
+            "CREATE FUNCTION pgrdf_f1_block() RETURNS event_trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'f1 probe: partition DDL blocked'; END $$",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE EVENT TRIGGER pgrdf_f1_block ON ddl_command_start \
+             WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION pgrdf_f1_block()",
+        )
+        .unwrap();
+        writer_role("pgrdf_f1_victim", "SELECT, INSERT, DELETE");
+        let (code, _hint, restored) = as_role_caught(
+            "pgrdf_f1_victim",
+            "SELECT pgrdf.add_graph('urn:tdd:f1:blocked')",
+        );
+        assert!(code.is_some(), "the blocked DDL must raise");
+        assert!(
+            restored,
+            "a caught error inside the switch must restore the caller"
+        );
+    }
+
+    /// F1: the capability predicates answer from the caller's grants.
+    #[pg_test]
+    fn can_create_and_drop_graphs_follow_grants() {
+        writer_role("pgrdf_f1_full", "SELECT, INSERT, DELETE");
+        writer_role("pgrdf_f1_ro", "SELECT");
+        Spi::run("SET ROLE pgrdf_f1_full").unwrap();
+        let full =
+            Spi::get_one::<bool>("SELECT pgrdf.can_create_graphs() AND pgrdf.can_drop_graphs()")
+                .unwrap()
+                .unwrap();
+        Spi::run("SET ROLE pgrdf_f1_ro").unwrap();
+        let ro =
+            Spi::get_one::<bool>("SELECT pgrdf.can_create_graphs() OR pgrdf.can_drop_graphs()")
+                .unwrap()
+                .unwrap();
+        Spi::run("RESET ROLE").unwrap();
+        assert!(full, "INSERT+DELETE on both tables reads true/true");
+        assert!(!ro, "SELECT only reads false/false");
+    }
 
     /// A partition created after a grant on the parent carries that
     /// grant. This is issue #96: without it a downstream `SECURITY

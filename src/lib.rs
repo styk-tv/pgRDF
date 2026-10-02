@@ -51,6 +51,21 @@ pub(crate) fn refuse(code: pgrx::pg_sys::errcodes::PgSqlErrorCode, msg: String) 
     unreachable!("ERROR-level report always unwinds")
 }
 
+/// `refuse` plus a HINT carrying the cure. Clients that render HINT
+/// (pgrdf-mcp shows it verbatim as `cure`) get the exact statement that
+/// fixes the refusal, not just its reason.
+#[track_caller]
+pub(crate) fn refuse_with_hint(
+    code: pgrx::pg_sys::errcodes::PgSqlErrorCode,
+    msg: String,
+    hint: String,
+) -> ! {
+    pgrx::pg_sys::panic::ErrorReport::new(code, msg, "pgrdf")
+        .set_hint(hint)
+        .report(pgrx::pg_sys::elog::PgLogLevel::ERROR);
+    unreachable!("ERROR-level report always unwinds")
+}
+
 /// Postgres entrypoint. Runs once per process: in the postmaster
 /// when `pgrdf` is in `shared_preload_libraries` (the supported
 /// production deployment), or lazily in a backend on first extension

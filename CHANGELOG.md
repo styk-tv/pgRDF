@@ -6,6 +6,105 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.37] — 2026-10-02
+
+SPEC.pgRDF.v0.6.37 — query custody under the pinned join order, set-semantics
+paths, graph DDL authority. Two 1.1M-triple graphs loaded side by side exposed
+three runaways and a missing capability; the fixes landed with the tests that
+would have caught them.
+
+### Fixed
+
+- **Property paths `+` and `*` enumerated paths instead of computing
+  reachability** (#138). The recursive CTE used `UNION ALL` + `CYCLE … USING
+  path`, seeded with every edge of the predicate, so a call graph of 168k edges
+  passed 1 GB of temp at depth 4 and exhausted the disk at the default cap.
+  Paths now walk breadth-first with a visited set, from the endpoint that is
+  already bound (a constant, or a variable an earlier pattern bound). Depth is
+  shortest distance and truncation is exact: it is recorded iff some node is
+  reachable only beyond `pgrdf.path_max_depth`, and a cycle never registers.
+  `pgrdf.path_max_depth`, `pgrdf.on_path_truncation` and
+  `path_depth_truncations` keep their contract. The walk polls for interrupts,
+  so `statement_timeout` and cancel apply, and the new GUC
+  `pgrdf.path_max_pairs` (default 1,000,000) refuses `54000` instead of
+  exhausting backend memory, which `temp_file_limit` does not cover.
+- **An `OPTIONAL` group sharing only an outer variable became a cross product
+  under the pinned join order** (#139). `pgrdf.sparql()` pins the join order;
+  an OPTIONAL group of two or more triples was emitted with every inner alias
+  tied only to the outer query, and the planner flattened the group's own join
+  into a cross product (~424M rows, 16 GB of temp, on an 8-row answer).
+  OPTIONAL and MINUS groups now chain their joins to each other, and the
+  OPTIONAL subquery is fenced with `OFFSET 0`. **The SQL `sparql_sql()` shows
+  for OPTIONAL queries changes accordingly.**
+- **Blank nodes in query patterns were refused** (#140). `?s :p [ :q ?o ]`,
+  `?s :p _:x . _:x :q ?o` and the RDF list idiom `?list rdf:rest*/rdf:first ?m`
+  all failed at execution while `sparql_parse` reported them runnable. Query
+  blank nodes are now non-projected variables, so lists (SHACL `sh:in`) walk.
+  **Parse and execution now agree:** every shape `sparql_parse` lists as
+  unsupported refuses typed (`0A000`) with its message unchanged, and nothing
+  it calls runnable is refused at execution.
+- **A locked graph could be changed by direct SQL** (#142). Locks were enforced
+  on engine routes only. `lock_graph` now installs refuse-triggers on the
+  graph's own partition (`55P03`, with `pgrdf.unlock_graph(<id>, '<reason>')`
+  as HINT on both the trigger and the engine fence); `unlock_graph` removes
+  them. Unlocked graphs carry no trigger, so ordinary writes pay nothing
+  (measured: a parent-wide trigger or RLS cost ~40% on every bulk insert).
+  Graphs locked before the upgrade get their triggers in the upgrade script.
+  `graph_integrity` reports lock custody; drift is not clean.
+- Server-path loaders (`load_turtle` and its `_verbose`, `_dict_batched`,
+  `_streaming`, `_staged`, `_staged_run` variants) now require the privileges
+  of `pg_read_server_files` before opening any path, as PostgreSQL requires for
+  `COPY … FROM 'file'`; the refusal is `42501` with the grant as HINT and is the
+  same for a present and an absent path. The staged loader's background
+  workers run as the calling role; the staged lane is an owner lane, refused up
+  front for a non-owner, and `load_turtle`'s N-Triples auto-route takes the
+  standard parser for a non-owner. The content parsers (`parse_turtle*`,
+  `parse_nquads`, `parse_trig`) are unchanged.
+
+### Added
+
+- **Non-owner roles create and drop graphs** (#137). Creating a graph is
+  authorised by `SELECT` + `INSERT` on `pgrdf._pgrdf_quads` and
+  `pgrdf._pgrdf_graphs`, dropping by `SELECT` + `DELETE`; only the fixed
+  partition DDL runs as the storage owner, under
+  `SECURITY_RESTRICTED_OPERATION`, and the caller is restored on error. The
+  functions stay invoker functions; this elevation is disclosed here and in the
+  surface notes. Refusal: `42501`, HINT `GRANT SELECT, INSERT ON
+  pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs TO <role>` (DELETE for drop). New
+  stable predicates `pgrdf.can_create_graphs()` and `pgrdf.can_drop_graphs()`
+  answer the same rule.
+- **`pgrdf.graph_diff(a, b [, side, predicate, class])` and
+  `pgrdf.graph_diff_summary(a, b)`**, blank-node-aware (#141). Ground triples
+  are compared by exact set difference; blank-node components (triples
+  connected through shared blank nodes) are each canonicalised with RDFC-1.0
+  and compared as a multiset of digests. The diff is empty iff the graphs are
+  isomorphic; a change inside a component reports the whole component.
+  Counting units: `ground.*` and `components.triples_*` are triples;
+  `components.removed/added/common` count components as a multiset;
+  `by_predicate` counts ground and component triples per predicate; `by_type`
+  counts `rdf:type` triples per class. Rows are ordered by side then canonical
+  N-Triples line, so `OFFSET`/`LIMIT` paging is deterministic; `predicate` and
+  `class` narrow the ground comparison, and a component is returned whole if
+  any of its triples matches. New GUC `pgrdf.diff_max_rows` (default
+  5,000,000) bounds memory; an adversarial component keeps RDFC's `54000`.
+- **Duplicate-aware graph creation** (#143). `graph_inventory()` gains
+  `source_sha256`, `source_loads` and `identity_digest` (a locked graph's cached
+  rdfc-1.0 digest while lock custody holds). `parse_nquads` and `parse_trig`
+  record the source digest — sha256 of the UTF-8 bytes of the content argument
+  — when every quad lands in the target graph. New strict
+  `pgrdf.create_graph(iri)` claims a new IRI or refuses `42710` with the
+  existing graph's id and source digest in the HINT; `add_graph` stays
+  get-or-create.
+- A locked graph's `graph_digest` is cached on first computation and served
+  while lock custody holds; unlock clears it, drift bypasses it.
+
+### Changed
+
+- `graph_inventory()` has three new columns (a signature change; the upgrade
+  drops and recreates the function). No stable export is removed.
+- Upgrade: `ALTER EXTENSION pgrdf UPDATE` in place; graph ids, partitions and
+  consumer schemas survive.
+
 ## [0.6.36] — 2026-09-16
 
 SPEC.pgRDF.v0.6.35 — "capability custody." pgRDF could not state, provably and

@@ -35,6 +35,22 @@ pub(crate) const MAX_PATH_MAX_DEPTH: i32 = 1024;
 /// affects that session's query plans, never another backend).
 pub(crate) static PATH_MAX_DEPTH: GucSetting<i32> = GucSetting::<i32>::new(DEFAULT_PATH_MAX_DEPTH);
 
+/// `pgrdf.path_max_pairs` — the memory budget of one property-path walk
+/// (SPEC 0.6.37 §3.2). `path_max_depth` bounds how FAR a walk goes, not
+/// how WIDE: an unbound `?s p+ ?o` over a large predicate is the whole
+/// transitive closure. The breadth-first walk counts every (start,
+/// reached) pair it holds in backend memory — which `temp_file_limit`
+/// does not cover — and refuses 54000 past this many, instead of
+/// exhausting the backend. Bind an endpoint (the walk then seeds from
+/// it) or raise the budget deliberately.
+pub(crate) static PATH_MAX_PAIRS: GucSetting<i32> = GucSetting::<i32>::new(1_000_000);
+
+/// `pgrdf.diff_max_rows` — the memory budget of `graph_diff` /
+/// `graph_diff_summary` (SPEC 0.6.37 §3.5): the blank-node-bearing
+/// triples read per graph and the difference rows held before return.
+/// Past it the call refuses 54000 instead of exhausting the backend.
+pub(crate) static DIFF_MAX_ROWS: GucSetting<i32> = GucSetting::<i32>::new(5_000_000);
+
 /// `pgrdf.on_path_truncation` — what a query does when a recursive
 /// property-path walk (`+` / `*`) actually hits `pgrdf.path_max_depth`
 /// (issue #14, fail-closed truncation; detected by the per-`+`
@@ -251,6 +267,31 @@ impl IngestDictPath {
 /// Register every pgRDF custom GUC. Called once from `_PG_init`.
 pub fn register() {
     GucRegistry::define_int_guc(
+        c"pgrdf.diff_max_rows",
+        c"Memory budget of graph_diff / graph_diff_summary, in rows.",
+        c"Blank-node-bearing triples read per graph, and difference rows held \
+          before return. Past it the call refuses with SQLSTATE 54000 \
+          instead of exhausting the backend; narrow the diff or raise this.",
+        &DIFF_MAX_ROWS,
+        1_000,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pgrdf.path_max_pairs",
+        c"Memory budget of one SPARQL property-path walk, in (start, reached) pairs.",
+        c"A recursive property path (+, *) is walked breadth-first in backend \
+          memory, which temp_file_limit does not cover. Past this many pairs \
+          the query refuses with SQLSTATE 54000 instead of exhausting the \
+          backend. Binding an endpoint makes the walk start there.",
+        &PATH_MAX_PAIRS,
+        1_000,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
         c"pgrdf.path_max_depth",
         c"Maximum recursion depth for SPARQL property-path CTEs.",
         c"Recursive property-path operators (*, +) walk the graph up to \
@@ -396,6 +437,16 @@ pub fn register() {
 #[allow(dead_code)]
 pub(crate) fn path_max_depth() -> i32 {
     PATH_MAX_DEPTH.get()
+}
+
+/// Resolved `pgrdf.path_max_pairs` for this call.
+pub(crate) fn path_max_pairs() -> i32 {
+    PATH_MAX_PAIRS.get()
+}
+
+/// Resolved `pgrdf.diff_max_rows` for this call.
+pub(crate) fn diff_max_rows() -> i32 {
+    DIFF_MAX_ROWS.get()
 }
 
 /// Resolved `pgrdf.ingest_dict_path` for this call, applying the

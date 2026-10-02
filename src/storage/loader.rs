@@ -1460,6 +1460,35 @@ where
 /// (same verbose-stats keys + conventions as `parse_turtle_verbose`)
 /// and extends it with a `graphs` array of the resolved destination
 /// graph ids, in first-seen order.
+/// #143 (0.6.37): a quad load records the target graph's source digest
+/// only when every quad lands in the default graph — always true for an
+/// N-Triples import. Decided by a parse-only pre-pass BEFORE any lock:
+/// the record opens with an early `_pgrdf_graphs` row update (the
+/// canonical lock order, see `begin_source_record`), and a load that
+/// names other graphs auto-creates them mid-ingest, which takes the
+/// partition-DDL gate — holding the row lock while waiting on the gate
+/// deadlocks against a concurrent `add_graph` (measured in the parallel
+/// suite). A load whose content does not parse cleanly in the pre-pass
+/// records nothing; the ingest itself still reports its errors. The
+/// digest is sha256 of the UTF-8 bytes of the content argument as
+/// received (the database encoding is UTF8).
+fn only_default_graph<I, E>(quads: I) -> bool
+where
+    I: Iterator<Item = Result<oxrdf::Quad, E>>,
+{
+    let mut all_default = true;
+    for q in quads {
+        match q {
+            Ok(q) if q.graph_name == GraphName::DefaultGraph => {}
+            _ => {
+                all_default = false;
+                break;
+            }
+        }
+    }
+    all_default
+}
+
 fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
     pgrx::JsonB(json!({
         "triples":          stats.triples,
@@ -2796,7 +2825,17 @@ fn parse_trig(
     // #107: the PARAMETER graph is lock-checked. Graphs named inside
     // the TriG payload are not (documented v0.6.28 limitation).
     crate::storage::lock::require_unlocked(default_graph_id, "parse_trig");
+    let record = only_default_graph(TriGParser::new().for_slice(content.as_bytes()));
+    if record {
+        crate::storage::source_digest::begin_source_record(default_graph_id);
+    }
     let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_trig");
+    if record {
+        crate::storage::source_digest::finish_source_record_bytes(
+            default_graph_id,
+            content.as_bytes(),
+        );
+    }
     quad_stats_to_jsonb(&stats, &graphs)
 }
 
@@ -2825,7 +2864,17 @@ fn parse_nquads(
     // #107: parameter graph checked; payload-named graphs are not
     // (documented v0.6.28 limitation).
     crate::storage::lock::require_unlocked(default_graph_id, "parse_nquads");
+    let record = only_default_graph(NQuadsParser::new().for_slice(content.as_bytes()));
+    if record {
+        crate::storage::source_digest::begin_source_record(default_graph_id);
+    }
     let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_nquads");
+    if record {
+        crate::storage::source_digest::finish_source_record_bytes(
+            default_graph_id,
+            content.as_bytes(),
+        );
+    }
     quad_stats_to_jsonb(&stats, &graphs)
 }
 
