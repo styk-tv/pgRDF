@@ -72,7 +72,7 @@ fn nt_escape(s: &str) -> String {
 /// Serialize one term; blank nodes go through `label` so callers control
 /// the substitution (`_:a`/`_:z` during first-degree hashing, issued
 /// canonical ids at the end).
-fn nt_term(t: &CTerm, label: &dyn Fn(&str) -> String) -> String {
+pub(crate) fn nt_term(t: &CTerm, label: &dyn Fn(&str) -> String) -> String {
     match t {
         CTerm::Iri(i) => format!("<{i}>"),
         CTerm::BNode(b) => format!("_:{}", label(b)),
@@ -89,7 +89,7 @@ fn nt_term(t: &CTerm, label: &dyn Fn(&str) -> String) -> String {
     }
 }
 
-fn nt_triple(t: &Triple, label: &dyn Fn(&str) -> String) -> String {
+pub(crate) fn nt_triple(t: &Triple, label: &dyn Fn(&str) -> String) -> String {
     format!(
         "{} {} {} .\n",
         nt_term(&t.0, label),
@@ -108,22 +108,33 @@ fn sha256_hex(data: &str) -> String {
 /// join shape `serialise_graph_to_ntriples` uses (shacl.rs), minus the
 /// inferred rows.
 pub(crate) fn read_asserted_triples(graph_id: i64) -> Vec<Triple> {
+    read_asserted_triples_where(graph_id, "")
+}
+
+/// The term-structured triple read behind `graph_digest`, narrowed by an
+/// extra SQL condition over the aliases `q` (quad), `s` / `p` / `o`
+/// (dictionary rows) — `graph_diff` reads only the blank-node-bearing
+/// triples this way. `extra` is engine-built, never user input.
+pub(crate) fn read_asserted_triples_where(graph_id: i64, extra: &str) -> Vec<Triple> {
     let mut triples: Vec<Triple> = Vec::new();
+    let sql = format!(
+        "SELECT
+            s.term_type,        s.lexical_value,
+            p.lexical_value     AS p_iri,
+            o.term_type,        o.lexical_value,
+            dt.lexical_value    AS o_dt,
+            o.language_tag      AS o_lang
+         FROM pgrdf._pgrdf_quads q
+         JOIN pgrdf._pgrdf_dictionary s  ON s.id  = q.subject_id
+         JOIN pgrdf._pgrdf_dictionary p  ON p.id  = q.predicate_id
+         JOIN pgrdf._pgrdf_dictionary o  ON o.id  = q.object_id
+         LEFT JOIN pgrdf._pgrdf_dictionary dt ON dt.id = o.datatype_iri_id
+         WHERE q.graph_id = $1 AND q.is_inferred = FALSE {extra}"
+    );
     Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT
-                    s.term_type,        s.lexical_value,
-                    p.lexical_value     AS p_iri,
-                    o.term_type,        o.lexical_value,
-                    dt.lexical_value    AS o_dt,
-                    o.language_tag      AS o_lang
-                 FROM pgrdf._pgrdf_quads q
-                 JOIN pgrdf._pgrdf_dictionary s  ON s.id  = q.subject_id
-                 JOIN pgrdf._pgrdf_dictionary p  ON p.id  = q.predicate_id
-                 JOIN pgrdf._pgrdf_dictionary o  ON o.id  = q.object_id
-                 LEFT JOIN pgrdf._pgrdf_dictionary dt ON dt.id = o.datatype_iri_id
-                 WHERE q.graph_id = $1 AND q.is_inferred = FALSE",
+                &sql,
                 None,
                 &[unsafe {
                     pgrx::datum::DatumWithOid::new(
@@ -462,6 +473,16 @@ fn graph_digest(graph_id: i64) -> String {
 /// blank-node component on its own (SPEC 0.6.37 §3.5). The complexity
 /// budget is per call: an adversarial input raises `pgRDF#117`.
 pub(crate) fn canonicalize(triples: Vec<Triple>) -> (Vec<String>, String) {
+    let (lines, digest, _labels) = canonicalize_labeled(triples);
+    (lines, digest)
+}
+
+/// [`canonicalize`] plus the label map: each input blank-node label →
+/// its canonical `c14nN` label. `graph_diff` renders a component's rows
+/// with these labels.
+pub(crate) fn canonicalize_labeled(
+    triples: Vec<Triple>,
+) -> (Vec<String>, String, HashMap<String, String>) {
     let mut bnode_quads: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, t) in triples.iter().enumerate() {
         for term in [&t.0, &t.2] {
@@ -532,7 +553,7 @@ pub(crate) fn canonicalize(triples: Vec<Triple>) -> (Vec<String>, String) {
         .collect();
     lines.sort();
     let digest = sha256_hex(&lines.concat());
-    (lines, digest)
+    (lines, digest, canonical.issued.clone())
 }
 
 #[cfg(any(test, feature = "pg_test"))]
