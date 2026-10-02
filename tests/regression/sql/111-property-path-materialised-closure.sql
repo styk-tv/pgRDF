@@ -54,13 +54,15 @@ SELECT pgrdf.shmem_reset();
 SELECT pgrdf.plan_cache_clear();
 
 -- Helper: does the EXECUTED plan of the SQL `pgrdf.sparql` would run
--- for `q` contain a `CTE Scan` node? We get the translated SQL via
--- the `pgrdf.sparql_sql` debug hook (dict ids inlined, so it is
+-- for `q` carry the recursive walk? We get the translated SQL via the
+-- `pgrdf.sparql_sql` debug hook (dict ids inlined, so it is
 -- self-contained + safely EXPLAIN-able), EXPLAIN it as JSON, and
--- substring-probe the plan text for `"Node Type": "CTE Scan"`. A
--- recursive property-path CTE always surfaces as a CTE Scan in the
--- executed plan; the materialised-closure fallback emits a plain
--- scan instead.
+-- substring-probe the plan text. Up to 0.6.36 the recursion was a
+-- `WITH RECURSIVE` CTE (a `CTE Scan` node); since 0.6.37 (#138) it is
+-- the breadth-first `pgrdf._path_walk` (a Function Scan). Either
+-- marks "the walk ran"; the materialised-closure fallback emits a
+-- plain scan with neither. The function keeps its name so the
+-- goldens below read unchanged: t = walked, f = elided.
 CREATE OR REPLACE FUNCTION _plan_has_cte_scan(q TEXT)
 RETURNS BOOLEAN
 LANGUAGE plpgsql AS $$
@@ -70,7 +72,8 @@ DECLARE
 BEGIN
   SELECT pgrdf.sparql_sql(q) INTO inner_sql;
   EXECUTE 'EXPLAIN (FORMAT JSON) ' || inner_sql INTO plan_json;
-  RETURN position('"CTE Scan"' IN plan_json) > 0;
+  RETURN position('"CTE Scan"' IN plan_json) > 0
+      OR position('_path_walk' IN plan_json) > 0;
 END
 $$;
 

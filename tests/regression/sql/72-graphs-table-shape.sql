@@ -43,6 +43,10 @@ SELECT bool_and(
     -- NULL means never recorded, distinct from every digest and count.
     WHEN 'source_sha256' THEN format_type(atttypid, atttypmod) = 'text'    AND NOT attnotnull
     WHEN 'source_loads'  THEN format_type(atttypid, atttypmod) = 'integer' AND NOT attnotnull
+    -- #142 (0.6.37): a locked graph's cached rdfc-1.0 digest. Nullable —
+    -- filled lazily by graph_digest while lock custody holds, cleared by
+    -- lock_graph / unlock_graph.
+    WHEN 'locked_digest' THEN format_type(atttypid, atttypmod) = 'text'    AND NOT attnotnull
     -- E4 (0.6.34): materialization freshness record. Both nullable —
     -- NULL means never materialized ('never'/'unknown' in the
     -- graph_inventory() derivation), never a guess.
