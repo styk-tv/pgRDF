@@ -3,54 +3,54 @@
   successful oci-publish.yml run AND after SLSA Build Provenance v1
   attestations have been verified against every GHCR digest below. Do NOT edit
   by hand — the next workflow run will overwrite your changes. Last refresh:
-  2026-10-02 16:31:19Z (version: v0.6.38).
+  2026-10-02 22:38:12Z (version: v0.6.39).
 -->
 
 # pgRDF — latest published artifacts
 
 One publishable surface ships from this repo: the PostgreSQL **extension** (oras-pulled OCI artifact). This file tracks the current release for **PostgreSQL 18** on x86-64 and arm64. The [Repo packages view](https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle) shows everything currently published.
 
-## pgRDF extension — `v0.6.38` (PostgreSQL 18)
+## pgRDF extension — `v0.6.39` (PostgreSQL 18)
 
 Every digest below carries a verifiable SLSA Build Provenance v1 attestation.
 
-`oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.38-pg18-<arch>` → drop `lib/pgrdf.so` + `share/extension/{pgrdf.control, pgrdf--0.6.38.sql}` next to your `postgres:18` install.
+`oras pull ghcr.io/styk-tv/pgrdf-bundle:0.6.39-pg18-<arch>` → drop `lib/pgrdf.so` + `share/extension/{pgrdf.control, pgrdf--0.6.39.sql}` next to your `postgres:18` install.
 
 | arch  | Pull URI                                             | Also tagged | Digest                                                                  | Created (UTC)       |
 |-------|------------------------------------------------------|-------------|-------------------------------------------------------------------------|---------------------|
-| amd64 | `ghcr.io/styk-tv/pgrdf-bundle:0.6.38-pg18-amd64`     | —           | `sha256:f65d0578ecab633a46ab861445119740a7a7b22fb8661ea0cbc5fd9b1cf48029` | 2026-10-02 16:30:20 |
-| arm64 | `ghcr.io/styk-tv/pgrdf-bundle:0.6.38-pg18-arm64`     | —           | `sha256:0f891e9b47331bcbe244765a255f4a5f3c2fb627f05479e0e44ce4d5d26c1869` | 2026-10-02 16:30:18 |
+| amd64 | `ghcr.io/styk-tv/pgrdf-bundle:0.6.39-pg18-amd64`     | —           | `sha256:c67b3790e19b5877adeadfda00fc4576f2b9d1f7f89bc428b7dda88c1d9e34a7` | 2026-10-02 22:37:20 |
+| arm64 | `ghcr.io/styk-tv/pgrdf-bundle:0.6.39-pg18-arm64`     | —           | `sha256:cae0439f89ae751f884ee53f8f8a932e7b9664accc29a31f9614e671305a7a8a` | 2026-10-02 22:37:19 |
 
 |                       |                                                                                                |
 |-----------------------|------------------------------------------------------------------------------------------------|
 | Artifact type         | `application/vnd.styk.pgrdf.bundle.v1+tar`                                                     |
-| Aggregate index       | `ghcr.io/styk-tv/pgrdf-bundle:0.6.38` (also tagged `v0.6.38`)                                  |
-| Aggregate digest      | `sha256:17cd8a1c42d2e02c57ba12d3327278ab5452800edad392231a2588ffcbff0d9f` |
+| Aggregate index       | `ghcr.io/styk-tv/pgrdf-bundle:0.6.39` (also tagged `v0.6.39`)                                  |
+| Aggregate digest      | `sha256:8fa03ea85ba979382352229b76568563061a862e937b255a1f4fefaca9fd8ebd` |
 | Provenance            | SLSA Build Provenance v1, Sigstore-backed, pushed as OCI referrer                              |
-| Built by              | [Workflow run](https://github.com/styk-tv/pgRDF/actions/runs/37033495562)                                                                                |
-| Built from commit     | [`15d49476be9b`](https://github.com/styk-tv/pgRDF/commit/15d49476be9b88c9ccfef3b9556aeeecbf09a715)                                                                              |
-| Verify (CLI)          | `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.38 --repo styk-tv/pgRDF`         |
-| Release notes         | https://github.com/styk-tv/pgRDF/releases/tag/v0.6.38                                          |
-| Tarball mirror        | https://github.com/styk-tv/pgRDF/releases/tag/v0.6.38                                          |
+| Built by              | [Workflow run](https://github.com/styk-tv/pgRDF/actions/runs/37072789268)                                                                                |
+| Built from commit     | [`a1dce7bd7c4d`](https://github.com/styk-tv/pgRDF/commit/a1dce7bd7c4d1138f713c5b73e9d498aa279612b)                                                                              |
+| Verify (CLI)          | `gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.39 --repo styk-tv/pgRDF`         |
+| Release notes         | https://github.com/styk-tv/pgRDF/releases/tag/v0.6.39                                          |
+| Tarball mirror        | https://github.com/styk-tv/pgRDF/releases/tag/v0.6.39                                          |
 | Repo packages view    | https://github.com/styk-tv/pgRDF/pkgs/container/pgrdf-bundle                                   |
 
 ## Verifying any artifact above
 
 ```sh
 # Aggregate index (multi-arch)
-gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.38 \
+gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.39 \
   --repo styk-tv/pgRDF
 
 # A specific PG×arch leaf
-gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.38-pg18-amd64 \
+gh attestation verify oci://ghcr.io/styk-tv/pgrdf-bundle:0.6.39-pg18-amd64 \
   --repo styk-tv/pgRDF
 ```
 
-A successful verify means: signed by GitHub's Fulcio CA against the OIDC token of the v0.6.38 `oci-publish` workflow run, recorded in Sigstore's Rekor transparency log, subject digest matches the pulled artifact.
+A successful verify means: signed by GitHub's Fulcio CA against the OIDC token of the v0.6.39 `oci-publish` workflow run, recorded in Sigstore's Rekor transparency log, subject digest matches the pulled artifact.
 
 ## Pin policy
 
-- There is **no `latest` synonym** on the extension OCI artifact — pin by `pg`×`arch` explicitly (e.g. `0.6.38-pg18-amd64`).
+- There is **no `latest` synonym** on the extension OCI artifact — pin by `pg`×`arch` explicitly (e.g. `0.6.39-pg18-amd64`).
 - Tagged versions are immutable on GHCR.
 - The aggregate `vX.Y.Z` / `X.Y.Z` index references the per-arch leaves for that release; pull it to let your client pick.
 - Do not consider an artifact "shipped" if its digest does not verify under `gh attestation verify`.
