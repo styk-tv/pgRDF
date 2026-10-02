@@ -159,6 +159,24 @@ fn add_graph_iri(iri: &str) -> i64 {
         );
     }
 
+    // An IRI that is already registered is answered with a plain read:
+    // no lock, no privilege beyond SELECT. Creating a NEW graph is
+    // authorised by SELECT + INSERT on the quad and graph tables (SPEC
+    // 0.6.37 §3.1), checked before any lock so a refusal carries its
+    // cure. The locked re-check below still settles the race.
+    let registered: Option<i64> = Spi::get_one_with_args(
+        "SELECT (SELECT graph_id FROM pgrdf._pgrdf_graphs WHERE iri = $1 LIMIT 1)",
+        &[iri.into()],
+    )
+    .unwrap_or_else(|e| panic!("add_graph: lookup existing iri failed: {e}"));
+    if let Some(id) = registered {
+        return id;
+    }
+    crate::storage::partition::require_graph_ddl_privilege(
+        crate::storage::partition::GraphDdl::Create,
+        "add_graph",
+    );
+
     // Partition-DDL gate FIRST — the global outermost lock — taken
     // *before* the `_pgrdf_graphs` table lock below so this overload
     // agrees on the same `advisory → _pgrdf_graphs` order the integer
@@ -171,9 +189,14 @@ fn add_graph_iri(iri: &str) -> i64 {
     // Serialise concurrent allocate-and-insert. SHARE ROW EXCLUSIVE
     // blocks other writers (including itself) but not readers; the
     // lock releases at transaction end. This is the v0.4.1 mitigation
-    // for the `MAX(graph_id) + 1 → INSERT` race.
-    Spi::run("LOCK TABLE pgrdf._pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE")
-        .unwrap_or_else(|e| panic!("add_graph: lock _pgrdf_graphs failed: {e}"));
+    // for the `MAX(graph_id) + 1 → INSERT` race. The mode needs
+    // UPDATE/DELETE/TRUNCATE, which an INSERT-authorised creator may
+    // not hold, so it is taken as the storage owner; the lock belongs
+    // to the transaction, not the user.
+    crate::storage::partition::as_storage_owner(|| {
+        Spi::run("LOCK TABLE pgrdf._pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE")
+            .unwrap_or_else(|e| panic!("add_graph: lock _pgrdf_graphs failed: {e}"));
+    });
 
     // Idempotent path: if the IRI is already bound, return its id
     // without touching the partition or the table. The inner SELECT
@@ -272,6 +295,12 @@ fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
         );
     }
 
+    // Binding an (id, iri) pair is a create-class act (SPEC 0.6.37 §3.1).
+    crate::storage::partition::require_graph_ddl_privilege(
+        crate::storage::partition::GraphDdl::Create,
+        "add_graph",
+    );
+
     // Partition-DDL gate FIRST — global outermost lock — before the
     // `_pgrdf_graphs` table lock, so this overload's lock order
     // matches the integer overload it re-enters via
@@ -280,11 +309,12 @@ fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
     acquire_partition_ddl_gate();
 
     // Serialise concurrent (id, iri) writers — same idiom as the
-    // IRI-keyed overload. SHARE ROW EXCLUSIVE blocks other writers
-    // (including itself) but not readers; the lock releases at
-    // transaction end.
-    Spi::run("LOCK TABLE pgrdf._pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE")
-        .unwrap_or_else(|e| panic!("add_graph: lock _pgrdf_graphs failed: {e}"));
+    // IRI-keyed overload, and taken as the storage owner for the same
+    // reason (the mode needs more than INSERT).
+    crate::storage::partition::as_storage_owner(|| {
+        Spi::run("LOCK TABLE pgrdf._pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE")
+            .unwrap_or_else(|e| panic!("add_graph: lock _pgrdf_graphs failed: {e}"));
+    });
 
     // Resolve the current binding (if any) for both halves of the
     // pair. Same scalar-subquery wrapper trick as the IRI overload

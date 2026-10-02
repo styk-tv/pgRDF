@@ -265,15 +265,23 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
     // subquery wrapper needed. The format!-built SQL is safe: the
     // partition name is constructed from a validated non-negative
     // BIGINT (no user input in identifier position).
-    let total: i64 = Spi::get_one(&format!("SELECT count(*)::bigint FROM pgrdf.{part_name}"))
-        .unwrap_or_else(|e| panic!("drop_graph: count failed: {e}"))
-        .unwrap_or(0);
+    // Read through the parent (pruned to this partition) so the caller's
+    // privileges on `_pgrdf_quads` apply — a partition created before a
+    // grant does not inherit it (#96).
+    let total: i64 = Spi::get_one_with_args(
+        "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
+        &[id.into()],
+    )
+    .unwrap_or_else(|e| panic!("drop_graph: count failed: {e}"))
+    .unwrap_or(0);
 
     // Cascade guard — only when the caller asks for strict mode.
     if !cascade {
-        let has_inferred: bool = Spi::get_one(&format!(
-            "SELECT EXISTS(SELECT 1 FROM pgrdf.{part_name} WHERE is_inferred)"
-        ))
+        let has_inferred: bool = Spi::get_one_with_args(
+            "SELECT EXISTS(SELECT 1 FROM pgrdf._pgrdf_quads \
+             WHERE graph_id = $1 AND is_inferred)",
+            &[id.into()],
+        )
         .unwrap_or_else(|e| panic!("drop_graph: is_inferred check failed: {e}"))
         .unwrap_or(false);
         if has_inferred {
@@ -287,16 +295,27 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         }
     }
 
+    // Authority: dropping a partition is authorised by the caller's
+    // DELETE on the quad + graph tables, not by owning it (SPEC 0.6.37
+    // §3.1). Refuses 42501 with the cure before any DDL.
+    crate::storage::partition::require_graph_ddl_privilege(
+        crate::storage::partition::GraphDdl::Drop,
+        "drop_graph",
+    );
+
     // DETACH + DROP — partition-DDL metadata window under ACCESS
-    // EXCLUSIVE on the parent. DETACH first so DROP TABLE doesn't
-    // need partition-aware locking; the partition becomes a regular
-    // table for the duration of one statement before going away.
-    Spi::run(&format!(
-        "ALTER TABLE pgrdf._pgrdf_quads DETACH PARTITION pgrdf.{part_name}"
-    ))
-    .unwrap_or_else(|e| panic!("drop_graph: DETACH PARTITION failed: {e}"));
-    Spi::run(&format!("DROP TABLE pgrdf.{part_name}"))
-        .unwrap_or_else(|e| panic!("drop_graph: DROP TABLE failed: {e}"));
+    // EXCLUSIVE on the parent, run as the storage owner. DETACH first
+    // so DROP TABLE doesn't need partition-aware locking; the partition
+    // becomes a regular table for the duration of one statement before
+    // going away.
+    crate::storage::partition::as_storage_owner(|| {
+        Spi::run(&format!(
+            "ALTER TABLE pgrdf._pgrdf_quads DETACH PARTITION pgrdf.{part_name}"
+        ))
+        .unwrap_or_else(|e| panic!("drop_graph: DETACH PARTITION failed: {e}"));
+        Spi::run(&format!("DROP TABLE pgrdf.{part_name}"))
+            .unwrap_or_else(|e| panic!("drop_graph: DROP TABLE failed: {e}"));
+    });
 
     // Remove the IRI binding so `pgrdf.graph_iri(id)` and
     // `pgrdf.graph_id(iri)` start returning NULL post-drop, per

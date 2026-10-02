@@ -9,8 +9,10 @@
 # file covers every extension-owned function in both directions.
 add_graph(g bigint)	internal	ensures the quad partition for a raw graph id; consumers create graphs by IRI with add_graph(iri)
 add_graph(id bigint, iri text)	internal	binds an explicit id/IRI pair; refuses rebinding either side. Consumers create graphs by IRI
-add_graph(iri text)	stable	create (or ensure) a graph by IRI; returns its graph_id; idempotent
+add_graph(iri text)	stable	create (or ensure) a graph by IRI; returns its graph_id; idempotent. Creating a new graph needs SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs (42501 otherwise, HINT names the grant); the partition DDL itself runs as the storage owner. Since 0.6.37
 build_id()	stable	which build of version() this binary is (git describe at compile time); 'unknown' means the build did not supply one. Since 0.6.29
+can_create_graphs()	stable	can the current role create graphs? true when it holds SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs, the exact rule add_graph enforces. Read this rather than inferring from table ownership. Since 0.6.37
+can_drop_graphs()	stable	can the current role drop graphs? true when it holds SELECT and DELETE on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs, the exact rule drop_graph enforces. Since 0.6.37
 carve_graph(src bigint, predicate text, dst bigint)	stable	copy the subgraph matching one predicate from src into dst
 carve_graph(src bigint, seeds text[], dst bigint, max_hops integer)	stable	copy the neighbourhood reachable from seed IRIs within max_hops from src into dst
 clear_graph(id bigint)	stable	remove every triple from a graph; the graph itself remains
@@ -20,7 +22,7 @@ copy_graph(src bigint, dst bigint)	stable	copy src into dst. Caution: appends, a
 copy_graph(src_iri text, dst_iri text)	stable	copy by IRI; same append-and-carry caution as the id form
 count_quads(g bigint)	stable	total quads (asserted + inferred) in one graph; graph 0 is the default graph
 describe(query text)	stable	SPARQL DESCRIBE; rows are JSONB triples
-drop_graph(id bigint, cascade boolean)	stable	drop a graph and its partition; refuses over inferred rows unless cascade (2BP01); cannot drop the default partition
+drop_graph(id bigint, cascade boolean)	stable	drop a graph and its partition; refuses over inferred rows unless cascade (2BP01); cannot drop the default partition. Needs SELECT and DELETE on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs (42501 otherwise); the partition DDL runs as the storage owner. Since 0.6.37
 drop_graph(iri text, cascade boolean)	stable	drop by IRI; unknown IRI refuses (42704)
 get_term(id bigint)	stable	lexical value of a dictionary term id, as returned in query results and inventory
 graph_digest(graph_id bigint)	stable	canonical graph identity, method rdfc-1.0-sha256: survives reload and blank-node relabelling; equal AND unequal are both conclusive. Absent graph refuses (42704); empty graph answers. Not comparable with structural_digest values. Since 0.6.32
