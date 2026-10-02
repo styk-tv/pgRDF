@@ -40,6 +40,12 @@ SELECT pgrdf.graph_iri(1);  -- http://example.org/people
 > `copy_graph(iri, iri)`, `move_graph(iri, iri)`) refuse unknown IRIs
 > with SQLSTATE `42704` instead.
 
+**The IRI is the graph's identity; the id is a handle.** Ids are never
+reused: a dropped graph's id is not handed out again, and an IRI that is
+dropped and created again gets a new id. Gaps in the numbering are
+normal. Keep IRIs in anything that outlives a session (logs, ledgers,
+backup names) and look the id up with `graph_id(iri)` when you need it.
+
 ### Claiming a new IRI
 
 `add_graph` returns the existing graph when the IRI is already taken,

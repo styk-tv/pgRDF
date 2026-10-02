@@ -45,3 +45,12 @@ SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', '');
 -- `extension_sql_file!`), so its OID is resolvable here. Round-trip covered by
 -- `tests/regression/scripts/pg-dump-roundtrip.sh`.
 SELECT pg_catalog.pg_extension_config_dump('_pgrdf_dictionary', '');
+
+-- #150 (0.6.39): graph ids come from a sequence, so an id is never handed
+-- out twice. `add_graph(iri)` used to allocate MAX(graph_id) + 1, which gave
+-- the id of a dropped highest-numbered graph to the next graph created. Every
+-- partition creation advances the sequence past its id (explicitly bound ids
+-- included), so the sequence is a high-water mark that never goes down.
+-- Registered for pg_dump like `_pgrdf_graphs`, so a restore keeps the mark.
+CREATE SEQUENCE IF NOT EXISTS _pgrdf_graph_id_seq MINVALUE 1 START 1;
+SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graph_id_seq', '');
