@@ -6,6 +6,52 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.38] — 2026-10-02
+
+Clearing a graph as a non-owner. 0.6.37 let a role holding the documented
+grants create and drop graphs; clearing one still demanded a privilege outside
+that set. A downstream client's acceptance run against 0.6.37 found it.
+
+### Fixed
+
+- **`clear_graph` refused non-owner roles** (#145). It empties a graph with
+  `TRUNCATE` on the graph's partition, run as the caller, and `TRUNCATE` is its
+  own privilege, outside the grants `add_graph` and `drop_graph` accept. Both
+  overloads, SPARQL `CLEAR GRAPH` and any client that replaces a graph's
+  content by clearing it first failed with `permission denied for table
+  _pgrdf_quads_g<id>`. Clearing is now authorised by `SELECT` and `DELETE` on
+  `pgrdf._pgrdf_quads` (a role holding them may already delete every row of
+  the graph); only the `TRUNCATE` runs as the storage owner, under the same
+  restricted switch `drop_graph` uses. A locked graph still refuses `55P03`
+  first. Without the grants: `42501`, HINT `GRANT SELECT, DELETE ON
+  pgrdf._pgrdf_quads TO <role>`. The row count is read through the parent, so
+  a role granted after a graph's partition was created clears it too.
+- **The empty-database fast paths of `load_turtle(…, bulk_load => true)` and
+  `load_turtle_streaming` failed mid-load for a non-owner.** They drop and
+  rebuild the quad indexes and the dictionary constraint, which PostgreSQL
+  reserves for the table owner. For any other role they now take the standard
+  path, with a `NOTICE`, the same fallback a populated database already gets.
+
+### Added
+
+- `pgrdf.can_clear_graphs()` → boolean, stable: whether the current role holds
+  what `clear_graph` requires.
+
+### Tests
+
+- Every graph-writing entry point (SQL and SPARQL UPDATE, the content parsers,
+  the file loaders, copy/carve/move, materialize, lock/unlock, clear, drop) runs
+  as a non-owner holding exactly the grants the install guide documents, and
+  must succeed. Every stable function in `surface()` must be classified by that
+  test as exercised, read-only or owner-lane, so a new export cannot ship
+  without the decision. Without this release's fix the test fails at SPARQL
+  `CLEAR GRAPH`.
+
+### Upgrade
+
+- `ALTER EXTENSION pgrdf UPDATE` in place; additive only (`can_clear_graphs`).
+  `surface()` lists 53 stable rows.
+
 ## [0.6.37] — 2026-10-02
 
 SPEC.pgRDF.v0.6.37 — query custody under the pinned join order, set-semantics

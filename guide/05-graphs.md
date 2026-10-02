@@ -61,15 +61,17 @@ else is using this name".
 ### Who may create graphs
 
 Creating a graph needs `SELECT` and `INSERT` on `pgrdf._pgrdf_quads` and
-`pgrdf._pgrdf_graphs`; dropping one needs `SELECT` and `DELETE` on both.
-Table ownership is not required: the one step PostgreSQL reserves for
-the table owner (creating or removing the graph's storage partition)
-runs as the owner inside `add_graph` / `drop_graph`, and nothing else
-does. A role without the grants is refused with `42501` and the exact
-`GRANT` in the hint. Ask the server directly:
+`pgrdf._pgrdf_graphs`; dropping one needs `SELECT` and `DELETE` on both;
+clearing one needs `SELECT` and `DELETE` on `pgrdf._pgrdf_quads`.
+Table ownership is not required: the steps PostgreSQL reserves for the
+table owner (creating, emptying or removing the graph's storage
+partition) run as the owner inside `add_graph` / `clear_graph` /
+`drop_graph`, and nothing else does. A role without the grants is
+refused with `42501` and the exact `GRANT` in the hint. Ask the server
+directly:
 
 ```sql
-SELECT pgrdf.can_create_graphs(), pgrdf.can_drop_graphs();
+SELECT pgrdf.can_create_graphs(), pgrdf.can_clear_graphs(), pgrdf.can_drop_graphs();
 ```
 
 ## The inventory
@@ -93,7 +95,7 @@ SELECT graph_id, iri, asserted, inferred, locked, materialization, source_loads
 | `inferred` | Triples produced by `materialize`. |
 | `locked`, `lock_reason` | Whether the graph is write-locked, and why (see below). |
 | `materialization` | `never` / `current` / `stale` / `unknown`. See [reasoning](04-reasoning.md#is-the-materialization-current). |
-| `source_sha256`, `source_loads` | SHA-256 of the bytes the last load read, and how many loads the graph has had. `NULL` until a load records it. With one load, the digest identifies the source file; with more, the graph is the sum of several. |
+| `source_sha256`, `source_loads` | SHA-256 of the bytes the last load read, and how many loads the graph has had. `NULL` until a load records it. With one load, the digest identifies the source file; with more, the graph is the sum of several. It identifies the *file*, not the graph: never compare it with `graph_digest` or a bytes digest of an export. |
 | `identity_digest` | A locked graph's `graph_digest`, once computed. `NULL` for open graphs: their identity is computed on request. |
 
 Because it's a normal set-returning function, you can filter, join and

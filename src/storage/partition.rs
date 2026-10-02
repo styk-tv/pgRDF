@@ -159,43 +159,65 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
     });
 }
 
-/// The two graph-DDL acts, each authorised by a table privilege the
-/// caller already holds on BOTH `_pgrdf_quads` and `_pgrdf_graphs`.
+/// The graph-DDL acts, each authorised by a table privilege the caller
+/// already holds. Create and drop change both `_pgrdf_quads` and
+/// `_pgrdf_graphs`; clear empties the graph's partition and leaves its
+/// `_pgrdf_graphs` row alone, so it asks for the quad table only.
 #[derive(Clone, Copy)]
 pub(crate) enum GraphDdl {
     Create,
     Drop,
+    Clear,
 }
 
 impl GraphDdl {
     fn privilege(self) -> &'static str {
         match self {
             GraphDdl::Create => "INSERT",
-            GraphDdl::Drop => "DELETE",
+            GraphDdl::Drop | GraphDdl::Clear => "DELETE",
         }
     }
     fn act(self) -> &'static str {
         match self {
             GraphDdl::Create => "creating",
             GraphDdl::Drop => "dropping",
+            GraphDdl::Clear => "clearing",
+        }
+    }
+    fn tables(self) -> &'static str {
+        match self {
+            GraphDdl::Create | GraphDdl::Drop => "pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs",
+            GraphDdl::Clear => "pgrdf._pgrdf_quads",
+        }
+    }
+    fn tables_prose(self) -> &'static str {
+        match self {
+            GraphDdl::Create | GraphDdl::Drop => "pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs",
+            GraphDdl::Clear => "pgrdf._pgrdf_quads",
         }
     }
 }
 
 /// Does `current_user` hold the privilege that authorises `kind`?
 fn holds_graph_ddl_privilege(kind: GraphDdl) -> bool {
-    Spi::get_one_with_args::<bool>(
-        // SELECT too: every graph-DDL path reads both tables before it
-        // writes. A comma list in has_table_privilege means ANY, so each
-        // privilege is asked separately.
-        "SELECT has_table_privilege('pgrdf._pgrdf_quads', 'SELECT') \
-            AND has_table_privilege('pgrdf._pgrdf_graphs', 'SELECT') \
-            AND has_table_privilege('pgrdf._pgrdf_quads', $1) \
-            AND has_table_privilege('pgrdf._pgrdf_graphs', $1)",
-        &[kind.privilege().into()],
-    )
-    .expect("graph DDL privilege check failed")
-    .unwrap_or(false)
+    // SELECT too: every graph-DDL path reads before it writes. A comma
+    // list in has_table_privilege means ANY, so each privilege is asked
+    // separately.
+    let sql = match kind {
+        GraphDdl::Create | GraphDdl::Drop => {
+            "SELECT has_table_privilege('pgrdf._pgrdf_quads', 'SELECT') \
+                AND has_table_privilege('pgrdf._pgrdf_graphs', 'SELECT') \
+                AND has_table_privilege('pgrdf._pgrdf_quads', $1) \
+                AND has_table_privilege('pgrdf._pgrdf_graphs', $1)"
+        }
+        GraphDdl::Clear => {
+            "SELECT has_table_privilege('pgrdf._pgrdf_quads', 'SELECT') \
+                AND has_table_privilege('pgrdf._pgrdf_quads', $1)"
+        }
+    };
+    Spi::get_one_with_args::<bool>(sql, &[kind.privilege().into()])
+        .expect("graph DDL privilege check failed")
+        .unwrap_or(false)
 }
 
 /// Refuse 42501 unless `current_user` holds the privilege for `kind`.
@@ -211,11 +233,12 @@ pub(crate) fn require_graph_ddl_privilege(kind: GraphDdl, caller: &str) {
     crate::refuse_with_hint(
         pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
         format!(
-            "{caller}: {} a graph requires SELECT and {privilege} on pgrdf._pgrdf_quads \
-             and pgrdf._pgrdf_graphs; role {role} does not hold them",
-            kind.act()
+            "{caller}: {} a graph requires SELECT and {privilege} on {}; \
+             role {role} does not hold them",
+            kind.act(),
+            kind.tables_prose()
         ),
-        format!("GRANT SELECT, {privilege} ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs TO {role}"),
+        format!("GRANT SELECT, {privilege} ON {} TO {role}", kind.tables()),
     );
 }
 
@@ -230,7 +253,7 @@ pub(crate) fn require_graph_ddl_privilege(kind: GraphDdl, caller: &str) {
 /// caller is restored in a `finally`, so an ERROR caught in the same
 /// transaction (PgTryBuilder) never leaves the session elevated. `f`
 /// must run fixed, engine-built statements only. This is the one
-/// elevation in the add/drop path, disclosed in the elevation census.
+/// elevation in the add/clear/drop path, disclosed in the elevation census.
 pub(crate) fn as_storage_owner<R>(f: impl FnOnce() -> R) -> R {
     let owner: pgrx::pg_sys::Oid = Spi::get_one(
         "SELECT relowner FROM pg_catalog.pg_class \
@@ -290,6 +313,13 @@ fn can_create_graphs() -> bool {
 #[pg_extern]
 fn can_drop_graphs() -> bool {
     holds_graph_ddl_privilege(GraphDdl::Drop)
+}
+
+/// Can `current_user` clear graphs? True when it holds SELECT and DELETE on
+/// `_pgrdf_quads` — the rule `clear_graph` enforces.
+#[pg_extern]
+fn can_clear_graphs() -> bool {
+    holds_graph_ddl_privilege(GraphDdl::Clear)
 }
 
 /// Copy `pgrdf._pgrdf_quads`'s grants onto a freshly created partition.
@@ -658,5 +688,309 @@ mod tests {
         .unwrap()
         .unwrap_or(true);
         assert!(!has_select, "an unrelated role must not gain access");
+    }
+    /// #145: clear_graph TRUNCATEs the partition, a privilege outside the
+    /// documented grant set. A writer holding SELECT + DELETE on the quad
+    /// table clears a graph (the graph row stays); without DELETE it is
+    /// refused 42501 with a cure that names the quad table only.
+    #[pg_test]
+    fn nonowner_clear_needs_delete_on_quads() {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:145:clear')")
+            .unwrap()
+            .unwrap();
+        Spi::run(&format!(
+            "SELECT pgrdf.parse_turtle('<urn:c:s> <urn:c:p> <urn:c:o> . \
+             <urn:c:s> <urn:c:p> <urn:c:o2> .', {g})"
+        ))
+        .unwrap();
+        writer_role("pgrdf_145_clearer", "SELECT, INSERT, DELETE");
+        let (code, _h, restored) = as_role_caught(
+            "pgrdf_145_clearer",
+            "SELECT pgrdf.clear_graph('urn:tdd:145:clear')",
+        );
+        assert_eq!(
+            code, None,
+            "a writer with DELETE must be able to clear a graph"
+        );
+        assert!(
+            restored,
+            "the caller must be restored after the owner switch"
+        );
+        Spi::run("RESET ROLE").unwrap();
+        let (left, kept): (Option<i64>, Option<bool>) = Spi::get_two(&format!(
+            "SELECT (SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = {g}), \
+                    EXISTS(SELECT 1 FROM pgrdf._pgrdf_graphs WHERE graph_id = {g})"
+        ))
+        .unwrap();
+        assert_eq!(left, Some(0), "every triple is gone");
+        assert_eq!(kept, Some(true), "the graph itself remains");
+
+        writer_role("pgrdf_145_nodelete", "SELECT, INSERT");
+        let (code, hint, restored) = as_role_caught(
+            "pgrdf_145_nodelete",
+            "SELECT pgrdf.clear_graph('urn:tdd:145:clear')",
+        );
+        assert_eq!(code.as_deref(), Some("ERRCODE_INSUFFICIENT_PRIVILEGE"));
+        assert!(restored);
+        let hint = hint.expect("the refusal must carry a HINT");
+        assert_eq!(
+            hint, "GRANT SELECT, DELETE ON pgrdf._pgrdf_quads TO pgrdf_145_nodelete",
+            "clear asks for the quad table only"
+        );
+    }
+
+    /// #145: a role granted on the parent AFTER a graph's partition was
+    /// created holds nothing on that partition (#96 copies the ACL only at
+    /// creation). clear_graph counts through the parent and truncates as
+    /// the owner, so such a role still clears the graph.
+    #[pg_test]
+    fn clear_works_for_role_granted_after_partition() {
+        crate::storage::partition::acquire_partition_ddl_gate();
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:145:late')")
+            .unwrap()
+            .unwrap();
+        Spi::run(&format!(
+            "SELECT pgrdf.parse_turtle('<urn:l:s> <urn:l:p> <urn:l:o> .', {g})"
+        ))
+        .unwrap();
+        writer_role("pgrdf_145_late", "SELECT, INSERT, DELETE");
+        let on_partition = Spi::get_one::<bool>(&format!(
+            "SELECT has_table_privilege('pgrdf_145_late', 'pgrdf._pgrdf_quads_g{g}', 'SELECT')"
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(
+            !on_partition,
+            "precondition: no grant reached the old partition"
+        );
+        let (code, _h, _r) = as_role_caught(
+            "pgrdf_145_late",
+            &format!("SELECT pgrdf.clear_graph({g}::bigint)"),
+        );
+        assert_eq!(code, None, "clear must not need a grant on the partition");
+        Spi::run("RESET ROLE").unwrap();
+        let left: i64 = Spi::get_one(&format!(
+            "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = {g}"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    /// #145: the lock fence still comes first. A granted writer clearing a
+    /// locked graph is refused 55P03, never elevated into a TRUNCATE.
+    #[pg_test]
+    fn nonowner_clear_of_locked_graph_refuses_lock() {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:145:locked')")
+            .unwrap()
+            .unwrap();
+        Spi::run(&format!(
+            "SELECT pgrdf.parse_turtle('<urn:k:s> <urn:k:p> <urn:k:o> .', {g})"
+        ))
+        .unwrap();
+        Spi::run(&format!("SELECT pgrdf.lock_graph({g}, 'tdd 145')")).unwrap();
+        writer_role("pgrdf_145_locked", "SELECT, INSERT, DELETE");
+        let (code, _h, restored) = as_role_caught(
+            "pgrdf_145_locked",
+            &format!("SELECT pgrdf.clear_graph({g}::bigint)"),
+        );
+        // No SPI after a caught ERROR: the transaction is aborted.
+        assert_eq!(code.as_deref(), Some("ERRCODE_LOCK_NOT_AVAILABLE"));
+        assert!(restored);
+    }
+
+    /// #145: can_clear_graphs() answers the rule clear_graph enforces:
+    /// SELECT + DELETE on the quad table, nothing on the graph table.
+    #[pg_test]
+    fn can_clear_graphs_follows_grants() {
+        crate::storage::partition::acquire_partition_ddl_gate();
+        Spi::run("CREATE ROLE pgrdf_145_qdel NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_145_qdel").unwrap();
+        Spi::run("GRANT SELECT, DELETE ON pgrdf._pgrdf_quads TO pgrdf_145_qdel").unwrap();
+        writer_role("pgrdf_145_ro", "SELECT");
+        Spi::run("SET ROLE pgrdf_145_qdel").unwrap();
+        let (clear, drop): (Option<bool>, Option<bool>) =
+            Spi::get_two("SELECT pgrdf.can_clear_graphs(), pgrdf.can_drop_graphs()").unwrap();
+        Spi::run("SET ROLE pgrdf_145_ro").unwrap();
+        let ro = Spi::get_one::<bool>("SELECT pgrdf.can_clear_graphs()")
+            .unwrap()
+            .unwrap();
+        Spi::run("RESET ROLE").unwrap();
+        assert_eq!(
+            clear,
+            Some(true),
+            "DELETE on the quad table is enough to clear"
+        );
+        assert_eq!(
+            drop,
+            Some(false),
+            "dropping still needs the graph table too"
+        );
+        assert!(!ro, "SELECT only cannot clear");
+    }
+
+    /// Every graph-writing entry point, run as a non-owner holding exactly
+    /// the grants guide/01-install.md documents for an application role
+    /// (plus pg_read_server_files, which the file loaders document
+    /// separately), must succeed. F1 tested create and drop one by one and
+    /// clear slipped through (#145); this walks the whole write surface.
+    ///
+    /// The second half keeps it whole: every stable function in surface()
+    /// must be classified here as exercised, read-only or owner-lane, so a
+    /// new export cannot ship without someone deciding which it is.
+    #[pg_test]
+    fn documented_grants_cover_every_graph_write() {
+        use std::collections::BTreeSet;
+        const EXERCISED: &[&str] = &[
+            "add_graph",
+            "create_graph",
+            "parse_turtle",
+            "parse_turtle_verbose",
+            "parse_nquads",
+            "parse_trig",
+            "load_turtle",
+            "load_turtle_verbose",
+            "load_turtle_streaming",
+            "copy_graph",
+            "carve_graph",
+            "materialize",
+            "lock_graph",
+            "unlock_graph",
+            "sparql",
+            "clear_graph",
+            "move_graph",
+            "drop_graph",
+        ];
+        const READ_ONLY: &[&str] = &[
+            "build_id",
+            "can_clear_graphs",
+            "can_create_graphs",
+            "can_drop_graphs",
+            "construct",
+            "count_quads",
+            "describe",
+            "export_graph",
+            "get_term",
+            "graph_diff",
+            "graph_diff_summary",
+            "graph_digest",
+            "graph_id",
+            "graph_integrity",
+            "graph_inventory",
+            "graph_iri",
+            "graph_manifest",
+            "last_call_stats",
+            "orphan_partitions",
+            "shacl_capability",
+            "sparql_parse",
+            "sparql_sql",
+            "stats",
+            "structural_digest",
+            "surface",
+            "validate",
+            "version",
+        ];
+        // Refused up front for a non-owner, by design (F4), or operator
+        // maintenance of the shared term cache rather than a graph write.
+        const OWNER_LANE: &[&str] = &[
+            "load_turtle_staged",
+            "load_turtle_staged_run",
+            "shmem_reset",
+        ];
+
+        crate::storage::partition::acquire_partition_ddl_gate();
+        Spi::run("CREATE ROLE pgrdf_145_app NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_145_app").unwrap();
+        Spi::run(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgrdf TO pgrdf_145_app",
+        )
+        .unwrap();
+        Spi::run("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgrdf TO pgrdf_145_app").unwrap();
+        Spi::run("GRANT pg_read_server_files TO pgrdf_145_app").unwrap();
+
+        let path = format!("/tmp/pgrdf-145-matrix-{}.nt", std::process::id());
+        std::fs::write(&path, "<urn:m:f> <urn:m:p> <urn:m:o> .\n").unwrap();
+
+        let steps: Vec<(&str, String)> = vec![
+            ("add_graph", "SELECT pgrdf.add_graph('urn:m:a')".into()),
+            ("create_graph", "SELECT pgrdf.create_graph('urn:m:b')".into()),
+            ("parse_turtle", "SELECT pgrdf.parse_turtle('<urn:m:s> <urn:m:p> <urn:m:o> . \
+              <urn:m:s> a <urn:m:C> . <urn:m:C> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <urn:m:D> .', \
+              pgrdf.graph_id('urn:m:a'))".into()),
+            ("parse_turtle_verbose", "SELECT pgrdf.parse_turtle_verbose('<urn:m:s> <urn:m:q> <urn:m:o> .', \
+              pgrdf.graph_id('urn:m:a'))".into()),
+            ("parse_nquads", "SELECT pgrdf.parse_nquads('<urn:m:s> <urn:m:p> <urn:m:o> <urn:m:nq> .')".into()),
+            ("parse_trig", "SELECT pgrdf.parse_trig('<urn:m:tg> { <urn:m:s> <urn:m:p> <urn:m:o> . }')".into()),
+            ("load_turtle", format!("SELECT pgrdf.load_turtle('{path}', pgrdf.add_graph('urn:m:f1'))")),
+            ("load_turtle", format!("SELECT pgrdf.load_turtle('{path}', pgrdf.add_graph('urn:m:f2'), NULL, true)")),
+            ("load_turtle_verbose", format!("SELECT pgrdf.load_turtle_verbose('{path}', pgrdf.add_graph('urn:m:f3'))")),
+            ("load_turtle_streaming", format!("SELECT pgrdf.load_turtle_streaming('{path}', pgrdf.add_graph('urn:m:f4'))")),
+            ("copy_graph", "SELECT pgrdf.copy_graph(pgrdf.graph_id('urn:m:a'), pgrdf.graph_id('urn:m:b'))".into()),
+            ("copy_graph", "SELECT pgrdf.copy_graph('urn:m:a', 'urn:m:b')".into()),
+            ("carve_graph", "SELECT pgrdf.carve_graph(pgrdf.graph_id('urn:m:a'), 'urn:m:p', pgrdf.add_graph('urn:m:c1'))".into()),
+            ("carve_graph", "SELECT pgrdf.carve_graph(pgrdf.graph_id('urn:m:a'), ARRAY['urn:m:s'], pgrdf.add_graph('urn:m:c2'), 1)".into()),
+            ("materialize", "SELECT pgrdf.materialize(pgrdf.graph_id('urn:m:a'), 'rdfs')".into()),
+            ("lock_graph", "SELECT pgrdf.lock_graph(pgrdf.graph_id('urn:m:a'), 'matrix')".into()),
+            ("graph_digest", "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:m:a'))".into()),
+            ("unlock_graph", "SELECT pgrdf.unlock_graph(pgrdf.graph_id('urn:m:a'), 'matrix')".into()),
+            ("sparql", "SELECT * FROM pgrdf.sparql('INSERT DATA { GRAPH <urn:m:a> { <urn:m:x> <urn:m:p> <urn:m:y> } }')".into()),
+            ("sparql", "SELECT * FROM pgrdf.sparql('DELETE DATA { GRAPH <urn:m:a> { <urn:m:x> <urn:m:p> <urn:m:y> } }')".into()),
+            ("sparql", "SELECT * FROM pgrdf.sparql('DELETE WHERE { GRAPH <urn:m:b> { ?s <urn:m:q> ?o } }')".into()),
+            ("sparql", "SELECT * FROM pgrdf.sparql('CREATE GRAPH <urn:m:sp>')".into()),
+            ("sparql", "SELECT * FROM pgrdf.sparql('INSERT DATA { GRAPH <urn:m:sp> { <urn:m:x> <urn:m:p> <urn:m:y> } }')".into()),
+            ("sparql", "SELECT * FROM pgrdf.sparql('CLEAR GRAPH <urn:m:sp>')".into()),
+            ("sparql", "SELECT * FROM pgrdf.sparql('DROP GRAPH <urn:m:sp>')".into()),
+            ("clear_graph", "SELECT pgrdf.clear_graph(pgrdf.graph_id('urn:m:c1'))".into()),
+            ("clear_graph", "SELECT pgrdf.clear_graph('urn:m:b')".into()),
+            ("move_graph", "SELECT pgrdf.move_graph(pgrdf.graph_id('urn:m:c2'), pgrdf.add_graph('urn:m:mv1'))".into()),
+            ("add_graph", "SELECT pgrdf.add_graph('urn:m:mv2')".into()),
+            ("move_graph", "SELECT pgrdf.move_graph('urn:m:mv1', 'urn:m:mv2')".into()),
+            ("drop_graph", "SELECT pgrdf.drop_graph(pgrdf.graph_id('urn:m:c1'), true)".into()),
+            ("drop_graph", "SELECT pgrdf.drop_graph('urn:m:b', true)".into()),
+        ];
+        for (name, sql) in &steps {
+            let (code, hint, restored) = as_role_caught("pgrdf_145_app", sql);
+            // Stop at the first refusal: a caught ERROR aborts the
+            // transaction, so later steps could only fail spuriously.
+            if code.is_some() || !restored {
+                let _ = std::fs::remove_file(&path);
+                panic!(
+                    "a non-owner with the documented grants was refused at {name}: \
+                     {code:?} hint={hint:?} restored={restored}\n  {sql}"
+                );
+            }
+        }
+        Spi::run("RESET ROLE").unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let exercised: BTreeSet<&str> = steps.iter().map(|(n, _)| *n).collect();
+        for name in EXERCISED {
+            assert!(
+                exercised.contains(name),
+                "{name} is listed as exercised but has no step"
+            );
+        }
+        let stable: Vec<String> = Spi::connect(|c| {
+            c.select(
+                "SELECT DISTINCT name FROM pgrdf.surface() WHERE class = 'stable' ORDER BY 1",
+                None,
+                &[],
+            )
+            .unwrap()
+            .map(|r| r.get::<String>(1).unwrap().unwrap())
+            .collect()
+        });
+        let unclassified: Vec<&String> = stable
+            .iter()
+            .filter(|n| {
+                let n = n.as_str();
+                !EXERCISED.contains(&n) && !READ_ONLY.contains(&n) && !OWNER_LANE.contains(&n)
+            })
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "stable functions not classified in this matrix (exercise each writer as a \
+             non-owner, or list it as read-only / owner-lane): {unclassified:?}"
+        );
     }
 }

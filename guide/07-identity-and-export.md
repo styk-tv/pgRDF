@@ -67,6 +67,12 @@ and then served from the stored value (visible as `identity_digest` in
 `graph_inventory()`). Unlocking clears it. Open graphs are digested on
 every call, so the answer is always current.
 
+`graph_inventory()` also shows `source_sha256`, the SHA-256 of the file a
+graph was loaded from. That identifies the *artifact*, not the graph: the
+same triples loaded from a Turtle file and from an N-Triples file have
+different source digests and the same `graph_digest`. Compare like with
+like: source digests with source digests, graph digests with graph digests.
+
 ## What changed between two graphs
 
 `graph_diff_summary(a, b)` and `graph_diff(a, b)` compare two graphs

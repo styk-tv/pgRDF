@@ -187,7 +187,8 @@ SELECT pgrdf.load_turtle('/data/dump.nt', pgrdf.add_graph('http://example.org/du
 
 A parallel in-process path, also for N-Triples into a fresh database.
 It falls back to the standard loader when the database already holds
-data.
+data, and for a role that doesn't own the pgRDF tables (the fast path
+rebuilds indexes, which only the owner may do; a `NOTICE` says so).
 
 > **N-Triples only.** Given a Turtle file with prefixes or multi-line
 > statements, `bulk_load => true` currently skips the lines it can't
@@ -198,7 +199,9 @@ data.
 ### Files larger than memory
 
 `load_turtle_streaming(path, graph_id)` reads a file in windows of
-`window_triples` (default 20 million) so memory stays bounded.
+`window_triples` (default 20 million) so memory stays bounded. Like
+`bulk_load`, its fast path applies to an empty database loaded by the
+owner of the pgRDF tables; otherwise it loads through the standard path.
 
 ### Server settings for a big import
 

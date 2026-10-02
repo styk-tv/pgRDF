@@ -532,6 +532,14 @@ fn clear_graph(id: i64) -> i64 {
         );
     }
     crate::storage::lock::require_unlocked(id, "clear_graph"); // #107
+    // #145: TRUNCATE is its own privilege, outside the documented grant
+    // set. A caller holding SELECT + DELETE on the quad table may already
+    // delete every row of the graph; only the TRUNCATE itself runs as the
+    // storage owner, the same switch drop_graph uses for its DDL.
+    crate::storage::partition::require_graph_ddl_privilege(
+        crate::storage::partition::GraphDdl::Clear,
+        "clear_graph",
+    );
 
     let partition_name = format!("_pgrdf_quads_g{id}");
 
@@ -557,9 +565,14 @@ fn clear_graph(id: i64) -> i64 {
     // — no user input in a SQL identifier position — so direct
     // interpolation into the dynamic SQL is safe (same convention as
     // `add_graph(g BIGINT)` in `hexastore.rs`).
-    let total: i64 = Spi::get_one(&format!(
-        "SELECT count(*)::bigint FROM pgrdf.{partition_name}"
-    ))
+    //
+    // Counted through the parent, like drop_graph: a role granted on the
+    // parent after this partition was created holds nothing on the
+    // partition itself (#96 copies the ACL only at creation).
+    let total: i64 = Spi::get_one_with_args(
+        "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
+        &[id.into()],
+    )
     .unwrap_or_else(|e| panic!("clear_graph: count failed: {e}"))
     .unwrap_or(0);
 
@@ -568,8 +581,10 @@ fn clear_graph(id: i64) -> i64 {
     // shell stays attached to `_pgrdf_quads`, so the next
     // `INSERT … VALUES (..., $1 = id, ...)` routes here without
     // touching the default partition.
-    Spi::run(&format!("TRUNCATE ONLY pgrdf.{partition_name}"))
-        .unwrap_or_else(|e| panic!("clear_graph: TRUNCATE failed: {e}"));
+    crate::storage::partition::as_storage_owner(|| {
+        Spi::run(&format!("TRUNCATE ONLY pgrdf.{partition_name}"))
+            .unwrap_or_else(|e| panic!("clear_graph: TRUNCATE failed: {e}"));
+    });
 
     total
 }

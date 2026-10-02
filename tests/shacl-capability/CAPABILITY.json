@@ -60,7 +60,7 @@
   "generated_by": "tests/shacl-capability/run.sh",
   "hand_edited": false,
   "not_enforced": [],
-  "pgrdf_version": "0.6.37",
+  "pgrdf_version": "0.6.38",
   "postgres_major": 18,
   "probes": [
     {

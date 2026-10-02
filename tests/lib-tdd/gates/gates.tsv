@@ -52,13 +52,13 @@ src/storage/graphs.rs:391	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/graphs.rs:400	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/graphs.rs:457	refuse	ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
 src/storage/graphs.rs:530	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/graphs.rs:638	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/graphs.rs:645	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/graphs.rs:745	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/graphs.rs:752	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/graphs.rs:864	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/graphs.rs:870	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/graphs.rs:1038	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/graphs.rs:653	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/graphs.rs:660	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/graphs.rs:760	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/graphs.rs:767	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/graphs.rs:879	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/graphs.rs:885	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/graphs.rs:1053	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/hexastore.rs:65	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/hexastore.rs:157	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/hexastore.rs:259	refuse	ERRCODE_INVALID_PARAMETER_VALUE
@@ -81,5 +81,5 @@ src/storage/lock.rs:229	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/lock.rs:240	refuse	ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
 src/storage/lock.rs:244	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/staged/phases.rs:590	panic	_ => panic!("staged STAGE: unsupported object term"),
-src/storage/staged/pool.rs:186	panic	other => panic!("staged worker: unknown phase ordinal {other}"),
+src/storage/staged/pool.rs:190	panic	other => panic!("staged worker: unknown phase ordinal {other}"),
 src/validation/shacl.rs:404	refuse	ERRCODE_INVALID_PARAMETER_VALUE

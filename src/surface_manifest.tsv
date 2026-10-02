@@ -13,11 +13,12 @@ add_graph(g bigint)	internal	ensures the quad partition for a raw graph id; cons
 add_graph(id bigint, iri text)	internal	binds an explicit id/IRI pair; refuses rebinding either side. Consumers create graphs by IRI
 add_graph(iri text)	stable	create (or ensure) a graph by IRI; returns its graph_id; idempotent. Creating a new graph needs SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs (42501 otherwise, HINT names the grant); the partition DDL itself runs as the storage owner. Since 0.6.37
 build_id()	stable	which build of version() this binary is (git describe at compile time); 'unknown' means the build did not supply one. Since 0.6.29
+can_clear_graphs()	stable	can the current role clear graphs? true when it holds SELECT and DELETE on pgrdf._pgrdf_quads, the exact rule clear_graph enforces. Since 0.6.38
 can_create_graphs()	stable	can the current role create graphs? true when it holds SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs, the exact rule add_graph enforces. Read this rather than inferring from table ownership. Since 0.6.37
 can_drop_graphs()	stable	can the current role drop graphs? true when it holds SELECT and DELETE on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs, the exact rule drop_graph enforces. Since 0.6.37
 carve_graph(src bigint, predicate text, dst bigint)	stable	copy the subgraph matching one predicate from src into dst
 carve_graph(src bigint, seeds text[], dst bigint, max_hops integer)	stable	copy the neighbourhood reachable from seed IRIs within max_hops from src into dst
-clear_graph(id bigint)	stable	remove every triple from a graph; the graph itself remains
+clear_graph(id bigint)	stable	remove every triple from a graph; the graph itself remains. Refuses on a locked graph (55P03). Needs SELECT and DELETE on pgrdf._pgrdf_quads (42501 otherwise, HINT names the grant); the partition TRUNCATE runs as the storage owner. Since 0.6.38
 clear_graph(iri text)	stable	remove every triple from a graph by IRI; unknown IRI refuses (42704)
 create_graph(iri text)	stable	create a NEW graph by IRI, or refuse 42710 if the IRI exists; the HINT names the existing graph_id and its recorded source digest, so a caller can reuse it or choose another IRI. Atomic against concurrent claims. Needs SELECT and INSERT on pgrdf._pgrdf_quads and pgrdf._pgrdf_graphs. add_graph(iri) stays get-or-create. Since 0.6.37
 construct(query text)	stable	SPARQL CONSTRUCT; rows are JSONB triples suitable for put_construct_rows
@@ -38,7 +39,7 @@ graph_inventory()	stable	every registered graph with IRI, asserted/inferred coun
 graph_manifest(graph_id bigint)	stable	portable manifest of one graph: three digests each carrying its method (bytes / rdfc-1.0 identity / fd1 structure), counts, engine identity, and what is NOT carried. Pair with export_graph to build a redistributable package. Since 0.6.34
 graph_iri(id bigint)	stable	IRI bound to a graph_id, or NULL when unknown
 last_call_stats()	stable	per-call completeness figures (path_depth_truncations, filter_clauses_dropped) for the most recent sparql/construct/describe call in THIS session; session-local, so other sessions cannot pollute it. Read it right after the query. Since 0.6.34
-load_turtle(path text, graph_id bigint, base_iri text, bulk_load boolean)	stable	load a Turtle FILE from the server filesystem; bulk_load enables the parallel ingest fast path
+load_turtle(path text, graph_id bigint, base_iri text, bulk_load boolean)	stable	load a Turtle FILE from the server filesystem; bulk_load enables the parallel ingest fast path on an empty database (owner of pgrdf._pgrdf_quads only; any other role, or a populated database, loads through the standard path)
 load_turtle_dict_batched(path text, graph_id bigint, base_iri text, dict_batch_size integer)	internal	tuning variant of load_turtle with explicit dictionary batching; use load_turtle
 load_turtle_staged(IN path text, IN graph_id bigint, IN n_workers integer)	stable	staged multi-worker bulk load as a CALL-able procedure; per-phase commits, resumable
 load_turtle_staged_ping(n_workers integer)	internal	staged-loader worker-pool liveness diagnostic

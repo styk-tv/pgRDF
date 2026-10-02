@@ -134,5 +134,5 @@
     "seen": "sh:maxCount bound exceeded => the value is in the value set"
   },
   "note": "A per-feature verdict cannot express this: the fault is in the interaction between a path type and the term type of the value it reaches. SILENTLY-SKIPPED in CAPABILITY.json overstates it -- these paths are evaluated, and literal values reached through them are not.",
-  "pgrdf_version": "0.6.37"
+  "pgrdf_version": "0.6.38"
 }

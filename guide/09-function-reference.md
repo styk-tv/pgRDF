@@ -14,7 +14,7 @@ directly, as listed.
 |---|---|---|
 | `add_graph(iri text)` | `bigint` | Create a graph (or find the existing one) and return its id. |
 | `create_graph(iri text)` | `bigint` | Create a graph, or refuse (`42710`) if the IRI exists; the hint names the existing graph and its source digest. |
-| `can_create_graphs()` · `can_drop_graphs()` | `boolean` | Whether the current role holds the grants `add_graph` / `drop_graph` require. |
+| `can_create_graphs()` · `can_clear_graphs()` · `can_drop_graphs()` | `boolean` | Whether the current role holds the grants `add_graph` / `clear_graph` / `drop_graph` require. |
 | `graph_id(iri text)` | `bigint` | Id for an IRI, or `NULL` if there is no such graph. |
 | `graph_iri(id bigint)` | `text` | IRI for an id, or `NULL`. |
 | `graph_inventory()` | table | Every graph: `graph_id`, `iri`, `asserted`, `inferred`, `locked`, `lock_reason`, `materialization`, `source_sha256`, `source_loads`, `identity_digest`. |

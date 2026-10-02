@@ -191,14 +191,16 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgrdf TO app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgrdf TO app;
 ```
 
-Those grants are also enough to create and drop graphs: `add_graph`
-needs `SELECT` and `INSERT` on `pgrdf._pgrdf_quads` and
-`pgrdf._pgrdf_graphs`, `drop_graph` needs `SELECT` and `DELETE` on them.
-The one step PostgreSQL reserves for the table owner (creating or
-removing a graph's storage partition) runs as the owner inside those
-two functions and nowhere else. A role without the grants gets `42501`
-with the exact `GRANT` in the hint; `pgrdf.can_create_graphs()` answers
-the question up front. For a read-only role, grant only `USAGE` and
+Those grants are also enough to create, clear and drop graphs:
+`add_graph` needs `SELECT` and `INSERT` on `pgrdf._pgrdf_quads` and
+`pgrdf._pgrdf_graphs`, `drop_graph` needs `SELECT` and `DELETE` on them,
+and `clear_graph` needs `SELECT` and `DELETE` on `pgrdf._pgrdf_quads`.
+The steps PostgreSQL reserves for the table owner (creating, emptying or
+removing a graph's storage partition) run as the owner inside those
+three functions and nowhere else. A role without the grants gets `42501`
+with the exact `GRANT` in the hint; `pgrdf.can_create_graphs()`,
+`pgrdf.can_clear_graphs()` and `pgrdf.can_drop_graphs()` answer the
+question up front. For a read-only role, grant only `USAGE` and
 `SELECT`.
 
 The file loaders (`load_turtle` and its variants) read files from the
