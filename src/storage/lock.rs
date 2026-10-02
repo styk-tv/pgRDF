@@ -36,6 +36,110 @@ ALTER TABLE _pgrdf_graphs ADD COLUMN IF NOT EXISTS locked_at   TIMESTAMPTZ;
     requires = ["schema_v0_4_0_graphs"],
 );
 
+// F5 (SPEC 0.6.37, #142): lock custody below the engine. `lock_graph`
+// installs two triggers on the graph's own partition that call this
+// function, so a direct SQL write — through the parent or on the
+// partition, row-level or TRUNCATE — refuses exactly like the engine
+// fence. Unlocked partitions carry no trigger, so ordinary writes pay
+// nothing. The graph id and reason travel as trigger arguments: no table
+// read at fire time, so the refusal needs no privilege the writer lacks.
+// Message shape and HINT match `require_unlocked`.
+pgrx::extension_sql!(
+    r#"
+CREATE FUNCTION _refuse_locked_write() RETURNS trigger
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  RAISE EXCEPTION USING
+    ERRCODE = '55P03',
+    MESSAGE = format(
+      'pgrdf: graph %s is locked (%s): direct SQL %s refused. Unlock with pgrdf.unlock_graph(%s, ''<reason>'').',
+      TG_ARGV[0], TG_ARGV[1], TG_OP, TG_ARGV[0]),
+    HINT = format('pgrdf.unlock_graph(%s, ''<reason>'')', TG_ARGV[0]);
+END
+$fn$;
+"#,
+    name = "lock_refuse_trigger_v0_6_37",
+    requires = ["graph_lock_columns_v0_6_28"],
+);
+
+// 0.6.37: the rdfc-1.0 digest of a locked graph, cached by graph_digest on
+// first computation and cleared by lock_graph / unlock_graph. Valid only
+// while the graph is locked and its lock custody holds.
+pgrx::extension_sql!(
+    r#"
+ALTER TABLE _pgrdf_graphs ADD COLUMN IF NOT EXISTS locked_digest TEXT;
+"#,
+    name = "graph_locked_digest_v0_6_37",
+    requires = ["graph_lock_columns_v0_6_28"],
+);
+
+/// The partition that holds `graph_id`'s quads, when it has its own.
+fn dedicated_partition(graph_id: i64) -> Option<String> {
+    let name = format!("_pgrdf_quads_g{graph_id}");
+    let exists = Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM pg_class \
+         WHERE relnamespace = 'pgrdf'::regnamespace AND relname = $1)",
+        &[name.as_str().into()],
+    )
+    .expect("lock: partition lookup failed")
+    .unwrap_or(false);
+    exists.then_some(name)
+}
+
+/// Install the refuse-triggers on the graph's partition (as the storage
+/// owner — trigger DDL needs table ownership). A graph without a
+/// dedicated partition keeps the engine fence only.
+fn install_lock_triggers(graph_id: i64, reason: &str) {
+    let Some(part) = dedicated_partition(graph_id) else {
+        return;
+    };
+    let reason = reason.replace('\'', "''");
+    crate::storage::partition::as_storage_owner(|| {
+        Spi::run(&format!(
+            "CREATE TRIGGER pgrdf_lock_row BEFORE INSERT OR UPDATE OR DELETE \
+             ON pgrdf.{part} FOR EACH ROW \
+             EXECUTE FUNCTION pgrdf._refuse_locked_write('{graph_id}', '{reason}')"
+        ))
+        .expect("lock_graph: row trigger install failed");
+        Spi::run(&format!(
+            "CREATE TRIGGER pgrdf_lock_truncate BEFORE TRUNCATE \
+             ON pgrdf.{part} FOR EACH STATEMENT \
+             EXECUTE FUNCTION pgrdf._refuse_locked_write('{graph_id}', '{reason}')"
+        ))
+        .expect("lock_graph: truncate trigger install failed");
+    });
+}
+
+fn drop_lock_triggers(graph_id: i64) {
+    let Some(part) = dedicated_partition(graph_id) else {
+        return;
+    };
+    crate::storage::partition::as_storage_owner(|| {
+        Spi::run(&format!(
+            "DROP TRIGGER IF EXISTS pgrdf_lock_row ON pgrdf.{part}"
+        ))
+        .expect("unlock_graph: row trigger drop failed");
+        Spi::run(&format!(
+            "DROP TRIGGER IF EXISTS pgrdf_lock_truncate ON pgrdf.{part}"
+        ))
+        .expect("unlock_graph: truncate trigger drop failed");
+    });
+}
+
+/// How many of the two lock triggers the graph's partition carries
+/// (None = no dedicated partition). graph_integrity compares it with
+/// the `locked` flag.
+pub(crate) fn lock_trigger_count(graph_id: i64) -> Option<i64> {
+    let part = dedicated_partition(graph_id)?;
+    Spi::get_one_with_args::<i64>(
+        "SELECT count(*) FROM pg_trigger \
+         WHERE tgrelid = format('pgrdf.%I', $1::text)::regclass \
+           AND tgname IN ('pgrdf_lock_row', 'pgrdf_lock_truncate')",
+        &[part.as_str().into()],
+    )
+    .expect("lock: trigger count failed")
+}
+
 /// The stable error prefix every refusal carries. Tests and callers
 /// match on this; changing it is a contract change.
 const LOCK_PREFIX: &str = "pgrdf: graph";
@@ -57,12 +161,15 @@ pub(crate) fn require_unlocked(graph_id: i64, verb: &str) {
         // lock_not_available is the standard class for "declined because a
         // lock is held". Mechanism unchanged (see crate::refuse); message
         // byte-identical to the pre-E0 text (K2).
-        crate::refuse(
+        // 0.6.37: the same HINT the partition trigger raises — one cure,
+        // whichever path refused.
+        crate::refuse_with_hint(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
             format!(
                 "{LOCK_PREFIX} {graph_id} is locked ({reason}): {verb} refused. \
                  Unlock with pgrdf.unlock_graph({graph_id}, '<reason>')."
             ),
+            format!("pgrdf.unlock_graph({graph_id}, '<reason>')"),
         );
     }
 }
@@ -101,11 +208,14 @@ fn lock_graph(graph_id: i64, reason: &str) -> bool {
     }
     Spi::run_with_args(
         "UPDATE pgrdf._pgrdf_graphs \
-         SET locked = true, lock_reason = $2, locked_at = now() \
+         SET locked = true, lock_reason = $2, locked_at = now(), locked_digest = NULL \
          WHERE graph_id = $1",
         &[graph_id.into(), reason.into()],
     )
     .expect("lock_graph: update failed");
+    // After the caller's own UPDATE succeeded — so locking still needs
+    // UPDATE on _pgrdf_graphs — extend the lock below the engine.
+    install_lock_triggers(graph_id, reason);
     true
 }
 
@@ -137,11 +247,12 @@ fn unlock_graph(graph_id: i64, reason: &str) -> bool {
     }
     Spi::run_with_args(
         "UPDATE pgrdf._pgrdf_graphs \
-         SET locked = false, lock_reason = NULL, locked_at = NULL \
+         SET locked = false, lock_reason = NULL, locked_at = NULL, locked_digest = NULL \
          WHERE graph_id = $1",
         &[graph_id.into(), reason.into()],
     )
     .expect("unlock_graph: update failed");
+    drop_lock_triggers(graph_id);
     // The unlock reason goes to the log — the row's reason column
     // belongs to the (now absent) lock.
     pgrx::log!("pgrdf: graph {graph_id} unlocked: {reason}");
@@ -283,5 +394,138 @@ mod tests {
             Spi::run("SELECT pgrdf.lock_graph(980032, 'second holder')").unwrap();
         }));
         assert!(r.is_err(), "double lock must refuse");
+    }
+
+    /// Every direct write is tried inside a plpgsql EXCEPTION block — a
+    /// real subtransaction — so one refusal never aborts the test's
+    /// transaction. Returns "ok" or "<sqlstate>|<hint>".
+    fn f5_try_fn() {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.f5_try(q text) RETURNS text \
+             LANGUAGE plpgsql AS $$ DECLARE st text; h text; BEGIN \
+               EXECUTE q; RETURN 'ok'; \
+             EXCEPTION WHEN OTHERS THEN \
+               GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, h = PG_EXCEPTION_HINT; \
+               RETURN st || '|' || coalesce(h, ''); END $$",
+        )
+        .unwrap();
+    }
+
+    fn f5_try(q: &str) -> String {
+        Spi::get_one_with_args("SELECT pg_temp.f5_try($1)", &[q.into()])
+            .unwrap()
+            .unwrap()
+    }
+
+    /// A writer granted on the parent before the graph exists, so the
+    /// partition inherits the grants (#96) — the realistic shape.
+    fn f5_writer_and_locked_graph(role: &str, gid: i64) {
+        crate::storage::partition::acquire_partition_ddl_gate();
+        Spi::run(&format!("CREATE ROLE {role} NOLOGIN")).unwrap();
+        Spi::run(&format!("GRANT USAGE ON SCHEMA pgrdf TO {role}")).unwrap();
+        Spi::run(&format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON pgrdf._pgrdf_quads TO {role}"
+        ))
+        .unwrap();
+        setup(gid); // loads one triple and locks with reason 'test lock'
+        f5_try_fn();
+    }
+
+    /// F5 (#142): a locked graph refuses EVERY direct SQL write — through
+    /// the parent, on the partition, and TRUNCATE — with the lock's
+    /// SQLSTATE and the unlock cure as HINT.
+    #[pg_test]
+    fn locked_graph_refuses_direct_sql_writes() {
+        let gid = 980501;
+        f5_writer_and_locked_graph("pgrdf_f5_writer", gid);
+        let before: i64 = Spi::get_one(&format!(
+            "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = {gid}"
+        ))
+        .unwrap()
+        .unwrap();
+        Spi::run("SET ROLE pgrdf_f5_writer").unwrap();
+        let part = format!("pgrdf._pgrdf_quads_g{gid}");
+        for q in [
+            format!("INSERT INTO pgrdf._pgrdf_quads VALUES (1, 2, 3, {gid}, false)"),
+            format!("INSERT INTO {part} VALUES (1, 2, 3, {gid}, false)"),
+            format!("DELETE FROM pgrdf._pgrdf_quads WHERE graph_id = {gid}"),
+            format!("UPDATE pgrdf._pgrdf_quads SET is_inferred = true WHERE graph_id = {gid}"),
+            format!("TRUNCATE ONLY {part}"),
+        ] {
+            let got = f5_try(&q);
+            assert_eq!(
+                got,
+                format!("55P03|pgrdf.unlock_graph({gid}, '<reason>')"),
+                "{q}"
+            );
+        }
+        Spi::run("RESET ROLE").unwrap();
+        // TRUNCATE of the parent reaches the locked partition too.
+        assert!(f5_try("TRUNCATE pgrdf._pgrdf_quads").starts_with("55P03|"));
+        let after: i64 = Spi::get_one(&format!(
+            "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = {gid}"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(before, after, "nothing landed");
+    }
+
+    /// F5: unlock removes the triggers and direct writes land again; an
+    /// unlocked graph never carries one (the zero-cost path).
+    #[pg_test]
+    fn unlock_restores_writes_and_leaves_no_trigger() {
+        let gid = 980502;
+        f5_writer_and_locked_graph("pgrdf_f5_writer2", gid);
+        Spi::run(&format!("SELECT pgrdf.unlock_graph({gid}, 'f5 done')")).unwrap();
+        let triggers: i64 = Spi::get_one(&format!(
+            "SELECT count(*) FROM pg_trigger \
+             WHERE tgrelid = 'pgrdf._pgrdf_quads_g{gid}'::regclass AND NOT tgisinternal"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(triggers, 0, "an unlocked graph carries no trigger");
+        Spi::run("SET ROLE pgrdf_f5_writer2").unwrap();
+        assert_eq!(
+            f5_try(&format!(
+                "INSERT INTO pgrdf._pgrdf_quads VALUES (7, 8, 9, {gid}, false)"
+            )),
+            "ok"
+        );
+        Spi::run("RESET ROLE").unwrap();
+    }
+
+    /// F5: the engine fence and the trigger share one cure — the engine
+    /// refusal keeps its byte-identical message and gains the same HINT.
+    #[pg_test]
+    fn engine_fence_carries_the_same_hint() {
+        let gid = 980503;
+        f5_writer_and_locked_graph("pgrdf_f5_writer3", gid);
+        let got = f5_try(&format!("SELECT pgrdf.clear_graph({gid})"));
+        assert_eq!(got, format!("55P03|pgrdf.unlock_graph({gid}, '<reason>')"));
+    }
+
+    /// F5: lock custody joins graph_integrity — a locked graph whose
+    /// triggers were removed by hand is drift, and integrity says so.
+    #[pg_test]
+    fn integrity_reports_lock_trigger_drift() {
+        let gid = 980504;
+        f5_writer_and_locked_graph("pgrdf_f5_writer4", gid);
+        let clean: bool = Spi::get_one(&format!(
+            "SELECT (pgrdf.graph_integrity({gid})->>'clean')::bool"
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(clean, "a locked graph with its triggers is clean");
+        Spi::run(&format!(
+            "DROP TRIGGER pgrdf_lock_row ON pgrdf._pgrdf_quads_g{gid}"
+        ))
+        .unwrap();
+        let (clean, consistent): (Option<bool>, Option<bool>) = Spi::get_two(&format!(
+            "SELECT (pgrdf.graph_integrity({gid})->>'clean')::bool, \
+                    (pgrdf.graph_integrity({gid})->'lock_custody'->>'consistent')::bool"
+        ))
+        .unwrap();
+        assert_eq!(consistent, Some(false), "a missing trigger is drift");
+        assert_eq!(clean, Some(false), "drift makes the graph unclean");
     }
 }

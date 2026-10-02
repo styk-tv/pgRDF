@@ -417,7 +417,41 @@ fn graph_digest(graph_id: i64) -> String {
             );
         }
     }
-    canonicalize(read_asserted_triples(graph_id)).1
+    // 0.6.37 (#142/#143): a locked graph whose lock custody holds — the
+    // engine fence plus both partition triggers — cannot change, so its
+    // digest is cached on first computation (lazily: locking stays cheap)
+    // and served from the cache after. Custody drift (a trigger dropped by
+    // hand) means "do not trust the cache": recompute. Open graphs are
+    // never cached. A caller who cannot write the cache — read-only
+    // transaction, no UPDATE on _pgrdf_graphs — still gets the digest.
+    let (locked, cached): (Option<bool>, Option<String>) = Spi::get_two_with_args(
+        "SELECT locked, locked_digest FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
+        &[graph_id.into()],
+    )
+    .unwrap_or((None, None));
+    let custody_holds =
+        locked == Some(true) && crate::storage::lock::lock_trigger_count(graph_id) == Some(2);
+    if custody_holds && let Some(d) = cached {
+        return d;
+    }
+    let digest = canonicalize(read_asserted_triples(graph_id)).1;
+    if custody_holds {
+        let can_cache = Spi::get_one::<bool>(
+            "SELECT current_setting('transaction_read_only') = 'off' \
+                AND has_table_privilege('pgrdf._pgrdf_graphs', 'UPDATE')",
+        )
+        .expect("graph_digest: cache-write check failed")
+        .unwrap_or(false);
+        if can_cache {
+            Spi::run_with_args(
+                "UPDATE pgrdf._pgrdf_graphs SET locked_digest = $2 \
+                 WHERE graph_id = $1 AND locked",
+                &[graph_id.into(), digest.as_str().into()],
+            )
+            .expect("graph_digest: cache write failed");
+        }
+    }
+    digest
 }
 
 /// RDFC-1.0 over an arbitrary triple set: returns the sorted canonical
@@ -647,6 +681,78 @@ mod tests {
             digest_hex,
             digest(gid),
             "canonicalize digest must equal graph_digest"
+        );
+    }
+
+    fn cached_digest(graph_id: i64) -> Option<String> {
+        Spi::get_one_with_args(
+            "SELECT locked_digest FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
+            &[graph_id.into()],
+        )
+        .unwrap()
+    }
+
+    /// #142/#143 (0.6.37): a locked graph cannot change, so its digest is
+    /// cached on first computation and served from the cache after; unlock
+    /// clears it. Open graphs are never cached.
+    #[pg_test]
+    fn digest_is_cached_while_locked_and_cleared_on_unlock() {
+        seed(983501, BNODE_TTL);
+        let open = digest(983501);
+        assert_eq!(cached_digest(983501), None, "open graphs are never cached");
+        Spi::run("SELECT pgrdf.lock_graph(983501, 'checkpoint')").unwrap();
+        let first = digest(983501);
+        assert_eq!(first, open, "locking does not change identity");
+        assert_eq!(cached_digest(983501).as_deref(), Some(first.as_str()));
+        assert_eq!(digest(983501), first, "served from the cache");
+        Spi::run("SELECT pgrdf.unlock_graph(983501, 'reopen')").unwrap();
+        assert_eq!(cached_digest(983501), None, "unlock clears the cache");
+    }
+
+    /// The cache is trusted only while lock custody holds. If an owner
+    /// drops a lock trigger and changes the graph, graph_digest recomputes
+    /// instead of serving the stale value.
+    #[pg_test]
+    fn cached_digest_is_not_trusted_after_custody_drift() {
+        seed(983502, BNODE_TTL);
+        Spi::run("SELECT pgrdf.lock_graph(983502, 'checkpoint')").unwrap();
+        let cached = digest(983502);
+        Spi::run("DROP TRIGGER pgrdf_lock_row ON pgrdf._pgrdf_quads_g983502").unwrap();
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_quads (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+             SELECT subject_id, predicate_id, predicate_id, graph_id, false \
+             FROM pgrdf._pgrdf_quads WHERE graph_id = 983502 LIMIT 1",
+        )
+        .unwrap();
+        assert_ne!(
+            digest(983502),
+            cached,
+            "drift: recompute, never serve stale"
+        );
+    }
+
+    /// A caller without UPDATE on _pgrdf_graphs still gets the digest of a
+    /// locked graph; the cache is simply not written.
+    #[pg_test]
+    fn digest_of_locked_graph_works_for_a_reader() {
+        seed(983503, BNODE_TTL);
+        Spi::run("SELECT pgrdf.lock_graph(983503, 'checkpoint')").unwrap();
+        Spi::run("CREATE ROLE pgrdf_digest_reader NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_digest_reader").unwrap();
+        Spi::run(
+            "GRANT SELECT ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs, pgrdf._pgrdf_dictionary \
+             TO pgrdf_digest_reader",
+        )
+        .unwrap();
+        Spi::run("GRANT SELECT ON pgrdf._pgrdf_quads_g983503 TO pgrdf_digest_reader").unwrap();
+        Spi::run("SET ROLE pgrdf_digest_reader").unwrap();
+        let d = digest(983503);
+        Spi::run("RESET ROLE").unwrap();
+        assert_eq!(d.len(), 64);
+        assert_eq!(
+            cached_digest(983503),
+            None,
+            "no UPDATE privilege: no cache write"
         );
     }
 
