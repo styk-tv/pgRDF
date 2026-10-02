@@ -5831,6 +5831,8 @@ fn emit_optional_lateral(
 
     let mut inner_from = String::new();
     let mut inner_where: Vec<String> = Vec::new();
+    // Shared vars re-pointed to their first inner alias (F3 chaining).
+    let mut chained: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // ---- inner triples (atomic INNER-join group) ----
     let mut emitted_first = false;
@@ -5854,6 +5856,7 @@ fn emit_optional_lateral(
             optional_scope_clauses(&st.scope, qi, outer_plan, &mut c);
             (format!("pgrdf._pgrdf_quads q{qi}"), c)
         };
+        chain_shared_vars_into_group(&st.triple, qi, &pre_existing, &mut chained, &mut local);
         if !emitted_first {
             inner_from.push_str(&from_src);
             inner_where.append(&mut clauses);
@@ -5953,6 +5956,11 @@ fn emit_optional_lateral(
         sql.push_str(" WHERE ");
         sql.push_str(&inner_where.join(" AND "));
     }
+    // F3 fence: OFFSET 0 keeps the planner from pulling this LATERAL
+    // group up into the outer join problem, where pin_join_order()'s
+    // collapse limits would force its own syntactic join order. It runs
+    // as a per-outer-row parameterised subquery instead.
+    sql.push_str(" OFFSET 0");
     sql
 }
 
@@ -6038,6 +6046,34 @@ fn scope_constraint_clauses_anchor_q(
 /// outer projection (a fresh GRAPH inside MINUS binds locally;
 /// MINUS-inherited scope is keyed by the outer `g{S}` and would have
 /// already been registered by the BGP/OPTIONAL scan).
+/// F3 (SPEC 0.6.37 §3.3): inside an OPTIONAL or MINUS group, a variable
+/// shared with the outer query is correlated to the outer alias once, by
+/// the group's first triple that mentions it; every later triple in the
+/// group joins that inner alias instead. Without this each inner alias is
+/// tied only to the outer query, the group's own join has no clause, and
+/// under `pin_join_order()` the planner can flatten it into a cross
+/// product (measured on 1.1M-triple graphs: ~424M rows, 16 GB of temp).
+fn chain_shared_vars_into_group(
+    tp: &TriplePattern,
+    qi: usize,
+    outer: &std::collections::HashSet<String>,
+    chained: &mut std::collections::HashSet<String>,
+    local: &mut HashMap<String, (usize, &'static str)>,
+) {
+    for (var, col) in [
+        (tp_subject_var(tp), "subject_id"),
+        (tp_predicate_var(tp), "predicate_id"),
+        (tp_object_var(tp), "object_id"),
+    ] {
+        if let Some(v) = var
+            && outer.contains(&v)
+            && chained.insert(v.clone())
+        {
+            local.insert(v, (qi, col));
+        }
+    }
+}
+
 fn translate_minus(
     minus: &MinusBlock,
     outer_anchors: &HashMap<String, (usize, &'static str)>,
@@ -6069,6 +6105,8 @@ fn translate_minus(
     // New vars introduced inside the MINUS get fresh local aliases;
     // shared vars internal to the sub-pattern also tie together.
     let mut local_anchors = outer_anchors.clone();
+    let outer_vars: std::collections::HashSet<String> = outer_anchors.keys().cloned().collect();
+    let mut chained: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut all_clauses: Vec<String> = Vec::new();
     let mut from_aliases: Vec<String> = Vec::with_capacity(triples.len());
     // First qN inside the MINUS for the Variable scope, if any —
@@ -6083,6 +6121,7 @@ fn translate_minus(
             minus_first_qi = Some(qi);
         }
         let mut clauses = pattern_clauses(tp, qi, &mut local_anchors);
+        chain_shared_vars_into_group(tp, qi, &outer_vars, &mut chained, &mut local_anchors);
         match &minus.scope {
             Some(GraphScope::Literal(gid)) => {
                 let p = id_placeholder(*gid);
@@ -14884,6 +14923,125 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(n, 1, "branch-local filters must keep applying");
+    }
+
+    /// F3 fixture (SPEC 0.6.37 §3.3): graph A has N functions each raising
+    /// one state; graph B has the same functions typed and labelled, and
+    /// all but every 100th still raise it. The anti-join below has an
+    /// OPTIONAL group of two triples sharing ONLY the outer ?f — the shape
+    /// that, under pin_join_order(), the planner flattened into an
+    /// unconstrained cross product of B's labels × B's mayRaise rows.
+    fn seed_f3_pair(n: usize) -> i64 {
+        let mut a = String::new();
+        let mut b = String::new();
+        for i in 0..n {
+            let s = i % 50;
+            a.push_str(&format!(
+                "<urn:f3:f{i}> <urn:f3:mayRaise> <urn:f3:s{s}> ; <urn:f3:label> \"f{i}\" .\n"
+            ));
+            b.push_str(&format!(
+                "<urn:f3:f{i}> a <urn:f3:Function> ; <urn:f3:label> \"f{i}\" .\n"
+            ));
+            if i % 100 != 0 {
+                b.push_str(&format!(
+                    "<urn:f3:f{i}> <urn:f3:mayRaise> <urn:f3:s{s}> .\n"
+                ));
+            }
+        }
+        for s in 0..50 {
+            a.push_str(&format!(
+                "<urn:f3:s{s}> <urn:f3:label> \"s{s}\" ; <urn:f3:code> \"C{s}\" .\n"
+            ));
+        }
+        let ga: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:f3:a')")
+            .unwrap()
+            .unwrap();
+        let gb: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:f3:b')")
+            .unwrap()
+            .unwrap();
+        Spi::get_one_with_args::<i64>("SELECT pgrdf.parse_turtle($1, $2)", &[a.into(), ga.into()])
+            .unwrap();
+        Spi::get_one_with_args::<i64>("SELECT pgrdf.parse_turtle($1, $2)", &[b.into(), gb.into()])
+            .unwrap();
+        Spi::run("ANALYZE pgrdf._pgrdf_quads").unwrap();
+        (n / 100) as i64
+    }
+
+    const F3_ANTI_JOIN: &str = "SELECT ?function WHERE { \
+         GRAPH <urn:tdd:f3:a> { ?f <urn:f3:mayRaise> ?s ; <urn:f3:label> ?function . \
+                                ?s <urn:f3:label> ?n ; <urn:f3:code> ?c . } \
+         GRAPH <urn:tdd:f3:b> { ?f a <urn:f3:Function> } \
+         OPTIONAL { GRAPH <urn:tdd:f3:b> { ?f <urn:f3:mayRaise> ?s . ?f <urn:f3:label> ?still } } \
+         FILTER(!BOUND(?still)) }";
+
+    /// F3 guard: the anti-join answers exactly inside a temp budget a
+    /// cross product (≈9M rows here) would blow through. Synthetic data
+    /// does NOT reproduce the bench's misestimated plan even with
+    /// enable_nestloop off — the planner still finds a clause-carrying
+    /// order — so this guards the answer and the budget; the red/green
+    /// test for the fix is the structural one below, and the real-data
+    /// proof is the bench measurement (16 GB → 134–236 ms).
+    #[pg_test]
+    fn f3_optional_group_does_not_cross_product() {
+        let expected = seed_f3_pair(3000);
+        Spi::run("SET LOCAL temp_file_limit = '8MB'").unwrap();
+        Spi::run("SET LOCAL enable_nestloop = off").unwrap();
+        let got: i64 = Spi::get_one_with_args(
+            "SELECT count(*) FROM pgrdf.sparql($1)",
+            &[F3_ANTI_JOIN.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(got, expected, "exactly the functions that stopped raising");
+    }
+
+    /// F3: the emitted OPTIONAL subquery is fenced (OFFSET 0) and its
+    /// second triple joins the group's first alias, not only the outer.
+    #[pg_test]
+    fn f3_optional_lateral_is_fenced_and_chained() {
+        seed_f3_pair(10);
+        let sql: String =
+            Spi::get_one_with_args("SELECT pgrdf.sparql_sql($1)", &[F3_ANTI_JOIN.into()])
+                .unwrap()
+                .unwrap();
+        let lateral = sql
+            .split("LEFT JOIN LATERAL (")
+            .nth(1)
+            .expect("the OPTIONAL group is a LATERAL subquery");
+        let body = lateral.split(") q").next().unwrap();
+        assert!(
+            body.contains("OFFSET 0"),
+            "LATERAL group must be fenced: {body}"
+        );
+        let first = body
+            .split("FROM pgrdf._pgrdf_quads ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .expect("first inner alias");
+        let join_on = body
+            .split(" ON (")
+            .nth(1)
+            .expect("second inner triple joins");
+        assert!(
+            join_on.contains(&format!("{first}.subject_id")),
+            "the second triple must chain to {first}: {join_on}"
+        );
+    }
+
+    /// F3 audit: a multi-triple MINUS whose triples share only an outer
+    /// variable answers within the same budget.
+    #[pg_test]
+    fn f3_multi_triple_minus_within_budget() {
+        let expected = seed_f3_pair(3000);
+        Spi::run("SET LOCAL temp_file_limit = '8MB'").unwrap();
+        Spi::run("SET LOCAL enable_nestloop = off").unwrap();
+        let q = "SELECT ?f WHERE { \
+             GRAPH <urn:tdd:f3:a> { ?f <urn:f3:mayRaise> ?s } \
+             MINUS { GRAPH <urn:tdd:f3:b> { ?f <urn:f3:mayRaise> ?s . ?f <urn:f3:label> ?l } } }";
+        let got: i64 = Spi::get_one_with_args("SELECT count(*) FROM pgrdf.sparql($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, expected);
     }
 
     /// stats() carries the #114 counter and the refusal increments it
