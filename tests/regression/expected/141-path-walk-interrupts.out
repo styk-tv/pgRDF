@@ -1,0 +1,9 @@
+20000
+WARNING:  sparql: property path truncated at pgrdf.path_max_depth=64 — longer paths are missing from this result; raise pgrdf.path_max_depth, or SET pgrdf.on_path_truncation = 'error' to forbid partial results
+64
+1
+54000|bind an endpoint of the path (the walk then starts there), or raise pgrdf.path_max_pairs deliberately
+57014|cancelled
+WARNING:  sparql: property path truncated at pgrdf.path_max_depth=64 — longer paths are missing from this result; raise pgrdf.path_max_depth, or SET pgrdf.on_path_truncation = 'error' to forbid partial results
+64
+t
