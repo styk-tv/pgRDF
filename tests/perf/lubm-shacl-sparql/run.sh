@@ -11,7 +11,14 @@
 # Expected — 2 intentional teaching collisions (u0:CS101 and u3:CS101,
 # each with 2 Professors), so 4 violations from the pgRDF-native
 # evaluator (one row per Professor focus that shares a course). The
-# rudof-side verdict surfaces the ERRATA.v0.6 E-014 gap as it does on
+# ERRATA.v0.6 E-014 CLOSED (0.6.36): 'sparql' mode used to return the wrong
+# verdict on this shape topology -- conforms:true over data that violates the
+# constraint, because rudof's SparqlEngine did not evaluate sh:sparql. Upstream
+# closed it; measured, both modes now report the same 4 violations, and
+# expected.json says so. The gate is now a real cross-mode AGREEMENT check
+# rather than a pin on a known divergence.
+#
+# The rudof-side verdict surfaces the ERRATA.v0.6 E-014 gap as it does on
 # the W3C node-sparql-001 fixture.
 #
 # Dev-gate (not release-gate): runs on every CI to keep the path
@@ -50,14 +57,13 @@ SETUP_SQL+="SELECT pgrdf.parse_turtle('${SHAPES_ESC}', 91001);"$'\n'
 # Validation under each mode; collect conforms + violation count.
 VAL_SQL=$''
 for mode in sparql pgrdf; do
-  # 'sparql' opts out of the fail-closed guard: this shape carries a
-  # sh:sparql constraint and 'sparql' does not evaluate it (E-014), so
-  # the guard refuses by design. This gate COMPARES the two modes, and
-  # 'pgrdf' — the mode that actually evaluates it — stays strict.
-  STRICT_ARG=""
-  [ "${mode}" = "sparql" ] && STRICT_ARG=", false"
+  # Both modes now run under the default strict. The opt-out existed because
+  # 'sparql' could not evaluate sh:sparql and the fail-closed guard refused
+  # the combination; as of 0.6.36 every mode evaluates it, the refusal tables
+  # are empty, and there is nothing to opt out of. Keeping `strict => false`
+  # here would quietly disable a guard this gate should be exercising.
   VAL_SQL+="\\echo MODE: ${mode}"$'\n'
-  VAL_SQL+="SELECT pgrdf.validate(91000, 91001, '${mode}'${STRICT_ARG})::text;"$'\n'
+  VAL_SQL+="SELECT pgrdf.validate(91000, 91001, '${mode}')::text;"$'\n'
 done
 
 ALL_SQL="${SETUP_SQL}${VAL_SQL}"
