@@ -406,7 +406,7 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     let (template, pattern) = match parsed {
         Query::Construct {
             template, pattern, ..
-        } => (template, pattern),
+        } => (template, hide_query_bnodes(&pattern)),
         Query::Select { .. } | Query::Ask { .. } | Query::Describe { .. } => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
             "pgrdf.construct: not a CONSTRUCT query".to_string(),
@@ -1608,7 +1608,7 @@ fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
         .unwrap_or_else(|e| panic!("pgrdf.describe: parse error: {e}"));
 
     let pattern = match parsed {
-        Query::Describe { pattern, .. } => pattern,
+        Query::Describe { pattern, .. } => hide_query_bnodes(&pattern),
         Query::Select { .. } | Query::Ask { .. } | Query::Construct { .. } => {
             panic!("pgrdf.describe: not a DESCRIBE query")
         }
@@ -2307,7 +2307,7 @@ fn translate(q: &Query) -> ExecPlan {
     params_clear();
     match q {
         Query::Select { pattern, .. } => {
-            let ps = parse_select(pattern);
+            let ps = parse_select(&hide_query_bnodes(pattern));
             if ps.bgp.is_empty() && ps.union_branches.is_empty() {
                 panic!("sparql: empty BGP");
             }
@@ -2323,7 +2323,7 @@ fn translate(q: &Query) -> ExecPlan {
         Query::Ask { pattern, .. } => {
             // ASK reuses the SELECT pattern walk but only cares
             // whether the resulting solution sequence is non-empty.
-            let mut ps = parse_select(pattern);
+            let mut ps = parse_select(&hide_query_bnodes(pattern));
             if ps.bgp.is_empty() && ps.union_branches.is_empty() {
                 panic!("sparql: ASK with empty BGP");
             }
@@ -2586,6 +2586,134 @@ fn subst_triple(tp: &TriplePattern, binds: &HashMap<String, Expression>) -> Trip
 /// `Join`, `LeftJoin`, or a chained `Extend`). So we rewrite bottom-up
 /// — recurse into `inner`/arms first, then apply the accumulated map
 /// to the current node's own expressions / triples.
+/// List paths / blank nodes in queries (SPEC 0.6.37 §3.3a). SPARQL treats
+/// a blank node in a graph pattern as a variable that is never projected
+/// (§4.1.4), and spargebra introduces one for every top-level sequence path
+/// `a/b` (the `_:` joining the two halves — so `rdf:rest*/rdf:first`
+/// arrives as a `rest*` path and a `first` triple sharing one). The binder
+/// had no such notion and refused every query blank node. This renames
+/// each to a hidden variable `pgrdf-bn-<label>` before translation: `-` is
+/// illegal in a SPARQL VARNAME, so no user variable can collide, and
+/// spargebra refuses a label reused across groups, so one name per label
+/// keeps exactly the joins the query wrote. Only WHERE patterns go through
+/// here — CONSTRUCT templates keep their mint-per-solution blank nodes —
+/// and a Project's variable list is fixed at parse, so `SELECT *` never
+/// shows a hidden name. Blank nodes inside FILTER EXISTS are left as-is
+/// (EXISTS is not translatable).
+pub(crate) fn hide_query_bnodes(p: &GraphPattern) -> GraphPattern {
+    fn term(t: &TermPattern) -> TermPattern {
+        match t {
+            TermPattern::BlankNode(b) => {
+                TermPattern::Variable(Variable::new_unchecked(format!("pgrdf-bn-{}", b.as_str())))
+            }
+            other => other.clone(),
+        }
+    }
+    fn triple(tp: &TriplePattern) -> TriplePattern {
+        TriplePattern {
+            subject: term(&tp.subject),
+            predicate: tp.predicate.clone(),
+            object: term(&tp.object),
+        }
+    }
+    let b = |inner: &GraphPattern| Box::new(hide_query_bnodes(inner));
+    match p {
+        GraphPattern::Bgp { patterns } => GraphPattern::Bgp {
+            patterns: patterns.iter().map(triple).collect(),
+        },
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => GraphPattern::Path {
+            subject: term(subject),
+            path: path.clone(),
+            object: term(object),
+        },
+        GraphPattern::Join { left, right } => GraphPattern::Join {
+            left: b(left),
+            right: b(right),
+        },
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => GraphPattern::LeftJoin {
+            left: b(left),
+            right: b(right),
+            expression: expression.clone(),
+        },
+        GraphPattern::Lateral { left, right } => GraphPattern::Lateral {
+            left: b(left),
+            right: b(right),
+        },
+        GraphPattern::Filter { expr, inner } => GraphPattern::Filter {
+            expr: expr.clone(),
+            inner: b(inner),
+        },
+        GraphPattern::Union { left, right } => GraphPattern::Union {
+            left: b(left),
+            right: b(right),
+        },
+        GraphPattern::Graph { name, inner } => GraphPattern::Graph {
+            name: name.clone(),
+            inner: b(inner),
+        },
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => GraphPattern::Extend {
+            inner: b(inner),
+            variable: variable.clone(),
+            expression: expression.clone(),
+        },
+        GraphPattern::Minus { left, right } => GraphPattern::Minus {
+            left: b(left),
+            right: b(right),
+        },
+        GraphPattern::OrderBy { inner, expression } => GraphPattern::OrderBy {
+            inner: b(inner),
+            expression: expression.clone(),
+        },
+        GraphPattern::Project { inner, variables } => GraphPattern::Project {
+            inner: b(inner),
+            variables: variables.clone(),
+        },
+        GraphPattern::Distinct { inner } => GraphPattern::Distinct { inner: b(inner) },
+        GraphPattern::Reduced { inner } => GraphPattern::Reduced { inner: b(inner) },
+        GraphPattern::Slice {
+            inner,
+            start,
+            length,
+        } => GraphPattern::Slice {
+            inner: b(inner),
+            start: *start,
+            length: *length,
+        },
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => GraphPattern::Group {
+            inner: b(inner),
+            variables: variables.clone(),
+            aggregates: aggregates.clone(),
+        },
+        GraphPattern::Service {
+            name,
+            inner,
+            silent,
+        } => GraphPattern::Service {
+            name: name.clone(),
+            inner: b(inner),
+            silent: *silent,
+        },
+        // Values carries no triple patterns.
+        other => other.clone(),
+    }
+}
+
 fn substitute_binds(
     p: &GraphPattern,
     binds: &mut HashMap<String, Expression>,
@@ -3089,7 +3217,26 @@ fn scoped_triple_from_path(
     // consistent), and build the placeholder triple (subject/object
     // drive var-binding + SELECT-*; predicate slot is unused for path
     // rows). Only the relation builder called at the end differs.
-    let plan = classify_path(subject, path, object);
+    // `classify_path` is pure Rust and panics with a stable message on
+    // the gated shapes (a sequence inside `*`/`+`, negated sets, nested
+    // recursion) — its plain unit tests rely on that, and it must not
+    // reach Postgres error machinery outside a backend. Here, inside one,
+    // the panic becomes a typed refusal: 0A000 feature_not_supported,
+    // message byte-identical (SPEC 0.6.37 §3.3a step 5).
+    let plan = match std::panic::catch_unwind(|| classify_path(subject, path, object)) {
+        Ok(plan) => plan,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "sparql: unsupported property path".to_string());
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                msg,
+            )
+        }
+    };
     if let PathPlan::Triple(tp) = plan {
         return ScopedTriple {
             triple: *tp,
@@ -6785,9 +6932,10 @@ fn bind_subject(
             let p = id_placeholder(id);
             clauses.push(format!("q{qi}.subject_id = {p}"));
         }
-        TermPattern::BlankNode(_) => {
-            panic!("sparql: blank-node subject in query not supported")
-        }
+        TermPattern::BlankNode(_) => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: blank-node subject in query not supported".to_string(),
+        ),
         TermPattern::Literal(_) => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
             "sparql: literal subject is invalid in RDF".to_string(),
@@ -6833,9 +6981,10 @@ fn bind_object(
             let p = id_placeholder(id);
             clauses.push(format!("q{qi}.object_id = {p}"));
         }
-        TermPattern::BlankNode(_) => {
-            panic!("sparql: blank-node object in query not supported")
-        }
+        TermPattern::BlankNode(_) => crate::refuse(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: blank-node object in query not supported".to_string(),
+        ),
         other => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             format!("sparql: unsupported object term {other:?}"),
@@ -15042,6 +15191,155 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got, expected);
+    }
+
+    /// List paths (SPEC 0.6.37 §3.3a): blank nodes in a query pattern are
+    /// non-projected variables — both the `[ … ]` form and an explicit
+    /// `_:label`.
+    #[pg_test]
+    fn query_blank_nodes_join_as_hidden_variables() {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:bn:join')")
+            .unwrap()
+            .unwrap();
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &["<urn:bn:s1> <urn:bn:p> [ <urn:bn:q> \"o1\" ] . <urn:bn:s2> <urn:bn:p> <urn:bn:iri> .".into(), g.into()],
+        )
+        .unwrap();
+        for q in [
+            "SELECT ?s ?o WHERE { GRAPH <urn:tdd:bn:join> { ?s <urn:bn:p> [ <urn:bn:q> ?o ] } }",
+            "SELECT ?s ?o WHERE { GRAPH <urn:tdd:bn:join> { ?s <urn:bn:p> _:x . _:x <urn:bn:q> ?o } }",
+        ] {
+            let n: i64 =
+                Spi::get_one_with_args("SELECT count(*) FROM pgrdf.sparql($1)", &[q.into()])
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(n, 1, "the blank node must join its two triples: {q}");
+        }
+        let keys: String = Spi::get_one(
+            "SELECT string_agg(DISTINCT k, ',') FROM pgrdf.sparql( \
+               'SELECT * WHERE { GRAPH <urn:tdd:bn:join> { ?s <urn:bn:p> [ <urn:bn:q> ?o ] } }') r, \
+               jsonb_object_keys(r) k",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            keys, "o,s",
+            "SELECT * never projects a hidden blank-node variable"
+        );
+    }
+
+    const SHIN_QUERY: &str = "SELECT ?head (SUM(IF(isIRI(?m), 1, 0)) AS ?iri_members) \
+         (SUM(IF(isLiteral(?m), 1, 0)) AS ?literal_members) \
+         WHERE { GRAPH <urn:tdd:shin> { \
+           ?head <http://www.w3.org/ns/shacl#in> ?list . \
+           ?list <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>*/<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> ?m } } \
+         GROUP BY ?head";
+
+    /// Load the sh:in fixture and run the acceptance query (pgrdf-mcp's
+    /// RESIDUAL-1 shape) at `cap`; returns (head, iri, literal) sorted,
+    /// plus the call's path_depth_truncations.
+    fn shin_rows(cap: i32) -> (Vec<(String, i64, i64)>, i64) {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:shin')")
+            .unwrap()
+            .unwrap();
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                include_str!("../../tests/fixtures/shin/sh-in-lists.ttl").into(),
+                g.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run(&format!("SET LOCAL pgrdf.path_max_depth = {cap}")).unwrap();
+        let mut rows: Vec<(String, i64, i64)> = Vec::new();
+        Spi::connect(|c| {
+            let t = c
+                .select(
+                    "SELECT r->>'head', (r->>'iri_members')::bigint, (r->>'literal_members')::bigint \
+                     FROM pgrdf.sparql($1) r",
+                    None,
+                    &[SHIN_QUERY.into()],
+                )
+                .unwrap();
+            for row in t {
+                let head: String = row.get(1).unwrap().unwrap();
+                rows.push((
+                    head.rsplit('#').next().unwrap().to_string(),
+                    row.get(2).unwrap().unwrap(),
+                    row.get(3).unwrap().unwrap(),
+                ));
+            }
+        });
+        let truncations: i64 =
+            Spi::get_one("SELECT (pgrdf.last_call_stats()->>'path_depth_truncations')::bigint")
+                .unwrap()
+                .unwrap();
+        rows.sort();
+        (rows, truncations)
+    }
+
+    /// RESIDUAL-1 acceptance at a sufficient cap: 7 rows · 110 · 6.
+    #[pg_test]
+    fn list_path_sh_in_at_cap_1024() {
+        let (rows, truncations) = shin_rows(1024);
+        let want: Vec<(String, i64, i64)> = vec![
+            ("Cyclic".into(), 2, 0),
+            ("Level".into(), 0, 4),
+            ("Long".into(), 100, 0),
+            ("Mixed".into(), 1, 2),
+            ("SharedA".into(), 2, 0),
+            ("SharedB".into(), 2, 0),
+            ("Status".into(), 3, 0),
+        ];
+        assert_eq!(rows, want);
+        assert_eq!(
+            truncations, 0,
+            "nothing is cut at 1024, and a cycle never truncates"
+        );
+    }
+
+    /// RESIDUAL-1 at the default cap: ex:Long reads 65 and the cut is
+    /// STATED; every other head is whole.
+    #[pg_test]
+    fn list_path_sh_in_at_cap_64_states_truncation() {
+        let (rows, truncations) = shin_rows(64);
+        let long = rows.iter().find(|r| r.0 == "Long").expect("ex:Long row");
+        assert_eq!(long.1, 65, "distance 0..64 = 65 cells");
+        assert!(truncations > 0, "the cut must be stated, never a silent 65");
+        assert_eq!(rows.iter().map(|r| r.1).sum::<i64>(), 75);
+        assert_eq!(rows.iter().map(|r| r.2).sum::<i64>(), 6);
+    }
+
+    /// A sequence inside a recursive operator stays out of scope, but it
+    /// refuses TYPED (0A000) and sparql_parse reports it — parse and
+    /// execution agree.
+    #[pg_test]
+    fn sequence_inside_star_refuses_typed_and_parse_agrees() {
+        let q = "SELECT ?x WHERE { <urn:a> (<urn:p>/<urn:q>)* ?x }";
+        let unsupported: i64 = Spi::get_one_with_args(
+            "SELECT jsonb_array_length(pgrdf.sparql_parse($1)->'unsupported_algebra')",
+            &[q.into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            unsupported > 0,
+            "sparql_parse must report what execution refuses"
+        );
+        let code = pgrx::PgTryBuilder::new(|| {
+            Spi::run(&format!("SELECT * FROM pgrdf.sparql('{q}')")).unwrap();
+            None
+        })
+        .catch_others(|e| match &e {
+            pgrx::pg_sys::panic::CaughtError::PostgresError(r)
+            | pgrx::pg_sys::panic::CaughtError::ErrorReport(r)
+            | pgrx::pg_sys::panic::CaughtError::RustPanic { ereport: r, .. } => {
+                Some(format!("{:?}", r.sql_error_code()))
+            }
+        })
+        .execute();
+        assert_eq!(code.as_deref(), Some("ERRCODE_FEATURE_NOT_SUPPORTED"));
     }
 
     /// stats() carries the #114 counter and the refusal increments it

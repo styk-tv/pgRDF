@@ -1,0 +1,42 @@
+# sh:in RDF lists — acceptance fixture for list paths (rdf:rest*/rdf:first)
+# over query blank nodes. Each head pins one behaviour:
+#   ex:Status   plain IRI list                         3 IRI members
+#   ex:Level    literal list, "low" twice              4 cells, 4 rows (no DISTINCT)
+#   ex:Mixed    IRI + typed + language-tagged literal  1 IRI, 2 literals
+#   ex:SharedA  one list node shared by two heads      2 each, walked per head
+#   ex:SharedB
+#   ex:Long     100 cells (rest* distance 99)          65 at the default cap of 64
+#                                                      with a stated truncation; 100 at 1024
+#   ex:Cyclic   malformed: last rest points to first   2, and NO truncation
+#   ex:Empty    sh:in () = rdf:nil                     no row
+# Totals at a sufficient cap: 7 rows, 110 IRI members, 6 literal members.
+
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:  <urn:tdd:shin#> .
+
+ex:Status  sh:in ( ex:Open ex:Closed ex:Pending ) .
+ex:Level   sh:in ( "low" "mid" "high" "low" ) .
+ex:Mixed   sh:in ( ex:Auto "1"^^xsd:integer "manual"@en ) .
+ex:Empty   sh:in () .
+
+ex:SharedA sh:in _:shared1 .
+ex:SharedB sh:in _:shared1 .
+_:shared1 rdf:first ex:One ; rdf:rest _:shared2 .
+_:shared2 rdf:first ex:Two ; rdf:rest rdf:nil .
+
+ex:Cyclic  sh:in _:cyc1 .
+_:cyc1 rdf:first ex:Left  ; rdf:rest _:cyc2 .
+_:cyc2 rdf:first ex:Right ; rdf:rest _:cyc1 .
+
+ex:Long sh:in ( ex:c1 ex:c2 ex:c3 ex:c4 ex:c5 ex:c6 ex:c7 ex:c8 ex:c9 ex:c10
+  ex:c11 ex:c12 ex:c13 ex:c14 ex:c15 ex:c16 ex:c17 ex:c18 ex:c19 ex:c20
+  ex:c21 ex:c22 ex:c23 ex:c24 ex:c25 ex:c26 ex:c27 ex:c28 ex:c29 ex:c30
+  ex:c31 ex:c32 ex:c33 ex:c34 ex:c35 ex:c36 ex:c37 ex:c38 ex:c39 ex:c40
+  ex:c41 ex:c42 ex:c43 ex:c44 ex:c45 ex:c46 ex:c47 ex:c48 ex:c49 ex:c50
+  ex:c51 ex:c52 ex:c53 ex:c54 ex:c55 ex:c56 ex:c57 ex:c58 ex:c59 ex:c60
+  ex:c61 ex:c62 ex:c63 ex:c64 ex:c65 ex:c66 ex:c67 ex:c68 ex:c69 ex:c70
+  ex:c71 ex:c72 ex:c73 ex:c74 ex:c75 ex:c76 ex:c77 ex:c78 ex:c79 ex:c80
+  ex:c81 ex:c82 ex:c83 ex:c84 ex:c85 ex:c86 ex:c87 ex:c88 ex:c89 ex:c90
+  ex:c91 ex:c92 ex:c93 ex:c94 ex:c95 ex:c96 ex:c97 ex:c98 ex:c99 ex:c100 ) .
