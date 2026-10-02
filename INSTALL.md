@@ -10,11 +10,11 @@ archive.
 - PostgreSQL 18 with its development files (`pg_config`, server
   headers). On Debian / Ubuntu: `postgresql-server-dev-18`.
 - Rust 1.96 or newer.
-- `cargo-pgrx` **0.19.2**, which must match the `pgrx` version in
+- `cargo-pgrx` **0.19.3**, which must match the `pgrx` version in
   `Cargo.toml`.
 
 ```bash
-cargo install cargo-pgrx --locked --version 0.19.2
+cargo install cargo-pgrx --locked --version 0.19.3
 cargo pgrx init --pg18 "$(which pg_config)"
 ```
 
@@ -26,8 +26,9 @@ From a clone of this repository:
 cargo pgrx install --release --pg-config "$(which pg_config)"
 ```
 
-This builds `pgrdf.so` and copies it, together with the control and SQL
-files, into that PostgreSQL installation.
+This builds the library (`pgrdf.so`, or `pgrdf.dylib` on macOS) and
+copies it, together with the control and SQL files, into that PostgreSQL
+installation.
 
 ### From the source archive
 
@@ -40,6 +41,9 @@ make PG_CONFIG=/path/to/pg_config install
 ```
 
 or, with the PGXN client: `pgxn install pgrdf --pg_config /path/to/pg_config`.
+The archive builds on Linux and macOS (Homebrew `postgresql@18`, for
+example `--pg_config /opt/homebrew/opt/postgresql@18/bin/pg_config`); files
+install wherever that `pg_config` says.
 
 ## Configure and create the extension
 

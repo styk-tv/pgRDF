@@ -39,7 +39,7 @@ Every operation is a SQL function call.
 pgxn install pgrdf
 ```
 
-This builds from source and needs Rust 1.96+ and `cargo-pgrx` 0.19.2.
+This builds from source and needs Rust 1.96+ and `cargo-pgrx` 0.19.3.
 Prebuilt archives and a Docker recipe are in the
 [install guide](https://github.com/styk-tv/pgRDF/blob/main/guide/01-install.md).
 

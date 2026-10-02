@@ -6,6 +6,46 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.39] — 2026-10-02
+
+Graph ids are never reused, the PGXN source archive builds again (on Linux and
+macOS), and the build moves to pgrx 0.19.3.
+
+### Fixed
+
+- **Graph ids were reused** (#150). `add_graph(iri)` allocated
+  `MAX(graph_id) + 1`, so dropping the highest-numbered graph gave its id to
+  the next graph created, and a numeric id held across a drop and a create
+  silently named a different graph. Ids now come from a sequence
+  (`pgrdf._pgrdf_graph_id_seq`, registered for `pg_dump`) and are never handed
+  out again; every partition creation advances it, so explicitly bound ids are
+  never allocated later either. The IRI is the graph's identity, the id a
+  handle; gaps in the numbering are normal. Existing ids are unchanged. If the
+  library is newer than the installed SQL, `add_graph` refuses `55000` with
+  HINT `ALTER EXTENSION pgrdf UPDATE` instead of failing on a missing relation.
+- **The PGXN source archive did not compile since 0.6.35** (#149).
+  `shacl_capability()` reads two data files under `tests/shacl-capability/`
+  at compile time and the archive did not ship them. The archive now carries
+  them and `.cargo/config.toml` (the macOS link flag), and `make install`
+  takes its paths and library suffix from `pg_config` and the platform
+  instead of a hardcoded Debian layout, so it installs on macOS (Homebrew)
+  and RPM-style layouts too. CI now builds the archive, installs it from a
+  clean unpack and runs `CREATE EXTENSION` from it on every run. The
+  archives attached to 0.6.35–0.6.38 should not be used.
+
+### Changed
+
+- pgrx 0.19.3 (#148): interrupts held while non-ERROR reports are raised,
+  safer varlena handling, fewer allocations on error paths, PostgreSQL 19
+  beta4 support. MSRV unchanged (1.96). SHACL capability (47/47 enforced) and
+  path matrix (17 cells, 0 defective) re-measured, unchanged.
+
+### Upgrade
+
+- `ALTER EXTENSION pgrdf UPDATE` in place. Creates the id sequence and starts
+  it above every id in use (bound or present as a partition). No stable
+  export is added or removed; `surface()` lists 53 stable rows.
+
 ## [0.6.38] — 2026-10-02
 
 Clearing a graph as a non-owner. 0.6.37 let a role holding the documented
