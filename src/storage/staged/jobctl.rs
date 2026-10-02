@@ -83,6 +83,7 @@ pub struct JobSlot {
     pub n_workers: u16,
     pub n_shards: u16,
     pub db_oid: u32, // worker reconnects to THIS db (it doesn't inherit the spawner's)
+    pub role_oid: u32, // ... and as THIS role (the caller's), never the bootstrap superuser
     pub graph_id: i64,
     pub job_id: i64,
     pub path_len: u16,
@@ -113,6 +114,7 @@ impl JobSlot {
             n_workers: 0,
             n_shards: 0,
             db_oid: 0,
+            role_oid: 0,
             graph_id: 0,
             job_id: 0,
             path_len: 0,
@@ -200,6 +202,7 @@ pub fn create_job(
     path: &str,
     graph_id: i64,
     db_oid: u32,
+    role_oid: u32,
     n_workers: u16,
     n_shards: u16,
 ) -> Option<usize> {
@@ -221,6 +224,7 @@ pub fn create_job(
             slot.n_workers = n_workers;
             slot.n_shards = n_shards;
             slot.db_oid = db_oid;
+            slot.role_oid = role_oid;
             slot.graph_id = graph_id;
             slot.job_id = job_id;
             slot.path_len = bytes.len() as u16;
@@ -414,4 +418,22 @@ pub fn tally_job(idx: usize) -> (usize, usize) {
         }
     }
     (ok, err)
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pgrx::pg_schema]
+mod tests {
+    use pgrx::prelude::*;
+
+    /// A job slot records the CALLER's role; the worker connects as it.
+    /// The test instance preloads pgrdf, so the job table is ready.
+    #[pg_test]
+    fn job_slot_records_the_callers_role() {
+        let me = unsafe { pgrx::pg_sys::GetUserId() }.to_u32();
+        let idx = super::create_job("<probe>", 0, 1, me, 1, 0).expect("job table ready");
+        let job = super::read_job(idx);
+        assert_eq!(job.role_oid, me);
+        assert_ne!(job.role_oid, 0);
+        super::release_job(idx);
+    }
 }

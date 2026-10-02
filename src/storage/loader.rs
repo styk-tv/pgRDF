@@ -2234,6 +2234,7 @@ fn load_turtle_streaming(
     id_reserve_block: default!(i32, 1_000_000),
     base_iri: default!(Option<&str>, "NULL"),
 ) -> pgrx::JsonB {
+    require_server_file_read("load_turtle_streaming");
     let base = base_iri.filter(|s| !s.is_empty());
     crate::storage::lock::require_unlocked(graph_id, "load_turtle_streaming"); // #107
     let stats = streaming_load_guarded(
@@ -2627,6 +2628,7 @@ fn load_turtle(
     base_iri: default!(Option<&str>, "NULL"),
     bulk_load: default!(bool, false),
 ) -> i64 {
+    require_server_file_read("load_turtle");
     let base = base_iri.filter(|s| !s.is_empty());
     // Explicit opt-in to the v0.6.2 in-backend parallel bulk path is honoured
     // verbatim — it predates the staged loader and stays the caller's choice.
@@ -2648,7 +2650,12 @@ fn load_turtle(
         && !unsafe { pgrx::pg_sys::IsTransactionBlock() };
     if staged_eligible {
         match file_sniffs_as_ntriples(path) {
-            Some(true) => return staged_load_default(path, graph_id),
+            // The staged lane is owner-only (its workers run as the
+            // caller); a non-owner takes the standard parser below.
+            Some(true) if crate::storage::partition::caller_owns_storage() => {
+                return staged_load_default(path, graph_id);
+            }
+            Some(true) => {}
             Some(false) => {
                 // Preloaded + a READABLE Turtle file — the safe full parser runs.
                 // Nudge toward the fast staged path (N-Triples + preload).
@@ -2684,6 +2691,7 @@ fn load_turtle_verbose(
     base_iri: default!(Option<&str>, "NULL"),
     bulk_load: default!(bool, false),
 ) -> pgrx::JsonB {
+    require_server_file_read("load_turtle_verbose");
     let base = base_iri.filter(|s| !s.is_empty());
     let stats = if bulk_load {
         bulk_load_guarded(path, graph_id, base)
@@ -2774,6 +2782,7 @@ fn load_turtle_dict_batched(
     base_iri: default!(Option<&str>, "NULL"),
     dict_batch_size: default!(i32, 500),
 ) -> pgrx::JsonB {
+    require_server_file_read("load_turtle_dict_batched");
     let file = File::open(path)
         .unwrap_or_else(|e| panic!("load_turtle_dict_batched: failed to open {path:?}: {e}"));
     let base = base_iri.filter(|s| !s.is_empty());
@@ -2878,10 +2887,172 @@ fn parse_nquads(
     quad_stats_to_jsonb(&stats, &graphs)
 }
 
+/// Server-path loaders read a file the BACKEND can reach, so they are
+/// gated like PostgreSQL's own `COPY ... FROM 'file'` and `pg_read_file`:
+/// the caller must hold the privileges of `pg_read_server_files` (a
+/// superuser does). Checked BEFORE any path is opened, and the same
+/// refusal for a present and an absent path, so a caller without the
+/// role learns nothing about the filesystem. 42501 with the grant as HINT.
+pub(crate) fn require_server_file_read(caller: &str) {
+    let allowed = Spi::get_one::<bool>(
+        "SELECT pg_has_role(current_user, 'pg_read_server_files', 'USAGE') \
+            OR (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user)",
+    )
+    .expect("server-file privilege check failed")
+    .unwrap_or(false);
+    if allowed {
+        return;
+    }
+    let role: String = Spi::get_one("SELECT quote_ident(current_user::text)")
+        .expect("current_user lookup failed")
+        .unwrap_or_default();
+    crate::refuse_with_hint(
+        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+        format!(
+            "{caller}: reading a server file requires the privileges of pg_read_server_files; \
+             role {role} does not hold them"
+        ),
+        format!("GRANT pg_read_server_files TO {role}"),
+    );
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
     use pgrx::prelude::*;
+
+    fn try_fn() {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.ld_try(q text) RETURNS text \
+             LANGUAGE plpgsql AS $$ DECLARE st text; h text; BEGIN \
+               EXECUTE q; RETURN 'ok'; \
+             EXCEPTION WHEN OTHERS THEN \
+               GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, h = PG_EXCEPTION_HINT; \
+               RETURN st || '|' || coalesce(h, ''); END $$",
+        )
+        .unwrap();
+    }
+
+    fn try_as(role: &str, q: &str) -> String {
+        Spi::run(&format!("SET ROLE {role}")).unwrap();
+        let r: String = Spi::get_one_with_args("SELECT pg_temp.ld_try($1)", &[q.into()])
+            .unwrap()
+            .unwrap();
+        Spi::run("RESET ROLE").unwrap();
+        r
+    }
+
+    /// Every server-path loader requires pg_read_server_files (or
+    /// superuser) BEFORE opening any path — the same rule PostgreSQL
+    /// applies to COPY FROM 'file' and pg_read_file. The refusal is 42501
+    /// with the grant as HINT, and a missing file gets the same refusal as
+    /// a present one, so nothing is learned about the filesystem.
+    #[pg_test]
+    fn server_path_loaders_require_pg_read_server_files() {
+        try_fn();
+        // GRANT on the parent locks it: take the DDL gate first (outermost).
+        crate::storage::partition::acquire_partition_ddl_gate();
+        Spi::run("CREATE ROLE pgrdf_ld_reader NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_ld_reader").unwrap();
+        Spi::run(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs, \
+             pgrdf._pgrdf_dictionary TO pgrdf_ld_reader",
+        )
+        .unwrap();
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:ld:g')")
+            .unwrap()
+            .unwrap();
+        let want = "42501|GRANT pg_read_server_files TO pgrdf_ld_reader";
+        for q in [
+            format!("SELECT pgrdf.load_turtle('/nonexistent/a.ttl', {g})"),
+            format!("SELECT pgrdf.load_turtle('/etc/hostname', {g})"),
+            format!("SELECT pgrdf.load_turtle_verbose('/nonexistent/a.ttl', {g})"),
+            format!("SELECT pgrdf.load_turtle_dict_batched('/nonexistent/a.ttl', {g})"),
+            format!("SELECT pgrdf.load_turtle_streaming('/nonexistent/a.ttl', {g})"),
+            format!("SELECT pgrdf.load_turtle_staged_run('/nonexistent/a.nt', {g}, 1)"),
+        ] {
+            assert_eq!(try_as("pgrdf_ld_reader", &q), want, "{q}");
+        }
+    }
+
+    /// A granted non-owner may not use the staged lane: refused up front
+    /// (nothing spawned), with the cure; and load_turtle's N-Triples
+    /// auto-route takes the standard parser for it instead.
+    #[pg_test]
+    fn staged_lane_is_owner_only_and_auto_route_falls_back() {
+        try_fn();
+        crate::storage::partition::acquire_partition_ddl_gate();
+        Spi::run("CREATE ROLE pgrdf_ld_nt NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_ld_nt").unwrap();
+        Spi::run(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs, \
+             pgrdf._pgrdf_dictionary TO pgrdf_ld_nt",
+        )
+        .unwrap();
+        Spi::run("GRANT USAGE ON ALL SEQUENCES IN SCHEMA pgrdf TO pgrdf_ld_nt").unwrap();
+        Spi::run("GRANT pg_read_server_files TO pgrdf_ld_nt").unwrap();
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:ld:nt')")
+            .unwrap()
+            .unwrap();
+        let path = format!("/tmp/pgrdf-ld-{}.nt", std::process::id());
+        std::fs::write(&path, "<urn:nt:s> <urn:nt:p> <urn:nt:o> .\n").unwrap();
+        let got = try_as(
+            "pgrdf_ld_nt",
+            &format!("SELECT pgrdf.load_turtle_staged_run('{path}', {g}, 1)"),
+        );
+        assert!(got.starts_with("42501|load as the storage owner"), "{got}");
+        assert_eq!(
+            try_as(
+                "pgrdf_ld_nt",
+                &format!("SELECT pgrdf.load_turtle('{path}', {g})")
+            ),
+            "ok",
+            "N-Triples auto-route falls back to the standard parser"
+        );
+        let n: i64 = Spi::get_one(&format!(
+            "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = {g}"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// With the role granted, a server-path load works for a non-superuser.
+    #[pg_test]
+    fn granted_role_loads_server_file() {
+        try_fn();
+        // GRANT on the parent locks it: take the DDL gate first (outermost).
+        crate::storage::partition::acquire_partition_ddl_gate();
+        Spi::run("CREATE ROLE pgrdf_ld_loader NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_ld_loader").unwrap();
+        Spi::run(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON pgrdf._pgrdf_quads, pgrdf._pgrdf_graphs, \
+             pgrdf._pgrdf_dictionary TO pgrdf_ld_loader",
+        )
+        .unwrap();
+        Spi::run("GRANT USAGE ON ALL SEQUENCES IN SCHEMA pgrdf TO pgrdf_ld_loader").unwrap();
+        Spi::run("GRANT pg_read_server_files TO pgrdf_ld_loader").unwrap();
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:ld:ok')")
+            .unwrap()
+            .unwrap();
+        let path = format!("/tmp/pgrdf-ld-{}.ttl", std::process::id());
+        std::fs::write(&path, "<urn:ld:s> <urn:ld:p> <urn:ld:o> .\n").unwrap();
+        assert_eq!(
+            try_as(
+                "pgrdf_ld_loader",
+                &format!("SELECT pgrdf.load_turtle('{path}', {g})")
+            ),
+            "ok"
+        );
+        let n: i64 = Spi::get_one(&format!(
+            "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = {g}"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 1);
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// parse_turtle on a tiny FOAF graph reports the expected triple
     /// count and the dictionary contains the well-known IRIs.
