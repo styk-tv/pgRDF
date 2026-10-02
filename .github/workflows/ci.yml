@@ -32,7 +32,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PGRX_VERSION: "0.19.2"
+  PGRX_VERSION: "0.19.3"
 
 jobs:
   fmt:
@@ -102,6 +102,31 @@ jobs:
       - uses: ./.github/actions/setup-pgrx
         with: { pg: "${{ matrix.pg }}" }
       - run: cargo pgrx test --no-default-features --features pg${{ matrix.pg }} pg${{ matrix.pg }}
+      # #149: the PGXN source archive must build and install from the
+      # archive ALONE. Releases 0.6.35-0.6.38 shipped archives that could
+      # not compile (compile-time data files missing from DIST_PATHS) and
+      # nothing noticed. This does what `pgxn install` does: unpack in a
+      # clean directory, `make install` against the job's PostgreSQL, then
+      # CREATE EXTENSION and read the version back.
+      - name: PGXN archive builds, installs and loads from the archive alone
+        run: |
+          set -euo pipefail
+          make dist
+          ver="$(sed -n "s/^default_version = '\(.*\)'/\1/p" pgrdf.control)"
+          work="$(mktemp -d)"
+          unzip -q "pgrdf-${ver}.zip" -d "$work"
+          pgc="$(cargo pgrx info pg-config pg${{ matrix.pg }})"
+          ( cd "$work/pgrdf-${ver}" && make install PG_CONFIG="$pgc" )
+          bindir="$("$pgc" --bindir)"
+          data="$work/data"
+          "$bindir/initdb" -D "$data" -U postgres >/dev/null
+          "$bindir/pg_ctl" -D "$data" -o "-p 55439 -k $work" -w start >/dev/null
+          psql=("$bindir/psql" -h "$work" -p 55439 -U postgres -d postgres -X -v ON_ERROR_STOP=1)
+          "${psql[@]}" -qc "CREATE EXTENSION pgrdf"
+          got="$("${psql[@]}" -Atc "SELECT pgrdf.version() || '|' || extversion FROM pg_extension WHERE extname = 'pgrdf'")"
+          "$bindir/pg_ctl" -D "$data" -w stop >/dev/null
+          echo "loaded from the PGXN archive: ${got}"
+          test "${got}" = "${ver}|${ver}"
 
   # Compose-based regression suite. Mirrors the local dev loop
   # (`just build-ext && just test-regression`) byte-for-byte: builds the

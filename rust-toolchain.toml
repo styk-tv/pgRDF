@@ -1,6 +1,6 @@
 [toolchain]
 # Current stable. pgrx sets the real floor: 0.18.1 raised its MSRV to
-# 1.96, and the workspace pins pgrx =0.19.2, so `rust-version` in
+# 1.96, and the workspace pins pgrx =0.19.3, so `rust-version` in
 # Cargo.toml is 1.96. ERRATA E-006 (the pgrx 0.17/0.18 hold) was
 # RESOLVED at v0.6.20 — the note that used to live here described the
 # opposite of reality for three releases.

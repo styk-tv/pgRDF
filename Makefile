@@ -15,18 +15,25 @@ DIST_PATHS  := \
 	Cargo.toml \
 	Cargo.lock \
 	rust-toolchain.toml \
+	.cargo/config.toml \
 	src \
 	sql \
-	examples
+	examples \
+	tests/shacl-capability/SHACL-CORE-SURFACE.tsv \
+	tests/shacl-capability/CAPABILITY.json
 
 PG_CONFIG   ?= pg_config
 PG_MAJOR    := $(shell "$(PG_CONFIG)" --version | sed -E 's/.* ([0-9]+)(\..*)?/\1/')
 PKGLIBDIR   := $(shell "$(PG_CONFIG)" --pkglibdir)
 SHAREDIR    := $(shell "$(PG_CONFIG)" --sharedir)
 
-PACKAGE_DIR    := target/release/$(EXTENSION)-pg$(PG_MAJOR)
-PACKAGE_LIB    := $(PACKAGE_DIR)/usr/lib/postgresql/$(PG_MAJOR)/lib/$(EXTENSION).so
-PACKAGE_EXTDIR := $(PACKAGE_DIR)/usr/share/postgresql/$(PG_MAJOR)/extension
+# `cargo pgrx package` lays files out under the paths pg_config reports, so
+# the packaged locations follow pg_config too (Debian, RPM and Homebrew
+# layouts all differ). The library suffix is the platform's: .dylib on macOS.
+DLSUFFIX       := $(if $(filter Darwin,$(shell uname -s)),.dylib,.so)
+PACKAGE_DIR    := $(or $(CARGO_TARGET_DIR),target)/release/$(EXTENSION)-pg$(PG_MAJOR)
+PACKAGE_LIB    := $(PACKAGE_DIR)$(PKGLIBDIR)/$(EXTENSION)$(DLSUFFIX)
+PACKAGE_EXTDIR := $(PACKAGE_DIR)$(SHAREDIR)/extension
 
 .PHONY: all check-meta check-tools package install installcheck dist clean
 
@@ -39,7 +46,7 @@ check-meta:
 
 check-tools:
 	@command -v cargo >/dev/null 2>&1 || { echo "cargo is required" >&2; exit 1; }
-	@cargo pgrx --version >/dev/null 2>&1 || { echo "cargo-pgrx is required; install cargo-pgrx 0.19.2 and run cargo pgrx init first" >&2; exit 1; }
+	@cargo pgrx --version >/dev/null 2>&1 || { echo "cargo-pgrx is required; install cargo-pgrx 0.19.3 and run cargo pgrx init first" >&2; exit 1; }
 	@command -v "$(PG_CONFIG)" >/dev/null 2>&1 || { echo "pg_config not found: $(PG_CONFIG)" >&2; exit 1; }
 
 package: check-meta check-tools
@@ -47,7 +54,7 @@ package: check-meta check-tools
 
 install: package
 	install -d "$(DESTDIR)$(PKGLIBDIR)" "$(DESTDIR)$(SHAREDIR)/extension"
-	install -m 755 "$(PACKAGE_LIB)" "$(DESTDIR)$(PKGLIBDIR)/$(EXTENSION).so"
+	install -m 755 "$(PACKAGE_LIB)" "$(DESTDIR)$(PKGLIBDIR)/$(EXTENSION)$(DLSUFFIX)"
 	install -m 644 "$(PACKAGE_EXTDIR)"/*.control "$(DESTDIR)$(SHAREDIR)/extension/"
 	install -m 644 "$(PACKAGE_EXTDIR)"/*.sql "$(DESTDIR)$(SHAREDIR)/extension/"
 

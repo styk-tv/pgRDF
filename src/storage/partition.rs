@@ -156,7 +156,31 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
         Spi::run(&sql).expect("create_quads_partition: CREATE TABLE failed");
         // (6) Replicate the parent's ACL onto the new partition.
         inherit_parent_acl(part_name);
+        // (7) #150: advance the graph-id sequence past this id, so an id
+        // bound explicitly (add_graph(id), add_graph(id, iri)) is never
+        // allocated later. Under the DDL gate, so concurrent creates
+        // cannot move the mark backwards. Skipped while the extension's
+        // SQL predates the sequence (library swapped, ALTER EXTENSION
+        // UPDATE not yet run); the upgrade script seeds it past every id.
+        if !graph_id_seq_present() {
+            return;
+        }
+        Spi::run_with_args(
+            "SELECT pg_catalog.setval('pgrdf._pgrdf_graph_id_seq', $1) \
+              WHERE $1 > (SELECT last_value FROM pgrdf._pgrdf_graph_id_seq)",
+            &[graph_id.into()],
+        )
+        .expect("create_quads_partition: advancing the graph-id sequence failed");
     });
+}
+
+/// Does `pgrdf._pgrdf_graph_id_seq` exist? It arrives with the 0.6.39 SQL;
+/// a library newer than the installed SQL runs without it until
+/// `ALTER EXTENSION pgrdf UPDATE`.
+pub(crate) fn graph_id_seq_present() -> bool {
+    Spi::get_one::<bool>("SELECT pg_catalog.to_regclass('pgrdf._pgrdf_graph_id_seq') IS NOT NULL")
+        .expect("graph-id sequence lookup failed")
+        .unwrap_or(false)
 }
 
 /// The graph-DDL acts, each authorised by a table privilege the caller
@@ -992,5 +1016,78 @@ mod tests {
             "stable functions not classified in this matrix (exercise each writer as a \
              non-owner, or list it as read-only / owner-lane): {unclassified:?}"
         );
+    }
+    /// #150: a dropped graph's id is never handed out again. With
+    /// MAX(graph_id) + 1 allocation, dropping the highest-numbered graph
+    /// gave its id to the next graph created, so a numeric id held across
+    /// a drop and a create silently named a different graph.
+    #[pg_test]
+    fn dropped_graph_id_is_never_reused() {
+        let a: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:150:a')")
+            .unwrap()
+            .unwrap();
+        Spi::run(&format!("SELECT pgrdf.drop_graph({a}::bigint, true)")).unwrap();
+        let b: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:150:b')")
+            .unwrap()
+            .unwrap();
+        assert!(
+            b > a,
+            "the id of a dropped graph must not be reused: {a} then {b}"
+        );
+        // The same IRI re-created gets a new id too: the IRI is the
+        // identity, the id names one incarnation.
+        let a2: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:150:a')")
+            .unwrap()
+            .unwrap();
+        assert!(a2 > b, "a re-created IRI gets a fresh id: {a2} after {b}");
+    }
+
+    /// #150: an id bound explicitly above the allocator's mark advances
+    /// it, so the allocator never hands that id out later, even after
+    /// the explicit graph is dropped.
+    #[pg_test]
+    fn explicit_id_advances_the_allocator() {
+        let base: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:150:base')")
+            .unwrap()
+            .unwrap();
+        let high = base + 1000;
+        Spi::run(&format!(
+            "SELECT pgrdf.add_graph({high}::bigint, 'urn:tdd:150:explicit')"
+        ))
+        .unwrap();
+        Spi::run(&format!("SELECT pgrdf.drop_graph({high}::bigint, true)")).unwrap();
+        let next: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:150:after')")
+            .unwrap()
+            .unwrap();
+        assert!(
+            next > high,
+            "an explicitly bound id must never be allocated later: {next} <= {high}"
+        );
+    }
+
+    /// #150: an id already bound before the sequence knew about it (a
+    /// database upgraded with graphs above the mark) is skipped, never
+    /// collided with.
+    #[pg_test]
+    fn allocator_skips_ids_already_in_use() {
+        // Hold the DDL gate for the whole test: every allocation happens
+        // behind it, so no parallel test can take seed+1 in between.
+        crate::storage::partition::acquire_partition_ddl_gate();
+        let seed: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:150:seed')")
+            .unwrap()
+            .unwrap();
+        // Bind the next two ids behind the allocator's back (row only, as
+        // an older install could have left them), without moving the mark.
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) VALUES \
+             ({}, 'urn:tdd:150:taken1'), ({}, 'urn:tdd:150:taken2')",
+            seed + 1,
+            seed + 2
+        ))
+        .unwrap();
+        let next: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:150:skip')")
+            .unwrap()
+            .unwrap();
+        assert!(next > seed + 2, "taken ids are skipped: got {next}");
     }
 }

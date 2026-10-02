@@ -9,7 +9,7 @@
 # resolves cargo-pgrx from that crate's own pin.
 #
 # Why cargo-pgrx is not baked: it must EXACTLY equal the crate's pgrx
-# pin. pgRDF is on 0.19.2 and pgCK on 0.16.1, so a baked version locks
+# pin. pgRDF is on 0.19.3 and pgCK on 0.16.1, so a baked version locks
 # the image to one crate. Resolving per build lets both share it today.
 #
 #   docker build -t ck-rust-builder:trixie-pg18 -f compose/rust-builder.Containerfile .

@@ -18,7 +18,6 @@
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use pgrx::prelude::*; // pg_shmem_init! expands to code referencing pg_guard / pg_sys (as in shmem_cache.rs)
 use pgrx::{PGRXSharedMemory, PgAtomic, PgLwLock, pg_shmem_init};
 
 /// Concurrent staged loads. Tiny — each is a heavyweight whole-file ingest.

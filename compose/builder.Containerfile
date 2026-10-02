@@ -29,7 +29,7 @@
 FROM docker.io/library/rust:1.96-trixie AS builder
 
 ARG PG_MAJOR=18
-ARG PGRX_VERSION=0.19.2
+ARG PGRX_VERSION=0.19.3
 # Build identity baked into the .so via option_env!("PGRDF_BUILD_ID") —
 # pgrdf.build_id() reports this. CI passes the tag; a build without it
 # honestly reports "unknown" (#112). No paths/host/user, readable by any role.

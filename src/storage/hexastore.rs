@@ -123,16 +123,14 @@ fn add_graph(g: i64) -> bool {
 /// existing `graph_id` without creating a second partition or
 /// duplicating the binding.
 ///
-/// Allocation strategy: the smallest unused positive integer, computed
-/// via `COALESCE(MAX(graph_id), 0) + 1`. Concurrent allocate-and-insert
-/// sequences are serialised by a `LOCK TABLE _pgrdf_graphs IN SHARE
-/// ROW EXCLUSIVE MODE` taken before the SELECT-MAX so two simultaneous
-/// callers can't both compute the same id and race the INSERT (the
-/// `UNIQUE(iri)` constraint would catch one of them, but the lock
-/// makes it impossible to lose). The lock releases at transaction end
-/// per Postgres semantics. For v0.4.1 we accept this simple approach;
-/// a sequence-based allocator is a future option if contention proves
-/// real on the wire.
+/// Allocation strategy (#150, 0.6.39): the next value of
+/// `pgrdf._pgrdf_graph_id_seq`, skipping any id already bound. Ids are
+/// never reused: a dropped graph's id is never handed out again, so the
+/// IRI is the identity and an id is a handle valid while its graph
+/// exists. Gaps after drops or rolled-back creates are expected. The
+/// `LOCK TABLE _pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE` taken first
+/// still serialises concurrent get-or-create calls on the same IRI;
+/// the lock releases at transaction end.
 ///
 /// IRI is bound to the `_pgrdf_graphs` row *before* `add_graph(id)`
 /// runs so the slice-119 synthetic-IRI insert path inside the integer
@@ -215,12 +213,37 @@ fn add_graph_iri(iri: &str) -> i64 {
         return id;
     }
 
-    // Allocate the next id — smallest positive integer not yet in
-    // use. Seed row `(0, 'urn:pgrdf:graph:0')` makes MAX always >= 0
-    // post-CREATE-EXTENSION, so this branch always yields >= 1.
-    let next: i64 = Spi::get_one("SELECT COALESCE(MAX(graph_id), 0) + 1 FROM pgrdf._pgrdf_graphs")
+    // Allocate the next id from the graph-id sequence (#150): ids are
+    // never reused, so an id held across a drop and a create can never
+    // name a different graph. Every partition creation advances the
+    // sequence past its id, so an explicitly bound id is never handed
+    // out either; the skip below covers ids bound before the sequence
+    // existed. Read as the storage owner: roles granted on ALL SEQUENCES
+    // before 0.6.39 hold nothing on this one, and the allocation is the
+    // engine's act, not the caller's.
+    if !crate::storage::partition::graph_id_seq_present() {
+        crate::refuse_with_hint(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "add_graph: the graph-id sequence pgrdf._pgrdf_graph_id_seq is missing: the \
+             installed extension SQL is older than the loaded library"
+                .to_string(),
+            "ALTER EXTENSION pgrdf UPDATE".to_string(),
+        );
+    }
+    let next: i64 = crate::storage::partition::as_storage_owner(|| {
+        Spi::get_one(
+            "WITH RECURSIVE n(id) AS ( \
+               SELECT pg_catalog.nextval('pgrdf._pgrdf_graph_id_seq') \
+               UNION ALL \
+               SELECT pg_catalog.nextval('pgrdf._pgrdf_graph_id_seq') FROM n \
+                WHERE EXISTS (SELECT 1 FROM pgrdf._pgrdf_graphs g WHERE g.graph_id = n.id) \
+                   OR pg_catalog.to_regclass(pg_catalog.format('pgrdf._pgrdf_quads_g%s', n.id)) \
+                      IS NOT NULL) \
+             SELECT max(id) FROM n",
+        )
         .unwrap_or_else(|e| panic!("add_graph: allocate next id failed: {e}"))
-        .expect("add_graph: COALESCE returned NULL (impossible)");
+        .expect("add_graph: graph-id sequence returned NULL (impossible)")
+    });
 
     // Bind the IRI *before* the integer overload runs. The integer
     // overload's slice-119 synthetic-IRI INSERT carries
