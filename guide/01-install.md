@@ -203,6 +203,26 @@ with the exact `GRANT` in the hint; `pgrdf.can_create_graphs()`,
 question up front. For a read-only role, grant only `USAGE` and
 `SELECT`.
 
+### Giving pgRDF's storage to another role
+
+Some deployments make a dedicated role own pgRDF's tables with
+`ALTER TABLE … OWNER TO`. The steps above that run as the owner then run
+as that role, the owner of `pgrdf._pgrdf_quads`, so it needs every
+storage relation. That includes the graph-id sequence
+`pgrdf._pgrdf_graph_id_seq`, which is not tied to a table, so
+`ALTER TABLE` does not move it. `pgrdf.ownership_drift()` lists each
+relation the owner of `pgrdf._pgrdf_quads` does not own, whether that
+stops pgRDF, and the statement that fixes it:
+
+```sql
+SELECT relname, owner, blocking, cure FROM pgrdf.ownership_drift();
+-- no rows: ownership agrees
+```
+
+Run it after handing the storage over and after every
+`ALTER EXTENSION pgrdf UPDATE`. If creating a graph refuses with `55000`,
+its hint is the statement to run.
+
 The file loaders (`load_turtle` and its variants) read files from the
 database server's filesystem, so they require the built-in role
 `pg_read_server_files`, as `COPY … FROM 'file'` does:

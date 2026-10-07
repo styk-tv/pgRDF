@@ -51,6 +51,7 @@ materialize(graph_id bigint, profile text)	stable	OWL 2 RL ('owl-rl') or RDFS ('
 move_graph(src bigint, dst bigint)	stable	move src into an EMPTY dst and drop src; non-empty dst refuses (55000)
 move_graph(src_iri text, dst_iri text)	stable	move by IRI; same empty-destination requirement
 orphan_partitions()	stable	quad partitions with no registered graph — invisible to SPARQL and to graph-level export/digest; a non-empty result deserves investigation. Since 0.6.34
+ownership_drift()	stable	storage relations (tables, partitions, standalone sequences) not owned by the storage owner, the owner of pgrdf._pgrdf_quads that graph creation, clear and drop act as; blocking marks the ones the engine cannot use, cure gives the ALTER ... OWNER TO that realigns each. Empty when ownership agrees. Since 0.6.40
 parse_nquads(content text, default_graph_id bigint, strict boolean)	stable	parse N-Quads text; quads without a graph label land in default_graph_id
 parse_trig(content text, default_graph_id bigint, strict boolean)	stable	parse TriG text; triples outside named graphs land in default_graph_id
 parse_turtle(content text, graph_id bigint, base_iri text)	stable	parse Turtle text into a graph; returns the triple count

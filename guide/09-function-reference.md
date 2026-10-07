@@ -29,6 +29,7 @@ directly, as listed.
 | `unlock_graph(graph_id bigint, reason text)` | `boolean` | Release a lock. |
 | `graph_integrity(graph_id bigint)` | `jsonb` | Check every triple is well-formed and lock custody is consistent. |
 | `orphan_partitions()` | table | Storage partitions with no graph. Normally empty. |
+| `ownership_drift()` | table | Storage relations not owned by the owner of `_pgrdf_quads`: `relname`, `kind`, `owner`, `storage_owner`, `blocking`, `cure`. Normally empty. |
 
 Guide: [05 — Managing graphs](05-graphs.md)
 

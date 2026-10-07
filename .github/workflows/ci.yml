@@ -127,6 +127,32 @@ jobs:
           "$bindir/pg_ctl" -D "$data" -w stop >/dev/null
           echo "loaded from the PGXN archive: ${got}"
           test "${got}" = "${ver}|${ver}"
+      # #153: the 0.6.39 upgrade left its new sequence owned by the role that
+      # ran it, and a consumer that had handed pgRDF's tables to its own role
+      # could no longer create graphs. Nothing tested an upgrade. This installs
+      # the PREVIOUS release's SQL (from its published, checksummed package),
+      # hands the tables to another role, upgrades to this build (installed by
+      # the step above), and runs tests/upgrade/upgrade-gate.sh.
+      - name: Upgrade from the previous release, storage owned by another role
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver="$(sed -n "s/^default_version = '\(.*\)'/\1/p" pgrdf.control)"
+          prev="$(basename sql/pgrdf--*--"${ver}".sql | sed -E 's/^pgrdf--(.*)--.*\.sql$/\1/')"
+          pkg="pgrdf-${prev}-pg${{ matrix.pg }}-glibc-amd64"
+          work="$(mktemp -d)"
+          gh release download "v${prev}" -p "${pkg}.tar.gz" -p SHA256SUMS -D "$work"
+          ( cd "$work" && grep " ${pkg}.tar.gz\$" SHA256SUMS | sha256sum -c - )
+          tar xzf "$work/${pkg}.tar.gz" -C "$work"
+          pgc="$(cargo pgrx info pg-config pg${{ matrix.pg }})"
+          cp "$work/${pkg}/share/extension/pgrdf--${prev}.sql" "$("$pgc" --sharedir)/extension/"
+          bindir="$("$pgc" --bindir)"
+          "$bindir/initdb" -D "$work/data" -U postgres >/dev/null
+          "$bindir/pg_ctl" -D "$work/data" -o "-p 55440 -k $work" -w start >/dev/null
+          trap '"$bindir/pg_ctl" -D "$work/data" -m fast -w stop >/dev/null || true' EXIT
+          PGRDF_UPGRADE_PSQL="$bindir/psql -X -h $work -p 55440 -U postgres" \
+            bash tests/upgrade/upgrade-gate.sh "$prev" "$ver"
 
   # Compose-based regression suite. Mirrors the local dev loop
   # (`just build-ext && just test-regression`) byte-for-byte: builds the
