@@ -61,11 +61,11 @@ src/storage/graphs.rs:885	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/graphs.rs:1053	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/hexastore.rs:65	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/hexastore.rs:155	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/hexastore.rs:282	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/hexastore.rs:374	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/hexastore.rs:380	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/hexastore.rs:445	refuse	ERRCODE_DUPLICATE_OBJECT
-src/storage/hexastore.rs:456	refuse	ERRCODE_DUPLICATE_OBJECT
+src/storage/hexastore.rs:283	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/hexastore.rs:375	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/hexastore.rs:381	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/hexastore.rs:446	refuse	ERRCODE_DUPLICATE_OBJECT
+src/storage/hexastore.rs:457	refuse	ERRCODE_DUPLICATE_OBJECT
 src/storage/loader.rs:231	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/storage/loader.rs:316	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/loader.rs:432	refuse	ERRCODE_INVALID_PARAMETER_VALUE

@@ -6,6 +6,48 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.40] — 2026-10-07
+
+Graph creation works again where pgRDF's tables belong to a role other than
+the one that ran the 0.6.39 upgrade, and every release is now tested by
+upgrading from the one before it.
+
+### Fixed
+
+- **No graph could be created after the 0.6.39 upgrade in databases where
+  pgRDF's tables had been handed to another role** (#153). Graph creation
+  allocates ids from `pgrdf._pgrdf_graph_id_seq` as the storage owner (the
+  owner of `pgrdf._pgrdf_quads`). The 0.6.39 upgrade created that sequence
+  owned by whoever ran `ALTER EXTENSION pgrdf UPDATE`, so where a consumer had
+  already given the tables to its own role, every new graph failed `42501` on
+  `nextval`. Granting `USAGE` on the sequence is not enough: the next step
+  reads and moves it. The upgrade now gives the sequence to the storage owner.
+  Fresh installs were never affected. When the storage owner cannot use the
+  sequence, graph creation now refuses `55000` with HINT
+  `ALTER SEQUENCE pgrdf._pgrdf_graph_id_seq OWNER TO <storage owner>` instead
+  of a bare permission error.
+
+### Added
+
+- `ownership_drift()`: each storage relation (table, partition, standalone
+  sequence) not owned by the owner of `pgrdf._pgrdf_quads`, whether it stops
+  pgRDF (`blocking`), and the `ALTER … OWNER TO` that realigns it (`cure`).
+  Empty when ownership agrees. Run it after handing the storage to another
+  role and after every upgrade.
+- CI upgrade gate (`tests/upgrade/upgrade-gate.sh`): installs the previous
+  release's SQL from its published, checksummed package, hands the storage
+  tables to another role, upgrades as a superuser, then checks that a role
+  with only the documented grants creates, fills, drops and re-creates graphs,
+  that existing graphs keep their digest, and that the upgraded database has
+  exactly the functions and relations of a fresh install.
+
+### Upgrade
+
+- `ALTER EXTENSION pgrdf UPDATE` in place. Gives `_pgrdf_graph_id_seq` to the
+  owner of `_pgrdf_quads` where they differ; nothing else changes. Databases
+  that applied that `ALTER SEQUENCE` by hand are left as they are. One stable
+  export added; `surface()` lists 54 stable rows.
+
 ## [0.6.39] — 2026-10-02
 
 Graph ids are never reused, the PGXN source archive builds again (on Linux and
