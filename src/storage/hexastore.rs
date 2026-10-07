@@ -230,6 +230,7 @@ fn add_graph_iri(iri: &str) -> i64 {
             "ALTER EXTENSION pgrdf UPDATE".to_string(),
         );
     }
+    crate::storage::partition::require_graph_id_seq_usable("add_graph");
     let next: i64 = crate::storage::partition::as_storage_owner(|| {
         Spi::get_one(
             "WITH RECURSIVE n(id) AS ( \

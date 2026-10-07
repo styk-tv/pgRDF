@@ -142,6 +142,11 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
     // INSERT on the quad + graph tables, not by owning the parent
     // (SPEC 0.6.37 §3.1). Refuses 42501 with the cure before any DDL.
     require_graph_ddl_privilege(GraphDdl::Create, "add_graph");
+    // Step (7) below moves the graph-id sequence as the storage owner;
+    // refuse with the cure before any DDL if that owner cannot (#153).
+    if graph_id_seq_present() {
+        require_graph_id_seq_usable("add_graph");
+    }
 
     // (5) Create it, as the storage owner. `part_name` is caller-built
     // from a BIGINT (no user input in identifier position); `graph_id`
@@ -181,6 +186,57 @@ pub(crate) fn graph_id_seq_present() -> bool {
     Spi::get_one::<bool>("SELECT pg_catalog.to_regclass('pgrdf._pgrdf_graph_id_seq') IS NOT NULL")
         .expect("graph-id sequence lookup failed")
         .unwrap_or(false)
+}
+
+/// Can `role` allocate graph ids? Graph creation runs `nextval`, a read
+/// of `last_value` and `setval` on `_pgrdf_graph_id_seq` as the storage
+/// owner, so that role needs the sequence owner's rights, or USAGE,
+/// SELECT and UPDATE on it. USAGE alone passes `nextval` and then
+/// refuses at `setval` (#153).
+pub(crate) fn graph_id_seq_usable_by(role: pgrx::pg_sys::Oid) -> bool {
+    Spi::get_one_with_args::<bool>(
+        "SELECT pg_catalog.pg_has_role($1, s.relowner, 'USAGE') \
+             OR (pg_catalog.has_sequence_privilege($1, s.oid, 'USAGE') \
+                 AND pg_catalog.has_sequence_privilege($1, s.oid, 'SELECT') \
+                 AND pg_catalog.has_sequence_privilege($1, s.oid, 'UPDATE')) \
+           FROM pg_catalog.pg_class s \
+          WHERE s.oid = 'pgrdf._pgrdf_graph_id_seq'::regclass",
+        &[role.into()],
+    )
+    .expect("graph-id sequence privilege check failed")
+    .unwrap_or(false)
+}
+
+/// Refuse graph creation, with the cure, when the storage owner cannot
+/// use the graph-id sequence (#153). The 0.6.39 upgrade created the
+/// sequence owned by whoever ran `ALTER EXTENSION UPDATE`; where the
+/// storage tables had been given to another role, every new graph then
+/// failed with a bare 42501 on `nextval`. 55000 names the state and the
+/// HINT carries the one statement that fixes it.
+pub(crate) fn require_graph_id_seq_usable(fn_name: &str) {
+    let (owner, owner_name, seq_owner) = Spi::get_three::<pgrx::pg_sys::Oid, String, String>(
+        "SELECT q.relowner, \
+                pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(q.relowner)::text), \
+                pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(s.relowner)::text) \
+           FROM pg_catalog.pg_class q, pg_catalog.pg_class s \
+          WHERE q.oid = 'pgrdf._pgrdf_quads'::regclass \
+            AND s.oid = 'pgrdf._pgrdf_graph_id_seq'::regclass",
+    )
+    .expect("graph-id sequence owner lookup failed");
+    let owner = owner.expect("pgrdf._pgrdf_quads has no owner");
+    if graph_id_seq_usable_by(owner) {
+        return;
+    }
+    let owner_name = owner_name.unwrap_or_default();
+    crate::refuse_with_hint(
+        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+        format!(
+            "{fn_name}: the storage owner {owner_name} cannot use the graph-id sequence \
+             pgrdf._pgrdf_graph_id_seq (owned by {}), so no graph id can be allocated",
+            seq_owner.unwrap_or_default()
+        ),
+        format!("ALTER SEQUENCE pgrdf._pgrdf_graph_id_seq OWNER TO {owner_name}"),
+    );
 }
 
 /// The graph-DDL acts, each authorised by a table privilege the caller
@@ -905,6 +961,7 @@ mod tests {
             "graph_manifest",
             "last_call_stats",
             "orphan_partitions",
+            "ownership_drift",
             "shacl_capability",
             "sparql_parse",
             "sparql_sql",
@@ -1089,5 +1146,119 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(next > seed + 2, "taken ids are skipped: got {next}");
+    }
+
+    /// #153: graph creation runs nextval, a read of last_value and setval
+    /// on the graph-id sequence as the storage owner, so that owner needs
+    /// the sequence owner's rights or USAGE, SELECT and UPDATE on it.
+    /// USAGE alone passes nextval and then refuses at setval.
+    #[pg_test]
+    fn graph_id_seq_usable_needs_usage_select_and_update() {
+        // The gate first: every reader of the sequence takes it, so the
+        // grant and owner changes below cannot interleave with them.
+        crate::storage::partition::acquire_partition_ddl_gate();
+        Spi::run("CREATE ROLE pgrdf_153_owner NOLOGIN").unwrap();
+        let role: pgrx::pg_sys::Oid = Spi::get_one("SELECT 'pgrdf_153_owner'::regrole::oid")
+            .unwrap()
+            .unwrap();
+        let usable = || crate::storage::partition::graph_id_seq_usable_by(role);
+        assert!(!usable(), "a role with no rights cannot allocate ids");
+        Spi::run("GRANT USAGE ON SEQUENCE pgrdf._pgrdf_graph_id_seq TO pgrdf_153_owner").unwrap();
+        assert!(!usable(), "USAGE alone is not enough");
+        Spi::run("GRANT SELECT, UPDATE ON SEQUENCE pgrdf._pgrdf_graph_id_seq TO pgrdf_153_owner")
+            .unwrap();
+        assert!(usable(), "USAGE, SELECT and UPDATE are enough");
+        Spi::run("REVOKE ALL ON SEQUENCE pgrdf._pgrdf_graph_id_seq FROM pgrdf_153_owner").unwrap();
+        Spi::run("ALTER SEQUENCE pgrdf._pgrdf_graph_id_seq OWNER TO pgrdf_153_owner").unwrap();
+        assert!(usable(), "owning the sequence is enough");
+    }
+
+    /// #153: ownership_drift() lists each storage relation the storage
+    /// owner does not own, says whether that blocks the engine, and gives
+    /// the statement that realigns it. Running the cures empties it.
+    #[pg_test]
+    fn ownership_drift_reports_and_cures() {
+        crate::storage::partition::acquire_partition_ddl_gate();
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:153:drift')")
+            .unwrap()
+            .unwrap();
+        let part = format!("_pgrdf_quads_g{g}");
+        let watched = format!("relname IN ('_pgrdf_graph_id_seq', '{part}')");
+        let count = || -> i64 {
+            Spi::get_one(&format!(
+                "SELECT count(*) FROM pgrdf.ownership_drift() WHERE {watched}"
+            ))
+            .unwrap()
+            .unwrap()
+        };
+        assert_eq!(count(), 0, "a fresh install has no drift");
+
+        Spi::run("CREATE ROLE pgrdf_153_other NOLOGIN").unwrap();
+        Spi::run(&format!(
+            "ALTER TABLE pgrdf.{part} OWNER TO pgrdf_153_other"
+        ))
+        .unwrap();
+        Spi::run("ALTER SEQUENCE pgrdf._pgrdf_graph_id_seq OWNER TO pgrdf_153_other").unwrap();
+
+        let (storage_owner, superuser) = Spi::get_two::<String, bool>(
+            "SELECT r.rolname::text, r.rolsuper FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner \
+             WHERE c.oid = 'pgrdf._pgrdf_quads'::regclass",
+        )
+        .unwrap();
+        let (storage_owner, superuser) = (storage_owner.unwrap(), superuser.unwrap());
+        let rows: Vec<(String, String, String, String, bool, String)> = Spi::connect(|c| {
+            c.select(
+                &format!(
+                    "SELECT relname, kind, owner, storage_owner, blocking, cure \
+                     FROM pgrdf.ownership_drift() WHERE {watched} ORDER BY relname"
+                ),
+                None,
+                &[],
+            )
+            .unwrap()
+            .map(|r| {
+                (
+                    r.get::<String>(1).unwrap().unwrap(),
+                    r.get::<String>(2).unwrap().unwrap(),
+                    r.get::<String>(3).unwrap().unwrap(),
+                    r.get::<String>(4).unwrap().unwrap(),
+                    r.get::<bool>(5).unwrap().unwrap(),
+                    r.get::<String>(6).unwrap().unwrap(),
+                )
+            })
+            .collect()
+        });
+        assert_eq!(rows.len(), 2, "both drifted relations are listed: {rows:?}");
+        let (seq, prt) = if rows[0].0 == "_pgrdf_graph_id_seq" {
+            (&rows[0], &rows[1])
+        } else {
+            (&rows[1], &rows[0])
+        };
+        assert_eq!(prt.0, part);
+        assert_eq!(prt.1, "partition");
+        assert_eq!(seq.1, "sequence");
+        for r in [seq, prt] {
+            assert_eq!(r.2, "pgrdf_153_other");
+            assert_eq!(r.3, storage_owner);
+            // A superuser storage owner holds every role's rights, so the
+            // drift is reported but blocks nothing.
+            assert_eq!(
+                r.4, !superuser,
+                "blocking follows the owner's rights: {r:?}"
+            );
+        }
+        assert_eq!(
+            seq.5,
+            format!("ALTER SEQUENCE pgrdf._pgrdf_graph_id_seq OWNER TO {storage_owner}")
+        );
+        assert_eq!(
+            prt.5,
+            format!("ALTER TABLE pgrdf.{part} OWNER TO {storage_owner}")
+        );
+
+        for (_, _, _, _, _, cure) in &rows {
+            Spi::run(cure).unwrap();
+        }
+        assert_eq!(count(), 0, "running the cures removes the drift");
     }
 }

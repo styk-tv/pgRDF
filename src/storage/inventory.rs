@@ -145,6 +145,82 @@ fn orphan_partitions() -> TableIterator<'static, (name!(relname, String),)> {
     TableIterator::new(rows.into_iter())
 }
 
+/// Storage relations not owned by the storage owner (#153, 0.6.40).
+///
+/// The storage owner is the owner of `_pgrdf_quads`: graph creation,
+/// clear and drop act as that role. A consumer that hands pgRDF's tables
+/// to its own role (one ALTER ... OWNER per relation) leaves behind any
+/// relation a later release adds, and any partition someone else
+/// created; acts on those can then be refused. One row per drifted
+/// table, partition or standalone sequence (a sequence linked to a
+/// column follows its table). `blocking` is true when the storage owner
+/// holds neither the relation owner's rights nor, for a sequence,
+/// USAGE, SELECT and UPDATE on it. `cure` is the statement that
+/// realigns it. Empty when everything agrees: empty is the answer.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+#[allow(clippy::type_complexity)]
+fn ownership_drift() -> TableIterator<
+    'static,
+    (
+        name!(relname, String),
+        name!(kind, String),
+        name!(owner, String),
+        name!(storage_owner, String),
+        name!(blocking, bool),
+        name!(cure, String),
+    ),
+> {
+    let mut rows = Vec::new();
+    Spi::connect(|client| {
+        let tup = client
+            .select(
+                "WITH so AS (
+                     SELECT relowner AS oid FROM pg_catalog.pg_class
+                     WHERE oid = 'pgrdf._pgrdf_quads'::regclass)
+                 SELECT c.relname::text,
+                        CASE WHEN c.relkind = 'S' THEN 'sequence'
+                             WHEN c.relispartition THEN 'partition'
+                             ELSE 'table' END,
+                        pg_catalog.pg_get_userbyid(c.relowner)::text,
+                        pg_catalog.pg_get_userbyid(so.oid)::text,
+                        NOT (pg_catalog.pg_has_role(so.oid, c.relowner, 'USAGE')
+                             OR (c.relkind = 'S'
+                                 AND pg_catalog.has_sequence_privilege(so.oid, c.oid, 'USAGE')
+                                 AND pg_catalog.has_sequence_privilege(so.oid, c.oid, 'SELECT')
+                                 AND pg_catalog.has_sequence_privilege(so.oid, c.oid, 'UPDATE'))),
+                        pg_catalog.format('ALTER %s pgrdf.%I OWNER TO %I',
+                               CASE WHEN c.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
+                               c.relname, pg_catalog.pg_get_userbyid(so.oid))
+                 FROM pg_catalog.pg_class c, so
+                 WHERE c.relnamespace = 'pgrdf'::regnamespace
+                   AND c.relkind IN ('r', 'p', 'S')
+                   AND c.relowner <> so.oid
+                   AND NOT (c.relkind = 'S' AND EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_depend d
+                       WHERE d.classid = 'pg_catalog.pg_class'::regclass
+                         AND d.objid = c.oid
+                         AND d.refclassid = 'pg_catalog.pg_class'::regclass
+                         AND d.deptype IN ('a', 'i')))
+                 ORDER BY 1",
+                None,
+                &[],
+            )
+            .unwrap_or_else(|e| panic!("ownership_drift: enumeration failed: {e}"));
+        for row in tup {
+            rows.push((
+                row.get::<String>(1).unwrap().unwrap_or_default(),
+                row.get::<String>(2).unwrap().unwrap_or_default(),
+                row.get::<String>(3).unwrap().unwrap_or_default(),
+                row.get::<String>(4).unwrap().unwrap_or_default(),
+                row.get::<bool>(5).unwrap().unwrap_or(true),
+                row.get::<String>(6).unwrap().unwrap_or_default(),
+            ));
+        }
+    });
+    TableIterator::new(rows.into_iter())
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {

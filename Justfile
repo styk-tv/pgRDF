@@ -223,12 +223,12 @@ build-ext:
     DOCKER_BUILDKIT=1 {{BUILD}} build --target builder \
         -t pgrdf-builder-rust:pg{{PG_MAJOR}} \
         --build-arg PG_MAJOR={{PG_MAJOR}} \
-        --build-arg PGRDF_BUILD_ID="$(git describe --tags --always --dirty)" \
+        --build-arg PGRDF_BUILD_ID="$(git describe --tags --match 'v*' --always --dirty)" \
         -f compose/builder.Containerfile .
     DOCKER_BUILDKIT=1 {{BUILD}} build \
         -t pgrdf-builder:pg{{PG_MAJOR}} \
         --build-arg PG_MAJOR={{PG_MAJOR}} \
-        --build-arg PGRDF_BUILD_ID="$(git describe --tags --always --dirty)" \
+        --build-arg PGRDF_BUILD_ID="$(git describe --tags --match 'v*' --always --dirty)" \
         -f compose/builder.Containerfile .
     rm -rf compose/extensions/lib compose/extensions/share
     mkdir -p compose/extensions/lib compose/extensions/share/extension
