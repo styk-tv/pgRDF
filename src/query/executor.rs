@@ -632,10 +632,13 @@ fn execute_construct_per_solution_path(
                 "NULL::TEXT".to_string()
             } else {
                 translate_bind_expression(&bind.expression, &anchors).unwrap_or_else(|| {
-                    panic!(
-                        "pgrdf.construct: BIND expression for template ?{var} \
+                    crate::refuse(
+                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!(
+                            "pgrdf.construct: BIND expression for template ?{var} \
                          not translatable: {:?}",
-                        bind.expression
+                            bind.expression
+                        ),
                     )
                 })
             };
@@ -1257,21 +1260,24 @@ fn encode_dict_term(term: &ResolvedTerm) -> Value {
 /// aggregates not supported (W3C 1.1 §16.2)`).
 fn reject_construct_modifiers(p: &GraphPattern) {
     match p {
-        GraphPattern::Distinct { .. } | GraphPattern::Reduced { .. } => {
-            panic!(
-                "pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)"
-            )
-        }
-        GraphPattern::OrderBy { .. } => {
-            panic!(
-                "pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)"
-            )
-        }
-        GraphPattern::Group { .. } => {
-            panic!(
-                "pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported (W3C 1.1 §16.2)"
-            )
-        }
+        GraphPattern::Distinct { .. } | GraphPattern::Reduced { .. } => crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported \
+                 (W3C 1.1 §16.2)"
+                .to_string(),
+        ),
+        GraphPattern::OrderBy { .. } => crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported \
+                 (W3C 1.1 §16.2)"
+                .to_string(),
+        ),
+        GraphPattern::Group { .. } => crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "pgrdf.construct: DISTINCT / ORDER BY / GROUP BY / aggregates not supported \
+                 (W3C 1.1 §16.2)"
+                .to_string(),
+        ),
         GraphPattern::Project { inner, .. } | GraphPattern::Slice { inner, .. } => {
             reject_construct_modifiers(inner)
         }
@@ -2115,10 +2121,13 @@ impl OrderKey {
     fn require_projected_var(&self, ctx: &str) -> &str {
         match self {
             OrderKey::Var(v) => v.as_str(),
-            OrderKey::Expr(e) => panic!(
-                "sparql: ORDER BY expression sort keys are not supported on {ctx} \
+            OrderKey::Expr(e) => crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "sparql: ORDER BY expression sort keys are not supported on {ctx} \
                  (project the expression with BIND, then ORDER BY the bound \
                  variable); got {e:?}"
+                ),
             ),
         }
     }
@@ -2318,7 +2327,10 @@ fn translate(q: &Query) -> ExecPlan {
         Query::Select { pattern, .. } => {
             let ps = parse_select(&hide_query_bnodes(pattern));
             if ps.bgp.is_empty() && ps.union_branches.is_empty() {
-                panic!("sparql: empty BGP");
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "sparql: empty BGP".to_string(),
+                );
             }
             let sql = build_bgp_sql(&ps);
             let truncation_probes = collect_truncation_probes(&ps);
@@ -2334,7 +2346,10 @@ fn translate(q: &Query) -> ExecPlan {
             // whether the resulting solution sequence is non-empty.
             let mut ps = parse_select(&hide_query_bnodes(pattern));
             if ps.bgp.is_empty() && ps.union_branches.is_empty() {
-                panic!("sparql: ASK with empty BGP");
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    "sparql: ASK with empty BGP".to_string(),
+                );
             }
             // Collect `+` truncation probes before the projection
             // reset below (the BGP itself is untouched by the reset).
@@ -2368,10 +2383,14 @@ fn translate(q: &Query) -> ExecPlan {
         // CONSTRUCT entry point: a clean redirect, not a generic
         // "unsupported". (CONSTRUCT keeps the generic catch-all
         // message below — gap-5 in 80-unsupported-shapes locks it.)
-        Query::Describe { .. } => {
-            panic!("sparql: use pgrdf.describe(q) for DESCRIBE queries")
-        }
-        other => panic!("sparql: query form not supported yet (got {other:?})"),
+        Query::Describe { .. } => crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: use pgrdf.describe(q) for DESCRIBE queries".to_string(),
+        ),
+        other => crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!("sparql: query form not supported yet (got {other:?})"),
+        ),
     }
 }
 
@@ -3174,9 +3193,10 @@ fn parse_aggregate(synth_var: &str, agg: &AggregateExpression) -> AggregateSpec 
                     separator: separator.clone().unwrap_or_else(|| " ".to_string()),
                 },
                 AggregateFunction::Sample => AggregateFn::Sample,
-                AggregateFunction::Custom(iri) => {
-                    panic!("sparql: custom aggregate {iri:?} not supported")
-                }
+                AggregateFunction::Custom(iri) => crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!("sparql: custom aggregate {iri:?} not supported"),
+                ),
             };
             AggregateSpec {
                 output_var: synth_var.to_string(),
@@ -3711,9 +3731,12 @@ fn collect_optional_inner(
         } => {
             block.values.push(make_values_block(variables, bindings));
         }
-        other => panic!(
-            "sparql: OPTIONAL group contains an unsupported sub-pattern: {other:?} \
+        other => crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "sparql: OPTIONAL group contains an unsupported sub-pattern: {other:?} \
              (BIND-downstream → F2, DESCRIBE → F3 not yet shipped)"
+            ),
         ),
     }
 }
@@ -4352,11 +4375,14 @@ fn refuse_values_on_graph_variable(ps: &ParsedSelect, ctx: &str) {
     for vb in all_blocks {
         if let Some(hit) = vb.variables.iter().find(|v| scope_vars.contains(v)) {
             crate::storage::shmem_cache::note_filter_clause_dropped();
-            panic!(
-                "sparql: VALUES binds ?{hit}, which also names a GRAPH scope — the binding \
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "sparql: VALUES binds ?{hit}, which also names a GRAPH scope — the binding \
                  is not joined into graph resolution on the {ctx} path and the answer would \
                  silently widen to every graph (pgRDF#109). Enumerate explicit GRAPH <iri> \
                  groups instead. Refusing instead of returning a wrong answer."
+                ),
             );
         }
     }
@@ -4372,11 +4398,14 @@ fn refuse_group_constructs_over_union(ps: &ParsedSelect, ctx: &str) {
     ];
     if let Some((_, what)) = parked.iter().find(|(hit, _)| *hit) {
         crate::storage::shmem_cache::note_filter_clause_dropped();
-        panic!(
-            "sparql: group-level {what} alongside a UNION is not applied on the {ctx} path \
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "sparql: group-level {what} alongside a UNION is not applied on the {ctx} path \
              (pgRDF#114) — it would be silently dropped and widen the result set. Move the \
              {what} into every UNION branch (or restructure the query). Refusing instead of \
              returning a wrong answer."
+            ),
         );
     }
 }
@@ -4438,9 +4467,12 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
             }
             let expr_sql =
                 translate_bind_expression(&bind.expression, &anchors).unwrap_or_else(|| {
-                    panic!(
-                        "sparql: BIND expression for ?{var} not translatable: {:?}",
-                        bind.expression
+                    crate::refuse(
+                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!(
+                            "sparql: BIND expression for ?{var} not translatable: {:?}",
+                            bind.expression
+                        ),
                     )
                 });
             select_clauses.push(format!("{expr_sql} AS {}", quote_identifier(var)));
@@ -4455,7 +4487,10 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
             continue;
         }
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-            panic!("sparql: projected variable ?{var} is not bound in any BGP pattern")
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: projected variable ?{var} is not bound in any BGP pattern"),
+            )
         });
         select_clauses.push(format!(
             "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary
@@ -4487,16 +4522,22 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
                     // SPARQL §15.1 + SQL DISTINCT make a non-projected
                     // expression key ill-formed. Stable panic (never a
                     // wrong answer) — mirrors the unprojected-var rule.
-                    panic!(
-                        "sparql: ORDER BY over an expression is not supported together \
+                    crate::refuse(
+                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!(
+                            "sparql: ORDER BY over an expression is not supported together \
                          with DISTINCT (project the expression with BIND, then \
                          ORDER BY the bound variable): {expr:?}"
+                        ),
                     );
                 }
                 // Expression sort key — translate via the shared
                 // BIND/FILTER translator over the BGP anchors.
                 translate_bind_expression(expr, &anchors).unwrap_or_else(|| {
-                    panic!("sparql: ORDER BY expression not translatable: {expr:?}")
+                    crate::refuse(
+                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!("sparql: ORDER BY expression not translatable: {expr:?}"),
+                    )
                 })
             }
             OrderKey::Var(var) => {
@@ -4519,17 +4560,25 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
                         } else {
                             translate_bind_expression(&bind.expression, &anchors).unwrap_or_else(
                                 || {
-                                    panic!(
-                                        "sparql: ORDER BY references BIND ?{var} whose \
+                                    crate::refuse(
+                                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                                        format!(
+                                            "sparql: ORDER BY references BIND ?{var} whose \
                                          expression is not translatable: {:?}",
-                                        bind.expression
+                                            bind.expression
+                                        ),
                                     )
                                 },
                             )
                         }
                     } else {
                         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-                            panic!("sparql: ORDER BY variable ?{var} not bound in any BGP pattern")
+                            crate::refuse(
+                                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                                format!(
+                                    "sparql: ORDER BY variable ?{var} not bound in any BGP pattern"
+                                ),
+                            )
                         });
                         format!(
                             "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary \
@@ -4538,9 +4587,12 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
                     }
                 } else {
                     if ps.distinct {
-                        panic!(
-                            "sparql: ORDER BY ?{var} requires ?{var} to be in the SELECT \
+                        crate::refuse(
+                            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!(
+                                "sparql: ORDER BY ?{var} requires ?{var} to be in the SELECT \
                              clause when DISTINCT is used"
+                            ),
                         );
                     }
                     // Non-projected sort key. The §15.1 type-aware
@@ -4555,7 +4607,12 @@ fn build_single_branch_outer(ps: &ParsedSelect) -> String {
                         format!("g{scope_id}.iri")
                     } else {
                         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-                            panic!("sparql: ORDER BY variable ?{var} not bound in any BGP pattern")
+                            crate::refuse(
+                                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                                format!(
+                                    "sparql: ORDER BY variable ?{var} not bound in any BGP pattern"
+                                ),
+                            )
                         });
                         format!(
                             "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary \
@@ -4638,7 +4695,10 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
             continue;
         }
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-            panic!("sparql: GROUP BY variable ?{var} not bound in any BGP pattern")
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: GROUP BY variable ?{var} not bound in any BGP pattern"),
+            )
         });
         let expr = format!(
             "(SELECT lexical_value FROM pgrdf._pgrdf_dictionary WHERE id = q{alias_idx}.{col})"
@@ -4661,8 +4721,11 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
                 quote_identifier(var)
             ));
         } else {
-            panic!(
-                "sparql: projected variable ?{var} is neither a GROUP BY variable nor an aggregate output"
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "sparql: projected variable ?{var} is neither a GROUP BY variable nor an aggregate output"
+                ),
             );
         }
     }
@@ -4690,7 +4753,10 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
             let sql_pred =
                 translate_filter_with_aggregates(expr, &anchors, &ps.aggregates, &group_exprs)
                     .unwrap_or_else(|| {
-                        panic!("sparql: HAVING expression not translatable: {expr:?}")
+                        crate::refuse(
+                            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!("sparql: HAVING expression not translatable: {expr:?}"),
+                        )
                     });
             having_parts.push(sql_pred);
         }
@@ -4719,9 +4785,12 @@ fn build_aggregate_sql(ps: &ParsedSelect) -> String {
             } else if let Some(agg) = ps.aggregates.iter().find(|a| a.output_var.as_str() == var) {
                 translate_aggregate(agg, &anchors)
             } else {
-                panic!(
-                    "sparql: ORDER BY ?{var} on an aggregate query must reference a \
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "sparql: ORDER BY ?{var} on an aggregate query must reference a \
                          projected variable (group var or aggregate output)"
+                    ),
                 );
             };
             order_parts.extend(type_aware_order_terms(&lex_expr, *ascending));
@@ -4769,7 +4838,10 @@ fn translate_aggregate_lanes(
     let distinct = if agg.distinct { "DISTINCT " } else { "" };
     let lex_subselect = |var: &str| {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-            panic!("sparql: aggregate over ?{var} but variable not bound in any BGP pattern")
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: aggregate over ?{var} but variable not bound in any BGP pattern"),
+            )
         });
         if text_lane_vars.contains(var) {
             format!("q{alias_idx}.{col}")
@@ -4785,7 +4857,10 @@ fn translate_aggregate_lanes(
             // the regex-guarded cast yields NULL (SUM/AVG ignore it),
             // matching the single-BGP non-numeric behaviour.
             let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-                panic!("sparql: numeric aggregate over ?{var} but variable not bound")
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!("sparql: numeric aggregate over ?{var} but variable not bound"),
+                )
             });
             format!(
                 "(CASE WHEN q{alias_idx}.{col} ~ '{NUMERIC_LEXICAL_RE}' \
@@ -4799,7 +4874,12 @@ fn translate_aggregate_lanes(
         (AggregateFn::Count, None) => "COUNT(*)".to_string(),
         (AggregateFn::Count, Some(var)) => {
             let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-                panic!("sparql: aggregate COUNT(?{var}) but variable not bound in any BGP pattern")
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "sparql: aggregate COUNT(?{var}) but variable not bound in any BGP pattern"
+                    ),
+                )
             });
             format!("COUNT({distinct}q{alias_idx}.{col})")
         }
@@ -4845,7 +4925,10 @@ fn translate_aggregate_lanes(
             format!("STRING_AGG({distinct}{}, '{escaped}')", lex_subselect(var))
         }
         (AggregateFn::Sample, Some(var)) => format!("MIN({})", lex_subselect(var)),
-        (_, None) => panic!("sparql: aggregate over `*` only supported for COUNT"),
+        (_, None) => crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            "sparql: aggregate over `*` only supported for COUNT".to_string(),
+        ),
     }
 }
 
@@ -4875,9 +4958,12 @@ fn translate_aggregate_over_expression(
     let mut vars: HashSet<String> = HashSet::new();
     collect_expr_vars(expr, &mut vars);
     if let Some(v) = vars.iter().find(|v| text_lane_vars.contains(*v)) {
-        panic!(
-            "sparql: aggregate over an expression referencing the \
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "sparql: aggregate over an expression referencing the \
              UNION graph-text-lane variable ?{v} not supported yet"
+            ),
         );
     }
     let distinct = if agg.distinct { "DISTINCT " } else { "" };
@@ -4885,7 +4971,10 @@ fn translate_aggregate_over_expression(
     let lexical = expr_to_lexical_sql(expr, anchors);
     let numeric_or_panic = |lane: Option<String>, fn_name: &str| {
         lane.unwrap_or_else(|| {
-            panic!("sparql: {fn_name} over expression not numerically translatable: {expr:?}")
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: {fn_name} over expression not numerically translatable: {expr:?}"),
+            )
         })
     };
     match &agg.func {
@@ -4893,7 +4982,10 @@ fn translate_aggregate_over_expression(
             // COUNT(expr) counts rows where the expression evaluates
             // without error — either lane's NULL encodes the error.
             let arg = numeric.or(lexical).unwrap_or_else(|| {
-                panic!("sparql: COUNT over expression not translatable: {expr:?}")
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!("sparql: COUNT over expression not translatable: {expr:?}"),
+                )
             });
             format!("COUNT({distinct}{arg})")
         }
@@ -4902,22 +4994,27 @@ fn translate_aggregate_over_expression(
         AggregateFn::Min => match (&numeric, &lexical) {
             (Some(n), _) => format!("MIN({distinct}{n})::text"),
             (None, Some(l)) => format!("MIN({distinct}{l})"),
-            (None, None) => {
-                panic!("sparql: MIN over expression not translatable: {expr:?}")
-            }
+            (None, None) => crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: MIN over expression not translatable: {expr:?}"),
+            ),
         },
         AggregateFn::Max => match (&numeric, &lexical) {
             (Some(n), _) => format!("MAX({distinct}{n})::text"),
             (None, Some(l)) => format!("MAX({distinct}{l})"),
-            (None, None) => {
-                panic!("sparql: MAX over expression not translatable: {expr:?}")
-            }
+            (None, None) => crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: MAX over expression not translatable: {expr:?}"),
+            ),
         },
         AggregateFn::GroupConcat { separator } => {
             let arg = lexical
                 .or(numeric.map(|n| format!("({n})::text")))
                 .unwrap_or_else(|| {
-                    panic!("sparql: GROUP_CONCAT over expression not translatable: {expr:?}")
+                    crate::refuse(
+                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!("sparql: GROUP_CONCAT over expression not translatable: {expr:?}"),
+                    )
                 });
             let escaped = separator.replace('\'', "''");
             format!("STRING_AGG({distinct}{arg}, '{escaped}')")
@@ -4926,7 +5023,10 @@ fn translate_aggregate_over_expression(
             let arg = lexical
                 .or(numeric.map(|n| format!("({n})::text")))
                 .unwrap_or_else(|| {
-                    panic!("sparql: SAMPLE over expression not translatable: {expr:?}")
+                    crate::refuse(
+                        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                        format!("sparql: SAMPLE over expression not translatable: {expr:?}"),
+                    )
                 });
             format!("MIN({arg})")
         }
@@ -5056,7 +5156,12 @@ fn translate_filter_with_aggregates_lanes(
 /// XSD numeric IRIs, else NULL.
 fn numeric_cast_subselect(var: &str, anchors: &HashMap<String, (usize, &'static str)>) -> String {
     let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-        panic!("sparql: numeric aggregate over ?{var} but variable not bound in any BGP pattern")
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            format!(
+                "sparql: numeric aggregate over ?{var} but variable not bound in any BGP pattern"
+            ),
+        )
     });
     let dt_ids = numeric_datatype_id_list();
     format!(
@@ -5093,9 +5198,12 @@ fn build_union_sql(ps: &ParsedSelect) -> String {
         for (key, ascending) in &ps.order_by {
             let var = key.require_projected_var("a UNION query");
             if !ps.projected.iter().any(|p| p == var) {
-                panic!(
-                    "sparql: ORDER BY ?{var} on UNION must reference a projected \
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "sparql: ORDER BY ?{var} on UNION must reference a projected \
                      variable (the outer SELECT can't see branch-local columns)"
+                    ),
                 );
             }
             // Phase F group F4 (LLD v0.4 §11): type-aware §15.1
@@ -5326,11 +5434,14 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
                 // cannot share one `UNION ALL` column. Stable panic —
                 // never a wrong answer (v0.5-FUTURE §8 / LLD v0.4 §11).
                 // Tracked for v1.0 (a typed dual-lane derived table).
-                panic!(
-                    "sparql: GROUP BY / aggregate over a variable ?{var} that is \
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "sparql: GROUP BY / aggregate over a variable ?{var} that is \
                      GRAPH-scoped in one UNION branch but term-bound in another \
                      is deferred to v1.0 (v0.5-FUTURE §8 / LLD v0.4 §11); \
                      aggregate the object/subject variable instead"
+                    ),
                 );
             } else {
                 select_clauses.push(format!("NULL::BIGINT AS {col}"));
@@ -5368,7 +5479,10 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
     let mut group_exprs: Vec<(String, String)> = Vec::new();
     for var in &ps.group_vars {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-            panic!("sparql: GROUP BY variable ?{var} not bound in any UNION branch")
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: GROUP BY variable ?{var} not bound in any UNION branch"),
+            )
         });
         let expr = if graph_text_vars.contains(var) {
             format!("q{alias_idx}.{col}")
@@ -5391,8 +5505,11 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
                 quote_identifier(var)
             ));
         } else {
-            panic!(
-                "sparql: projected variable ?{var} is neither a GROUP BY variable nor an aggregate output"
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "sparql: projected variable ?{var} is neither a GROUP BY variable nor an aggregate output"
+                ),
             );
         }
     }
@@ -5419,7 +5536,12 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
                 &group_exprs,
                 &graph_text_vars,
             )
-            .unwrap_or_else(|| panic!("sparql: HAVING expression not translatable: {expr:?}"));
+            .unwrap_or_else(|| {
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!("sparql: HAVING expression not translatable: {expr:?}"),
+                )
+            });
             having_parts.push(sql_pred);
         }
         sql.push_str(" HAVING ");
@@ -5441,9 +5563,12 @@ fn build_aggregate_over_union_sql(ps: &ParsedSelect) -> String {
             } else if let Some(agg) = ps.aggregates.iter().find(|a| a.output_var.as_str() == var) {
                 translate_aggregate_lanes(agg, &anchors, &graph_text_vars)
             } else {
-                panic!(
-                    "sparql: ORDER BY ?{var} on an aggregate-over-UNION query must \
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "sparql: ORDER BY ?{var} on an aggregate-over-UNION query must \
                          reference a projected variable (group var or aggregate output)"
+                    ),
                 );
             };
             order_parts.extend(type_aware_order_terms(&lex_expr, *ascending));
@@ -6085,13 +6210,21 @@ fn emit_optional_lateral(
 
     // ---- inner FILTERs + join-FILTER ----
     for f in &opt.filters {
-        let sql = translate_filter(f, &local)
-            .unwrap_or_else(|| panic!("sparql: OPTIONAL inner FILTER not translatable: {f:?}"));
+        let sql = translate_filter(f, &local).unwrap_or_else(|| {
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: OPTIONAL inner FILTER not translatable: {f:?}"),
+            )
+        });
         inner_where.push(sql);
     }
     if let Some(jf) = &opt.join_filter {
-        let sql = translate_filter(jf, &local)
-            .unwrap_or_else(|| panic!("sparql: OPTIONAL join FILTER not translatable: {jf:?}"));
+        let sql = translate_filter(jf, &local).unwrap_or_else(|| {
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: OPTIONAL join FILTER not translatable: {jf:?}"),
+            )
+        });
         inner_where.push(sql);
     }
 
@@ -6173,10 +6306,13 @@ fn optional_scope_clauses(
             if let Some(anchor_qi) = outer_plan.first_qi_for(*scope_id) {
                 clauses.push(format!("q{qi}.graph_id = q{anchor_qi}.graph_id"));
             } else {
-                panic!(
-                    "sparql: rollout-preview: `GRAPH ?{name}` introduced inside a \
+                crate::refuse(
+                    PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "sparql: rollout-preview: `GRAPH ?{name}` introduced inside a \
                      multi-triple OPTIONAL is not yet supported (Phase F-future); \
                      scope the GRAPH block around the whole pattern instead"
+                    ),
                 );
             }
         }
@@ -8259,8 +8395,10 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
     params_clear();
     let mut ps = parse_select(pattern);
     if !ps.aggregates.is_empty() || !ps.group_vars.is_empty() {
-        panic!(
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             "sparql: INSERT WHERE template feature 'aggregate/GROUP BY in WHERE' not yet supported"
+                .to_string(),
         );
     }
     if !ps.union_branches.is_empty() {
@@ -8311,9 +8449,12 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
     let mut col_order: Vec<String> = Vec::new();
     for var in &template_vars {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-            panic!(
-                "sparql: INSERT WHERE template feature 'unbound template variable ?{var}' \
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "sparql: INSERT WHERE template feature 'unbound template variable ?{var}' \
                  not yet supported (every template variable must appear in the WHERE BGP)"
+                ),
             )
         });
         select_clauses.push(format!(
@@ -8578,8 +8719,10 @@ fn execute_delete_where(
     params_clear();
     let mut ps = parse_select(pattern);
     if !ps.aggregates.is_empty() || !ps.group_vars.is_empty() {
-        panic!(
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             "sparql: DELETE WHERE template feature 'aggregate/GROUP BY in WHERE' not yet supported"
+                .to_string(),
         );
     }
     if !ps.union_branches.is_empty() {
@@ -8617,9 +8760,12 @@ fn execute_delete_where(
     let mut col_order: Vec<String> = Vec::new();
     for var in &template_vars {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-            panic!(
-                "sparql: DELETE WHERE template feature 'unbound template variable ?{var}' \
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "sparql: DELETE WHERE template feature 'unbound template variable ?{var}' \
                  not yet supported (every template variable must appear in the WHERE BGP)"
+                ),
             )
         });
         select_clauses.push(format!(
@@ -8914,9 +9060,11 @@ fn execute_delete_insert_where(
     params_clear();
     let mut ps = parse_select(pattern);
     if !ps.aggregates.is_empty() || !ps.group_vars.is_empty() {
-        panic!(
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             "sparql: DELETE/INSERT WHERE template feature 'aggregate/GROUP BY in WHERE' \
              not yet supported"
+                .to_string(),
         );
     }
     if !ps.union_branches.is_empty() {
@@ -8959,9 +9107,13 @@ fn execute_delete_insert_where(
     let mut col_order: Vec<String> = Vec::new();
     for var in &template_vars {
         let &(alias_idx, col) = anchors.get(var).unwrap_or_else(|| {
-            panic!(
-                "sparql: DELETE/INSERT WHERE template feature 'unbound template variable ?{var}' \
-                 not yet supported (every template variable must appear in the WHERE BGP)"
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "sparql: DELETE/INSERT WHERE template feature \
+                     'unbound template variable ?{var}' not yet supported \
+                     (every template variable must appear in the WHERE BGP)"
+                ),
             )
         });
         select_clauses.push(format!(
