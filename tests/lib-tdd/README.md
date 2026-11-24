@@ -83,7 +83,7 @@ surface/gen-surface.sh      live surface dump (extension-owned AND pgrdf-schema 
 gates/gen-gates.sh          mechanical census: refuse-sites (code named) + panic gates,
                             test modules excluded (the first census counted 9 path.rs
                             test assertions as gates — corrected)
-gates/gates.tsv             the snapshot: 74 refuse sites · 2 deliberate remainders
+gates/gates.tsv             the snapshot: 159 refuse sites (regenerate with gen-gates.sh; the count moves with every release)
                             (staged/phases.rs:590 runs in a background worker whose
                             error protocol needs its own analysis before E0 touches it;
                             staged/pool.rs:186 is a genuine internal invariant = XX000)
