@@ -132,8 +132,8 @@ Two semantics to know:
 - A comparison that doesn't type-check (a string against a number)
   drops the row instead of raising an error, as SPARQL specifies.
 
-Anything outside this list is refused with a message naming the
-expression. See [not supported](#not-supported).
+Anything outside this list is refused with SQLSTATE `0A000` and a
+message naming the expression. See [not supported](#not-supported).
 
 ## Aggregates and ordering
 
@@ -282,13 +282,67 @@ $$);
 | `DELETE { … } INSERT { … } WHERE { … }` | change a value in one atomic step |
 | `WITH <iri>` | sets the graph for both the template and the `WHERE` |
 | `CREATE` / `CLEAR` / `DROP GRAPH`, `DEFAULT` / `NAMED` / `ALL`, `SILENT` | graph management |
+| `ADD` / `COPY` / `MOVE <src> TO <dst>` | whole-graph transfers; see [below](#add-copy-and-move) |
 
 - `INSERT DATA` without a `GRAPH` block writes to the default graph
   (`0`).
-- `INSERT DATA` of a triple that already exists is a no-op.
 - Updates run inside your transaction, so `BEGIN … ROLLBACK` works.
 - A write to a locked graph is refused with `55P03`. See
   [locking](05-graphs.md#locking-a-graph).
+- A term containing U+0000 (written `\u0000`) is refused with `22P05`.
+- Each statement is recorded in the
+  [act record](05-graphs.md#the-act-record): one `update` act per graph
+  whose triples it changed, and a `create`, `clear` or `drop` act for
+  each graph it created, cleared or dropped. A statement that changed
+  nothing records nothing.
+
+### The counts are what changed
+
+`triples_inserted` counts the triples the statement stored, not the
+ones it asked for (since 0.6.41). A graph is a set, so a triple that is
+already there is not inserted and not counted. Run the statement above
+a second time:
+
+```sql
+SELECT * FROM pgrdf.sparql($$
+  PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+  PREFIX ex:   <http://example.org/>
+  INSERT DATA { GRAPH <http://example.org/people> { ex:carol foaf:age 29 } }
+$$);
+-- {"_update": {"form": "INSERT_DATA", "triples_inserted": 0, "triples_deleted": 0,
+--              "graphs_touched": ["http://example.org/people"], "elapsed_ms": 0.56}}
+```
+
+A triple that was stored only as inferred and is now asserted counts
+as inserted: the asserted data gained it.
+
+### ADD, COPY and MOVE
+
+`ADD <src> TO <dst>` adds every triple of `src` to `dst`. `COPY`
+replaces the content of `dst` with that of `src`. `MOVE` does the same
+and then removes `src`. A destination that does not exist is created.
+`COPY` and `MOVE` replace the destination by dropping and re-creating
+it, so the destination's IRI stays and its graph id changes.
+
+A **source** that does not exist is refused with `42704`, before
+anything is written:
+
+```sql
+SELECT * FROM pgrdf.sparql('COPY <http://example.org/peopel> TO <http://example.org/backup>');
+-- ERROR:  42704: sparql: COPY: source graph <http://example.org/peopel> does not exist
+-- HINT:  check the source IRI, or CREATE GRAPH it first; SILENT does not suppress this refusal
+```
+
+`SILENT` is not honoured for these three: `COPY SILENT`, `ADD SILENT`
+and `MOVE SILENT` from a graph that does not exist refuse like the
+plain forms. This is stricter than the SPARQL 1.1 Update
+specification, which lets `SILENT` report success. Before 0.6.41 a
+mistyped source made `COPY` empty the destination and report success;
+pgRDF now refuses instead.
+
+For `CREATE`, `CLEAR` and `DROP`, `SILENT` works as specified: without
+it, `CLEAR` or `DROP` of a graph that does not exist is refused with
+`42704` and `CREATE` of one that exists with `42710`.
 
 ## Checking a query before running it
 
@@ -303,8 +357,12 @@ SELECT pgrdf.sparql_sql('SELECT ?s WHERE { ?s a <http://xmlns.com/foaf/0.1/Perso
 
 ## Not supported
 
-These are refused with an error that names the construct, unless noted
-otherwise:
+These are refused with SQLSTATE `0A000` and a message that names the
+construct, unless noted otherwise. A query that does not parse is
+refused with `42601`. Whether a request is refused depends on the
+request, never on the data: the same text refuses over an empty graph
+and over a full one. See
+[errors and diagnostics](08-errors-and-diagnostics.md#refusals-carry-a-sqlstate).
 
 | Construct | Instead |
 |---|---|

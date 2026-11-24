@@ -15,10 +15,10 @@ has feature deep dives, worked examples and the internals.
 
 | Page | Covers |
 |---|---|
-| [02 — Loading RDF](02-loading-rdf.md) | Turtle, N-Triples, TriG, N-Quads; strings and files; bulk loading and tuning |
+| [02 — Loading RDF](02-loading-rdf.md) | Turtle, N-Triples, TriG, N-Quads; strings and files; graphs as sets, load reports; bulk loading and tuning |
 | [03 — Querying](03-querying.md) | SPARQL 1.1 query and update, named graphs, property paths, what's not supported |
 | [04 — Reasoning](04-reasoning.md) | OWL 2 RL and RDFS materialization, freshness |
-| [05 — Managing graphs](05-graphs.md) | inventory, copy / move / drop, carving, locks, integrity |
+| [05 — Managing graphs](05-graphs.md) | inventory, copy / move / drop, carving, locks, graph owner, the act record, integrity |
 | [06 — Validation](06-validation-recipes.md) | SHACL Core and SHACL-SPARQL, reports, strict mode |
 | [07 — Identity and export](07-identity-and-export.md) | canonical digests, N-Triples export, portable manifests |
 | [08 — Errors and diagnostics](08-errors-and-diagnostics.md) | SQLSTATEs, completeness, settings, version checks |

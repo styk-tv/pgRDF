@@ -174,12 +174,16 @@ SELECT jsonb_pretty(pgrdf.validate(
     "shapes_triples": 10,
     "data_graph_id": 1,
     "shapes_graph_id": 2,
-    "elapsed_ms": 2.007986
+    "elapsed_ms": 2.007986,
+    "act_recorded": true,
+    "act_id": 6
 }
 ```
 
 The shape targets `foaf:Person`, and the people only became Persons
 through reasoning. Validation sees the inferred triples too.
+`act_recorded` says the verdict was written to the graph's act record;
+step 6 reads it back.
 
 ## 5. Fix the data with SPARQL UPDATE
 
@@ -226,7 +230,7 @@ SELECT * FROM pgrdf.sparql($$
   INSERT DATA { GRAPH <http://example.org/people> {
     <http://example.org/dave> <http://xmlns.com/foaf/0.1/name> "Dave" } }
 $$);
--- ERROR:  55P03: pgrdf: graph 1 is locked (release review): SPARQL UPDATE refused.
+-- ERROR:  55P03: pgrdf: graph 1 is locked (release review): direct SQL INSERT refused.
 --         Unlock with pgrdf.unlock_graph(1, '<reason>').
 
 SELECT pgrdf.unlock_graph(pgrdf.graph_id('http://example.org/people'), 'review done');
@@ -235,6 +239,29 @@ SELECT pgrdf.unlock_graph(pgrdf.graph_id('http://example.org/people'), 'review d
 Every refusal carries a standard SQLSTATE (`55P03` here) and a message
 that says what to do next. See
 [errors and diagnostics](08-errors-and-diagnostics.md).
+
+pgRDF keeps a record of every graph-level act: who did it, and what it
+did. Everything this tour has done to the graph so far is there:
+
+```sql
+SELECT act_id, act, acting_role, detail
+  FROM pgrdf.graph_acts(pgrdf.graph_id('http://example.org/people'));
+--  act_id |     act     | acting_role | detail
+-- --------+-------------+-------------+----------------------------------------------------------
+--       1 | create      | postgres    | {"iri": "http://example.org/people"}
+--       2 | load        | postgres    | {"load": {"triples_read": 13, "triples_stored": 13, …},
+--         |             |             |  "entry": "parse_turtle", "route": "combined"}
+--       3 | materialize | postgres    | {"profile": "rdfs", "base_triples": 13, "inferred_written": 8, …}
+--       6 | validate    | postgres    | {"conforms": false, "results": 1, "mode": "native", …}
+--       7 | update      | postgres    | {"form": "INSERT_DATA", "deleted": 0, "inserted": 1}
+--       8 | validate    | postgres    | {"conforms": true, "results": 0, "mode": "native", …}
+--       9 | lock        | postgres    | {"reason": "release review"}
+--      10 | unlock      | postgres    | {"reason": "review done"}
+```
+
+(Acts 4 and 5 created and loaded the shapes graph. The refused insert
+left no row: only acts that commit are recorded.) See
+[the act record](05-graphs.md#the-act-record).
 
 ## 7. Fingerprint and export
 
