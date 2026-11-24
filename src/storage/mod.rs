@@ -21,6 +21,8 @@
 //! Reference: SPEC.pgRDF.LLD.v0.2 §3, §4.1, §4.3, SPEC.pgRDF.LLD.v0.4
 //! §3, §6.3, and `docs/02-storage.md`.
 
+pub mod activity;
+pub mod acts;
 pub mod canon;
 pub mod construct_ingest;
 pub mod dict;
@@ -32,10 +34,12 @@ pub mod graphs;
 pub mod hexastore;
 pub mod integrity;
 pub mod inventory;
+pub mod lines;
 pub mod loader;
 pub mod loader_ta11;
 pub mod lock;
 pub mod partition;
+pub mod quads;
 pub mod shmem_cache;
 pub mod source_digest;
 pub mod staged;

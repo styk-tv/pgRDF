@@ -17,12 +17,9 @@ use pgrx::prelude::*;
 #[pg_extern]
 fn put_quad(s: i64, p: i64, o: i64, g: default!(i64, 0)) {
     crate::storage::lock::require_unlocked(g, "put_quad"); // #107
-    Spi::run_with_args(
-        "INSERT INTO pgrdf._pgrdf_quads (subject_id, predicate_id, object_id, graph_id)
-         VALUES ($1, $2, $3, $4)",
-        &[s.into(), p.into(), o.into(), g.into()],
-    )
-    .expect("put_quad: insert failed");
+    // Through the shared writer: a triple the graph already holds adds
+    // nothing. One triple per call, so no act is recorded here.
+    crate::storage::quads::insert_row(g, s, p, o);
 }
 
 /// Count quads in a graph (0 = default partition).
@@ -111,6 +108,10 @@ fn add_graph(g: i64) -> bool {
         &[g.into()],
     )
     .unwrap_or_else(|e| panic!("add_graph: failed to insert synthetic IRI for graph_id {g}: {e}"));
+    // Every creating route ends here (the IRI overloads, create_graph, the
+    // loaders' implicit create, SPARQL CREATE GRAPH), so this is the one
+    // place the owner and the create act are recorded.
+    crate::storage::acts::record_created(g);
     true
 }
 
@@ -430,11 +431,13 @@ fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
         // upgradable; any other existing IRI takes the conflict path
         // below.
         (Some(existing_iri), None) if existing_iri == synthetic_iri => {
+            let act = crate::storage::acts::begin(id, "rename");
             Spi::run_with_args(
                 "UPDATE pgrdf._pgrdf_graphs SET iri = $2 WHERE graph_id = $1",
                 &[id.into(), iri.into()],
             )
             .unwrap_or_else(|e| panic!("add_graph: upgrade synthetic iri failed: {e}"));
+            act.finish(serde_json::json!({ "from": synthetic_iri, "to": iri }));
             id
         }
         // id is bound to a non-synthetic IRI different from the

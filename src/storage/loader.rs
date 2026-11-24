@@ -20,13 +20,10 @@
 //! SPEC.pgRDF.LLD.v0.2 §4.3 needs lower-level Postgres integration
 //! than pgrx 0.16 exposes cleanly. Tracked for Phase 3 step 3.
 
-use crate::query::plan_cache;
 use crate::storage::dict::{put_term_full, term_type};
 use crate::storage::shmem_cache;
 use oxrdf::{GraphName, NamedOrBlankNode, Term};
 use oxttl::{NQuadsParser, TriGParser, TurtleParser};
-use pgrx::datum::DatumWithOid;
-use pgrx::pg_sys::{Oid, PgBuiltInOids};
 use pgrx::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
@@ -51,16 +48,6 @@ const BATCH_SIZE: usize = 1000;
 /// ceiling, and the rows insert heap-only when the bulk path has
 /// deferred its indexes. (v0.6.6)
 const BULK_QUAD_BATCH: usize = 50_000;
-
-/// Static SQL for the batched quad flush. Phase 3 step 3 (LLD §4.3,
-/// phase A): the string is constant, so a single prepared statement
-/// — stashed in the per-backend `plan_cache` from Phase 3 step 2 —
-/// is reused for every flush, in every load call, for the rest of
-/// the backend's lifetime. Saves one parse+plan per batch.
-const QUAD_INSERT_SQL: &str = "INSERT INTO pgrdf._pgrdf_quads \
-    (subject_id, predicate_id, object_id, graph_id) \
-    SELECT s, p, o, $4 \
-      FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS t(s, p, o)";
 
 type DictKey = (i16, String, Option<i64>, Option<String>);
 
@@ -137,6 +124,21 @@ struct LoaderStats {
     /// Streaming path only — distinct dictionary terms the persistent in-Rust map
     /// resolved across the whole load (final cross-window `HashMap` size).
     dict_terms: i64,
+    /// New rows this call stored.
+    stored: i64,
+    /// Rows that were inferred and are asserted now.
+    made_asserted: i64,
+    /// The target graph held no rows when the call started. `None` when
+    /// the call wrote to several graphs.
+    graph_was_empty: Option<bool>,
+    /// How each graph written by this call is written (looked up once).
+    modes: HashMap<i64, crate::storage::quads::Mode>,
+    /// Whether each graph written by this call held no rows before the
+    /// call's first write to it.
+    was_empty: HashMap<i64, bool>,
+    /// The target partition's unique index is dropped for this load:
+    /// write without conflict handling, de-duplicate at the rebuild.
+    plain: bool,
 }
 
 /// Resolve a term to its dictionary id, caching the result for the
@@ -234,14 +236,11 @@ fn object_to_id(t: &Term, cache: &mut HashMap<DictKey, i64>, stats: &mut LoaderS
     }
 }
 
-/// Flush a buffered batch of quads to the partitioned hexastore via
-/// the cached prepared `INSERT ... unnest` statement.
-///
-/// On first call in a backend the SQL is prepared and `keep()`-ed
-/// into `plan_cache`; every subsequent call (in this load and in
-/// future loads) is a pure execute. Moves the buffer Vecs into
-/// Postgres-side arrays so we don't pay a clone; callers see empty
-/// Vecs after this returns.
+/// Flush a buffered batch of quads through the shared set-semantics
+/// writer (`storage::quads`): repeats are dropped, rows that were only
+/// inferred become asserted, and the counts land in `stats`. The statement
+/// is prepared once per backend and reused by every batch of every load.
+/// Callers see empty Vecs after this returns.
 fn flush_batch(
     batch_s: &mut Vec<i64>,
     batch_p: &mut Vec<i64>,
@@ -255,50 +254,25 @@ fn flush_batch(
     let s_arr = mem::take(batch_s);
     let p_arr = mem::take(batch_p);
     let o_arr = mem::take(batch_o);
-    let int8_oid: Oid = PgBuiltInOids::INT8OID.into();
-    let int8_array_oid: Oid = PgBuiltInOids::INT8ARRAYOID.into();
-
-    Spi::connect_mut(|client| {
-        // Prepare-once / reuse-many via the per-backend plan cache.
-        // Same mechanism as the SPARQL executor (Phase 3 step 2);
-        // keyed on the SQL string which is `QUAD_INSERT_SQL`
-        // verbatim.
-        if !plan_cache::contains(QUAD_INSERT_SQL) {
-            let arg_oids = vec![
-                PgOid::BuiltIn(PgBuiltInOids::INT8ARRAYOID),
-                PgOid::BuiltIn(PgBuiltInOids::INT8ARRAYOID),
-                PgOid::BuiltIn(PgBuiltInOids::INT8ARRAYOID),
-                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
-            ];
-            let prepared = client
-                .prepare_mut(QUAD_INSERT_SQL, &arg_oids)
-                .expect("flush_batch: prepare failed")
-                .keep();
-            plan_cache::insert(QUAD_INSERT_SQL.to_string(), prepared);
-            plan_cache::record_miss();
-        } else {
-            plan_cache::record_hit();
-        }
-
-        // Build Datums for the cached plan. SAFETY: the (value, oid)
-        // pairs match by construction (Vec<i64>/INT8ARRAYOID,
-        // i64/INT8OID).
-        let datums: Vec<DatumWithOid<'_>> = unsafe {
-            vec![
-                DatumWithOid::new(s_arr, int8_array_oid),
-                DatumWithOid::new(p_arr, int8_array_oid),
-                DatumWithOid::new(o_arr, int8_array_oid),
-                DatumWithOid::new(graph_id, int8_oid),
-            ]
-        };
-
-        plan_cache::with_plan(QUAD_INSERT_SQL, |maybe_owned| {
-            let owned = maybe_owned.expect("load_turtle: plan must be in cache after insert");
-            client
-                .update(owned, None, &datums)
-                .expect("flush_batch: prepared insert failed");
-        });
-    });
+    // Probed here, at the call's first write to the graph, and not when
+    // the call starts: by now the loader holds its registry lock, and a
+    // read of the quad table before that lock inverts the order graph
+    // creation takes them in (registry, then quads) and deadlocks.
+    stats
+        .was_empty
+        .entry(graph_id)
+        .or_insert_with(|| graph_is_empty(graph_id));
+    let mode = if stats.plain {
+        crate::storage::quads::Mode::Plain
+    } else {
+        *stats
+            .modes
+            .entry(graph_id)
+            .or_insert_with(|| crate::storage::quads::Mode::of(graph_id))
+    };
+    let written = crate::storage::quads::insert_batch(graph_id, mode, s_arr, p_arr, o_arr);
+    stats.stored += written.stored;
+    stats.made_asserted += written.made_asserted;
     stats.quad_batches += 1;
 }
 
@@ -1088,6 +1062,94 @@ fn maybe_prewarm_once() {
     PREWARM_DONE.with(|c| c.set(true));
 }
 
+/// The import report every loader gives: what it read, what it stored and
+/// what it dropped as a repeat.
+///
+/// `duplicates_dropped` is one total: a repeat inside the load and a
+/// triple that was already stored look the same to a loader that works in
+/// batches, and telling them apart would mean holding the whole load in
+/// memory. `graph_was_empty` settles it where it can: when true, every
+/// duplicate came from inside the load. It is null for a call that wrote
+/// to several graphs.
+fn load_report(stats: &LoaderStats) -> serde_json::Value {
+    let read = stats.triples;
+    json!({
+        "triples_read": read,
+        "parse_skipped": stats.parse_skipped,
+        "triples_stored": stats.stored,
+        "inferred_made_asserted": stats.made_asserted,
+        "duplicates_dropped": (read - stats.stored - stats.made_asserted).max(0),
+        "graph_was_empty": stats.graph_was_empty,
+    })
+}
+
+/// What a `load` act records about itself: the entry point called, the
+/// route it took, and the import report.
+fn load_detail(entry: &str, stats: &LoaderStats) -> serde_json::Value {
+    json!({
+        "entry": entry,
+        "route": stats.path,
+        "load": load_report(stats),
+    })
+}
+
+/// Did `graph_id` hold no rows before this call wrote to it? Known from
+/// the first write; a call that wrote nothing left the graph as it was,
+/// so it is read now.
+fn was_empty_before(stats: &LoaderStats, graph_id: i64) -> bool {
+    stats
+        .was_empty
+        .get(&graph_id)
+        .copied()
+        .unwrap_or_else(|| graph_is_empty(graph_id))
+}
+
+/// Does `graph_id` hold no rows? One index probe.
+fn graph_is_empty(graph_id: i64) -> bool {
+    Spi::get_one_with_args::<bool>(
+        "SELECT NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_quads WHERE graph_id = $1)",
+        &[graph_id.into()],
+    )
+    .expect("load: empty-graph probe failed")
+    .unwrap_or(true)
+}
+
+/// Run one loader call as a recorded `load` act on `graph_id`, and keep
+/// its import report for `last_call_stats()`.
+fn recorded_load(
+    entry: &'static str,
+    graph_id: i64,
+    load: impl FnOnce() -> LoaderStats,
+) -> LoaderStats {
+    crate::storage::shmem_cache::set_last_load(None);
+    let act = crate::storage::acts::begin(graph_id, "load");
+    let mut stats = load();
+    stats.graph_was_empty = Some(was_empty_before(&stats, graph_id));
+    act.finish(load_detail(entry, &stats));
+    crate::storage::shmem_cache::set_last_load(Some(load_report(&stats)));
+    stats
+}
+
+/// Record a quad load: one `load` act on every graph the payload wrote
+/// to. The counts are the call's totals; `graphs` lists where they went.
+fn record_quad_load(
+    act: crate::storage::acts::ActScope,
+    entry: &str,
+    default_graph_id: i64,
+    stats: &LoaderStats,
+    graphs: &[i64],
+) {
+    crate::storage::shmem_cache::set_last_load(Some(load_report(stats)));
+    let mut detail = load_detail(entry, stats);
+    detail["graphs"] = json!(graphs);
+    for g in graphs.iter().filter(|g| **g != default_graph_id) {
+        act.also(*g, "load", detail.clone());
+    }
+    if graphs.contains(&default_graph_id) {
+        act.finish(detail);
+    }
+}
+
 fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
     pgrx::JsonB(json!({
         "triples":          stats.triples,
@@ -1114,6 +1176,8 @@ fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
         "path":             stats.path,
         "windows":          stats.windows,
         "dict_terms":       stats.dict_terms,
+        // What was read, stored, made asserted and dropped as a repeat.
+        "load":             load_report(stats),
     }))
 }
 
@@ -1513,6 +1577,8 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
         // TA-5 — the `pgrdf.ingest_dict_path` route the quad
         // dispatcher selected for this call.
         "path":             stats.path,
+        // What was read, stored, made asserted and dropped as a repeat.
+        "load":             load_report(stats),
     }))
 }
 
@@ -1520,7 +1586,8 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
 // UDF surface
 // ─────────────────────────────────────────────────────────────────────
 
-/// Drop the hexastore (SPO/POS/OSP) + the dict `_pgrdf_dict_val_idx`
+/// Drop the hexastore (POS/OSP on the parent, the target graph's own SPO
+/// index) + the dict `_pgrdf_dict_val_idx`
 /// hash + the dict `unique_term` UNIQUE constraint (v0.6.4) before a
 /// fresh bulk load, so the dict and quad bulk-inserts skip per-row index
 /// + uniqueness maintenance. Serialised through the same advisory gate
@@ -1535,27 +1602,37 @@ fn quad_stats_to_jsonb(stats: &LoaderStats, graphs: &[i64]) -> pgrx::JsonB {
 /// (`storage::staged::pool::load_turtle_staged_run`) reuses the EXACT same defer-index drop (incl.
 /// the partition-DDL gate) before its STAGE phase — the staged INDEX phase then rebuilds via
 /// `jobctl::index_ddls()` (byte-identical to `bulk_rebuild_indexes`).
-pub(crate) fn bulk_drop_indexes() {
+pub(crate) fn bulk_drop_indexes(graph_id: i64) {
     crate::storage::partition::acquire_partition_ddl_gate();
     Spi::run(
-        "DROP INDEX IF EXISTS pgrdf._pgrdf_idx_spo, pgrdf._pgrdf_idx_pos, \
-         pgrdf._pgrdf_idx_osp, pgrdf._pgrdf_dict_val_idx",
+        "DROP INDEX IF EXISTS pgrdf._pgrdf_idx_pos, pgrdf._pgrdf_idx_osp, \
+         pgrdf._pgrdf_dict_val_idx",
     )
     .expect("load_turtle: bulk defer-index drop");
+    // The target graph's own subject-predicate-object index: the unique
+    // one, or the plain one a graph holding repeats carries. Other
+    // partitions are empty here (the fast path needs an empty database)
+    // and keep theirs.
+    let part = crate::storage::quads::partition_of(graph_id);
+    Spi::run(&format!(
+        "DROP INDEX IF EXISTS pgrdf.{part}_spo_uniq, pgrdf.{part}_spo_idx"
+    ))
+    .expect("load_turtle: bulk defer set-index drop");
     Spi::run("ALTER TABLE pgrdf._pgrdf_dictionary DROP CONSTRAINT IF EXISTS unique_term")
         .expect("load_turtle: bulk defer unique_term drop");
 }
 
 /// Rebuild the indexes + the `unique_term` constraint dropped by
-/// `bulk_drop_indexes` after the bulk load completes. The DDL mirrors
-/// `sql/schema_v0_2_0.sql` exactly and uses `ON pgrdf._pgrdf_quads` (not
-/// `ON ONLY`) so the hexastore indexes cascade to the LIST partitions.
+/// `bulk_drop_indexes` after the bulk load completes, and return how many
+/// repeated rows the unique-index build had to remove (0 for clean input).
+/// The parent DDL mirrors `sql/schema_v0_2_0.sql` exactly and uses
+/// `ON pgrdf._pgrdf_quads` (not `ON ONLY`) so POS and OSP cascade to the
+/// LIST partitions.
 /// `CREATE INDEX` is parallel-aware (honours
 /// `max_parallel_maintenance_workers`); the final `ADD CONSTRAINT
 /// unique_term` re-validates dictionary uniqueness over the loaded data.
-fn bulk_rebuild_indexes() {
+fn bulk_rebuild_indexes(graph_id: i64) -> i64 {
     for ddl in [
-        "CREATE INDEX _pgrdf_idx_spo ON pgrdf._pgrdf_quads (subject_id, predicate_id, object_id) INCLUDE (is_inferred)",
         "CREATE INDEX _pgrdf_idx_pos ON pgrdf._pgrdf_quads (predicate_id, object_id, subject_id) INCLUDE (is_inferred)",
         "CREATE INDEX _pgrdf_idx_osp ON pgrdf._pgrdf_quads (object_id, subject_id, predicate_id) INCLUDE (is_inferred)",
         "CREATE INDEX _pgrdf_dict_val_idx ON pgrdf._pgrdf_dictionary USING HASH (lexical_value)",
@@ -1564,6 +1641,11 @@ fn bulk_rebuild_indexes() {
     ] {
         Spi::run(ddl).expect("load_turtle: bulk defer-index rebuild");
     }
+    // The graph's unique index, over rows that were written without
+    // conflict handling. Clean input pays one index build, as before. If
+    // the build finds repeats (the file repeated a triple), the surplus
+    // rows are removed and the index is built: the count comes back.
+    crate::storage::quads::build_set_index(graph_id, true)
 }
 
 /// v0.6.2 — parallel bulk-ingest fast path (`load_turtle(..., bulk_load
@@ -1709,7 +1791,8 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
     stats.defer_index = defer;
     if defer {
         let t_idx = Instant::now();
-        bulk_drop_indexes();
+        bulk_drop_indexes(graph_id);
+        stats.plain = true;
         stats.index_ms += t_idx.elapsed().as_secs_f64() * 1000.0;
     }
 
@@ -1750,6 +1833,9 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
                lv: Vec<String>,
                di: Vec<Option<i64>>,
                lt: Vec<Option<String>>| {
+        for v in &lv {
+            crate::storage::dict::refuse_nul(v);
+        }
         Spi::run_with_args(
             "INSERT INTO pgrdf._pgrdf_dictionary \
              (id, term_type, lexical_value, datatype_iri_id, language_tag) \
@@ -1897,7 +1983,7 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
     // Rebuild the deferred indexes over the freshly-loaded data.
     if defer {
         let t_idx = Instant::now();
-        bulk_rebuild_indexes();
+        stats.stored -= bulk_rebuild_indexes(graph_id);
         stats.index_ms += t_idx.elapsed().as_secs_f64() * 1000.0;
     }
     stats.elapsed_ms = t_all.elapsed().as_secs_f64() * 1000.0;
@@ -1957,6 +2043,9 @@ fn ingest_turtle_streaming(
         if ids.is_empty() {
             return;
         }
+        for v in &lv {
+            crate::storage::dict::refuse_nul(v);
+        }
         Spi::run_with_args(
             "INSERT INTO pgrdf._pgrdf_dictionary \
              (id, term_type, lexical_value, datatype_iri_id, language_tag) \
@@ -1969,7 +2058,8 @@ fn ingest_turtle_streaming(
 
     // Defer-index ONCE across the whole multi-window load.
     let t_idx0 = Instant::now();
-    bulk_drop_indexes();
+    bulk_drop_indexes(graph_id);
+    stats.plain = true;
     stats.index_ms += t_idx0.elapsed().as_secs_f64() * 1000.0;
     stats.defer_index = true;
 
@@ -2188,7 +2278,7 @@ fn ingest_turtle_streaming(
     }
 
     let t_idx1 = Instant::now();
-    bulk_rebuild_indexes();
+    stats.stored -= bulk_rebuild_indexes(graph_id);
     stats.index_ms += t_idx1.elapsed().as_secs_f64() * 1000.0;
 
     stats.dict_terms = dict.len() as i64;
@@ -2237,13 +2327,15 @@ fn load_turtle_streaming(
     require_server_file_read("load_turtle_streaming");
     let base = base_iri.filter(|s| !s.is_empty());
     crate::storage::lock::require_unlocked(graph_id, "load_turtle_streaming"); // #107
-    let stats = streaming_load_guarded(
-        path,
-        graph_id,
-        window_triples.max(1) as usize,
-        id_reserve_block.max(1) as usize,
-        base,
-    );
+    let stats = recorded_load("load_turtle_streaming", graph_id, || {
+        streaming_load_guarded(
+            path,
+            graph_id,
+            window_triples.max(1) as usize,
+            id_reserve_block.max(1) as usize,
+            base,
+        )
+    });
     stats_to_jsonb(&stats)
 }
 
@@ -2541,7 +2633,12 @@ fn staged_load_default(path: &str, graph_id: i64) -> i64 {
     if v.get("fallback").and_then(serde_json::Value::as_bool) == Some(true) {
         let file = File::open(path)
             .unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
-        return ingest_dispatch(BufReader::new(file), graph_id, None).triples;
+        // Recorded like every other load: the staged loader wrote no act
+        // for a load it declined.
+        return recorded_load("load_turtle", graph_id, || {
+            ingest_dispatch(BufReader::new(file), graph_id, None)
+        })
+        .triples;
     }
     if v.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         let phase = v
@@ -2552,6 +2649,16 @@ fn staged_load_default(path: &str, graph_id: i64) -> i64 {
             .get("error")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unspecified");
+        // A refusal raised in a worker (a term containing U+0000, say)
+        // reaches the caller with its own SQLSTATE and message, not wrapped
+        // in an internal error. Anything else stays one.
+        let refused = v
+            .get("sqlstate")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::storage::staged::pool::sqlstate_code);
+        if let Some(code) = refused {
+            crate::refuse(code, reason.to_string());
+        }
         error!(
             "load_turtle: staged loader aborted in the {phase} phase: {reason} \
              (staging table left in place as the resume point)"
@@ -2649,7 +2756,10 @@ fn load_turtle(
     // Explicit opt-in to the v0.6.2 in-backend parallel bulk path is honoured
     // verbatim — it predates the staged loader and stays the caller's choice.
     if bulk_load {
-        return bulk_load_guarded(path, graph_id, base).triples;
+        return recorded_load("load_turtle", graph_id, || {
+            bulk_load_guarded(path, graph_id, base)
+        })
+        .triples;
     }
     // v0.6.14 format-aware dispatch: prefer the native staged loader, but
     // ONLY when its worker pool is available (pgRDF preloaded), the file is
@@ -2668,6 +2778,8 @@ fn load_turtle(
         match file_sniffs_as_ntriples(path) {
             // The staged lane is owner-only (its workers run as the
             // caller); a non-owner takes the standard parser below.
+            // Its load act is written by the staged loader itself, in the
+            // transaction that publishes the triples.
             Some(true) if crate::storage::partition::caller_owns_storage() => {
                 return staged_load_default(path, graph_id);
             }
@@ -2688,7 +2800,10 @@ fn load_turtle(
     }
     let file =
         File::open(path).unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
-    ingest_dispatch(BufReader::new(file), graph_id, base).triples
+    recorded_load("load_turtle", graph_id, || {
+        ingest_dispatch(BufReader::new(file), graph_id, base)
+    })
+    .triples
 }
 
 /// Same as `load_turtle` but returns JSONB stats: triples,
@@ -2709,13 +2824,15 @@ fn load_turtle_verbose(
 ) -> pgrx::JsonB {
     require_server_file_read("load_turtle_verbose");
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = if bulk_load {
-        bulk_load_guarded(path, graph_id, base)
-    } else {
-        let file = File::open(path)
-            .unwrap_or_else(|e| panic!("load_turtle_verbose: failed to open {path:?}: {e}"));
-        ingest_dispatch(BufReader::new(file), graph_id, base)
-    };
+    let stats = recorded_load("load_turtle_verbose", graph_id, || {
+        if bulk_load {
+            bulk_load_guarded(path, graph_id, base)
+        } else {
+            let file = File::open(path)
+                .unwrap_or_else(|e| panic!("load_turtle_verbose: failed to open {path:?}: {e}"));
+            ingest_dispatch(BufReader::new(file), graph_id, base)
+        }
+    });
     stats_to_jsonb(&stats)
 }
 
@@ -2727,7 +2844,10 @@ fn load_turtle_verbose(
 #[pg_extern]
 fn parse_turtle(content: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL")) -> i64 {
     let base = base_iri.filter(|s| !s.is_empty());
-    ingest_dispatch(content.as_bytes(), graph_id, base).triples
+    recorded_load("parse_turtle", graph_id, || {
+        ingest_dispatch(content.as_bytes(), graph_id, base)
+    })
+    .triples
 }
 
 /// Verbose variant of `parse_turtle` returning JSONB stats.
@@ -2739,7 +2859,9 @@ fn parse_turtle_verbose(
     base_iri: default!(Option<&str>, "NULL"),
 ) -> pgrx::JsonB {
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = ingest_dispatch(content.as_bytes(), graph_id, base);
+    let stats = recorded_load("parse_turtle_verbose", graph_id, || {
+        ingest_dispatch(content.as_bytes(), graph_id, base)
+    });
     stats_to_jsonb(&stats)
 }
 
@@ -2764,12 +2886,17 @@ fn parse_turtle_dict_batched(
     dict_batch_size: default!(i32, 500),
 ) -> pgrx::JsonB {
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = ingest_turtle_dict_batched(
-        content.as_bytes(),
-        graph_id,
-        base,
-        dict_batch_size.max(1) as usize,
-    );
+    // This entry point calls its ingest loop directly, so it takes the
+    // lock check the shared dispatch gives every other route.
+    crate::storage::lock::require_unlocked(graph_id, "parse_turtle_dict_batched");
+    let stats = recorded_load("parse_turtle_dict_batched", graph_id, || {
+        ingest_turtle_dict_batched(
+            content.as_bytes(),
+            graph_id,
+            base,
+            dict_batch_size.max(1) as usize,
+        )
+    });
     let mut j = stats_to_jsonb(&stats);
     if let serde_json::Value::Object(ref mut m) = j.0 {
         m.insert(
@@ -2802,12 +2929,15 @@ fn load_turtle_dict_batched(
     let file = File::open(path)
         .unwrap_or_else(|e| panic!("load_turtle_dict_batched: failed to open {path:?}: {e}"));
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = ingest_turtle_dict_batched(
-        BufReader::new(file),
-        graph_id,
-        base,
-        dict_batch_size.max(1) as usize,
-    );
+    crate::storage::lock::require_unlocked(graph_id, "load_turtle_dict_batched");
+    let stats = recorded_load("load_turtle_dict_batched", graph_id, || {
+        ingest_turtle_dict_batched(
+            BufReader::new(file),
+            graph_id,
+            base,
+            dict_batch_size.max(1) as usize,
+        )
+    });
     let mut j = stats_to_jsonb(&stats);
     if let serde_json::Value::Object(ref mut m) = j.0 {
         m.insert(
@@ -2854,13 +2984,17 @@ fn parse_trig(
     if record {
         crate::storage::source_digest::begin_source_record(default_graph_id);
     }
-    let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_trig");
+    let act = crate::storage::acts::begin(default_graph_id, "load");
+    let (mut stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_trig");
+    // Stated only when the whole payload went to one graph.
+    stats.graph_was_empty = record.then(|| was_empty_before(&stats, default_graph_id));
     if record {
         crate::storage::source_digest::finish_source_record_bytes(
             default_graph_id,
             content.as_bytes(),
         );
     }
+    record_quad_load(act, "parse_trig", default_graph_id, &stats, &graphs);
     quad_stats_to_jsonb(&stats, &graphs)
 }
 
@@ -2893,13 +3027,18 @@ fn parse_nquads(
     if record {
         crate::storage::source_digest::begin_source_record(default_graph_id);
     }
-    let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_nquads");
+    let act = crate::storage::acts::begin(default_graph_id, "load");
+    let (mut stats, graphs) =
+        ingest_quads_dispatch(parser, default_graph_id, strict, "parse_nquads");
+    // Stated only when the whole payload went to one graph.
+    stats.graph_was_empty = record.then(|| was_empty_before(&stats, default_graph_id));
     if record {
         crate::storage::source_digest::finish_source_record_bytes(
             default_graph_id,
             content.as_bytes(),
         );
     }
+    record_quad_load(act, "parse_nquads", default_graph_id, &stats, &graphs);
     quad_stats_to_jsonb(&stats, &graphs)
 }
 
@@ -2956,6 +3095,93 @@ mod tests {
             .unwrap();
         Spi::run("RESET ROLE").unwrap();
         r
+    }
+
+    /// Stored terms that contain U+0000, found on raw bytes (length() and
+    /// the regex engine both stop at a NUL).
+    fn nul_terms() -> i64 {
+        Spi::get_one(
+            "SELECT count(*) FROM pgrdf._pgrdf_dictionary \
+             WHERE position('\\x00'::bytea IN pg_catalog.textsend(lexical_value)) > 0",
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    /// U+0000 is valid in an RDF literal (`"\u0000"`) and PostgreSQL text
+    /// cannot hold it: a stored NUL breaks every later read of the term.
+    /// Every ingest route refuses 22P05 before anything is written.
+    /// `load_turtle_streaming` and the staged route are covered by
+    /// tests/upgrade/loader-gate.sh: the first drops and rebuilds the quad
+    /// table's indexes, which deadlocks against parallel tests, and the
+    /// second commits from background workers.
+    #[pg_test]
+    fn every_ingest_route_refuses_u0000() {
+        try_fn();
+        let triple = "<urn:n1:s> <urn:n1:p> \"a\\u0000b\" .\n";
+        let quad = "<urn:n1:s> <urn:n1:p> \"a\\u0000b\" <urn:n1:g> .\n";
+        let path = format!("/tmp/pgrdf-n1-{}.nt", std::process::id());
+        std::fs::write(&path, triple).unwrap();
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:n1:g')")
+            .unwrap()
+            .unwrap();
+        let routes: Vec<(&str, String)> = vec![
+            (
+                "parse_turtle",
+                format!("SELECT pgrdf.parse_turtle($n1${triple}$n1$, {g})"),
+            ),
+            (
+                "parse_turtle_verbose",
+                format!("SELECT pgrdf.parse_turtle_verbose($n1${triple}$n1$, {g})"),
+            ),
+            (
+                "parse_turtle_dict_batched",
+                format!("SELECT pgrdf.parse_turtle_dict_batched($n1${triple}$n1$, {g})"),
+            ),
+            (
+                "parse_nquads",
+                format!("SELECT pgrdf.parse_nquads($n1${quad}$n1$, {g})"),
+            ),
+            (
+                "parse_trig",
+                format!("SELECT pgrdf.parse_trig($n1$<urn:n1:g> {{ {triple} }}$n1$, {g})"),
+            ),
+            (
+                "load_turtle (standard)",
+                format!("SELECT pgrdf.load_turtle('{path}', {g}, 'http://base.example/')"),
+            ),
+            (
+                "load_turtle (bulk)",
+                format!("SELECT pgrdf.load_turtle('{path}', {g}, NULL, true)"),
+            ),
+            (
+                "load_turtle_verbose",
+                format!("SELECT pgrdf.load_turtle_verbose('{path}', {g}, 'http://base.example/')"),
+            ),
+            (
+                "load_turtle_dict_batched",
+                format!("SELECT pgrdf.load_turtle_dict_batched('{path}', {g})"),
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (name, sql) in &routes {
+            let got: String = Spi::get_one_with_args("SELECT pg_temp.ld_try($1)", &[sql.into()])
+                .unwrap()
+                .unwrap();
+            if !got.starts_with("22P05|") {
+                wrong.push(format!("{name}: {got}"));
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            wrong.is_empty(),
+            "routes that did not refuse 22P05: {wrong:#?}"
+        );
+        assert_eq!(nul_terms(), 0, "no term with U+0000 was stored");
+        let rows: i64 = Spi::get_one(&format!("SELECT pgrdf.count_quads({g})"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(rows, 0, "nothing was written");
     }
 
     /// Every server-path loader requires pg_read_server_files (or
@@ -3706,8 +3932,9 @@ mod tests {
         let idx: i64 = Spi::get_one(
             "SELECT count(*)::bigint FROM pg_indexes
               WHERE schemaname = 'pgrdf'
-                AND indexname IN ('_pgrdf_idx_spo', '_pgrdf_idx_pos',
-                                  '_pgrdf_idx_osp', '_pgrdf_dict_val_idx')",
+                AND indexname IN ('_pgrdf_idx_pos', '_pgrdf_idx_osp', '_pgrdf_dict_val_idx',
+                                  '_pgrdf_quads_g7531_spo_uniq',
+                                  '_pgrdf_quads_default_spo_uniq')",
         )
         .unwrap()
         .unwrap();

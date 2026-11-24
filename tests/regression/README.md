@@ -10,8 +10,7 @@ tests/regression/
 ├── run.sh            # the driver: glob sql/*.sql → psql → diff vs expected/
 ├── sql/      NN-*.sql # the STIMULUS — the test script (setup + fixtures + queries)
 ├── expected/ NN-*.out # the ORACLE   — golden stdout it must reproduce (tuples-only)
-└── scripts/          # two orchestration tests that can't run inside psql -c
-    ├── pg-dump-roundtrip.sh
+└── scripts/          # orchestration that can't run inside psql -c
     └── verify-installed-artifacts.sh
 ```
 
@@ -27,7 +26,7 @@ rows).
 | `just test-regression` | all 93 (`bash tests/regression/run.sh`) |
 | `bash tests/regression/run.sh 71-shacl-real` | one test by exact basename |
 | `just test-regression-accept` / `ACCEPT=1 … run.sh` | re-baseline `expected/` from actual |
-| `just test-pg-dump-roundtrip` | `scripts/pg-dump-roundtrip.sh` (separate) |
+| `just test-pg-dump-roundtrip` | `tests/upgrade/dump-roundtrip.sh` (separate; needs a superuser `psql`) |
 | `just verify-installed-artifacts` | `scripts/verify-installed-artifacts.sh` (separate) |
 
 `run.sh` takes **all** or **one exact name** today — there is no group / range /
@@ -233,7 +232,7 @@ invocations, so they live outside the `sql/`+`expected/` golden model and are
 
 | Script | Run via | Verifies |
 |---|---|---|
-| [pg-dump-roundtrip.sh](scripts/pg-dump-roundtrip.sh) | `just test-pg-dump-roundtrip` | `pg_dump` of a pgRDF DB round-trips the `_pgrdf_graphs` IRI mapping verbatim (LLD v0.4 §3.1) |
+| [dump-roundtrip.sh](../upgrade/dump-roundtrip.sh) | `just test-pg-dump-roundtrip` (and CI) | `pg_dump` + `pg_restore` of a database holding graphs keeps the registry, every triple (default graph included), the dictionary, lock state and both id allocators, and the restored database keeps working (#152) |
 | [verify-installed-artifacts.sh](scripts/verify-installed-artifacts.sh) | `just verify-installed-artifacts` (and CI) | the running container has THIS repo's extension bytes mounted (fresh-export byte-compare + version surface) |
 
 ## Authoring a new regression test

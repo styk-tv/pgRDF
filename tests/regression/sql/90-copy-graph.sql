@@ -133,12 +133,11 @@ SELECT count(*)::bigint AS post_copy_src_count
   FROM pgrdf._pgrdf_quads
  WHERE graph_id = 200;
 
--- ─── Invariant 5: re-call duplicates ─────────────────────────────
--- copy_graph is NOT idempotent on dst — calling again with the
--- same (src, dst) appends another 3 rows to dst (total 6). To get
--- re-call idempotency, callers do `clear_graph(dst)` first; the
--- post-clear copy then yields exactly 3 again. This locks the
--- documented "callers handle clear-first" contract.
+-- ─── Invariant 5: a second copy adds nothing ─────────────────────
+-- A graph is a set (0.6.41): copying again with the same (src, dst)
+-- stores nothing and returns 0, and dst still holds 3 rows. (It used
+-- to append another 3.) Clearing dst first and copying again yields
+-- exactly 3 again.
 SELECT pgrdf.copy_graph(200::bigint, 201::bigint) AS recopied;
 
 SELECT count(*)::bigint AS dst_after_recopy

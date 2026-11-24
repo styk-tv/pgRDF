@@ -13,15 +13,17 @@ both with digests and a portable export.
 | **Structure** | `structural_digest(g)` | `pgrdf-fd1-sha256` | Did anything structural change? | **unequal only** |
 
 All three cover asserted triples only; inferred triples are never
-included.
+included. All three describe the graph as a **set** of triples: see
+[digests describe the set of triples](#digests-describe-the-set-of-triples).
 
 Values from different methods are never comparable with each other.
 Always keep the method label next to a digest you store or send.
 
 ### Why bytes are not enough: blank nodes
 
-Blank nodes get fresh labels every time data is loaded. Load the same
-Turtle twice and you get the same graph with different bytes:
+Anonymous blank nodes (`[ … ]`) get fresh labels every time data is
+loaded. Load the same Turtle twice and you get the same graph with
+different bytes:
 
 ```sql
 SELECT pgrdf.add_graph('urn:b1'), pgrdf.add_graph('urn:b2');
@@ -49,7 +51,10 @@ canonically before hashing. Equal identity digests mean the graphs are
 the same; unequal ones mean they differ.
 
 For graphs without blank nodes, the bytes and identity digests are the
-same value.
+same value. Labelled blank nodes (`_:b1`) keep the label the document
+gave them, so two loads of such a document also agree on bytes; rely on
+the identity digest all the same, because a copy made by another tool
+need not keep the labels.
 
 ### When to use the structural digest
 
@@ -66,6 +71,35 @@ A locked graph cannot change, so its `graph_digest` is computed once
 and then served from the stored value (visible as `identity_digest` in
 `graph_inventory()`). Unlocking clears it. Open graphs are digested on
 every call, so the answer is always current.
+
+### Digests describe the set of triples
+
+Since 0.6.41 `graph_digest`, `structural_digest`, the manifest's bytes
+digest and `export_graph` depend only on which triples a graph holds,
+not on how many times a triple is stored. Every graph written by
+0.6.41 is a set anyway. The difference shows on a graph that an
+earlier version left holding repeated triples (see
+[repeated triples from earlier versions](05-graphs.md#repeated-triples-from-earlier-versions)):
+it now digests and exports exactly like the same graph without the
+repeats.
+
+What that means for values you already hold:
+
+- **A graph without repeats: nothing changes.** Every digest and every
+  export line is byte-identical to what 0.6.40 produced.
+- **A graph that held repeats when you recorded its digest:** the old
+  value counted the repeated triples as stored, and the value 0.6.41
+  computes does not, so the two differ. `pgrdf.duplicate_report()`
+  names the graphs this applies to. The old value is not wrong about
+  what was stored then; it is a digest of a different thing, and it
+  cannot be reproduced by 0.6.41. Record the new one.
+- **A locked graph keeps answering the digest recorded for it**, even
+  if an earlier version computed it over repeats. The value is a
+  recorded fact and stays until the graph is unlocked.
+  `duplicate_report()` shows in `locked_digest_engine` which pgRDF
+  version computed it; empty means none since 0.6.41. Unlock, run
+  `dedup_graph`, and lock again to have the digest of the set
+  recorded.
 
 `graph_inventory()` also shows `source_sha256`, the SHA-256 of the file a
 graph was loaded from. That identifies the *artifact*, not the graph: the
@@ -118,9 +152,8 @@ SELECT side, subject, object
   FROM pgrdf.graph_diff(1, 2, class => 'http://example.org/C');
 ```
 
-Memory is bounded by `pgrdf.diff_max_rows` (default 5,000,000);
-pathological blank-node structures are refused with `54000`, as for
-`graph_digest`.
+Memory is bounded by `pgrdf.diff_max_rows` (default 5,000,000); past
+it the call is refused with `54000`.
 
 ### Edge cases
 
@@ -129,7 +162,62 @@ pathological blank-node structures are refused with `54000`, as for
 - A graph that doesn't exist is refused with `42704`. It never
   silently hashes nothing.
 - RDFC-1.0 has a complexity budget. Pathological blank-node structures
-  are refused with `54000` rather than running forever.
+  are refused rather than running forever, with the message
+  `canonicalization budget exceeded`.
+
+### Size and memory
+
+`export_graph`, `graph_manifest`, `graph_digest` and
+`structural_digest` read every asserted triple of a graph. Since 0.6.41
+they stream: PostgreSQL sorts the lines, on disk once they exceed
+`work_mem`, and pgRDF reads them a batch at a time, so the memory of
+the database process no longer grows with the graph.
+
+One part is still held in memory: the triples that involve a blank
+node, which the two digests need together to label the blank nodes.
+`pgrdf.digest_max_bnode_quads` (default 5,000,000) bounds how many;
+past it `graph_digest`, `structural_digest` and `graph_manifest` are
+refused with `54000`:
+
+```sql
+SET pgrdf.digest_max_bnode_quads = 1;
+SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:b1'));
+-- ERROR:  54000: graph_digest: graph 1 holds more than 1 distinct triples that involve a
+--         blank node (pgrdf.digest_max_bnode_quads=1)
+-- HINT:  Blank-node labelling needs those triples in memory together; ground triples are
+--        streamed and do not count. Raise pgrdf.digest_max_bnode_quads deliberately, with
+--        the memory to hold them.
+```
+
+Triples without blank nodes do not count towards it, and
+`export_graph` has no such limit.
+
+### A stored U+0000
+
+Versions before 0.6.41 could store a term containing the character
+U+0000, which PostgreSQL `text` cannot hold; reading such a term back
+failed or cut it short. Loading now [refuses it](02-loading-rdf.md#characters-that-cannot-be-stored).
+A graph that still holds one is refused by `export_graph`,
+`graph_manifest`, `graph_digest` and `structural_digest` with `22021`
+before any line is returned, so no cut-off export leaves the database.
+The message names the term's dictionary id and the graph, and the
+hint the cure: reload the graph from a source with the character
+removed or replaced.
+
+`pgrdf.nul_term_report()` lists every such term with the graphs that
+use it. No rows means there are none:
+
+```sql
+SELECT * FROM pgrdf.nul_term_report();
+--  term_id | term_type | preview | graph_ids
+-- ---------+-----------+---------+-----------
+-- (0 rows)
+```
+
+`term_type` is `1` for an IRI, `2` for a blank node, `3` for a literal;
+`preview` shows the start of the term with the character written
+`\u0000`. The function reads the whole dictionary, so run it as an
+occasional check, not per request.
 
 ## Exporting a graph
 
@@ -154,8 +242,9 @@ JSON document:
 {
   "graph_id": 1,
   "iri": "http://example.org/people",
-  "captured_at": "2026-09-10 08:07:19.478543+00",
-  "engine": { "version": "0.6.34", "build_id": "v0.6.34", "extversion": "0.6.34" },
+  "captured_at": "2026-11-24 14:15:16.21078+00",
+  "consistent": false,
+  "engine": { "version": "0.6.41", "build_id": "v0.6.41", "extversion": "0.6.41" },
   "counts": { "asserted": 14, "inferred": 8 },
   "digests": {
     "bytes":     { "value": "c8500c48…", "method": "sha256-of-canonical-ntriples" },
@@ -171,6 +260,34 @@ JSON document:
 ```
 
 `not_carried` spells out what a copy of the graph does *not* include.
+
+Every value describes the set of asserted triples:
+
+- `counts.asserted` is the number of lines `export_graph` returns.
+- `counts.repeats` appears only for a graph that stores some triple
+  more than once, and is the number of surplus rows. A graph written by
+  0.6.41 never has it.
+- `counts.inferred` is a check value; inferred triples are not
+  exported.
+
+`consistent` says whether the three digests are known to describe the
+same state. They are three separate reads of the graph, so a write
+that lands between them could make them disagree. `consistent` is
+`true` when that cannot have happened: the graph is locked, or the
+transaction runs at `REPEATABLE READ` or stricter. When it is `false`
+and the graph may be written while you read, take the manifest again
+like this:
+
+```sql
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT pgrdf.graph_manifest(pgrdf.graph_id('http://example.org/people')) -> 'consistent';
+-- true
+COMMIT;
+```
+
+For a package, export and manifest belong in one such transaction (or
+take them from a locked graph), so the file and its manifest describe
+the same state.
 
 ## Recipe: package a graph and verify it offline
 

@@ -457,11 +457,18 @@ pub fn prepare_for_load(job: &JobSlot) {
         .max(1);
     // (1) Defer indexes — the SAME drop (incl. the partition-DDL gate) the single-backend bulk path
     // uses; Phase D rebuilds the identical set via `index_ddls()`.
-    crate::storage::loader::bulk_drop_indexes();
+    // Register the graph the way every other creating route does: a
+    // registry row, an owner and a create act (the caller's: this worker
+    // acts for it). The partition made here is replaced by RESOLVE, which
+    // builds the graph's table standalone and attaches it; the registry
+    // row stays. Before this, a staged load left a graph with no registry
+    // row at all.
+    Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[job.graph_id.into()])
+        .expect("staged STAGE: registering the graph failed");
+    crate::storage::loader::bulk_drop_indexes(job.graph_id);
     // (2) The UNLOGGED staging table, with the parallel_workers reloption that lets DICT/RESOLVE scan
     // it on all cores. Created here (in a committed worker txn), not by the coordinator, so its
     // ACCESS EXCLUSIVE creation lock is released before DICT/RESOLVE run.
-    let _ = job.graph_id; // partition for graph_id is created by RESOLVE (standalone-then-ATTACH).
     let table = staging_table(job.job_id);
     let sql = format!(
         "CREATE UNLOGGED TABLE IF NOT EXISTS {table} ({STAGE_COLS}) WITH (parallel_workers = {nproc})"
@@ -541,13 +548,17 @@ fn itoa_smallint(v: i16) -> &'static str {
 /// parallel, no shared state. The term→column extraction is byte-for-byte the same match the serial
 /// `stage()` used (URI/blank → `as_str()` sans brackets; literal → lexical value sans quotes, with
 /// datatype IRI string XOR language tag), so the staged rows are identical regardless of core count.
-/// Returns `(rows, skipped)`.
-fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64) {
-    let parsed: Vec<(Vec<StagedRow>, i64)> = lines
+/// Returns `(rows, skipped, nul_term)`. `nul_term` is the first term found that contains U+0000:
+/// PostgreSQL text cannot hold it and the COPY would fail on it with an encoding error, so the
+/// caller refuses the load by name instead. It is only reported here, never raised: these closures
+/// run on rayon threads, and an error may only be raised from the backend's own thread.
+fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64, Option<String>) {
+    let parsed: Vec<(Vec<StagedRow>, i64, Option<String>)> = lines
         .par_chunks(STAGE_PARSE_CHUNK)
         .map(|chunk| {
             let mut out: Vec<StagedRow> = Vec::with_capacity(chunk.len());
             let mut skipped: i64 = 0;
+            let mut nul_term: Option<String> = None;
             for line in chunk {
                 for r in NTriplesParser::new().for_reader(line.as_bytes()) {
                     let t = match r {
@@ -557,9 +568,13 @@ fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64) {
                             continue; // lenient: skip malformed triples (Wikidata control bytes)
                         }
                     };
+                    // A blank subject is staged WITH its `_:` prefix. The subject column has
+                    // no type column beside it, and DICT and RESOLVE tell a blank subject from
+                    // an IRI by that prefix; staged bare, it was stored as an IRI and no longer
+                    // joined its own uses as an object.
                     let s = match &t.subject {
                         NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
-                        NamedOrBlankNode::BlankNode(b) => b.as_str().to_string(),
+                        NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
                     };
                     let p = t.predicate.as_str().to_string();
                     let (o_type, o_val, o_dt, o_lang): (
@@ -589,15 +604,22 @@ fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64) {
                         #[allow(unreachable_patterns)]
                         _ => panic!("staged STAGE: unsupported object term"),
                     };
+                    if nul_term.is_none() {
+                        nul_term = [&s, &p, &o_val]
+                            .into_iter()
+                            .find(|v| v.as_bytes().contains(&0))
+                            .cloned();
+                    }
                     out.push((s, p, o_type, o_val, o_dt, o_lang));
                 }
             }
-            (out, skipped)
+            (out, skipped, nul_term)
         })
         .collect();
-    let skipped: i64 = parsed.iter().map(|(_, s)| *s).sum();
-    let rows: Vec<StagedRow> = parsed.into_iter().flat_map(|(c, _)| c).collect();
-    (rows, skipped)
+    let skipped: i64 = parsed.iter().map(|(_, s, _)| *s).sum();
+    let nul_term = parsed.iter().find_map(|(_, _, n)| n.clone());
+    let rows: Vec<StagedRow> = parsed.into_iter().flat_map(|(c, _, _)| c).collect();
+    (rows, skipped, nul_term)
 }
 
 /// Load one parsed window into `{table}` via server-side **COPY** (the fast path the E160 benchmark
@@ -695,6 +717,7 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
 
     let mut window_lines: Vec<String> = Vec::with_capacity(STAGE_WINDOW_LINES);
     let mut staged: i64 = 0;
+    let mut skipped_total: i64 = 0;
     let mut window_idx: u64 = 0;
 
     loop {
@@ -721,7 +744,11 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
         }
 
         // ── Parse this window across all cores, then COPY it in.
-        let (rows, _skipped) = parse_window_par(&window_lines);
+        let (rows, skipped, nul_term) = parse_window_par(&window_lines);
+        if let Some(term) = nul_term {
+            crate::storage::dict::refuse_nul(&term);
+        }
+        skipped_total += skipped;
         staged += rows.len() as i64;
         copy_window(&table, job.job_id, w.shard, window_idx, &rows);
         window_idx += 1;
@@ -730,6 +757,7 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
             break;
         }
     }
+    jobctl::add_parse_skipped(w.job_idx as usize, skipped_total);
     staged
 }
 
@@ -869,7 +897,7 @@ pub fn dict(job: &JobSlot, _w: &WorkerSlot) -> i64 {
          SELECT {base}::bigint + (SELECT count(*) FROM {d_uri}) + row_number() OVER () AS id, \
                 b AS lexical_value FROM ( \
              SELECT b FROM ( \
-                 SELECT s AS b FROM {stg} WHERE s LIKE '\\_:%' \
+                 SELECT substr(s, 3) AS b FROM {stg} WHERE s LIKE '\\_:%' \
                  UNION ALL SELECT o_val FROM {stg} WHERE o_type = {blank} \
              ) a GROUP BY b \
          ) d"
@@ -974,7 +1002,7 @@ pub fn dict(job: &JobSlot, _w: &WorkerSlot) -> i64 {
 /// datatype IRI) `ddt.lexical_value IS NOT DISTINCT FROM o_dt`, both NULL-safe so URIs/blanks and
 /// no-datatype/lang literals (all NULL `o_dt`/`o_lang`) still resolve exactly as before. So
 /// `"5"^^xsd:int` and `"5"@en` resolve to their OWN ids — the prior lossy value-only collision is gone.
-pub fn resolve(job: &JobSlot, _w: &WorkerSlot) -> i64 {
+pub fn resolve(job: &JobSlot, w: &WorkerSlot) -> i64 {
     let stg = staging_table(job.job_id);
     let graph_id = job.graph_id;
     let uri = term_type::URI as i32;
@@ -1027,7 +1055,8 @@ pub fn resolve(job: &JobSlot, _w: &WorkerSlot) -> i64 {
          FROM {stg} st \
          JOIN pgrdf._pgrdf_dictionary ds \
               ON ds.term_type = CASE WHEN st.s LIKE '\\_:%' THEN {blank} ELSE {uri} END \
-             AND ds.lexical_md5 = decode(md5(st.s), 'hex') \
+             AND ds.lexical_md5 = decode(md5(CASE WHEN st.s LIKE '\\_:%' THEN substr(st.s, 3) \
+                                                  ELSE st.s END), 'hex') \
          JOIN pgrdf._pgrdf_dictionary dp \
               ON dp.term_type = {uri} \
              AND dp.lexical_md5 = decode(md5(st.p), 'hex') \
@@ -1060,14 +1089,39 @@ pub fn resolve(job: &JobSlot, _w: &WorkerSlot) -> i64 {
         "ALTER TABLE pgrdf.{part} DROP CONSTRAINT {part}_pbound"
     ))
     .expect("staged RESOLVE: drop redundant partition CHECK failed");
+    // The table attached here replaced the partition the graph was
+    // registered with, so it gets the parent's ACL the way a newly
+    // created partition does.
+    crate::storage::partition::inherit_parent_acl(&part);
 
-    Spi::get_one_with_args::<i64>(
+    let rows = Spi::get_one_with_args::<i64>(
         "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
         &[graph_id.into()],
     )
     .ok()
     .flatten()
-    .unwrap_or(0)
+    .unwrap_or(0);
+    // The load act, in the transaction that publishes the triples: the
+    // act and the data commit together or not at all. Repeats in the file
+    // are still in `rows` here; the index phase removes them and records
+    // that as an act of its own.
+    let skipped = jobctl::read_job(w.job_idx as usize).parse_skipped;
+    crate::storage::acts::record(
+        graph_id,
+        "load",
+        serde_json::json!({
+            "entry": "load_turtle_staged_run",
+            "route": "staged",
+            "load": {
+                "triples_read": rows,
+                "parse_skipped": skipped,
+                "triples_stored": rows,
+                "inferred_made_asserted": 0,
+                "graph_was_empty": true,
+            },
+        }),
+    );
+    rows
 }
 
 /// **INDEX** (Phase D). Each INDEX worker runs exactly ONE of the [`super::index_ddls`] statements
@@ -1077,12 +1131,29 @@ pub fn resolve(job: &JobSlot, _w: &WorkerSlot) -> i64 {
 /// load — the same situation `bulk_rebuild_indexes` already exploits; "concurrent" parallelism comes
 /// from running the separate builds at once, not from `CONCURRENTLY` (§6.D). The worker's `shard`
 /// field selects which DDL it runs.
-pub fn build_index(_job: &JobSlot, w: &WorkerSlot) {
+pub fn build_index(job: &JobSlot, w: &WorkerSlot) {
     let ddls = jobctl::index_ddls();
     let i = w.shard as usize;
     let ddl = ddls
         .get(i)
         .unwrap_or_else(|| panic!("staged INDEX: ddl index {i} out of range"));
+    if *ddl == jobctl::SET_INDEX {
+        // The graph's unique index, over rows RESOLVE wrote as the file
+        // stated them. A file without repeats pays one index build, as the
+        // parent's index did. One with repeats has the surplus rows
+        // removed first; that changes stored data, so it is recorded: a
+        // `dedup` act beside the load.
+        let removed = crate::storage::quads::build_set_index(job.graph_id, true);
+        jobctl::set_dups_removed(w.job_idx as usize, removed.max(0));
+        if removed > 0 {
+            crate::storage::acts::record(
+                job.graph_id,
+                "dedup",
+                serde_json::json!({ "removed": removed, "during": "load" }),
+            );
+        }
+        return;
+    }
     Spi::run(ddl).unwrap_or_else(|e| panic!("staged INDEX: DDL #{i} failed: {e}"));
 }
 
@@ -1154,7 +1225,7 @@ mod tests {
              SELECT {base}::bigint + (SELECT count(*) FROM dict_uri_lt) + row_number() OVER () AS id, \
                     b AS lexical_value FROM ( \
                SELECT b FROM ( \
-                 SELECT s AS b FROM {stg} WHERE s LIKE '\\_:%' \
+                 SELECT substr(s, 3) AS b FROM {stg} WHERE s LIKE '\\_:%' \
                  UNION ALL SELECT o_val FROM {stg} WHERE o_type = {blank} \
                ) a GROUP BY b) d"
         ))
@@ -1235,7 +1306,8 @@ mod tests {
              FROM {stg} st \
              JOIN pgrdf._pgrdf_dictionary ds \
                   ON ds.term_type = CASE WHEN st.s LIKE '\\_:%' THEN {blank} ELSE {uri} END \
-                 AND ds.lexical_md5 = decode(md5(st.s), 'hex') \
+                 AND ds.lexical_md5 = decode(md5(CASE WHEN st.s LIKE '\\_:%' THEN substr(st.s, 3) \
+                                                  ELSE st.s END), 'hex') \
              JOIN pgrdf._pgrdf_dictionary dp \
                   ON dp.term_type = {uri} AND dp.lexical_md5 = decode(md5(st.p), 'hex') \
              JOIN pgrdf._pgrdf_dictionary dobj \
@@ -1288,12 +1360,27 @@ mod tests {
             "<http://ex/s> <http://ex/p> <http://ex/o> .".to_string(),
             "this is not a valid n-triples line at all".to_string(),
         ];
-        let (rows, skipped) = parse_window_par(&lines);
+        let (rows, skipped, nul_term) = parse_window_par(&lines);
         assert_eq!(rows.len(), 1, "the one well-formed triple is parsed");
         assert!(
             skipped >= 1,
             "the malformed line must be counted as skipped (got {skipped}), not panic"
         );
+        assert_eq!(nul_term, None);
+    }
+
+    /// A literal `"\u0000"` parses as valid N-Triples; PostgreSQL text cannot hold the value, and
+    /// the staging COPY would fail on it with an encoding error. The parser reports the term so the
+    /// worker refuses the load by name (22P05) before the COPY.
+    #[pg_test]
+    fn staged_parse_window_reports_a_term_with_u0000() {
+        let lines = vec![
+            "<http://ex/s> <http://ex/p> <http://ex/o> .".to_string(),
+            "<http://ex/s> <http://ex/p> \"a\\u0000b\" .".to_string(),
+        ];
+        let (rows, _skipped, nul_term) = parse_window_par(&lines);
+        assert_eq!(rows.len(), 2, "both lines are well-formed N-Triples");
+        assert_eq!(nul_term.as_deref(), Some("a\0b"));
     }
 
     /// **Local proxy for "RESOLVE degrades to spill, not OOM."** No box is available to reproduce the
@@ -1361,7 +1448,8 @@ mod tests {
              FROM {stg} st \
              JOIN pgrdf._pgrdf_dictionary ds \
                   ON ds.term_type = CASE WHEN st.s LIKE '\\_:%' THEN {blank} ELSE {uri} END \
-                 AND ds.lexical_md5 = decode(md5(st.s), 'hex') \
+                 AND ds.lexical_md5 = decode(md5(CASE WHEN st.s LIKE '\\_:%' THEN substr(st.s, 3) \
+                                                  ELSE st.s END), 'hex') \
              JOIN pgrdf._pgrdf_dictionary dp \
                   ON dp.term_type = {uri} AND dp.lexical_md5 = decode(md5(st.p), 'hex') \
              JOIN pgrdf._pgrdf_dictionary dobj \

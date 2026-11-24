@@ -159,6 +159,15 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
     );
     as_storage_owner(|| {
         Spi::run(&sql).expect("create_quads_partition: CREATE TABLE failed");
+        // A graph is a set of triples, and this index is what enforces it:
+        // no two rows of the partition share subject, predicate and object.
+        // Same key as the other two hexastore indexes' sibling, so lookups
+        // by subject plan exactly as before.
+        Spi::run(&format!(
+            "CREATE UNIQUE INDEX IF NOT EXISTS {part_name}_spo_uniq ON pgrdf.{part_name} \
+             (subject_id, predicate_id, object_id) INCLUDE (is_inferred)"
+        ))
+        .expect("create_quads_partition: unique index failed");
         // (6) Replicate the parent's ACL onto the new partition.
         inherit_parent_acl(part_name);
         // (7) #150: advance the graph-id sequence past this id, so an id
@@ -421,7 +430,7 @@ fn can_clear_graphs() -> bool {
 /// `relacl IS NULL` means default, owner-only privileges — `aclexplode`
 /// yields no rows and nothing is granted, so a deployment that never
 /// granted anything sees no behaviour change.
-fn inherit_parent_acl(part_name: &str) {
+pub(crate) fn inherit_parent_acl(part_name: &str) {
     // Grantee 0 is PUBLIC, which has no entry in pg_authid and must be
     // spelled as a bare keyword rather than a quoted identifier.
     let sql = format!(
@@ -934,9 +943,12 @@ mod tests {
             "copy_graph",
             "carve_graph",
             "materialize",
+            "validate",
             "lock_graph",
             "unlock_graph",
             "sparql",
+            "dedup_graph",
+            "set_graph_owner",
             "clear_graph",
             "move_graph",
             "drop_graph",
@@ -949,9 +961,12 @@ mod tests {
             "construct",
             "count_quads",
             "describe",
+            "duplicate_report",
             "export_graph",
             "get_term",
             "graph_diff",
+            "graph_activity",
+            "graph_acts",
             "graph_diff_summary",
             "graph_digest",
             "graph_id",
@@ -960,23 +975,24 @@ mod tests {
             "graph_iri",
             "graph_manifest",
             "last_call_stats",
+            "nul_term_report",
             "orphan_partitions",
             "ownership_drift",
             "shacl_capability",
             "sparql_parse",
             "sparql_sql",
-            "stats",
             "structural_digest",
             "surface",
-            "validate",
             "version",
         ];
         // Refused up front for a non-owner, by design (F4), or operator
-        // maintenance of the shared term cache rather than a graph write.
+        // maintenance of state every database shares (the term cache and
+        // its counters, #161) rather than a graph write.
         const OWNER_LANE: &[&str] = &[
             "load_turtle_staged",
             "load_turtle_staged_run",
             "shmem_reset",
+            "stats",
         ];
 
         crate::storage::partition::acquire_partition_ddl_gate();
@@ -1011,6 +1027,7 @@ mod tests {
             ("carve_graph", "SELECT pgrdf.carve_graph(pgrdf.graph_id('urn:m:a'), 'urn:m:p', pgrdf.add_graph('urn:m:c1'))".into()),
             ("carve_graph", "SELECT pgrdf.carve_graph(pgrdf.graph_id('urn:m:a'), ARRAY['urn:m:s'], pgrdf.add_graph('urn:m:c2'), 1)".into()),
             ("materialize", "SELECT pgrdf.materialize(pgrdf.graph_id('urn:m:a'), 'rdfs')".into()),
+            ("validate", "SELECT pgrdf.validate(pgrdf.graph_id('urn:m:a'), pgrdf.graph_id('urn:m:b'), 'native', false)".into()),
             ("lock_graph", "SELECT pgrdf.lock_graph(pgrdf.graph_id('urn:m:a'), 'matrix')".into()),
             ("graph_digest", "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:m:a'))".into()),
             ("unlock_graph", "SELECT pgrdf.unlock_graph(pgrdf.graph_id('urn:m:a'), 'matrix')".into()),
@@ -1021,6 +1038,8 @@ mod tests {
             ("sparql", "SELECT * FROM pgrdf.sparql('INSERT DATA { GRAPH <urn:m:sp> { <urn:m:x> <urn:m:p> <urn:m:y> } }')".into()),
             ("sparql", "SELECT * FROM pgrdf.sparql('CLEAR GRAPH <urn:m:sp>')".into()),
             ("sparql", "SELECT * FROM pgrdf.sparql('DROP GRAPH <urn:m:sp>')".into()),
+            ("set_graph_owner", "SELECT pgrdf.set_graph_owner(pgrdf.graph_id('urn:m:c1'), 'pgrdf_145_app')".into()),
+            ("dedup_graph", "SELECT pgrdf.dedup_graph(pgrdf.graph_id('urn:m:c1'))".into()),
             ("clear_graph", "SELECT pgrdf.clear_graph(pgrdf.graph_id('urn:m:c1'))".into()),
             ("clear_graph", "SELECT pgrdf.clear_graph('urn:m:b')".into()),
             ("move_graph", "SELECT pgrdf.move_graph(pgrdf.graph_id('urn:m:c2'), pgrdf.add_graph('urn:m:mv1'))".into()),
@@ -1260,5 +1279,107 @@ mod tests {
             Spi::run(cure).unwrap();
         }
         assert_eq!(count(), 0, "running the cures removes the drift");
+    }
+
+    /// #160: `blocking` is true exactly when the storage owner lacks what
+    /// the engine does as that role on the object. Asked for a role with
+    /// chosen grants, so the rule is checked without re-owning storage.
+    #[pg_test]
+    fn ownership_drift_blocking_follows_what_the_engine_uses() {
+        use std::collections::BTreeMap;
+        crate::storage::partition::acquire_partition_ddl_gate();
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:160:g')")
+            .unwrap()
+            .unwrap();
+        let part = format!("_pgrdf_quads_g{g}");
+        Spi::run("CREATE ROLE pgrdf_160_so NOLOGIN").unwrap();
+        let role: pgrx::pg_sys::Oid = Spi::get_one("SELECT 'pgrdf_160_so'::regrole::oid")
+            .unwrap()
+            .unwrap();
+        let rows = || -> BTreeMap<String, (String, bool, String)> {
+            crate::storage::inventory::drift_rows_for(role)
+                .into_iter()
+                .map(|(name, kind, _, _, blocking, cure)| (name, (kind, blocking, cure)))
+                .collect()
+        };
+        let blocking = |name: &str| -> bool {
+            rows()
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not listed"))
+                .1
+        };
+
+        // A role with no rights at all: every object the engine uses blocks.
+        assert!(blocking(&part), "a partition needs ownership");
+        assert!(blocking("_pgrdf_graphs"));
+        assert!(blocking("_pgrdf_graph_id_seq"));
+        let r = rows();
+        let schema = r.get("pgrdf").expect("the pgrdf schema is listed");
+        assert_eq!(schema.0, "schema");
+        assert!(schema.1, "creating partitions needs CREATE on the schema");
+        assert_eq!(schema.2, "ALTER SCHEMA pgrdf OWNER TO pgrdf_160_so");
+        // The 0.6.40 false positive: nothing runs as the storage owner on
+        // the dictionary, so it is listed and never blocking.
+        assert!(
+            !blocking("_pgrdf_dictionary"),
+            "the engine never touches the dictionary as the storage owner"
+        );
+
+        // _pgrdf_graphs: SELECT and UPDATE. UPDATE is also what LOCK TABLE
+        // ... SHARE ROW EXCLUSIVE asks for; compared with the real command.
+        // Tried in a subtransaction, so a refusal leaves this one usable.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.o1_can_lock() RETURNS boolean LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               BEGIN \
+                 SET LOCAL ROLE pgrdf_160_so; \
+                 LOCK TABLE pgrdf._pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE; \
+                 RESET ROLE; \
+                 RETURN true; \
+               EXCEPTION WHEN insufficient_privilege THEN \
+                 RETURN false; \
+               END; \
+             END $$",
+        )
+        .unwrap();
+        let can_lock = || -> bool {
+            Spi::get_one::<bool>("SELECT pg_temp.o1_can_lock()")
+                .unwrap()
+                .unwrap()
+        };
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_160_so").unwrap();
+        Spi::run("GRANT SELECT ON pgrdf._pgrdf_graphs TO pgrdf_160_so").unwrap();
+        assert!(
+            blocking("_pgrdf_graphs"),
+            "SELECT alone cannot take the lock"
+        );
+        assert!(!can_lock(), "PostgreSQL agrees: SELECT alone cannot lock");
+        Spi::run("GRANT UPDATE ON pgrdf._pgrdf_graphs TO pgrdf_160_so").unwrap();
+        assert!(!blocking("_pgrdf_graphs"), "SELECT + UPDATE is enough");
+        assert!(can_lock(), "PostgreSQL agrees: UPDATE can lock");
+
+        // The sequence keeps its 0.6.40 rule.
+        Spi::run("GRANT USAGE ON SEQUENCE pgrdf._pgrdf_graph_id_seq TO pgrdf_160_so").unwrap();
+        assert!(blocking("_pgrdf_graph_id_seq"), "USAGE alone is not enough");
+        Spi::run("GRANT SELECT, UPDATE ON SEQUENCE pgrdf._pgrdf_graph_id_seq TO pgrdf_160_so")
+            .unwrap();
+        assert!(!blocking("_pgrdf_graph_id_seq"));
+
+        // The schema: USAGE is held, CREATE is still missing.
+        assert!(
+            rows().get("pgrdf").unwrap().1,
+            "USAGE without CREATE blocks"
+        );
+        Spi::run("GRANT CREATE ON SCHEMA pgrdf TO pgrdf_160_so").unwrap();
+        assert!(!rows().get("pgrdf").unwrap().1, "USAGE + CREATE is enough");
+
+        // A partition is cured by ownership only: no grant is enough.
+        Spi::run(&format!("GRANT ALL ON pgrdf.{part} TO pgrdf_160_so")).unwrap();
+        assert!(blocking(&part), "grants never replace owning a partition");
+        Spi::run(&format!("ALTER TABLE pgrdf.{part} OWNER TO pgrdf_160_so")).unwrap();
+        assert!(
+            !rows().contains_key(&part),
+            "an owned partition is not drift"
+        );
     }
 }

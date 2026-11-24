@@ -52,6 +52,16 @@ SELECT bool_and(
     -- graph_inventory() derivation), never a guess.
     WHEN 'last_materialize_at'     THEN format_type(atttypid, atttypmod) = 'timestamp with time zone' AND NOT attnotnull
     WHEN 'materialized_base_count' THEN format_type(atttypid, atttypmod) = 'bigint' AND NOT attnotnull
+    -- 0.6.41: the graph owner (a role NAME, so a restore never aborts on
+    -- a missing role), when and by which act the graph was created, the
+    -- act holding the current lock, and the engine version that computed
+    -- the cached digest. All nullable: NULL means "not recorded" on a
+    -- graph that predates them.
+    WHEN 'owner'                THEN format_type(atttypid, atttypmod) = 'text'   AND NOT attnotnull
+    WHEN 'created_at'           THEN format_type(atttypid, atttypmod) = 'timestamp with time zone' AND NOT attnotnull
+    WHEN 'created_act'          THEN format_type(atttypid, atttypmod) = 'bigint' AND NOT attnotnull
+    WHEN 'locked_act'           THEN format_type(atttypid, atttypmod) = 'bigint' AND NOT attnotnull
+    WHEN 'locked_digest_engine' THEN format_type(atttypid, atttypmod) = 'text'   AND NOT attnotnull
     ELSE FALSE
   END
 ) AS columns_correct

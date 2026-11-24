@@ -100,7 +100,13 @@ fn decode_term_cell(cell: &Value, position: &str, bnode_map: &mut HashMap<String
                     "{PANIC_PREFIX}: {position}: literal not allowed in subject/predicate position (RDF)"
                 );
             }
-            let language = obj.get("language").and_then(Value::as_str);
+            // Lower case, as every parser route stores it: `"hi"@EN` and
+            // `"hi"@en` are one literal and must be one dictionary term.
+            let language = obj
+                .get("language")
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase);
+            let language = language.as_deref();
             // Language-tagged literals MUST NOT carry a separately
             // resolved datatype id (rdf:langString is implicit per
             // RDF 1.1 §3.3). The construct emitter writes the
@@ -143,27 +149,10 @@ fn insert_quad(s_id: i64, p_id: i64, o_id: i64, g_id: i64) -> bool {
         Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[g_id.into()])
             .unwrap_or_else(|e| panic!("{PANIC_PREFIX}: add_graph({g_id}) failed: {e}"));
     }
-    // RETURNING gives us the row count so we can report "newly
-    // inserted" vs "deduplicated by NOT EXISTS guard" without a
-    // second probe.
-    let inserted: i64 = Spi::get_one_with_args(
-        "WITH ins AS (
-            INSERT INTO pgrdf._pgrdf_quads
-                  (subject_id, predicate_id, object_id, graph_id, is_inferred)
-            SELECT $1, $2, $3, $4, false
-             WHERE NOT EXISTS (
-                SELECT 1 FROM pgrdf._pgrdf_quads
-                 WHERE subject_id = $1
-                   AND predicate_id = $2
-                   AND object_id = $3
-                   AND graph_id = $4)
-            RETURNING 1)
-         SELECT count(*)::bigint FROM ins",
-        &[s_id.into(), p_id.into(), o_id.into(), g_id.into()],
-    )
-    .unwrap_or_else(|e| panic!("{PANIC_PREFIX}: INSERT quad failed: {e}"))
-    .unwrap_or(0);
-    inserted > 0
+    // The shared writer: a triple already asserted adds nothing, and one
+    // stored only as inferred becomes asserted.
+    let w = crate::storage::quads::insert_row(g_id, s_id, p_id, o_id);
+    w.stored + w.made_asserted > 0
 }
 
 /// Core decode + insert step. Shared between the single-row and
@@ -217,8 +206,11 @@ fn put_construct_row(row: pgrx::JsonB, graph_id: default!(i64, 0)) -> i64 {
         );
     }
     crate::storage::lock::require_unlocked(graph_id, "put_construct_row"); // #107
+    let act = crate::storage::acts::begin(graph_id, "ingest");
     let mut bnode_map: HashMap<String, i64> = HashMap::new();
-    ingest_one(&row.0, graph_id, &mut bnode_map)
+    let stored = ingest_one(&row.0, graph_id, &mut bnode_map);
+    act.finish(serde_json::json!({ "rows": 1, "stored": stored }));
+    stored
 }
 
 /// Re-ingest a captured `pgrdf.construct(q)` rowset into the
@@ -257,6 +249,7 @@ fn put_construct_rows(rows: Option<Vec<Option<pgrx::JsonB>>>, graph_id: default!
         // rather than panicking.
         return 0;
     };
+    let act = crate::storage::acts::begin(graph_id, "ingest");
     let mut bnode_map: HashMap<String, i64> = HashMap::new();
     let mut inserted: i64 = 0;
     for (idx, maybe_row) in rows.iter().enumerate() {
@@ -265,6 +258,7 @@ fn put_construct_rows(rows: Option<Vec<Option<pgrx::JsonB>>>, graph_id: default!
         });
         inserted += ingest_one(&row.0, graph_id, &mut bnode_map);
     }
+    act.finish(serde_json::json!({ "rows": rows.len(), "stored": inserted }));
     inserted
 }
 
@@ -454,5 +448,34 @@ mod tests {
             joined,
             "bnode within-solution joining must survive round-trip"
         );
+    }
+
+    /// Language tags are stored in lower case by every parser route
+    /// (RDF 1.1 allows the conversion, and tags compare case-insensitively).
+    /// A JSON row must land on the same term, or one literal becomes two.
+    #[pg_test]
+    fn language_tag_is_lowercased_like_the_parsers() {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:lang:g')")
+            .unwrap()
+            .unwrap();
+        Spi::run(&format!(
+            "SELECT pgrdf.parse_turtle('<urn:l:s> <urn:l:p> \"hi\"@en-US .', {g})"
+        ))
+        .unwrap();
+        let n: i64 = Spi::get_one(&format!(
+            "SELECT pgrdf.put_construct_row('{{\"subject\": {{\"type\": \"iri\", \"value\": \"urn:l:s\"}}, \
+               \"predicate\": {{\"type\": \"iri\", \"value\": \"urn:l:p\"}}, \
+               \"object\": {{\"type\": \"literal\", \"value\": \"hi\", \"language\": \"EN-us\"}}}}'::jsonb, {g})"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 0, "the same triple: nothing new is stored");
+        let terms: i64 = Spi::get_one(
+            "SELECT count(*) FROM pgrdf._pgrdf_dictionary \
+             WHERE lexical_value = 'hi' AND lower(language_tag) = 'en-us'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(terms, 1, "one term for one literal");
     }
 }

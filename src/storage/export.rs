@@ -28,46 +28,10 @@
 //! what it does not contain is a transcription that says so, instead of
 //! a record-shaped object relying on a reader who already knows.
 
-use crate::storage::canon::{CTerm, read_asserted_triples};
+use crate::storage::lines::Lines;
 use pgrx::prelude::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-
-/// Canonical N-Triples escaping — the full grammar (backslash, quote,
-/// newline, carriage return, tab), shared with the RDFC serializer's
-/// conventions. NOTE: deliberately NOT the fd1 fleet-minimal escaping;
-/// the two serializations serve different digests and are never mixed.
-fn nt_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-fn nt_term(t: &CTerm) -> String {
-    match t {
-        CTerm::Iri(i) => format!("<{i}>"),
-        CTerm::BNode(b) => format!("_:{b}"),
-        CTerm::Lit { val, dt, lang } => {
-            let esc = nt_escape(val);
-            match (lang, dt) {
-                (Some(l), _) => format!("\"{esc}\"@{l}"),
-                (None, Some(d)) if d != "http://www.w3.org/2001/XMLSchema#string" => {
-                    format!("\"{esc}\"^^<{d}>")
-                }
-                _ => format!("\"{esc}\""),
-            }
-        }
-    }
-}
 
 /// Refuse absent graphs with 42704 — the shared existence discipline of
 /// the digest/export surface (an EMPTY graph answers; absence refuses).
@@ -92,18 +56,6 @@ fn require_graph(graph_id: i64, verb: &str) {
     }
 }
 
-/// The canonical export body: sorted lines, no trailing newline in the
-/// vector form. Shared by `export_graph` and the manifest's bytes digest
-/// so the digest is BY CONSTRUCTION over exactly what the export emits.
-fn export_lines(graph_id: i64) -> Vec<String> {
-    let mut lines: Vec<String> = read_asserted_triples(graph_id)
-        .iter()
-        .map(|(s, p, o)| format!("{} {} {} .", nt_term(s), nt_term(p), nt_term(o)))
-        .collect();
-    lines.sort();
-    lines
-}
-
 /// A graph's ASSERTED triples as canonical N-Triples, one line per
 /// triple, byte-sorted. Deterministic for a given stored copy; blank
 /// node labels are the stored ones, so two loads of the same source
@@ -111,11 +63,20 @@ fn export_lines(graph_id: i64) -> Vec<String> {
 /// `structural_digest` exist to see through. Inferred rows are never
 /// exported: they re-derive (`pgrdf.materialize`), and exporting them
 /// would re-import as asserted what was only derived.
+///
+/// The export is the SET of triples: a triple the graph physically holds
+/// more than once is one line. Lines are sorted by PostgreSQL and read
+/// through a cursor, so the backend holds a batch of lines, not the
+/// graph. A graph holding a term that contains U+0000 refuses 22021
+/// before the first line is returned.
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn export_graph(graph_id: i64) -> SetOfIterator<'static, String> {
     require_graph(graph_id, "export_graph");
-    SetOfIterator::new(export_lines(graph_id).into_iter())
+    // Listed while PostgreSQL sorts, which is where the time goes; the
+    // lines are then handed out as the caller asks for them.
+    let _listed = crate::storage::acts::reading(graph_id, "export");
+    SetOfIterator::new(Lines::export(graph_id))
 }
 
 /// The portable manifest of one graph: digests (each with its method),
@@ -123,32 +84,49 @@ fn export_graph(graph_id: i64) -> SetOfIterator<'static, String> {
 /// Pair with `export_graph` (the content) to build a redistributable
 /// package; verify a copy offline by recomputing `digests.bytes` over
 /// the content file.
+///
+/// Every value describes the SET of asserted triples. `counts.asserted`
+/// is the number of lines `export_graph` returns; `counts.repeats` is
+/// present, and above 0, only when the graph physically holds some triple
+/// more than once, and is the number of surplus rows.
+///
+/// The three digests are three separate reads of the graph. `consistent`
+/// is true when they are known to have read the same data: the graph is
+/// locked, or the transaction runs at REPEATABLE READ or stricter. When it
+/// is false and the graph may be written concurrently, take the manifest
+/// again inside a REPEATABLE READ transaction.
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn graph_manifest(graph_id: i64) -> pgrx::JsonB {
     require_graph(graph_id, "graph_manifest");
+    let _listed = crate::storage::acts::reading(graph_id, "manifest");
 
-    let lines = export_lines(graph_id);
     // The bytes digest is over the export FILE form: every line
     // newline-terminated. An empty graph is an empty file — e3b0c44…,
     // the sha256 of zero bytes, which is an ANSWER here (the graph
-    // exists and is empty; absence refused above).
+    // exists and is empty; absence refused above). It hashes the very
+    // stream `export_graph` returns, so it is BY CONSTRUCTION the digest
+    // of what the export emits.
+    let mut lines = Lines::export(graph_id);
     let mut h = Sha256::new();
-    for l in &lines {
+    for l in lines.by_ref() {
+        pgrx::check_for_interrupts!();
         h.update(l.as_bytes());
         h.update(b"\n");
     }
     let bytes_sha: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let (asserted, repeats) = (lines.distinct, lines.rows - lines.distinct);
+    drop(lines);
 
-    let (iri, asserted, inferred, captured_at, extversion) = Spi::get_one_with_args::<pgrx::JsonB>(
+    let (iri, inferred, captured_at, extversion, locked) = Spi::get_one_with_args::<pgrx::JsonB>(
         "SELECT to_jsonb(x) FROM (
             SELECT (SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = $1) AS iri,
                    (SELECT count(*) FROM pgrdf._pgrdf_quads
-                     WHERE graph_id = $1 AND NOT is_inferred) AS asserted,
-                   (SELECT count(*) FROM pgrdf._pgrdf_quads
                      WHERE graph_id = $1 AND is_inferred) AS inferred,
                    now()::text AS captured_at,
-                   (SELECT extversion FROM pg_extension WHERE extname = 'pgrdf') AS extversion
+                   (SELECT extversion FROM pg_extension WHERE extname = 'pgrdf') AS extversion,
+                   coalesce((SELECT locked FROM pgrdf._pgrdf_graphs WHERE graph_id = $1),
+                            false) AS locked
          ) x",
         &[graph_id.into()],
     )
@@ -157,10 +135,10 @@ fn graph_manifest(graph_id: i64) -> pgrx::JsonB {
         let v = j.0;
         (
             v["iri"].as_str().map(|s| s.to_string()),
-            v["asserted"].as_i64().unwrap_or(0),
             v["inferred"].as_i64().unwrap_or(0),
             v["captured_at"].as_str().unwrap_or_default().to_string(),
             v["extversion"].as_str().unwrap_or_default().to_string(),
+            v["locked"].as_bool().unwrap_or(false),
         )
     })
     .expect("graph_manifest: metadata row");
@@ -174,20 +152,34 @@ fn graph_manifest(graph_id: i64) -> pgrx::JsonB {
             .expect("graph_manifest: structural_digest failed")
             .expect("graph_manifest: structural_digest NULL");
 
+    // The passes above are separate reads. They agree for certain when
+    // nothing can write the graph (it is locked and the lock's triggers
+    // are in place), or when the transaction reads one snapshot.
+    let one_snapshot =
+        unsafe { pgrx::pg_sys::XactIsoLevel } >= pgrx::pg_sys::XACT_REPEATABLE_READ as i32;
+    let consistent =
+        one_snapshot || (locked && crate::storage::lock::lock_trigger_count(graph_id) == Some(2));
+
+    let mut counts = json!({
+        "asserted": asserted,
+        // A CHECK VALUE, never content: inferred triples re-derive.
+        "inferred": inferred,
+    });
+    if repeats > 0 {
+        counts["repeats"] = json!(repeats);
+    }
+
     pgrx::JsonB(json!({
         "graph_id": graph_id,
         "iri": iri,
         "captured_at": captured_at,
+        "consistent": consistent,
         "engine": {
             "version": crate::version(),
             "build_id": crate::build_id(),
             "extversion": extversion,
         },
-        "counts": {
-            "asserted": asserted,
-            // A CHECK VALUE, never content: inferred triples re-derive.
-            "inferred": inferred,
-        },
+        "counts": counts,
         "digests": {
             "bytes":     { "value": bytes_sha, "method": "sha256-of-canonical-ntriples" },
             "identity":  { "value": identity,  "method": "rdfc-1.0-sha256" },
@@ -301,7 +293,7 @@ mod tests {
         );
         for d in ["bytes", "identity", "structure"] {
             assert!(
-                v["digests"][d]["method"].as_str().unwrap_or("").len() > 0,
+                !v["digests"][d]["method"].as_str().unwrap_or("").is_empty(),
                 "every digest carries its method (K5)"
             );
         }

@@ -19,3 +19,6 @@ ex:TestShape
   sh:targetNode 4.1 ;
   sh:targetNode "Hello" ;
 .
+_:b22005
+  rdf:type ex:TestClass ;
+.

@@ -129,6 +129,18 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
             ),
         ),
     }
+    // The reasoner needs the whole base in memory. With
+    // pgrdf.max_inmemory_triples set, a larger graph refuses here, before
+    // anything is read or the previous inferred rows are wiped.
+    crate::query::guc::require_inmemory_limit("materialize", &format!("graph {graph_id}"), || {
+        Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $1 AND NOT is_inferred",
+            &[graph_id.into()],
+        )
+        .expect("materialize: counting the base failed")
+        .unwrap_or(0)
+    });
+    let act = crate::storage::acts::begin(graph_id, "materialize");
 
     // 1. Idempotency: wipe prior inferred rows in this graph.
     let dropped: i64 = Spi::connect_mut(|client| {
@@ -336,6 +348,12 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     // asserted count it ran over — graph_inventory()'s `materialization`
     // column derives current/stale from these at read time.
     crate::storage::freshness::stamp_materialize(graph_id, base_count);
+    act.finish(json!({
+        "profile": profile,
+        "base_triples": base_count,
+        "inferred_written": written,
+        "previous_inferred_dropped": dropped,
+    }));
     pgrx::JsonB(json!({
         "base_triples":              base_count,
         "inferred_triples_written":  written,
@@ -353,10 +371,9 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
 }
 
 /// Flush one accumulated batch of inferred (s, p, o) dict-id triples
-/// into `_pgrdf_quads` as a single unnest-array INSERT with
-/// `is_inferred = TRUE` — the loader's `flush_batch` shape, minus the
-/// plan cache (≤ ~200 statements per materialize; parse cost is noise).
-/// Clears the input vecs and returns the number of rows written.
+/// into `_pgrdf_quads` with `is_inferred = TRUE`, through the shared
+/// set-semantics writer. Clears the input vecs and returns the number of
+/// rows written.
 fn flush_inferred(
     batch_s: &mut Vec<i64>,
     batch_p: &mut Vec<i64>,
@@ -366,31 +383,18 @@ fn flush_inferred(
     if batch_s.is_empty() {
         return 0;
     }
-    let n = batch_s.len() as i64;
     let s_arr = std::mem::take(batch_s);
     let p_arr = std::mem::take(batch_p);
     let o_arr = std::mem::take(batch_o);
-    let int8_oid: pgrx::pg_sys::Oid = pgrx::pg_sys::PgBuiltInOids::INT8OID.into();
-    let int8_array_oid: pgrx::pg_sys::Oid = pgrx::pg_sys::PgBuiltInOids::INT8ARRAYOID.into();
-    // SAFETY: the (value, oid) pairs match by construction
-    // (Vec<i64>/INT8ARRAYOID, i64/INT8OID).
-    let datums = unsafe {
-        [
-            pgrx::datum::DatumWithOid::new(s_arr, int8_array_oid),
-            pgrx::datum::DatumWithOid::new(p_arr, int8_array_oid),
-            pgrx::datum::DatumWithOid::new(o_arr, int8_array_oid),
-            pgrx::datum::DatumWithOid::new(graph_id, int8_oid),
-        ]
-    };
-    Spi::run_with_args(
-        "INSERT INTO pgrdf._pgrdf_quads
-            (subject_id, predicate_id, object_id, graph_id, is_inferred)
-         SELECT s, p, o, $4, TRUE
-           FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS t(s, p, o)",
-        &datums,
+    // Through the shared writer: an inferred triple never duplicates or
+    // changes a stored one.
+    crate::storage::quads::insert_inferred_batch(
+        graph_id,
+        crate::storage::quads::Mode::of(graph_id),
+        s_arr,
+        p_arr,
+        o_arr,
     )
-    .expect("materialize: batched insert inferred failed");
-    n
 }
 
 /// Strict, sound, complete RDFS entailment-rule forward-chain over
@@ -1014,5 +1018,76 @@ mod tests {
             "SELECT pgrdf.materialize($1, 'owl-rl-ext')",
             &[g.into()],
         );
+    }
+
+    /// `pgrdf.max_inmemory_triples`: off by default; when set, a graph
+    /// with more asserted triples refuses 54000 before anything is read
+    /// or changed (the previous inferred rows stay), naming the count,
+    /// the limit and the setting.
+    #[pg_test]
+    fn materialize_refuses_over_the_inmemory_limit() {
+        let g: i64 = 8480;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.com/> .
+                 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                 ex:Engineer rdfs:subClassOf ex:Person .
+                 ex:alice a ex:Engineer .
+                 ex:bob a ex:Engineer ."
+                    .into(),
+                g.into(),
+            ],
+        )
+        .unwrap();
+        let limit: String = Spi::get_one("SHOW pgrdf.max_inmemory_triples")
+            .unwrap()
+            .unwrap();
+        assert_eq!(limit, "0", "off by default");
+        Spi::run_with_args("SELECT pgrdf.materialize($1, 'rdfs')", &[g.into()]).unwrap();
+        let inferred = || -> i64 {
+            Spi::get_one_with_args(
+                "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $1 AND is_inferred",
+                &[g.into()],
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let before = inferred();
+        assert!(before >= 2);
+
+        // Tried in a subtransaction, so the refusal leaves this one usable.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.m_attempt(q text) RETURNS text \
+             LANGUAGE plpgsql AS $$ DECLARE st text; m text; BEGIN \
+               BEGIN EXECUTE q; RETURN 'ok'; \
+               EXCEPTION WHEN OTHERS THEN \
+                 GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, m = MESSAGE_TEXT; \
+                 RETURN st || '|' || m; \
+               END; \
+             END $$",
+        )
+        .unwrap();
+        let attempt = || -> String {
+            Spi::get_one::<String>(
+                "SELECT pg_temp.m_attempt('SELECT pgrdf.materialize(8480, ''rdfs'')')",
+            )
+            .unwrap()
+            .unwrap()
+        };
+
+        Spi::run("SET LOCAL pgrdf.max_inmemory_triples = 2").unwrap();
+        let refused = attempt();
+        assert!(refused.starts_with("54000|"), "{refused}");
+        assert!(
+            refused.contains("holds 3 triples") && refused.contains("pgrdf.max_inmemory_triples=2"),
+            "the refusal names the count, the limit and the setting: {refused}"
+        );
+        assert_eq!(inferred(), before, "nothing was wiped");
+
+        Spi::run("SET LOCAL pgrdf.max_inmemory_triples = 3").unwrap();
+        assert_eq!(attempt(), "ok", "at the limit it runs");
+        assert_eq!(inferred(), before);
     }
 }

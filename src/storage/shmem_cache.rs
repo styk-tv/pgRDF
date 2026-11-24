@@ -205,10 +205,28 @@ thread_local! {
     static CALL_FILTER_DROPS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
 }
 
+thread_local! {
+    /// The import report of the most recent loader call in this backend.
+    static LAST_LOAD: RefCell<Option<serde_json::Value>> = const { RefCell::new(None) };
+}
+
 /// Reset the per-call figures. Called at query-verb entry.
 pub fn call_stats_reset() {
     CALL_PATH_TRUNCATIONS.with(|c| c.set(0));
     CALL_FILTER_DROPS.with(|c| c.set(0));
+    LAST_LOAD.with(|l| *l.borrow_mut() = None);
+}
+
+/// Record (or, with `None`, forget) the import report of the loader call
+/// that just ran. Backend-local, like the other per-call figures.
+pub fn set_last_load(report: Option<serde_json::Value>) {
+    LAST_LOAD.with(|l| *l.borrow_mut() = report);
+}
+
+/// The import report of the most recent loader call in THIS backend, if
+/// the most recent pgrdf call was a load.
+pub fn last_load() -> Option<serde_json::Value> {
+    LAST_LOAD.with(|l| l.borrow().clone())
 }
 
 /// The per-call figures for the most recent pgrdf query verb in THIS

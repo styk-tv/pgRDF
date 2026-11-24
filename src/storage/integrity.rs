@@ -40,7 +40,10 @@ fn graph_integrity(graph_id: i64) -> pgrx::JsonB {
     .expect("graph_integrity: graph lookup failed")
     .unwrap_or(false);
     if !known {
-        pgrx::error!("graph_integrity: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)");
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+            format!("graph_integrity: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
+        );
     }
 
     // One pass over the graph's quads, all positions joined at once.

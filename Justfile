@@ -166,12 +166,13 @@ benchmark-report:
         --history target/perf-history/runs.jsonl \
         --out     target/perf-history/index.html
 
-# pg_dump round-trip verification for `_pgrdf_graphs` (LLD v0.4 §3.1
-# acceptance criterion). Boots a clean state, seeds two IRI bindings,
-# pg_dumps, drops + restores, then re-queries to verify the mapping
-# survived. Requires the compose stack to be up and idle.
+# pg_dump / pg_restore round trip (#152): the registry, every triple, the
+# dictionary, lock state and both id allocators survive, and the restored
+# database keeps working. Needs a superuser connection: set
+# PGRDF_UPGRADE_PSQL to the psql command (default `psql -X`). The gate
+# creates and drops its own two databases and touches nothing else.
 test-pg-dump-roundtrip:
-    PGRDF_RUNTIME={{RUN}} bash tests/regression/scripts/pg-dump-roundtrip.sh
+    bash tests/upgrade/dump-roundtrip.sh
 
 # Prove that compose/extensions/ matches a fresh build from this source tree
 # and that the running container has those exact bytes mounted.

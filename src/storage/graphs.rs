@@ -217,6 +217,7 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         );
     }
     crate::storage::lock::require_unlocked(id, "drop_graph"); // #107
+    crate::storage::acts::require_graph_owner(id, "drop_graph");
     if id == 0 {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
@@ -303,6 +304,10 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         "drop_graph",
     );
 
+    // Read who is acting, and the graph's IRI, before the row goes: the
+    // drop act keeps the IRI of a graph that no longer exists.
+    let act = crate::storage::acts::begin(id, "drop");
+
     // DETACH + DROP — partition-DDL metadata window under ACCESS
     // EXCLUSIVE on the parent, run as the storage owner. DETACH first
     // so DROP TABLE doesn't need partition-aware locking; the partition
@@ -325,6 +330,7 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         &[id.into()],
     )
     .unwrap_or_else(|e| panic!("drop_graph: _pgrdf_graphs row cleanup failed: {e}"));
+    act.finish(serde_json::json!({ "rows": total, "cascade": cascade }));
 
     total
 }
@@ -463,6 +469,10 @@ fn move_graph(src: i64, dst: i64) -> i64 {
         }
     }
 
+    // One act, recorded on both graphs; the copy and the drop it is made
+    // of record nothing of their own.
+    let act = crate::storage::acts::begin(dst, "move");
+
     // Compose step 1: copy src → dst. Slice 97's `copy_graph`
     // returns the row count copied — that's our return value.
     // Runtime dependency: this SELECT errors until slice 97 lands.
@@ -478,8 +488,15 @@ fn move_graph(src: i64, dst: i64) -> i64 {
     // with the partition. The drop's return value is discarded —
     // we report `copied` as the move count, which is the row count
     // at copy time.
+    // The source's row is written while its registry row still names it.
+    act.also(
+        src,
+        "move",
+        serde_json::json!({ "to": dst, "rows": copied }),
+    );
     Spi::run_with_args("SELECT pgrdf.drop_graph($1::bigint, true)", &[src.into()])
         .unwrap_or_else(|e| panic!("move_graph: drop_graph step failed: {e}"));
+    act.finish(serde_json::json!({ "from": src, "rows": copied }));
 
     copied
 }
@@ -532,6 +549,7 @@ fn clear_graph(id: i64) -> i64 {
         );
     }
     crate::storage::lock::require_unlocked(id, "clear_graph"); // #107
+    crate::storage::acts::require_graph_owner(id, "clear_graph");
     // #145: TRUNCATE is its own privilege, outside the documented grant
     // set. A caller holding SELECT + DELETE on the quad table may already
     // delete every row of the graph; only the TRUNCATE itself runs as the
@@ -581,12 +599,117 @@ fn clear_graph(id: i64) -> i64 {
     // shell stays attached to `_pgrdf_quads`, so the next
     // `INSERT … VALUES (..., $1 = id, ...)` routes here without
     // touching the default partition.
+    let act = crate::storage::acts::begin(id, "clear");
     crate::storage::partition::as_storage_owner(|| {
         Spi::run(&format!("TRUNCATE ONLY pgrdf.{partition_name}"))
             .unwrap_or_else(|e| panic!("clear_graph: TRUNCATE failed: {e}"));
     });
+    // The registry describes the graph as it is now: an empty graph has no
+    // source and no materialization. What it was loaded from stays in the
+    // act record.
+    // As the storage owner: clearing is authorised by DELETE on the quad
+    // table alone (#145), and this is the engine's own bookkeeping.
+    crate::storage::partition::as_storage_owner(|| {
+        Spi::run_with_args(
+            "UPDATE pgrdf._pgrdf_graphs \
+                SET source_sha256 = NULL, source_loads = NULL, \
+                    last_materialize_at = NULL, materialized_base_count = NULL \
+              WHERE graph_id = $1 \
+                AND (source_sha256, source_loads, last_materialize_at, materialized_base_count) \
+                    IS DISTINCT FROM (NULL, NULL, NULL, NULL)",
+            &[id.into()],
+        )
+        .unwrap_or_else(|e| panic!("clear_graph: registry reset failed: {e}"));
+    });
+    act.finish(serde_json::json!({ "rows": total }));
 
     total
+}
+
+/// Copy the triples of `src` (all of them, or those with predicate
+/// `predicate_id`) into `dst` as a set, and return how many triples `dst`
+/// gained: new rows, plus rows that were only inferred in `dst` and are
+/// asserted in `src`.
+///
+/// Repeats in a source that still holds them are collapsed (an asserted
+/// copy wins over an inferred one). The insert goes through the parent
+/// with `ON CONFLICT DO NOTHING`; a destination without the unique index
+/// is checked row by row instead. Partition names are built from validated
+/// non-negative BIGINTs, never from user input.
+fn copy_as_set(src: i64, dst: i64, predicate_id: Option<i64>) -> i64 {
+    let src_name = format!("_pgrdf_quads_g{src}");
+    let filter = match predicate_id {
+        Some(_) => "AND s.predicate_id = $1",
+        None => "AND $1::bigint IS NULL",
+    };
+    // A source holding repeats is grouped; a clean one is read as it is.
+    let (select, group) = if crate::storage::quads::set_enforced(src) {
+        ("s.is_inferred", "")
+    } else {
+        (
+            "bool_and(s.is_inferred)",
+            "GROUP BY s.subject_id, s.predicate_id, s.object_id",
+        )
+    };
+    let absent = if crate::storage::quads::set_enforced(dst) {
+        ""
+    } else {
+        "AND NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_quads d \
+                          WHERE d.graph_id = $2 AND d.subject_id = s.subject_id \
+                            AND d.predicate_id = s.predicate_id AND d.object_id = s.object_id)"
+    };
+    let dst_had_rows: bool = Spi::get_one_with_args(
+        "SELECT EXISTS (SELECT 1 FROM pgrdf._pgrdf_quads WHERE graph_id = $1)",
+        &[dst.into()],
+    )
+    .unwrap_or_else(|e| panic!("copy: destination probe failed: {e}"))
+    .unwrap_or(false);
+    let stored: i64 = Spi::get_one_with_args(
+        &format!(
+            "WITH ins AS ( \
+               INSERT INTO pgrdf._pgrdf_quads \
+                     (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+               SELECT s.subject_id, s.predicate_id, s.object_id, $2::bigint, {select} \
+                 FROM pgrdf.{src_name} s \
+                WHERE true {filter} {absent} \
+                {group} \
+               ON CONFLICT DO NOTHING \
+               RETURNING 1) \
+             SELECT count(*)::bigint FROM ins"
+        ),
+        &[predicate_id.into(), dst.into()],
+    )
+    .unwrap_or_else(|e| panic!("copy: INSERT ... SELECT failed: {e}"))
+    .unwrap_or(0);
+    // Asserted in the source, only inferred in the destination: the
+    // destination's row becomes asserted (see storage::quads). Possible
+    // only when the destination held rows before this copy.
+    let made_asserted: i64 = if dst_had_rows {
+        let filter = match predicate_id {
+            Some(_) => "AND s.predicate_id = $1",
+            None => "AND $1::bigint IS NULL",
+        };
+        crate::storage::partition::as_storage_owner(|| {
+            Spi::get_one_with_args(
+                &format!(
+                    "WITH up AS ( \
+                       UPDATE pgrdf._pgrdf_quads d SET is_inferred = false \
+                         FROM pgrdf.{src_name} s \
+                        WHERE d.graph_id = $2 AND d.is_inferred AND NOT s.is_inferred \
+                          AND d.subject_id = s.subject_id AND d.predicate_id = s.predicate_id \
+                          AND d.object_id = s.object_id {filter} \
+                       RETURNING 1) \
+                     SELECT pg_catalog.count(*)::bigint FROM up"
+                ),
+                &[predicate_id.into(), dst.into()],
+            )
+            .unwrap_or_else(|e| panic!("copy: asserting inferred rows failed: {e}"))
+            .unwrap_or(0)
+        })
+    } else {
+        0
+    };
+    stored + made_asserted
 }
 
 /// Copy every row from graph `src`'s LIST partition into graph
@@ -701,6 +824,7 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
     .unwrap_or_else(|e| panic!("copy_graph: dst existence check failed: {e}"))
     .unwrap_or(false);
 
+    let act = crate::storage::acts::begin(dst, "copy");
     if !dst_exists {
         Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[dst.into()])
             .unwrap_or_else(|e| panic!("copy_graph: dst partition creation failed: {e}"));
@@ -716,25 +840,18 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
         .unwrap_or(0);
 
     if count == 0 {
+        act.finish(serde_json::json!({ "from": src, "rows": 0 }));
         return 0;
     }
 
-    // The copy itself — `INSERT INTO <dst> SELECT … FROM <src>`
-    // with the `graph_id` projection rebound to `dst`. Both
-    // `is_inferred = FALSE` and `is_inferred = TRUE` rows carry
-    // forward (no WHERE-clause discrimination). The explicit
-    // column list on the INSERT side keeps the projection
-    // order-independent of any future `_pgrdf_quads` column
-    // additions.
-    Spi::run(&format!(
-        "INSERT INTO pgrdf.{dst_name} \
-            (subject_id, predicate_id, object_id, graph_id, is_inferred) \
-         SELECT subject_id, predicate_id, object_id, {dst}::bigint, is_inferred \
-           FROM pgrdf.{src_name}"
-    ))
-    .unwrap_or_else(|e| panic!("copy_graph: INSERT INTO ... SELECT failed: {e}"));
+    // The copy itself, as a set: what the destination already holds is
+    // not stored again, so a second copy adds nothing. Both asserted and
+    // inferred rows carry forward.
+    let _ = dst_name;
+    let gained = copy_as_set(src, dst, None);
+    act.finish(serde_json::json!({ "from": src, "rows_read": count, "rows": gained }));
 
-    count
+    gained
 }
 
 /// Carve a query-defined slice of `src` into `dst` as a new graph in the SAME
@@ -825,27 +942,22 @@ fn carve_graph(src: i64, predicate: &str, dst: i64) -> i64 {
     )
     .unwrap_or_else(|e| panic!("carve_graph: dst existence check failed: {e}"))
     .unwrap_or(false);
+    let act = crate::storage::acts::begin(dst, "carve");
     if !dst_exists {
         Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[dst.into()])
             .unwrap_or_else(|e| panic!("carve_graph: dst partition creation failed: {e}"));
     }
 
-    // The carve — `INSERT … SELECT` with the predicate filter, `graph_id`
-    // rebound to `dst`. `is_inferred` carries forward (no discrimination), same
-    // as `copy_graph`. Partition names are derived from validated non-negative
-    // BIGINTs (no user input in identifier position); the predicate is bound.
-    Spi::run_with_args(
-        &format!(
-            "INSERT INTO pgrdf.{dst_name} \
-                (subject_id, predicate_id, object_id, graph_id, is_inferred) \
-             SELECT subject_id, predicate_id, object_id, {dst}::bigint, is_inferred \
-               FROM pgrdf.{src_name} WHERE predicate_id = $1"
-        ),
-        &[pred_id.into()],
-    )
-    .unwrap_or_else(|e| panic!("carve_graph: INSERT INTO ... SELECT failed: {e}"));
+    // The carve, as a set (see `copy_as_set`): the matching triples the
+    // destination lacks. `is_inferred` carries forward.
+    let _ = dst_name;
+    let gained = copy_as_set(src, dst, Some(pred_id));
+    act.finish(serde_json::json!({
+        "from": src, "by": "predicate", "predicate": predicate,
+        "rows_read": count, "rows": gained
+    }));
 
-    count
+    gained
 }
 
 /// Neighbourhood carve — the §4b.1 "common case" of the carve chain
@@ -931,6 +1043,7 @@ fn carve_graph_neighbourhood(
     )
     .unwrap_or_else(|e| panic!("carve_graph: dst existence check failed: {e}"))
     .unwrap_or(false);
+    let act = crate::storage::acts::begin(dst, "carve");
     if !dst_exists {
         Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[dst.into()])
             .unwrap_or_else(|e| panic!("carve_graph: dst partition creation failed: {e}"));
@@ -958,6 +1071,19 @@ fn carve_graph_neighbourhood(
     // via NOTICE — `max_hops` legitimately *defines* the slice (a K-hop
     // ball), so a continuing neighbourhood is not an error; a silent
     // partial closure is.
+    // Stored as a set, through the parent: a triple the destination holds
+    // is not stored again, and an asserted copy wins over an inferred one.
+    // A destination without the unique index is checked row by row.
+    let _ = &dst_name;
+    let absent = if crate::storage::quads::set_enforced(dst) {
+        String::new()
+    } else {
+        format!(
+            "AND NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_quads d \
+                              WHERE d.graph_id = {dst}::bigint AND d.subject_id = q.subject_id \
+                                AND d.predicate_id = q.predicate_id AND d.object_id = q.object_id)"
+        )
+    };
     let (count, boundary): (Option<i64>, Option<i64>) = Spi::get_two_with_args(
         &format!(
             "WITH RECURSIVE frontier(node_id, hop) AS ( \
@@ -973,16 +1099,19 @@ fn carve_graph_neighbourhood(
                  WHERE f.hop < $2 \
              ), nodes AS (SELECT DISTINCT node_id FROM frontier), \
              ins AS ( \
-                 INSERT INTO pgrdf.{dst_name} \
+                 INSERT INTO pgrdf._pgrdf_quads \
                      (subject_id, predicate_id, object_id, graph_id, is_inferred) \
-                 SELECT DISTINCT q.subject_id, q.predicate_id, q.object_id, {dst}::bigint, q.is_inferred \
+                 SELECT q.subject_id, q.predicate_id, q.object_id, {dst}::bigint, bool_and(q.is_inferred) \
                  FROM pgrdf.{src_name} q \
-                 WHERE q.subject_id IN (SELECT node_id FROM nodes) \
+                 WHERE q.subject_id IN (SELECT node_id FROM nodes) {absent} \
+                 GROUP BY q.subject_id, q.predicate_id, q.object_id \
                UNION ALL \
-                 SELECT DISTINCT q.subject_id, q.predicate_id, q.object_id, {dst}::bigint, q.is_inferred \
+                 SELECT q.subject_id, q.predicate_id, q.object_id, {dst}::bigint, bool_and(q.is_inferred) \
                  FROM pgrdf.{src_name} q \
                  WHERE q.object_id IN (SELECT node_id FROM nodes) \
-                   AND q.subject_id NOT IN (SELECT node_id FROM nodes) \
+                   AND q.subject_id NOT IN (SELECT node_id FROM nodes) {absent} \
+                 GROUP BY q.subject_id, q.predicate_id, q.object_id \
+                 ON CONFLICT DO NOTHING \
                  RETURNING 1 \
              ), \
              boundary AS ( \
@@ -1009,6 +1138,9 @@ fn carve_graph_neighbourhood(
              component (raise max_hops to widen)"
         );
     }
+    act.finish(serde_json::json!({
+        "from": src, "by": "neighbourhood", "hops": hops, "rows": count, "boundary": boundary
+    }));
 
     count
 }

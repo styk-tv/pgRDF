@@ -18,6 +18,47 @@ pub mod term_type {
     pub const LITERAL: i16 = 3;
 }
 
+/// Refuse a term that contains U+0000 (22P05).
+///
+/// `"\u0000"` is a valid RDF literal, and PostgreSQL `text` cannot hold a
+/// NUL: stored raw, the value breaks every later read (the JSON result of
+/// a query, an export line, a dump). Every path that writes the dictionary
+/// calls this before it writes, so a load carrying such a term refuses as
+/// a whole and nothing is stored.
+pub(crate) fn refuse_nul(value: &str) {
+    if !value.as_bytes().contains(&0) {
+        return;
+    }
+    crate::refuse_with_hint(
+        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNTRANSLATABLE_CHARACTER,
+        format!(
+            "pgrdf: a term contains U+0000, which PostgreSQL text cannot store: \"{}\"",
+            nul_term_preview(value)
+        ),
+        "U+0000 is valid in RDF but cannot be stored. Remove or replace the character \
+         in the source, then load again; nothing from this call was written."
+            .to_string(),
+    );
+}
+
+/// The start of a term for an error message: at most 60 characters, with
+/// U+0000 and other control characters written as `\uXXXX`.
+pub(crate) fn nul_term_preview(value: &str) -> String {
+    let mut out = String::new();
+    for (n, c) in value.chars().enumerate() {
+        if n == 60 {
+            out.push('…');
+            break;
+        }
+        if c.is_control() {
+            out.push_str(&format!("\\u{:04X}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Internal put with the full dictionary key (value, type, datatype id,
 /// language tag). `IS NOT DISTINCT FROM` is used on the lookup so NULL
 /// rows participate in dedup (Postgres default `UNIQUE` treats NULL as
@@ -32,6 +73,7 @@ pub(crate) fn put_term_full(
     datatype_id: Option<i64>,
     language: Option<&str>,
 ) -> i64 {
+    refuse_nul(value);
     // Phase 3 step 1: shmem cache hit avoids both SELECT and INSERT.
     if let Some(id) = shmem_cache::lookup(term_type, value, datatype_id, language) {
         return id;
@@ -132,6 +174,9 @@ fn put_term(value: &str, term_type: i16) -> i64 {
 pub(crate) fn put_terms_batch(terms: &[(i16, String, Option<i64>, Option<String>)]) -> Vec<i64> {
     if terms.is_empty() {
         return Vec::new();
+    }
+    for t in terms {
+        refuse_nul(&t.1);
     }
     // Build the four parallel arrays for unnest. Order MUST match
     // across all four; we reconstruct (term_type, lexical_value,

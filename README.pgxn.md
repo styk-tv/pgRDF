@@ -19,17 +19,23 @@ Every operation is a SQL function call.
 ## Capabilities
 
 - **Load:** Turtle, N-Triples, TriG, N-Quads, from strings or server
-  files, with parallel loaders for very large N-Triples dumps.
+  files, with parallel loaders for very large N-Triples dumps. A graph
+  is a set of triples: loading a triple it already holds stores
+  nothing.
 - **Query:** SPARQL 1.1 `SELECT` / `ASK` / `CONSTRUCT` / `DESCRIBE`,
   `OPTIONAL`, `UNION`, `MINUS`, `VALUES`, `BIND`, subqueries,
   aggregates, property paths, named graphs.
 - **Update:** SPARQL 1.1 UPDATE, including graph management.
 - **Reason:** OWL 2 RL or RDFS materialization, stored beside the
   asserted data.
-- **Validate:** W3C SHACL Core (25/25 on the conformance suite) plus
-  SHACL-SPARQL, with a JSONB report.
+- **Validate:** SHACL Core plus SHACL-SPARQL, with a JSONB report. 56
+  of the 98 W3C SHACL Core tests are run on every change and all pass,
+  graded on the `sh:conforms` verdict (the suite's partial compliance;
+  full reports are not compared).
 - **Manage graphs:** inventory, copy / move / drop, carving, write
-  locks, integrity checks.
+  locks, integrity checks, a graph owner, and a record of every
+  graph-level act (who created, loaded, cleared, locked or validated a
+  graph).
 - **Identify and export:** W3C RDFC-1.0 canonical digests, canonical
   N-Triples export, portable manifests.
 

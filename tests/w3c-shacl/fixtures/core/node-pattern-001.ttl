@@ -20,3 +20,6 @@ ex:TestShape
   sh:targetNode 9 ;
   sh:targetNode "John" ;
 .
+_:b22415
+  rdf:type ex:TestClass ;
+.

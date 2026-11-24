@@ -48,6 +48,10 @@ pub mod phase {
     /// ordering (STAGE=1 < DICT=2 < …) is unchanged. Its ordinal is intentionally OUTSIDE the 1..5
     /// high-water range so it can never be mistaken for one.
     pub const STAGE_PREP: u8 = 6;
+    /// After a refused load: drop the staging table. A worker's own committed transaction, because
+    /// the coordinator is about to raise the refusal, which rolls back anything it did itself.
+    /// A dispatch label only, like `STAGE_PREP`.
+    pub const DROP_STAGING: u8 = 7;
     /// R2.0 pool-proof sentinel — the `load_turtle_staged_ping` worker body (a marker INSERT), kept
     /// as a standalone regression test of the spawn/wait/report machinery distinct from the real
     /// phases. Never a real high-water mark; only set on the ping coordinator's worker slots.
@@ -93,8 +97,26 @@ pub struct JobSlot {
     pub tspace: [u8; TSPACE_CAP],
     pub guc: [u8; GUC_CAP],
     pub err: [u8; ERR_CAP],
+    /// SQLSTATE of the first worker failure, as PostgreSQL packs it; 0 when the failure carried
+    /// none. The coordinator re-raises with it, so a refusal keeps its class across the process
+    /// boundary instead of arriving as an internal error.
+    pub err_code: i32,
+    /// Lines the STAGE workers could not parse and skipped, summed across workers.
+    pub parse_skipped: i64,
+    /// Repeated rows the unique-index build removed.
+    pub dups_removed: i64,
+    /// The caller's identity (who the workers act for). Its own block: five declared values of up
+    /// to 128 bytes do not fit the 512-byte `guc` blob.
+    pub who_len: [u16; WHO_FIELDS],
+    pub who: [[u8; WHO_CAP]; WHO_FIELDS],
 }
 unsafe impl PGRXSharedMemory for JobSlot {}
+
+/// Fields of the identity block, in [`JobSlot::who`] order: session role, acting role,
+/// application_name, ckp.requester, then the five declared settings.
+pub const WHO_FIELDS: usize = 9;
+/// Bytes per identity field (the declared settings' own limit).
+pub const WHO_CAP: usize = 128;
 
 impl JobSlot {
     /// The server-side `.nt` path, decoded from the inline byte array (`path_len` bytes). The
@@ -124,7 +146,75 @@ impl JobSlot {
             tspace: [0; TSPACE_CAP],
             guc: [0; GUC_CAP],
             err: [0; ERR_CAP],
+            err_code: 0,
+            parse_skipped: 0,
+            dups_removed: 0,
+            who_len: [0; WHO_FIELDS],
+            who: [[0; WHO_CAP]; WHO_FIELDS],
         }
+    }
+
+    fn who_field(&self, i: usize) -> Option<String> {
+        let n = (self.who_len[i] as usize).min(WHO_CAP);
+        (n > 0).then(|| String::from_utf8_lossy(&self.who[i][..n]).into_owned())
+    }
+
+    /// The caller this job's workers act for.
+    pub(crate) fn caller(&self) -> crate::storage::acts::Carried {
+        crate::storage::acts::Carried {
+            session_role: self.who_field(0).unwrap_or_default(),
+            acting_role: self.who_field(1).unwrap_or_default(),
+            application_name: self.who_field(2),
+            requester: self.who_field(3),
+            workspace: self.who_field(4),
+            agent: self.who_field(5),
+            thread: self.who_field(6),
+            on_behalf_of: self.who_field(7),
+            harness: self.who_field(8),
+        }
+    }
+}
+
+/// Record the caller's identity on job `idx`. Each value is kept up to [`WHO_CAP`] bytes, cut on a
+/// character boundary (only `ckp.requester` and a role name can be longer than that).
+pub(crate) fn set_caller(idx: usize, who: &crate::storage::acts::Carried) {
+    if !is_ready() {
+        return;
+    }
+    let fields: [Option<&str>; WHO_FIELDS] = [
+        Some(who.session_role.as_str()),
+        Some(who.acting_role.as_str()),
+        who.application_name.as_deref(),
+        who.requester.as_deref(),
+        who.workspace.as_deref(),
+        who.agent.as_deref(),
+        who.thread.as_deref(),
+        who.on_behalf_of.as_deref(),
+        who.harness.as_deref(),
+    ];
+    let mut jobs = JOBS.exclusive();
+    for (i, v) in fields.iter().enumerate() {
+        let v = v.unwrap_or("");
+        let mut n = v.len().min(WHO_CAP);
+        while n > 0 && !v.is_char_boundary(n) {
+            n -= 1;
+        }
+        jobs[idx].who[i][..n].copy_from_slice(&v.as_bytes()[..n]);
+        jobs[idx].who_len[i] = n as u16;
+    }
+}
+
+/// Add to job `idx`'s count of lines the STAGE workers skipped.
+pub fn add_parse_skipped(idx: usize, n: i64) {
+    if is_ready() && n != 0 {
+        JOBS.exclusive()[idx].parse_skipped += n;
+    }
+}
+
+/// Record how many repeated rows the unique-index build removed.
+pub fn set_dups_removed(idx: usize, n: i64) {
+    if is_ready() {
+        JOBS.exclusive()[idx].dups_removed = n;
     }
 }
 
@@ -290,7 +380,7 @@ pub fn read_worker(idx: usize) -> WorkerSlot {
 /// shmem, before it returns. `ok=false` records `err` (truncated to [`ERR_CAP`]) into the owning
 /// [`JobSlot`] as the first-failure string the coordinator surfaces, and flips the job to
 /// `state::FAILED`. No-op when shmem isn't ready.
-pub fn report_worker(idx: usize, ok: bool, err: &str) {
+pub fn report_worker(idx: usize, ok: bool, err: &str, err_code: i32) {
     if !is_ready() {
         return;
     }
@@ -308,6 +398,7 @@ pub fn report_worker(idx: usize, ok: bool, err: &str) {
             let n = bytes.len().min(ERR_CAP);
             j.err[..n].copy_from_slice(&bytes[..n]);
             j.err_len = n as u16;
+            j.err_code = err_code;
         }
         j.state = state::FAILED;
     }
@@ -355,9 +446,14 @@ pub fn advance_phase(idx: usize, phase: u8) {
 /// INDEX phase spawns one worker per entry so all 5 build/validate steps run SIMULTANEOUSLY across
 /// backends (§6.D); each worker's `shard` field is the index into this slice. Kept here (next to the
 /// worker plumbing) so the coordinator can size the INDEX phase by `index_ddls().len()`.
+/// The entry of [`index_ddls`] that is not a statement: the worker that draws it builds the loaded
+/// graph's own unique subject-predicate-object index (and removes repeated rows first, if the
+/// build finds any). It stands where the parent table's SPO index used to be built.
+pub const SET_INDEX: &str = "<the graph's unique set index>";
+
 pub fn index_ddls() -> &'static [&'static str] {
     &[
-        "CREATE INDEX _pgrdf_idx_spo ON pgrdf._pgrdf_quads (subject_id, predicate_id, object_id) INCLUDE (is_inferred)",
+        SET_INDEX,
         "CREATE INDEX _pgrdf_idx_pos ON pgrdf._pgrdf_quads (predicate_id, object_id, subject_id) INCLUDE (is_inferred)",
         "CREATE INDEX _pgrdf_idx_osp ON pgrdf._pgrdf_quads (object_id, subject_id, predicate_id) INCLUDE (is_inferred)",
         "CREATE INDEX _pgrdf_dict_val_idx ON pgrdf._pgrdf_dictionary USING HASH (lexical_value)",

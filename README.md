@@ -6,7 +6,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![CI](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml/badge.svg)](https://github.com/styk-tv/pgRDF/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/badge/release-LATEST.md-blue)](./LATEST.md)
-[![SHACL](https://img.shields.io/badge/W3C%20SHACL%20Core-25%2F25-blue)](guide/06-validation-recipes.md)
+[![SHACL](https://img.shields.io/badge/W3C%20SHACL%20Core-56%20of%2098%20tests%2C%20sh%3Aconforms-blue)](guide/06-validation-recipes.md)
 [![Inference](https://img.shields.io/badge/inference-OWL%202%20RL%20%2B%20RDFS-success)](guide/04-reasoning.md)
 
 **RDF, SPARQL, SHACL and OWL reasoning inside PostgreSQL.**
@@ -45,7 +45,7 @@ With Docker and nothing else, run the extension in a stock
 `postgres:18` container:
 
 ```sh
-VER=0.6.37
+VER=0.6.41
 ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 curl -fsSL https://github.com/styk-tv/pgRDF/releases/download/v$VER/pgrdf-$VER-pg18-glibc-$ARCH.tar.gz | tar -xz
 
@@ -71,14 +71,15 @@ from source) are in the [install guide](guide/01-install.md).
 
 | | |
 |---|---|
-| **Load** | Turtle, N-Triples, TriG, N-Quads, from SQL strings or server files. Parallel loaders for very large N-Triples dumps. → [Loading](guide/02-loading-rdf.md) |
+| **Load** | Turtle, N-Triples, TriG, N-Quads, from SQL strings or server files. Parallel loaders for very large N-Triples dumps. A graph is a set of triples: loading a triple it already holds stores nothing, and each load reports what it read, stored and dropped. → [Loading](guide/02-loading-rdf.md) |
 | **Query** | SPARQL 1.1: `SELECT`, `ASK`, `CONSTRUCT`, `DESCRIBE`; `OPTIONAL`, `UNION`, `MINUS`, `VALUES`, `BIND`, subqueries, aggregates, property paths, named graphs. Results are JSONB rows you can join with any table. → [Querying](guide/03-querying.md) |
 | **Update** | SPARQL 1.1 UPDATE: `INSERT` / `DELETE` `DATA`, `INSERT` / `DELETE … WHERE`, `CREATE` / `CLEAR` / `DROP GRAPH`. Transactional like any SQL. → [Update](guide/03-querying.md#sparql-update) |
 | **Reason** | OWL 2 RL or RDFS materialization, stored beside your data and never mixed into it, with a freshness flag that tells you when to re-run. → [Reasoning](guide/04-reasoning.md) |
-| **Validate** | W3C SHACL Core (passes the 25/25 conformance suite) plus SHACL-SPARQL, with the report returned as JSONB. → [Validation](guide/06-validation-recipes.md) |
+| **Validate** | SHACL Core plus SHACL-SPARQL, with the report returned as JSONB. 56 of the 98 W3C SHACL Core tests are run on every change and all pass, graded on the `sh:conforms` verdict (the suite's partial compliance; full reports are not compared). → [Validation](guide/06-validation-recipes.md) |
 | **Manage graphs** | Inventory with source digests, copy / move / clear / drop, carve out subgraphs by predicate or neighbourhood, write locks that hold against plain SQL too, integrity checks. Any role with table grants can create graphs. → [Graphs](guide/05-graphs.md) |
+| **Know who did what** | Each graph records its owner. Every graph-level act (create, load, update, clear, lock, validate, …) is one row in an act record that pgRDF writes and a role with table grants cannot forge, with the PostgreSQL role that acted kept apart from what the client declares about itself. → [The act record](guide/05-graphs.md#the-act-record) |
 | **Identify, compare, export** | Canonical graph digests (W3C RDFC-1.0), a blank-node-aware diff between two graphs, canonical N-Triples export, and a manifest anyone can check offline with `sha256sum`. → [Identity](guide/07-identity-and-export.md) |
-| **Diagnose** | Standard SQLSTATE error codes, per-query completeness figures, and a queryable list of supported functions. → [Diagnostics](guide/08-errors-and-diagnostics.md) |
+| **Diagnose** | SQLSTATE codes that say what kind of refusal an error is, per-query completeness figures, and a queryable list of supported functions. → [Diagnostics](guide/08-errors-and-diagnostics.md) |
 
 ## Scale
 

@@ -16,6 +16,11 @@
 //!   canonicalised on their own with RDFC-1.0 and compared as a multiset
 //!   of component digests.
 //!
+//! Both parts compare SETS of triples: a triple a graph physically holds
+//! more than once is one triple, so the diff agrees with `graph_digest`.
+//! (Components stay a multiset: two isomorphic components are two
+//! distinct sets of triples, and RDF keeps both.)
+//!
 //! The diff is empty iff the graphs are isomorphic. A change inside a
 //! component reports the whole component as removed and added — the most
 //! precise answer that holds in general, since matching blank nodes
@@ -27,7 +32,7 @@ use crate::storage::canon::{
 use crate::storage::dict::term_type;
 use pgrx::prelude::*;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const METHOD: &str = "ground set difference + blank-node components by RDFC-1.0 component digest; \
                       a change inside a component reports the whole component";
@@ -157,7 +162,15 @@ impl Component {
 /// Split a graph's blank-node-bearing triples into components (union-find
 /// over shared blank nodes) and canonicalise each.
 fn components(graph_id: i64) -> Vec<Component> {
-    let triples = read_asserted_triples_where(graph_id, "AND (s.term_type = 2 OR o.term_type = 2)");
+    // A graph is a set: a triple stored more than once is one triple, as it
+    // is for `graph_digest` (#158). Left in, a repeat would change the
+    // component's canonical labels and digest.
+    let triples: Vec<Triple> =
+        read_asserted_triples_where(graph_id, "AND (s.term_type = 2 OR o.term_type = 2)")
+            .into_iter()
+            .collect::<HashSet<Triple>>()
+            .into_iter()
+            .collect();
     if triples.len() > budget() {
         over_budget("blank-node-bearing triples", triples.len());
     }
