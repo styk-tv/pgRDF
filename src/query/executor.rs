@@ -8231,7 +8231,10 @@ fn execute_clear(graph: &GraphTarget, silent: bool, graphs_touched: &mut HashSet
                     n
                 }
                 None if silent => 0,
-                None => panic!("sparql: CLEAR GRAPH <{iri}>: graph not bound"),
+                None => crate::refuse(
+                    PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                    format!("sparql: CLEAR GRAPH <{iri}>: graph not bound"),
+                ),
             }
         }
         GraphTarget::DefaultGraph => {
@@ -8275,7 +8278,10 @@ fn execute_create(graph: &NamedNode, silent: bool, graphs_touched: &mut HashSet<
     let iri = graph.as_str();
     if let Some(existing) = lookup_graph_id(iri) {
         if !silent {
-            panic!("sparql: CREATE GRAPH <{iri}>: graph already exists");
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_DUPLICATE_OBJECT,
+                format!("sparql: CREATE GRAPH <{iri}>: graph already exists"),
+            );
         }
         // SILENT idempotent path — already bound, no-op, but still
         // record the touched graph_id for the summary.
@@ -8320,7 +8326,10 @@ fn execute_drop(
                     n
                 }
                 None if silent => 0,
-                None => panic!("sparql: DROP GRAPH <{iri}>: graph not bound"),
+                None => crate::refuse(
+                    PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                    format!("sparql: DROP GRAPH <{iri}>: graph not bound"),
+                ),
             }
         }
         GraphTarget::DefaultGraph => {
@@ -8491,6 +8500,7 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
         ));
         col_order.push(var.clone());
     }
+    check_insert_template(template);
     // Fallback when the template has no variables at all (degenerate
     // — equivalent to INSERT DATA gated by a WHERE existence check).
     // SELECT a constant so the binding count still drives the
@@ -8566,6 +8576,110 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
     (triples_inserted, graphs_touched)
 }
 
+/// 0A000 for a blank node in an INSERT template. The pre-execution
+/// check and the per-row instantiation share it, so the text has one
+/// home.
+fn refuse_template_blank_node(label: &str) -> ! {
+    crate::refuse(
+        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+        format!(
+            "sparql: INSERT WHERE template feature 'blank node in template ({label})' \
+             not yet supported"
+        ),
+    )
+}
+
+/// 0A000 for `GRAPH ?g { … }` in a template. `form` is `INSERT` or
+/// `DELETE`.
+fn refuse_template_variable_graph(form: &str, var: &str) -> ! {
+    crate::refuse(
+        PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+        format!(
+            "sparql: {form} WHERE template feature 'variable GRAPH ?{var}' not yet supported \
+             (lands with slice 76 graph-scoped {form} WHERE)"
+        ),
+    )
+}
+
+/// Refuse an INSERT template pgRDF cannot instantiate, before the WHERE
+/// pattern is evaluated.
+///
+/// These checks used to live only in `instantiate_template_quad`, which
+/// runs once per solution. An UPDATE whose WHERE matched nothing
+/// therefore succeeded, and the same request over matching data
+/// refused: the outcome depended on the data. Here it depends on the
+/// request alone. The per-row arms stay as the same refusals; they can
+/// no longer be the first to fire.
+///
+/// Within a quad the order follows the instantiation (subject, object,
+/// graph), so a request that trips two checks reports the one it always
+/// did.
+fn check_insert_template(template: &[QuadPattern]) {
+    for qp in template {
+        match &qp.subject {
+            TermPattern::Variable(_) | TermPattern::NamedNode(_) => {}
+            TermPattern::BlankNode(b) => refuse_template_blank_node(b.as_str()),
+            TermPattern::Literal(_) => crate::refuse(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                "sparql: literal subject is invalid in RDF".to_string(),
+            ),
+            #[allow(unreachable_patterns)]
+            other => crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: INSERT WHERE template: unsupported subject term {other:?}"),
+            ),
+        }
+        match &qp.object {
+            TermPattern::Variable(_) | TermPattern::NamedNode(_) | TermPattern::Literal(_) => {}
+            TermPattern::BlankNode(b) => refuse_template_blank_node(b.as_str()),
+            #[allow(unreachable_patterns)]
+            other => crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: INSERT WHERE template: unsupported object term {other:?}"),
+            ),
+        }
+        if let GraphNamePattern::Variable(v) = &qp.graph_name {
+            refuse_template_variable_graph("INSERT", v.as_str());
+        }
+    }
+}
+
+/// The DELETE-template half of [`check_insert_template`].
+///
+/// The per-row instantiation was data-dependent twice over here: beside
+/// running only when the WHERE matched, it returned early for a
+/// constant the dictionary had never seen, before the later positions
+/// of the quad were looked at.
+fn check_delete_template(template: &[GroundQuadPattern]) {
+    for gqp in template {
+        match &gqp.subject {
+            GroundTermPattern::Variable(_) | GroundTermPattern::NamedNode(_) => {}
+            GroundTermPattern::Literal(_) => crate::refuse(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                "sparql: literal subject is invalid in RDF".to_string(),
+            ),
+            #[allow(unreachable_patterns)]
+            other => crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: DELETE WHERE template: unsupported subject term {other:?}"),
+            ),
+        }
+        match &gqp.object {
+            GroundTermPattern::Variable(_)
+            | GroundTermPattern::NamedNode(_)
+            | GroundTermPattern::Literal(_) => {}
+            #[allow(unreachable_patterns)]
+            other => crate::refuse(
+                PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!("sparql: DELETE WHERE template: unsupported object term {other:?}"),
+            ),
+        }
+        if let GraphNamePattern::Variable(v) = &gqp.graph_name {
+            refuse_template_variable_graph("DELETE", v.as_str());
+        }
+    }
+}
+
 /// Walk the template QuadPatterns and collect every Variable name
 /// referenced across subject / predicate / object / graph_name slots.
 /// Order is first-appearance (stable across runs) so SQL columns are
@@ -8624,11 +8738,7 @@ fn instantiate_template_quad(
             // — except we don't have a row uuid handy, and the
             // semantic is delicate enough to warrant its own slice.
             // Defer.
-            panic!(
-                "sparql: INSERT WHERE template feature 'blank node in template ({})' \
-                 not yet supported",
-                b.as_str()
-            )
+            refuse_template_blank_node(b.as_str())
         }
         TermPattern::Literal(_) => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
@@ -8658,13 +8768,7 @@ fn instantiate_template_quad(
             )
         }),
         TermPattern::NamedNode(n) => intern_named_node(n.as_str()),
-        TermPattern::BlankNode(b) => {
-            panic!(
-                "sparql: INSERT WHERE template feature 'blank node in template ({})' \
-                 not yet supported",
-                b.as_str()
-            )
-        }
+        TermPattern::BlankNode(b) => refuse_template_blank_node(b.as_str()),
         TermPattern::Literal(lit) => intern_object(&Term::Literal(lit.clone())),
         other => crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -8676,13 +8780,7 @@ fn instantiate_template_quad(
         GraphNamePattern::NamedNode(n) => {
             resolve_or_allocate_graph(&GraphName::NamedNode(n.clone()))
         }
-        GraphNamePattern::Variable(v) => {
-            panic!(
-                "sparql: INSERT WHERE template feature 'variable GRAPH ?{}' not yet supported \
-                 (lands with slice 76 graph-scoped INSERT WHERE)",
-                v.as_str()
-            )
-        }
+        GraphNamePattern::Variable(v) => refuse_template_variable_graph("INSERT", v.as_str()),
     };
     (s_id, p_id, o_id, g_id)
 }
@@ -8802,6 +8900,7 @@ fn execute_delete_where(
         ));
         col_order.push(var.clone());
     }
+    check_delete_template(template);
     if select_clauses.is_empty() {
         select_clauses.push("1 AS _pgrdf_unit".to_string());
     }
@@ -8990,13 +9089,7 @@ fn instantiate_ground_template_quad(
     let g_id = match &gqp.graph_name {
         GraphNamePattern::DefaultGraph => 0,
         GraphNamePattern::NamedNode(n) => lookup_graph_id(n.as_str())?,
-        GraphNamePattern::Variable(v) => {
-            panic!(
-                "sparql: DELETE WHERE template feature 'variable GRAPH ?{}' not yet supported \
-                 (lands with slice 76 graph-scoped DELETE WHERE)",
-                v.as_str()
-            )
-        }
+        GraphNamePattern::Variable(v) => refuse_template_variable_graph("DELETE", v.as_str()),
     };
     Some((s_id, p_id, o_id, g_id))
 }
@@ -9150,6 +9243,8 @@ fn execute_delete_insert_where(
         ));
         col_order.push(var.clone());
     }
+    check_delete_template(delete);
+    check_insert_template(insert);
     // Degenerate templates with no variables at all — equivalent to
     // DELETE DATA + INSERT DATA gated by a WHERE existence check.
     // SELECT a constant so the binding count still drives the per-row

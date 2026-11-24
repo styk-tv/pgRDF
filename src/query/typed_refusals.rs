@@ -587,4 +587,140 @@ mod tests {
         let (state, msg) = sparql(&within);
         assert_eq!(state, "00000", "64 variables are within the limit: {msg}");
     }
+    fn quads_in(graph_id: i64) -> i64 {
+        Spi::get_one_with_args(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
+            &[graph_id.into()],
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    /// An UPDATE template pgRDF cannot instantiate refuses whether or
+    /// not the WHERE pattern matches anything: the outcome is a property
+    /// of the request. Each shape runs twice — over a pattern that
+    /// matches nothing and over one that matches — and must refuse the
+    /// same way both times, leaving the store untouched.
+    #[pg_test]
+    fn update_template_refusals_do_not_depend_on_the_data() {
+        let g = seed("urn:tr:tpl");
+        let total_before: i64 = Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_quads")
+            .unwrap()
+            .unwrap();
+        // (template-and-form with a `{W}` slot for the WHERE predicate,
+        //  SQLSTATE, message fragment)
+        let shapes = [
+            (
+                "INSERT { _:b <urn:tr:q> ?o } WHERE { GRAPH <urn:tr:tpl> { ?s {W} ?o } }",
+                "0A000",
+                "INSERT WHERE template feature 'blank node in template (b)'",
+            ),
+            (
+                "INSERT { ?s <urn:tr:q> _:b } WHERE { GRAPH <urn:tr:tpl> { ?s {W} ?o } }",
+                "0A000",
+                "INSERT WHERE template feature 'blank node in template (b)'",
+            ),
+            (
+                "INSERT { GRAPH ?o { ?s <urn:tr:q> ?o } } WHERE { GRAPH <urn:tr:tpl> { ?s {W} ?o } }",
+                "0A000",
+                "INSERT WHERE template feature 'variable GRAPH ?o'",
+            ),
+            (
+                "INSERT { \"lit\" <urn:tr:q> ?o } WHERE { GRAPH <urn:tr:tpl> { ?s {W} ?o } }",
+                "22023",
+                "sparql: literal subject is invalid in RDF",
+            ),
+            (
+                "DELETE { GRAPH ?o { ?s <urn:tr:p> ?o } } WHERE { GRAPH <urn:tr:tpl> { ?s {W} ?o } }",
+                "0A000",
+                "DELETE WHERE template feature 'variable GRAPH ?o'",
+            ),
+            // A constant the dictionary has never seen used to end the
+            // row's instantiation before the GRAPH check was reached.
+            (
+                "DELETE { GRAPH ?o { <urn:tr:never-seen> <urn:tr:p> ?o } } \
+                 WHERE { GRAPH <urn:tr:tpl> { ?s {W} ?o } }",
+                "0A000",
+                "DELETE WHERE template feature 'variable GRAPH ?o'",
+            ),
+            (
+                "DELETE { \"lit\" <urn:tr:p> ?o } WHERE { GRAPH <urn:tr:tpl> { ?s {W} ?o } }",
+                "22023",
+                "sparql: literal subject is invalid in RDF",
+            ),
+            (
+                "DELETE { ?s <urn:tr:p> ?o } INSERT { _:b <urn:tr:q> ?o } \
+                 WHERE { GRAPH <urn:tr:tpl> { ?s {W} ?o } }",
+                "0A000",
+                "INSERT WHERE template feature 'blank node in template (b)'",
+            ),
+            (
+                "DELETE { GRAPH ?o { ?s <urn:tr:p> ?o } } INSERT { ?s <urn:tr:q> ?o } \
+                 WHERE { GRAPH <urn:tr:tpl> { ?s {W} ?o } }",
+                "0A000",
+                "DELETE WHERE template feature 'variable GRAPH ?o'",
+            ),
+        ];
+        for (shape, state, fragment) in shapes {
+            for (label, predicate) in [("no match", "<urn:tr:nomatch>"), ("match", "<urn:tr:p>")] {
+                let q = shape.replace("{W}", predicate);
+                assert_outcome(sparql(&q), state, fragment, &format!("{label}: {q}"));
+            }
+        }
+        let total_after: i64 = Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_quads")
+            .unwrap()
+            .unwrap();
+        assert_eq!(total_after, total_before, "no refused UPDATE wrote a quad");
+        assert_eq!(quads_in(g), 3);
+    }
+
+    /// CLEAR and DROP of a graph that does not exist: 42704. CREATE of
+    /// one that does: 42710. `SILENT` suppresses each, as W3C SPARQL 1.1
+    /// Update §3.2 requires.
+    #[pg_test]
+    fn graph_management_refusals_are_typed_and_silent_is_honoured() {
+        let g = seed("urn:tr:mgmt");
+        assert_outcome(
+            sparql("CLEAR GRAPH <urn:tr:absent>"),
+            "42704",
+            "sparql: CLEAR GRAPH <urn:tr:absent>: graph not bound",
+            "CLEAR",
+        );
+        assert_outcome(
+            sparql("DROP GRAPH <urn:tr:absent>"),
+            "42704",
+            "sparql: DROP GRAPH <urn:tr:absent>: graph not bound",
+            "DROP",
+        );
+        assert_outcome(
+            sparql("CREATE GRAPH <urn:tr:mgmt>"),
+            "42710",
+            "sparql: CREATE GRAPH <urn:tr:mgmt>: graph already exists",
+            "CREATE",
+        );
+        for q in [
+            "CLEAR SILENT GRAPH <urn:tr:absent>",
+            "DROP SILENT GRAPH <urn:tr:absent>",
+            "CREATE SILENT GRAPH <urn:tr:mgmt>",
+        ] {
+            let (state, msg) = sparql(q);
+            assert_eq!(state, "00000", "{q}: {msg}");
+        }
+        assert_eq!(
+            quads_in(g),
+            3,
+            "none of the six touched the graph's triples"
+        );
+    }
+
+    /// `graph_integrity` of a graph id nobody registered: 42704.
+    #[pg_test]
+    fn graph_integrity_of_unknown_graph_refuses_42704() {
+        assert_outcome(
+            outcome("SELECT pgrdf.graph_integrity(970998)"),
+            "42704",
+            "graph_integrity: no graph with id 970998 (see pgrdf._pgrdf_graphs)",
+            "graph_integrity",
+        );
+    }
 }
