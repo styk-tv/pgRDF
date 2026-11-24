@@ -73,6 +73,41 @@ ALTER TABLE _pgrdf_graphs ADD COLUMN IF NOT EXISTS locked_digest TEXT;
     requires = ["graph_lock_columns_v0_6_28"],
 );
 
+// 0.6.41 (#158): which engine version computed the cached digest. From
+// 0.6.41 the digest is over the SET of triples; a cache filled by an
+// earlier version (this column NULL) may have been computed over repeated
+// rows, and is kept as recorded until the graph is locked again.
+pgrx::extension_sql!(
+    r#"
+ALTER TABLE _pgrdf_graphs ADD COLUMN IF NOT EXISTS locked_digest_engine TEXT;
+"#,
+    name = "graph_locked_digest_engine_v0_6_41",
+    requires = ["graph_acts_v0_6_41"],
+);
+
+/// Does `_pgrdf_graphs` have the `locked_digest_engine` column? False
+/// while the installed SQL is older than the library (swapped in, `ALTER
+/// EXTENSION UPDATE` not yet run): the digest cache then works as it did
+/// before the column existed.
+pub(crate) fn digest_engine_column() -> bool {
+    Spi::get_one::<bool>(
+        "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute \
+                        WHERE attrelid = 'pgrdf._pgrdf_graphs'::regclass \
+                          AND attname = 'locked_digest_engine' AND NOT attisdropped)",
+    )
+    .expect("digest engine column probe failed")
+    .unwrap_or(false)
+}
+
+/// `SET` fragment that clears the cached digest's engine with the digest.
+fn clear_digest_engine() -> &'static str {
+    if digest_engine_column() {
+        ", locked_digest_engine = NULL"
+    } else {
+        ""
+    }
+}
+
 /// The partition that holds `graph_id`'s quads, when it has its own.
 fn dedicated_partition(graph_id: i64) -> Option<String> {
     let name = format!("_pgrdf_quads_g{graph_id}");
@@ -209,9 +244,12 @@ fn lock_graph(graph_id: i64, reason: &str) -> bool {
     crate::storage::acts::require_graph_owner(graph_id, "lock_graph");
     let act = crate::storage::acts::begin(graph_id, "lock");
     Spi::run_with_args(
-        "UPDATE pgrdf._pgrdf_graphs \
-         SET locked = true, lock_reason = $2, locked_at = now(), locked_digest = NULL \
-         WHERE graph_id = $1",
+        &format!(
+            "UPDATE pgrdf._pgrdf_graphs \
+             SET locked = true, lock_reason = $2, locked_at = now(), locked_digest = NULL{} \
+             WHERE graph_id = $1",
+            clear_digest_engine()
+        ),
         &[graph_id.into(), reason.into()],
     )
     .expect("lock_graph: update failed");
@@ -259,9 +297,12 @@ fn unlock_graph(graph_id: i64, reason: &str) -> bool {
     crate::storage::acts::require_graph_owner(graph_id, "unlock_graph");
     let act = crate::storage::acts::begin(graph_id, "unlock");
     Spi::run_with_args(
-        "UPDATE pgrdf._pgrdf_graphs \
-         SET locked = false, lock_reason = NULL, locked_at = NULL, locked_digest = NULL \
-         WHERE graph_id = $1",
+        &format!(
+            "UPDATE pgrdf._pgrdf_graphs \
+             SET locked = false, lock_reason = NULL, locked_at = NULL, locked_digest = NULL{} \
+             WHERE graph_id = $1",
+            clear_digest_engine()
+        ),
         &[graph_id.into()],
     )
     .expect("unlock_graph: update failed");

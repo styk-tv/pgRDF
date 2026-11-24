@@ -135,6 +135,29 @@ fn graph_inventory() -> TableIterator<
     TableIterator::new(rows.into_iter())
 }
 
+/// The materialization state of one registered graph, by the rule
+/// `graph_inventory()` shows in its `materialization` column: `never`,
+/// `unknown`, `stale` or `current`. `None` when the graph is not
+/// registered.
+pub(crate) fn materialization_of(graph_id: i64) -> Option<String> {
+    Spi::get_one_with_args::<String>(
+        "SELECT (SELECT CASE
+                          WHEN g.last_materialize_at IS NULL THEN
+                            CASE WHEN c.i > 0 THEN 'unknown' ELSE 'never' END
+                          WHEN c.a IS DISTINCT FROM g.materialized_base_count THEN 'stale'
+                          ELSE 'current'
+                        END
+                   FROM pgrdf._pgrdf_graphs g,
+                        LATERAL (SELECT count(*) FILTER (WHERE NOT q.is_inferred) AS a,
+                                        count(*) FILTER (WHERE q.is_inferred) AS i
+                                   FROM pgrdf._pgrdf_quads q
+                                  WHERE q.graph_id = g.graph_id) c
+                  WHERE g.graph_id = $1)",
+        &[graph_id.into()],
+    )
+    .unwrap_or_else(|e| panic!("materialization state read failed for graph {graph_id}: {e}"))
+}
+
 /// Quad partitions with no `_pgrdf_graphs` registration — unreachable
 /// by SPARQL and therefore by any graph-level export or digest. They
 /// are counted here so their existence is at least visible; capturing

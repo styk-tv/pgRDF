@@ -26,6 +26,9 @@
 //! ```
 //!
 //! Asserted triples only (inferred is a check value, never content).
+//! The graph is read as a SET: a triple stored more than once counts once
+//! (0.6.41, #158). The ground lines are sorted by PostgreSQL and hashed as
+//! they stream; only the triples that involve a blank node are held.
 //!
 //! THE ASYMMETRY IS NORMATIVE (LIB K6): unequal digests PROVE the graphs
 //! differ; equal digests are EVIDENCE of isomorphism, never proof —
@@ -35,9 +38,11 @@
 //! fd1). Where proof is required, `pgrdf.graph_digest` (rdfc-1.0-sha256)
 //! is the answer; the two values are never comparable with each other.
 
-use crate::storage::canon::{CTerm, Triple, read_asserted_triples};
+use crate::storage::canon::{CTerm, TermRef, Triple};
+use crate::storage::lines::{Refusal, Split, style};
 use pgrx::prelude::*;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 /// Fleet-minimal literal escaping: backslash and quote always; newline
 /// only when `object_position`. Byte-for-byte the reference renderer.
@@ -53,17 +58,26 @@ fn fleet_escape(s: &str, object_position: bool) -> String {
 /// label to its substitution (the real label for ground-detection is
 /// never rendered — ground lines contain no bnodes by construction).
 fn fleet_term(t: &CTerm, object_position: bool, bnode: &dyn Fn(&str) -> String) -> String {
+    fleet_term_ref(&t.as_term_ref(), object_position, bnode)
+}
+
+/// [`fleet_term`] over a borrowed term.
+fn fleet_term_ref(
+    t: &TermRef<'_>,
+    object_position: bool,
+    bnode: &dyn Fn(&str) -> String,
+) -> String {
     match t {
-        CTerm::Iri(i) => format!("<{i}>"),
-        CTerm::BNode(b) => format!("_:{}", bnode(b)),
-        CTerm::Lit { val, dt, lang } => {
+        TermRef::Iri(i) => format!("<{i}>"),
+        TermRef::BNode(b) => format!("_:{}", bnode(b)),
+        TermRef::Lit { val, dt, lang } => {
             let esc = fleet_escape(val, object_position);
             if !object_position {
                 return format!("\"{esc}\"");
             }
             match (lang, dt) {
                 (Some(l), _) => format!("\"{esc}\"@{l}"),
-                (None, Some(d)) if d != "http://www.w3.org/2001/XMLSchema#string" => {
+                (None, Some(d)) if *d != "http://www.w3.org/2001/XMLSchema#string" => {
                     format!("\"{esc}\"^^<{d}>")
                 }
                 _ => format!("\"{esc}\""),
@@ -72,14 +86,28 @@ fn fleet_term(t: &CTerm, object_position: bool, bnode: &dyn Fn(&str) -> String) 
     }
 }
 
+/// One triple as a fleet-format line, no newline: the line the ground
+/// part of the digest sorts and joins. `pgrdf._nt_line` calls this row by
+/// row, so the lines PostgreSQL sorts are the lines [`fd1_digest`] builds
+/// from held triples.
+pub(crate) fn fleet_line(
+    s: &TermRef<'_>,
+    p: &TermRef<'_>,
+    o: &TermRef<'_>,
+    bnode: &dyn Fn(&str) -> String,
+) -> String {
+    format!(
+        "{} {} {} .",
+        fleet_term_ref(s, false, bnode),
+        fleet_term_ref(p, false, bnode),
+        fleet_term_ref(o, true, bnode),
+    )
+}
+
 fn sha256_hex(data: &str) -> String {
     let mut h = Sha256::new();
     h.update(data.as_bytes());
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn is_bnode(t: &CTerm) -> bool {
-    matches!(t, CTerm::BNode(_))
 }
 
 fn bnode_label(t: &CTerm) -> Option<&str> {
@@ -89,9 +117,125 @@ fn bnode_label(t: &CTerm) -> Option<&str> {
     }
 }
 
-/// The fd1 computation over an already-read triple set. Pure — no SPI,
-/// shared verbatim by the SQL surface and the unit tests.
-fn fd1_digest(triples: &[Triple]) -> String {
+/// The signature part of the digest: for every blank node, sha256 over
+/// its incident lines with itself as `_:a` and every other blank node as
+/// `_:z`, byte-sorted and joined by newlines; the signatures byte-sorted
+/// and joined by newlines. `triples` is the set of blank-node-bearing
+/// triples (no repeats).
+fn fd1_signatures(triples: &[Triple]) -> String {
+    // blank-node label -> the triples it occurs in
+    let mut incident: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, (s, _, o)) in triples.iter().enumerate() {
+        let (sb, ob) = (bnode_label(s), bnode_label(o));
+        if let Some(b) = sb {
+            incident.entry(b).or_default().push(i);
+        }
+        if let Some(b) = ob
+            && sb != Some(b)
+        {
+            incident.entry(b).or_default().push(i);
+        }
+    }
+    let mut sigs: Vec<String> = incident
+        .iter()
+        .map(|(b, at)| {
+            let sub = |label: &str| -> String { if label == *b { "a".into() } else { "z".into() } };
+            let mut lines: Vec<String> = at
+                .iter()
+                .map(|&i| {
+                    let (s, p, o) = &triples[i];
+                    format!(
+                        "{} {} {} .",
+                        fleet_term(s, false, &sub),
+                        fleet_term(p, false, &sub),
+                        fleet_term(o, true, &sub),
+                    )
+                })
+                .collect();
+            lines.sort();
+            sha256_hex(&lines.join("\n"))
+        })
+        .collect();
+    sigs.sort();
+    sigs.join("\n")
+}
+
+/// The `pgrdf-fd1-sha256` digest of a graph's asserted triples, computed
+/// in bounded memory: the same bytes hashed as [`fd1_digest`] hashes for
+/// the graph's SET of triples.
+///
+/// Only the triples that involve a blank node are held (de-duplicated),
+/// for the signatures. The ground lines arrive from PostgreSQL already
+/// byte-sorted and go straight into the hasher, repeats skipped.
+pub(crate) fn fd1_stream(graph_id: i64) -> Result<String, Refusal> {
+    let Split { blank, ground } = Split::open(graph_id, style::FD1)?;
+    let signatures = fd1_signatures(&blank);
+    drop(blank);
+    let mut hasher = Sha256::new();
+    let mut first = true;
+    for line in ground {
+        pgrx::check_for_interrupts!();
+        if !first {
+            hasher.update(b"\n");
+        }
+        first = false;
+        hasher.update(line.as_bytes());
+    }
+    hasher.update(b"\n--\n");
+    hasher.update(signatures.as_bytes());
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// First-degree structural digest of a graph's ASSERTED triples.
+/// Method: `pgrdf-fd1-sha256`. Survives blank-node relabelling (a
+/// reload changes every label and not this value); `DIFFERENT` is
+/// conclusive, `SAME` is evidence only — see the module docs and use
+/// `pgrdf.graph_digest` where proof of identity is required. The digest
+/// is over the SET of triples: a triple stored more than once counts
+/// once.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn structural_digest(graph_id: i64) -> String {
+    let _listed = crate::storage::acts::reading(graph_id, "structural_digest");
+    // Same existence discipline as graph_digest (T-NULL/L9): an absent
+    // graph REFUSES — it has no digest; an EMPTY graph answers. Graph 0
+    // (the default graph) always exists.
+    if graph_id != 0 {
+        let registered: bool = Spi::get_one_with_args(
+            "SELECT EXISTS(SELECT 1 FROM pgrdf._pgrdf_graphs WHERE graph_id = $1)",
+            &[graph_id.into()],
+        )
+        .expect("structural_digest: registry existence check failed")
+        .unwrap_or(false);
+        if !registered {
+            crate::refuse(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                format!(
+                    "structural_digest: graph {graph_id} does not exist — an absent \
+                     graph has no digest (an EMPTY graph does: pgrdf.add_graph it first)"
+                ),
+            );
+        }
+    }
+    match fd1_stream(graph_id) {
+        Ok(digest) => digest,
+        Err(refusal) => refusal.raise("structural_digest", graph_id),
+    }
+}
+
+// The reference below is compiled for the tests only. It sits at the end
+// of the file, next to the test module.
+
+/// The fd1 computation over a triple list held in memory: the algorithm
+/// as the fleet's reference states it, kept as the definition the unit
+/// tests exercise and the streamed [`fd1_stream`] is compared against.
+/// Pure — no SPI. The list is taken as given: a repeated triple repeats.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn fd1_digest(triples: &[Triple]) -> String {
     // ground: lines whose subject and object are both non-bnode.
     let mut ground: Vec<String> = triples
         .iter()
@@ -144,47 +288,21 @@ fn fd1_digest(triples: &[Triple]) -> String {
     sha256_hex(&format!("{ground_text}\n--\n{sigs_text}"))
 }
 
-/// First-degree structural digest of a graph's ASSERTED triples.
-/// Method: `pgrdf-fd1-sha256`. Survives blank-node relabelling (a
-/// reload changes every label and not this value); `DIFFERENT` is
-/// conclusive, `SAME` is evidence only — see the module docs and use
-/// `pgrdf.graph_digest` where proof of identity is required.
-#[search_path(pgrdf, pg_temp)]
-#[pg_extern]
-fn structural_digest(graph_id: i64) -> String {
-    let _listed = crate::storage::acts::reading(graph_id, "structural_digest");
-    // Same existence discipline as graph_digest (T-NULL/L9): an absent
-    // graph REFUSES — it has no digest; an EMPTY graph answers. Graph 0
-    // (the default graph) always exists.
-    if graph_id != 0 {
-        let registered: bool = Spi::get_one_with_args(
-            "SELECT EXISTS(SELECT 1 FROM pgrdf._pgrdf_graphs WHERE graph_id = $1)",
-            &[graph_id.into()],
-        )
-        .expect("structural_digest: registry existence check failed")
-        .unwrap_or(false);
-        if !registered {
-            crate::refuse(
-                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
-                format!(
-                    "structural_digest: graph {graph_id} does not exist — an absent \
-                     graph has no digest (an EMPTY graph does: pgrdf.add_graph it first)"
-                ),
-            );
-        }
-    }
-    fd1_digest(&read_asserted_triples(graph_id))
+#[cfg(any(test, feature = "pg_test"))]
+fn is_bnode(t: &CTerm) -> bool {
+    matches!(t, CTerm::BNode(_))
 }
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
     use super::*;
-    use pgrx::prelude::*;
 
+    #[cfg(test)]
     fn iri(v: &str) -> CTerm {
         CTerm::Iri(v.into())
     }
+    #[cfg(test)]
     fn bn(v: &str) -> CTerm {
         CTerm::BNode(v.into())
     }

@@ -42,7 +42,12 @@ q postgres -q -c "CREATE DATABASE $UP" -c "CREATE DATABASE $FRESH" \
 # 1. The previous release, with a graph that must survive the upgrade.
 q $UP -q -c "CREATE EXTENSION pgrdf VERSION '$PREV'"
 q $UP -q -c "SELECT pgrdf.parse_turtle('<urn:ug:s> <urn:ug:p> \"kept\" . <urn:ug:s> <urn:ug:q> <urn:ug:o> .', pgrdf.add_graph('urn:ug:kept'))" >/dev/null
-kept_before=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")
+# The digest of that graph as the previous release computes it, recorded
+# from released 0.6.40. The library under test cannot compute a digest on
+# the old SQL (it sorts in SQL by a function the upgrade adds), so "the
+# upgrade leaves the digest unchanged" is checked against this constant.
+kept_before=0fdeb2e944b3e46c1f335b1381a5e862b9e287782aa61d0178038ccbbcdaa28f
+kept_structure=300306054a8ce699835c2a6b957f8fd080d68f02e0a2301a429dfde1c56d5815
 # A graph in the state the previous release left when a source stated one
 # triple twice: the row is stored twice. (Written with plain SQL: the
 # library under test is already the new one and would not store it.) The
@@ -59,7 +64,7 @@ END\$\$"
 q $UP -q -c "INSERT INTO pgrdf._pgrdf_quads SELECT q.* FROM pgrdf._pgrdf_quads q JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id WHERE q.graph_id = pgrdf.graph_id('urn:ug:repeats') AND o.lexical_value = 'twice'"
 repeats_before=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = pgrdf.graph_id('urn:ug:repeats')")
 [ "$repeats_before" = "3" ] || fail "expected 3 rows for 2 triples in urn:ug:repeats, got $repeats_before"
-ok "installed $PREV; graph urn:ug:kept digest ${kept_before:0:16}…; urn:ug:repeats holds $repeats_before rows for 2 triples"
+ok "installed $PREV; graph urn:ug:kept; urn:ug:repeats holds $repeats_before rows for 2 triples"
 
 # 2. A consumer hands every storage table to its own role (ALTER TABLE moves
 #    a column-linked sequence with its table). The graph-id sequence is left
@@ -83,7 +88,13 @@ before=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" -c "SET ROLE $APP"
 echo "$before" | grep -q "55000" || fail "before the upgrade, expected 55000; got: $before"
 echo "$before" | grep -q "HINT:  ALTER SEQUENCE pgrdf._pgrdf_graph_id_seq OWNER TO $STORE" \
   || fail "before the upgrade, expected the cure in HINT; got: $before"
-ok "before the upgrade: refused 55000 with HINT ALTER SEQUENCE … OWNER TO $STORE"
+# The same state, for the reads that need the new SQL: a refusal naming the
+# upgrade, never "function does not exist".
+digest=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" \
+  -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))" 2>&1 || true)
+echo "$digest" | grep -q "55000" && echo "$digest" | grep -q "HINT:  ALTER EXTENSION pgrdf UPDATE" \
+  || fail "before the upgrade, graph_digest should refuse 55000 with the upgrade as HINT; got: $digest"
+ok "before the upgrade: add_graph refused 55000 with HINT ALTER SEQUENCE … OWNER TO $STORE; graph_digest refused 55000 with HINT ALTER EXTENSION pgrdf UPDATE"
 
 # 4. The upgrade, as a superuser. It names the graph it could not constrain.
 notices=$("${PSQL[@]}" -d $UP -v ON_ERROR_STOP=1 -q -c "ALTER EXTENSION pgrdf UPDATE" 2>&1)
@@ -146,8 +157,10 @@ ok "urn:ug:repeats untouched by the upgrade ($report), no further repeat on relo
 
 # 6. The graph from before the upgrade is untouched.
 kept_after=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")
-[ "$kept_before" = "$kept_after" ] || fail "urn:ug:kept changed across the upgrade"
-ok "urn:ug:kept digest unchanged"
+[ "$kept_before" = "$kept_after" ] || fail "urn:ug:kept: graph_digest is $kept_after, the previous release computed $kept_before"
+structure_after=$(q $UP -c "SELECT pgrdf.structural_digest(pgrdf.graph_id('urn:ug:kept'))")
+[ "$kept_structure" = "$structure_after" ] || fail "urn:ug:kept: structural_digest is $structure_after, the previous release computed $kept_structure"
+ok "urn:ug:kept: graph_digest and structural_digest equal what the previous release computed"
 
 # 7. The upgraded database exposes exactly what a fresh install does.
 q $FRESH -q -c "CREATE EXTENSION pgrdf"
