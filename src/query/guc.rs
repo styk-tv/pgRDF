@@ -58,6 +58,12 @@ pub(crate) static DIFF_MAX_ROWS: GucSetting<i32> = GucSetting::<i32>::new(5_000_
 /// Past this many the call refuses 54000 instead of exhausting the backend.
 pub(crate) static DIGEST_MAX_BNODE_QUADS: GucSetting<i32> = GucSetting::<i32>::new(5_000_000);
 
+/// `pgrdf.max_inmemory_triples`: a guard for the two functions that hold
+/// a whole graph in backend memory by design, `materialize` (the reasoner)
+/// and `validate` (the SHACL engine). 0, the default, is no limit. When
+/// set, a call over more triples refuses 54000 before it reads the graph.
+pub(crate) static MAX_INMEMORY_TRIPLES: GucSetting<i32> = GucSetting::<i32>::new(0);
+
 /// `pgrdf.on_path_truncation` — what a query does when a recursive
 /// property-path walk (`+` / `*`) actually hits `pgrdf.path_max_depth`
 /// (issue #14, fail-closed truncation; detected by the per-`+`
@@ -375,6 +381,19 @@ pub fn register() {
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
+        c"pgrdf.max_inmemory_triples",
+        c"Largest graph materialize and validate will read into memory; 0 is no limit.",
+        c"materialize and validate hold whole graphs in backend memory by design. \
+          When this is above 0 and a call would read more triples (validate: the \
+          data graph plus the shapes graph), it refuses with SQLSTATE 54000 before \
+          reading anything. Usually set per database by the operator.",
+        &MAX_INMEMORY_TRIPLES,
+        0,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
         c"pgrdf.path_max_pairs",
         c"Memory budget of one SPARQL property-path walk, in (start, reached) pairs.",
         c"A recursive property path (+, *) is walked breadth-first in backend \
@@ -622,6 +641,39 @@ pub(crate) fn diff_max_rows() -> i32 {
 /// Resolved `pgrdf.digest_max_bnode_quads` for this call.
 pub(crate) fn digest_max_bnode_quads() -> usize {
     DIGEST_MAX_BNODE_QUADS.get().max(1) as usize
+}
+
+/// Resolved `pgrdf.max_inmemory_triples` for this call; `None` when the
+/// guard is off.
+pub(crate) fn max_inmemory_triples() -> Option<i64> {
+    match MAX_INMEMORY_TRIPLES.get() {
+        n if n > 0 => Some(n as i64),
+        _ => None,
+    }
+}
+
+/// The in-memory guard: refuse 54000 when `verb` would read more triples
+/// into backend memory than `pgrdf.max_inmemory_triples` allows. `count`
+/// (the triples `verb` would read from `what`) runs only when the guard is
+/// on, so the default costs nothing. Call it before reading or changing
+/// anything.
+pub(crate) fn require_inmemory_limit(verb: &str, what: &str, count: impl FnOnce() -> i64) {
+    let Some(limit) = max_inmemory_triples() else {
+        return;
+    };
+    let n = count();
+    if n > limit {
+        crate::refuse_with_hint(
+            pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            format!(
+                "{verb}: {what} holds {n} triples, more than \
+                 pgrdf.max_inmemory_triples={limit}; {verb} reads them all into backend memory"
+            ),
+            "Nothing was read or changed. Raise pgrdf.max_inmemory_triples (0 is no limit) \
+             when the backend has the memory for it, or run on a smaller graph."
+                .to_string(),
+        );
+    }
 }
 
 /// Resolved `pgrdf.ingest_dict_path` for this call, applying the

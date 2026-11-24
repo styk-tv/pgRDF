@@ -537,6 +537,25 @@ fn validate_report(
         );
     }
 
+    // Both graphs are held in memory whole (the SHACL engine works on an
+    // in-memory graph). With pgrdf.max_inmemory_triples set, refuse here,
+    // before either is read. Inferred rows count: validate reads them.
+    crate::query::guc::require_inmemory_limit(
+        "validate",
+        &format!("data graph {data_graph_id} plus shapes graph {shapes_graph_id}"),
+        || {
+            let rows = |g: i64| -> i64 {
+                Spi::get_one_with_args::<i64>(
+                    "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
+                    &[g.into()],
+                )
+                .expect("validate: counting the graph failed")
+                .unwrap_or(0)
+            };
+            rows(data_graph_id) + rows(shapes_graph_id)
+        },
+    );
+
     // 1. Rehydrate data + shapes graphs as N-Triples text.
     let (data_nt, data_count) = serialise_graph_to_ntriples(data_graph_id);
     let (shapes_nt, shapes_count) = serialise_graph_to_ntriples(shapes_graph_id);
@@ -2609,6 +2628,43 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
                 .as_str()
                 .is_some_and(|r| r.contains("canonicalization")),
             "{d}"
+        );
+    }
+
+    /// `pgrdf.max_inmemory_triples`: off by default; when set, a
+    /// validation that would read more triples (data + shapes) refuses
+    /// 54000 before reading, naming the count, the limit and the setting.
+    #[pg_test]
+    fn validate_refuses_over_the_inmemory_limit() {
+        act_fixture(8714, 8715, true);
+        let total: i64 =
+            Spi::get_one("SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id IN (8714, 8715)")
+                .unwrap()
+                .unwrap();
+        let limit: String = Spi::get_one("SHOW pgrdf.max_inmemory_triples")
+            .unwrap()
+            .unwrap();
+        assert_eq!(limit, "0", "off by default");
+
+        Spi::run(&format!("SET LOCAL pgrdf.max_inmemory_triples = {total}")).unwrap();
+        assert_eq!(attempt("SELECT pgrdf.validate(8714, 8715)"), "ok");
+
+        Spi::run(&format!(
+            "SET LOCAL pgrdf.max_inmemory_triples = {}",
+            total - 1
+        ))
+        .unwrap();
+        let refused = attempt("SELECT pgrdf.validate(8714, 8715)");
+        assert!(refused.starts_with("54000|"), "{refused}");
+        assert!(
+            refused.contains(&total.to_string())
+                && refused.contains(&format!("pgrdf.max_inmemory_triples={}", total - 1)),
+            "the refusal names the count, the limit and the setting: {refused}"
+        );
+        assert_eq!(
+            validate_acts(8714).len(),
+            1,
+            "a refused validation records no act"
         );
     }
 }

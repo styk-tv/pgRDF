@@ -129,6 +129,17 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
             ),
         ),
     }
+    // The reasoner needs the whole base in memory. With
+    // pgrdf.max_inmemory_triples set, a larger graph refuses here, before
+    // anything is read or the previous inferred rows are wiped.
+    crate::query::guc::require_inmemory_limit("materialize", &format!("graph {graph_id}"), || {
+        Spi::get_one_with_args::<i64>(
+            "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $1 AND NOT is_inferred",
+            &[graph_id.into()],
+        )
+        .expect("materialize: counting the base failed")
+        .unwrap_or(0)
+    });
     let act = crate::storage::acts::begin(graph_id, "materialize");
 
     // 1. Idempotency: wipe prior inferred rows in this graph.
@@ -1021,5 +1032,76 @@ mod tests {
             "SELECT pgrdf.materialize($1, 'owl-rl-ext')",
             &[g.into()],
         );
+    }
+
+    /// `pgrdf.max_inmemory_triples`: off by default; when set, a graph
+    /// with more asserted triples refuses 54000 before anything is read
+    /// or changed (the previous inferred rows stay), naming the count,
+    /// the limit and the setting.
+    #[pg_test]
+    fn materialize_refuses_over_the_inmemory_limit() {
+        let g: i64 = 8480;
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.com/> .
+                 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                 ex:Engineer rdfs:subClassOf ex:Person .
+                 ex:alice a ex:Engineer .
+                 ex:bob a ex:Engineer ."
+                    .into(),
+                g.into(),
+            ],
+        )
+        .unwrap();
+        let limit: String = Spi::get_one("SHOW pgrdf.max_inmemory_triples")
+            .unwrap()
+            .unwrap();
+        assert_eq!(limit, "0", "off by default");
+        Spi::run_with_args("SELECT pgrdf.materialize($1, 'rdfs')", &[g.into()]).unwrap();
+        let inferred = || -> i64 {
+            Spi::get_one_with_args(
+                "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $1 AND is_inferred",
+                &[g.into()],
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let before = inferred();
+        assert!(before >= 2);
+
+        // Tried in a subtransaction, so the refusal leaves this one usable.
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.m_attempt(q text) RETURNS text \
+             LANGUAGE plpgsql AS $$ DECLARE st text; m text; BEGIN \
+               BEGIN EXECUTE q; RETURN 'ok'; \
+               EXCEPTION WHEN OTHERS THEN \
+                 GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, m = MESSAGE_TEXT; \
+                 RETURN st || '|' || m; \
+               END; \
+             END $$",
+        )
+        .unwrap();
+        let attempt = || -> String {
+            Spi::get_one::<String>(
+                "SELECT pg_temp.m_attempt('SELECT pgrdf.materialize(8480, ''rdfs'')')",
+            )
+            .unwrap()
+            .unwrap()
+        };
+
+        Spi::run("SET LOCAL pgrdf.max_inmemory_triples = 2").unwrap();
+        let refused = attempt();
+        assert!(refused.starts_with("54000|"), "{refused}");
+        assert!(
+            refused.contains("holds 3 triples") && refused.contains("pgrdf.max_inmemory_triples=2"),
+            "the refusal names the count, the limit and the setting: {refused}"
+        );
+        assert_eq!(inferred(), before, "nothing was wiped");
+
+        Spi::run("SET LOCAL pgrdf.max_inmemory_triples = 3").unwrap();
+        assert_eq!(attempt(), "ok", "at the limit it runs");
+        assert_eq!(inferred(), before);
     }
 }
