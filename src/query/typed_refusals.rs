@@ -561,4 +561,30 @@ mod tests {
             assert_eq!(state, "00000", "{q}: {msg}");
         }
     }
+
+    /// A derived table carries at most 64 distinct variables. Past that
+    /// the request hits a limit of the implementation: 54000.
+    #[pg_test]
+    fn projection_arity_limit_refuses_54000() {
+        let vars: Vec<String> = (0..65).map(|i| format!("?v{i}")).collect();
+        let vals: Vec<String> = (0..65).map(|i| i.to_string()).collect();
+        let q = format!(
+            "SELECT ?s WHERE {{ ?s ?p ?o VALUES ({}) {{ ({}) }} }}",
+            vars.join(" "),
+            vals.join(" ")
+        );
+        assert_outcome(
+            sparql(&q),
+            "54000",
+            "sparql: derived-table arity exceeded 64 distinct variables",
+            "65-variable VALUES",
+        );
+        let within = format!(
+            "SELECT ?s WHERE {{ ?s ?p ?o VALUES ({}) {{ ({}) }} }}",
+            vars[..64].join(" "),
+            vals[..64].join(" ")
+        );
+        let (state, msg) = sparql(&within);
+        assert_eq!(state, "00000", "64 variables are within the limit: {msg}");
+    }
 }

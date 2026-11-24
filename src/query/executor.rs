@@ -185,11 +185,15 @@ const DERIVED_COLS: [&str; 64] = [
     "v54", "v55", "v56", "v57", "v58", "v59", "v60", "v61", "v62", "v63",
 ];
 
+/// Past the pool the request has hit a bound of the engine, not a
+/// fault in it: 54000 program_limit_exceeded.
 fn derived_col(k: usize) -> &'static str {
-    DERIVED_COLS
-        .get(k)
-        .copied()
-        .expect("sparql: derived-table arity exceeded 64 distinct variables")
+    DERIVED_COLS.get(k).copied().unwrap_or_else(|| {
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            "sparql: derived-table arity exceeded 64 distinct variables".to_string(),
+        )
+    })
 }
 
 /// Execute a SPARQL query (SELECT / ASK / UPDATE) and return one JSONB
