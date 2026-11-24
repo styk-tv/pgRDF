@@ -158,6 +158,14 @@ jobs:
           # the dictionary and both id allocators survive and keep working.
           PGRDF_UPGRADE_PSQL="$bindir/psql -X -h $work -p 55440 -U postgres" PGRDF_PGBIN="$bindir" \
             bash tests/upgrade/dump-roundtrip.sh
+          # What the in-database suite cannot reach: the staged loader's
+          # background workers, the streaming route's index DDL, a second
+          # session watching graph_activity(), NOTIFY on commit. These need
+          # the library preloaded, so the cluster is restarted with it.
+          "$bindir/pg_ctl" -D "$work/data" -m fast -w stop >/dev/null
+          "$bindir/pg_ctl" -D "$work/data" -o "-p 55440 -k $work -c shared_preload_libraries=pgrdf" -w start >/dev/null
+          PGRDF_UPGRADE_PSQL="$bindir/psql -X -h $work -p 55440 -U postgres" \
+            bash tests/upgrade/loader-gate.sh
 
   # Compose-based regression suite. Mirrors the local dev loop
   # (`just build-ext && just test-regression`) byte-for-byte: builds the

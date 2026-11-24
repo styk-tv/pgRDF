@@ -2644,6 +2644,16 @@ fn staged_load_default(path: &str, graph_id: i64) -> i64 {
             .get("error")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unspecified");
+        // A refusal raised in a worker (a term containing U+0000, say)
+        // reaches the caller with its own SQLSTATE and message, not wrapped
+        // in an internal error. Anything else stays one.
+        let refused = v
+            .get("sqlstate")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::storage::staged::pool::sqlstate_code);
+        if let Some(code) = refused {
+            crate::refuse(code, reason.to_string());
+        }
         error!(
             "load_turtle: staged loader aborted in the {phase} phase: {reason} \
              (staging table left in place as the resume point)"
@@ -2763,15 +2773,10 @@ fn load_turtle(
         match file_sniffs_as_ntriples(path) {
             // The staged lane is owner-only (its workers run as the
             // caller); a non-owner takes the standard parser below.
+            // Its load act is written by the staged loader itself, in the
+            // transaction that publishes the triples.
             Some(true) if crate::storage::partition::caller_owns_storage() => {
-                let act = crate::storage::acts::begin(graph_id, "load");
-                let triples = staged_load_default(path, graph_id);
-                act.finish(json!({
-                    "entry": "load_turtle",
-                    "route": "staged",
-                    "load": { "triples_read": triples },
-                }));
-                return triples;
+                return staged_load_default(path, graph_id);
             }
             Some(true) => {}
             Some(false) => {

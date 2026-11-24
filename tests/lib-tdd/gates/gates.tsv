@@ -108,8 +108,8 @@ src/query/executor.rs:9234	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/query/executor.rs:9266	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/query/parser.rs:87	refuse	ERRCODE_SYNTAX_ERROR
 src/query/typed_refusals.rs:44	refuse	ERRCODE_UNTRANSLATABLE_CHARACTER
-src/storage/acts.rs:441	refuse	ERRCODE_UNDEFINED_OBJECT
-src/storage/acts.rs:466	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/acts.rs:522	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/acts.rs:547	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/canon.rs:424	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/construct_ingest.rs:70	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/construct_ingest.rs:135	refuse	ERRCODE_INVALID_PARAMETER_VALUE
@@ -150,6 +150,7 @@ src/storage/loader.rs:866	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/storage/loader.rs:1274	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/loader.rs:1767	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/storage/loader.rs:2147	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
+src/storage/loader.rs:2656	refuse	code-on-later-line
 src/storage/lock.rs:184	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/lock.rs:196	refuse	ERRCODE_LOCK_NOT_AVAILABLE
 src/storage/lock.rs:205	refuse	ERRCODE_UNDEFINED_OBJECT
@@ -158,6 +159,6 @@ src/storage/lock.rs:251	refuse	ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
 src/storage/lock.rs:255	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/quads.rs:560	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/quads.rs:573	refuse	ERRCODE_UNDEFINED_OBJECT
-src/storage/staged/phases.rs:594	panic	_ => panic!("staged STAGE: unsupported object term"),
-src/storage/staged/pool.rs:190	panic	other => panic!("staged worker: unknown phase ordinal {other}"),
+src/storage/staged/phases.rs:605	panic	_ => panic!("staged STAGE: unsupported object term"),
+src/storage/staged/pool.rs:210	panic	other => panic!("staged worker: unknown phase ordinal {other}"),
 src/validation/shacl.rs:405	refuse	ERRCODE_INVALID_PARAMETER_VALUE

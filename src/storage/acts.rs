@@ -145,6 +145,29 @@ impl Identity {
                 .expect("act identity read failed")
                 .first();
             let text = |n: usize| row.get::<String>(n).expect("act identity column");
+            // A background worker answers with the caller it works for.
+            if let Some(c) = CARRIED.with(|c| c.borrow().clone()) {
+                return Identity {
+                    present: row
+                        .get::<bool>(1)
+                        .expect("act table probe")
+                        .unwrap_or(false),
+                    at: row
+                        .get::<pgrx::datum::TimestampWithTimeZone>(2)
+                        .expect("act start time")
+                        .expect("clock_timestamp() is never NULL"),
+                    graph_iri: text(3),
+                    session_role: c.session_role,
+                    acting_role: c.acting_role,
+                    application_name: c.application_name,
+                    requester: c.requester,
+                    workspace: c.workspace,
+                    agent: c.agent,
+                    thread: c.thread,
+                    on_behalf_of: c.on_behalf_of,
+                    harness: c.harness,
+                };
+            }
             Identity {
                 present: row
                     .get::<bool>(1)
@@ -231,6 +254,64 @@ impl Identity {
         }
         Some(act_id)
     }
+}
+
+/// The identity of the caller a background worker acts for. A worker is
+/// its own session: it has none of its caller's settings, and its
+/// `session_user` is the role it was started as. The staged loader's
+/// coordinator reads this in the caller's session and hands it to its
+/// workers, so the acts they write and the slots they show carry the
+/// caller, not the worker.
+#[derive(Clone, Default)]
+pub(crate) struct Carried {
+    pub(crate) session_role: String,
+    pub(crate) acting_role: String,
+    pub(crate) application_name: Option<String>,
+    pub(crate) requester: Option<String>,
+    pub(crate) workspace: Option<String>,
+    pub(crate) agent: Option<String>,
+    pub(crate) thread: Option<String>,
+    pub(crate) on_behalf_of: Option<String>,
+    pub(crate) harness: Option<String>,
+}
+
+thread_local! {
+    /// Set once in a background worker: every identity read in this
+    /// process then answers with the caller it works for.
+    static CARRIED: std::cell::RefCell<Option<Carried>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The caller's identity as it stands now, to hand to a worker.
+pub(crate) fn carried_now() -> Carried {
+    let id = Identity::capture(0);
+    Carried {
+        session_role: id.session_role,
+        acting_role: id.acting_role,
+        application_name: id.application_name,
+        requester: id.requester,
+        workspace: id.workspace,
+        agent: id.agent,
+        thread: id.thread,
+        on_behalf_of: id.on_behalf_of,
+        harness: id.harness,
+    }
+}
+
+/// In a background worker: act for `caller` from now on.
+pub(crate) fn act_for(caller: Carried) {
+    CARRIED.with(|c| *c.borrow_mut() = Some(caller));
+}
+
+/// List this background worker in `graph_activity()` as a worker of its
+/// caller's act, until [`stop_listing`].
+pub(crate) fn list_worker(graph_id: i64, act: &'static str, part: u8) {
+    let id = Identity::capture(graph_id);
+    activity::enter(graph_id, act, part, &id.shown());
+}
+
+/// Stop listing this backend.
+pub(crate) fn stop_listing() {
+    activity::leave();
 }
 
 thread_local! {

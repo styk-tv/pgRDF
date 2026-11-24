@@ -119,6 +119,10 @@ pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
     // own privileges — never the bootstrap superuser's.
     let role_oid = pg_sys::Oid::from_u32(job.role_oid);
     BackgroundWorker::connect_worker_to_spi_by_oid(Some(db_oid), Some(role_oid));
+    // A worker is its own session, with none of the caller's settings: from
+    // here on, every act it records and the slot it shows in
+    // graph_activity() carry the caller the coordinator read.
+    crate::storage::acts::act_for(job.caller());
 
     let job_id = job.job_id;
     let pid = unsafe { pg_sys::MyProcPid };
@@ -128,79 +132,102 @@ pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
     // caught and surfaced as a panic to `catch_unwind` rather than longjmp'ing past us. The body
     // dispatches on the worker's phase — the R2.1 STAGE/DICT/RESOLVE/INDEX bodies, or the R2.0 PING
     // marker INSERT kept as a standalone pool-machinery regression.
+    let listed = w.phase != jobctl::phase::PING;
     let result = std::panic::catch_unwind(|| {
-        BackgroundWorker::transaction(|| match w.phase {
-            jobctl::phase::PING => {
-                Spi::run_with_args(
+        BackgroundWorker::transaction(|| {
+            if listed {
+                crate::storage::acts::list_worker(
+                    job.graph_id,
+                    "load",
+                    crate::storage::activity::part::WORKER,
+                );
+            }
+            match w.phase {
+                jobctl::phase::PING => {
+                    Spi::run_with_args(
                     "INSERT INTO pgrdf._pgrdf_staged_ping (job_id, worker_slot, pid) VALUES ($1, $2, $3)",
                     &[job_id.into(), (slot as i64).into(), (pid as i64).into()],
                 )
                 .expect("staged worker: ping INSERT failed");
-            }
-            jobctl::phase::STAGE_PREP => {
-                phases::apply_session_gucs();
-                // Cross-load guard (issue #8). The staged DICT phase self-assigns dict ids and dedups
-                // only within the staging set — it can NOT dedup against rows already in the dictionary,
-                // so on a POPULATED dict it fabricates duplicate dict rows → RESOLVE multi-matches →
-                // cubic quad inflation. The staged fast path is correct ONLY on an empty dict. We MUST
-                // make this check HERE, in the STAGE_PREP worker's own committed transaction: its
-                // AccessShare lock on `_pgrdf_dictionary` releases when this worker commits, BEFORE the
-                // DICT/INDEX phases take their ACCESS EXCLUSIVE locks. (The check can't live in the
-                // coordinator's backend — a lingering AccessShare there would deadlock the INDEX phase's
-                // `ALTER TABLE … ADD CONSTRAINT`.) Non-empty ⇒ flag the job for fallback and do NOTHING
-                // ELSE — no index drop, no staging table — so the existing dict is untouched and the
-                // coordinator can cleanly hand the load to the combined path.
-                let empty = Spi::get_one::<bool>(
-                    "SELECT NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_dictionary)",
-                )
-                .ok()
-                .flatten()
-                .unwrap_or(false);
-                if empty {
-                    // T3: Phase-A prep (defer indexes, create the UNLOGGED staging table) is its OWN
-                    // single worker, run BEFORE the N parallel STAGE workers. It runs HERE in a committed
-                    // worker transaction — never the coordinator's — so its ACCESS EXCLUSIVE locks
-                    // release before STAGE/DICT/RESOLVE/INDEX run (see `phases::prepare_for_load`).
-                    // Splitting prep out is what lets STAGE go N-way without the `bulk_drop_indexes` /
-                    // `CREATE TABLE IF NOT EXISTS` DDL racing across the pool.
-                    phases::prepare_for_load(&job);
-                } else {
-                    jobctl::request_fallback(w.job_idx as usize);
                 }
+                jobctl::phase::STAGE_PREP => {
+                    phases::apply_session_gucs();
+                    // Cross-load guard (issue #8). The staged DICT phase self-assigns dict ids and dedups
+                    // only within the staging set — it can NOT dedup against rows already in the dictionary,
+                    // so on a POPULATED dict it fabricates duplicate dict rows → RESOLVE multi-matches →
+                    // cubic quad inflation. The staged fast path is correct ONLY on an empty dict. We MUST
+                    // make this check HERE, in the STAGE_PREP worker's own committed transaction: its
+                    // AccessShare lock on `_pgrdf_dictionary` releases when this worker commits, BEFORE the
+                    // DICT/INDEX phases take their ACCESS EXCLUSIVE locks. (The check can't live in the
+                    // coordinator's backend — a lingering AccessShare there would deadlock the INDEX phase's
+                    // `ALTER TABLE … ADD CONSTRAINT`.) Non-empty ⇒ flag the job for fallback and do NOTHING
+                    // ELSE — no index drop, no staging table — so the existing dict is untouched and the
+                    // coordinator can cleanly hand the load to the combined path.
+                    let empty = Spi::get_one::<bool>(
+                        "SELECT NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_dictionary)",
+                    )
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false);
+                    if empty {
+                        // T3: Phase-A prep (defer indexes, create the UNLOGGED staging table) is its OWN
+                        // single worker, run BEFORE the N parallel STAGE workers. It runs HERE in a committed
+                        // worker transaction — never the coordinator's — so its ACCESS EXCLUSIVE locks
+                        // release before STAGE/DICT/RESOLVE/INDEX run (see `phases::prepare_for_load`).
+                        // Splitting prep out is what lets STAGE go N-way without the `bulk_drop_indexes` /
+                        // `CREATE TABLE IF NOT EXISTS` DDL racing across the pool.
+                        phases::prepare_for_load(&job);
+                    } else {
+                        jobctl::request_fallback(w.job_idx as usize);
+                    }
+                }
+                jobctl::phase::STAGE => {
+                    phases::apply_session_gucs();
+                    // T3: a pure STAGE worker — prep already ran in the STAGE_PREP worker, so this one only
+                    // parses its newline-snapped byte range and COPYs into the SHARED staging table. N of
+                    // these run concurrently, each its own COPY-issuing backend (the multi-backend win).
+                    let _ = phases::stage(&job, &w);
+                }
+                jobctl::phase::DICT => {
+                    phases::apply_session_gucs();
+                    let _ = phases::dict(&job, &w);
+                }
+                jobctl::phase::RESOLVE => {
+                    phases::apply_session_gucs();
+                    let _ = phases::resolve(&job, &w);
+                }
+                jobctl::phase::INDEX => {
+                    phases::apply_session_gucs();
+                    phases::build_index(&job, &w);
+                }
+                jobctl::phase::DROP_STAGING => {
+                    Spi::run(&format!(
+                        "DROP TABLE IF EXISTS {}",
+                        phases::staging_table(job.job_id)
+                    ))
+                    .expect("staged worker: dropping the staging table failed");
+                }
+                other => panic!("staged worker: unknown phase ordinal {other}"),
             }
-            jobctl::phase::STAGE => {
-                phases::apply_session_gucs();
-                // T3: a pure STAGE worker — prep already ran in the STAGE_PREP worker, so this one only
-                // parses its newline-snapped byte range and COPYs into the SHARED staging table. N of
-                // these run concurrently, each its own COPY-issuing backend (the multi-backend win).
-                let _ = phases::stage(&job, &w);
-            }
-            jobctl::phase::DICT => {
-                phases::apply_session_gucs();
-                let _ = phases::dict(&job, &w);
-            }
-            jobctl::phase::RESOLVE => {
-                phases::apply_session_gucs();
-                let _ = phases::resolve(&job, &w);
-            }
-            jobctl::phase::INDEX => {
-                phases::apply_session_gucs();
-                phases::build_index(&job, &w);
-            }
-            other => panic!("staged worker: unknown phase ordinal {other}"),
         })
     });
+    if listed {
+        crate::storage::acts::stop_listing();
+    }
 
-    let (ok, err) = match result {
-        Ok(()) => (true, String::new()),
+    let (ok, err, err_code) = match result {
+        Ok(()) => (true, String::new(), 0),
         // Recover the REAL failure message from the panic payload (see `panic_message`). The most
         // diagnostically important case is a SQL ERROR (e.g. the 8.2 B-row RESOLVE failure): inside
         // `BackgroundWorker::transaction`'s `PgTryBuilder` a Postgres ERROR is re-raised as a Rust
         // panic carrying a pgrx `ErrorReportWithLevel`, NOT a `&str`/`String`, so the old
         // `&str`/`String`-only downcast always fell through to "unknown panic" — losing the message.
-        Err(panic) => (false, panic_message(panic, w.phase, w.shard, pid)),
+        Err(panic) => {
+            let code = panic_sqlstate(&panic);
+            (false, panic_message(panic, w.phase, w.shard, pid), code)
+        }
     };
-    jobctl::report_worker(slot, ok, &err);
+    jobctl::report_worker(slot, ok, &err, err_code);
     // Returning exits the backend → coordinator's wait_for_shutdown() unblocks.
 }
 
@@ -223,6 +250,54 @@ pub extern "C-unwind" fn pgrdf_staged_worker_main(arg: pg_sys::Datum) {
 /// * **Genuinely unrecognised payload** — fall back to a message that is still actionable: it names
 ///   the failed phase, the worker's shard, and its pid so the failure can be located in the server
 ///   log even when the message itself can't be recovered in-process.
+/// The SQLSTATE a worker's caught failure carries, as PostgreSQL packs it; 0 when it carries
+/// none (a plain Rust panic). A deliberate refusal raised in a worker (a term containing U+0000,
+/// say) keeps its class this way when the coordinator re-raises it.
+#[allow(clippy::borrowed_box)]
+fn panic_sqlstate(panic: &Box<dyn std::any::Any + Send>) -> i32 {
+    use pgrx::pg_sys::panic::{CaughtError, ErrorReportWithLevel};
+    if let Some(caught) = panic.downcast_ref::<CaughtError>() {
+        return match caught {
+            CaughtError::PostgresError(e) | CaughtError::ErrorReport(e) => {
+                e.sql_error_code() as i32
+            }
+            CaughtError::RustPanic { .. } => 0,
+        };
+    }
+    if let Some(e) = panic.downcast_ref::<ErrorReportWithLevel>() {
+        return e.sql_error_code() as i32;
+    }
+    0
+}
+
+/// A packed SQLSTATE as its five characters ("22P05"); `None` for 0 and for XX000, which is what
+/// a failure without a class of its own reads as.
+pub(crate) fn sqlstate_text(code: i32) -> Option<String> {
+    if code == 0 || code == pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR as i32 {
+        return None;
+    }
+    let mut out = String::with_capacity(5);
+    let mut c = code;
+    for _ in 0..5 {
+        out.push((((c & 0x3F) as u8) + b'0') as char);
+        c >>= 6;
+    }
+    Some(out)
+}
+
+/// The inverse of [`sqlstate_text`]: five characters to PostgreSQL's code.
+pub(crate) fn sqlstate_code(text: &str) -> Option<pg_sys::errcodes::PgSqlErrorCode> {
+    let b = text.as_bytes();
+    if b.len() != 5 {
+        return None;
+    }
+    let mut code: i32 = 0;
+    for (i, c) in b.iter().enumerate() {
+        code |= ((*c as i32 - b'0' as i32) & 0x3F) << (6 * i);
+    }
+    Some(pg_sys::errcodes::PgSqlErrorCode::from(code))
+}
+
 fn panic_message(panic: Box<dyn std::any::Any + Send>, phase: u8, shard: u16, pid: i32) -> String {
     use pgrx::pg_sys::panic::{CaughtError, ErrorReport, ErrorReportWithLevel};
 
@@ -280,6 +355,7 @@ fn phase_label(phase: u8) -> &'static str {
         jobctl::phase::DICT => "dict",
         jobctl::phase::RESOLVE => "resolve",
         jobctl::phase::INDEX => "index",
+        jobctl::phase::DROP_STAGING => "drop-staging",
         jobctl::phase::DONE => "done",
         _ => "unknown",
     }
@@ -339,7 +415,7 @@ fn load_turtle_staged_ping(n_workers: i32) -> pgrx::JsonB {
             Err(_) => {
                 // Spawn rejected (max_worker_processes). Mark the claimed slot failed so the
                 // succeeded/failed tally stays consistent, and account it as a spawn failure.
-                jobctl::report_worker(wslot, false, "load_dynamic rejected (pool exhausted)");
+                jobctl::report_worker(wslot, false, "load_dynamic rejected (pool exhausted)", 0);
                 spawn_failures += 1;
             }
         }
@@ -469,7 +545,7 @@ fn run_phase(job_idx: usize, phase: u8, specs: &[WorkerSpec]) -> PhaseOutcome {
             Ok(h) => handles.push(h),
             Err(e) => {
                 // Record the claimed slot as failed so the per-phase scan is consistent.
-                jobctl::report_worker(wslot, false, &e);
+                jobctl::report_worker(wslot, false, &e, 0);
                 spawn_err.get_or_insert(e);
             }
         }
@@ -566,6 +642,26 @@ fn run_phase(job_idx: usize, phase: u8, specs: &[WorkerSpec]) -> PhaseOutcome {
 /// pool needs the shmem job-control segment.
 ///
 /// SQL: `pgrdf.load_turtle_staged_run(path TEXT, graph_id BIGINT, n_workers INT DEFAULT 0) -> JSONB`.
+/// Lists the coordinator in `graph_activity()` for as long as it lives.
+struct Listed;
+
+impl Listed {
+    fn coordinator(graph_id: i64) -> Self {
+        crate::storage::acts::list_worker(
+            graph_id,
+            "load",
+            crate::storage::activity::part::COORDINATOR,
+        );
+        Listed
+    }
+}
+
+impl Drop for Listed {
+    fn drop(&mut self) {
+        crate::storage::acts::stop_listing();
+    }
+}
+
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)) -> pgrx::JsonB {
@@ -643,14 +739,24 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
         });
     let job_id = jobctl::job_id_of(job_idx);
 
+    // Who the workers act for: read here, in the caller's session, with the declared settings as
+    // they stand for this call.
+    jobctl::set_caller(job_idx, &crate::storage::acts::carried_now());
+    // Listed in graph_activity() for the whole load; the workers list themselves beside it.
+    let _listed = Listed::coordinator(graph_id);
+
     // Helper: on a phase failure, leave staging intact (resume point), free the shmem slots, and
     // return the abort JSONB. The job row stays FAILED (report_worker set it) — not marked done.
     let abort = |phase_label: &str, reason: String| -> pgrx::JsonB {
+        // The failing worker's SQLSTATE, when it had one of its own: a
+        // refusal stays a refusal for the caller.
+        let sqlstate = sqlstate_text(jobctl::read_job(job_idx).err_code);
         let out = json!({
             "job_id": job_id,
             "ok": false,
             "failed_phase": phase_label,
             "error": reason,
+            "sqlstate": sqlstate,
             "n_workers": requested,
             "note": "staging table left in place as the resume point",
         });
@@ -699,6 +805,19 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
         .map(|(i, &(lo, hi))| (i as u16, lo, hi))
         .collect();
     if let PhaseOutcome::Failed(reason) = run_phase(job_idx, jobctl::phase::STAGE, &stage_specs) {
+        // A refusal of the input (a data exception: a term containing
+        // U+0000) is not a crash to resume from: nothing of the file can be
+        // loaded as it is. Put back what the prep step took away, so the
+        // refused load leaves the database as it found it: the indexes and
+        // the dictionary constraint are rebuilt, and the staging table goes.
+        let refused = sqlstate_text(jobctl::read_job(job_idx).err_code)
+            .is_some_and(|code| code.starts_with("22"));
+        if refused {
+            let n_index = jobctl::index_ddls().len();
+            let specs: Vec<WorkerSpec> = (0..n_index).map(|i| (i as u16, 0u64, 0u64)).collect();
+            let _ = run_phase(job_idx, jobctl::phase::INDEX, &specs);
+            let _ = run_phase(job_idx, jobctl::phase::DROP_STAGING, &[(0u16, 0u64, 0u64)]);
+        }
         return abort("stage", reason);
     }
     let stage_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -764,6 +883,7 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
     ))
     .expect("staged loader: drop RESOLVE join index");
 
+    let job = jobctl::read_job(job_idx);
     jobctl::mark_job_done(job_idx);
     jobctl::release_job(job_idx);
 
@@ -773,6 +893,16 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
         "triples": triples,
         "dict_terms": dict_terms,
         "quads": quads,
+        // The import report every loader gives. The staged route loads
+        // into an empty database, so every duplicate came from the file.
+        "load": {
+            "triples_read": triples,
+            "parse_skipped": job.parse_skipped,
+            "triples_stored": quads,
+            "inferred_made_asserted": 0,
+            "duplicates_dropped": (triples - quads).max(0),
+            "graph_was_empty": true,
+        },
         "phase_ms": {
             "stage": stage_ms,
             "dict": dict_ms,

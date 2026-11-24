@@ -430,7 +430,7 @@ fn can_clear_graphs() -> bool {
 /// `relacl IS NULL` means default, owner-only privileges — `aclexplode`
 /// yields no rows and nothing is granted, so a deployment that never
 /// granted anything sees no behaviour change.
-fn inherit_parent_acl(part_name: &str) {
+pub(crate) fn inherit_parent_acl(part_name: &str) {
     // Grantee 0 is PUBLIC, which has no entry in pg_authid and must be
     // spelled as a bare keyword rather than a quoted identifier.
     let sql = format!(
