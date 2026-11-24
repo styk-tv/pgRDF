@@ -965,18 +965,19 @@ mod tests {
             "shacl_capability",
             "sparql_parse",
             "sparql_sql",
-            "stats",
             "structural_digest",
             "surface",
             "validate",
             "version",
         ];
         // Refused up front for a non-owner, by design (F4), or operator
-        // maintenance of the shared term cache rather than a graph write.
+        // maintenance of state every database shares (the term cache and
+        // its counters, #161) rather than a graph write.
         const OWNER_LANE: &[&str] = &[
             "load_turtle_staged",
             "load_turtle_staged_run",
             "shmem_reset",
+            "stats",
         ];
 
         crate::storage::partition::acquire_partition_ddl_gate();
@@ -1260,5 +1261,107 @@ mod tests {
             Spi::run(cure).unwrap();
         }
         assert_eq!(count(), 0, "running the cures removes the drift");
+    }
+
+    /// #160: `blocking` is true exactly when the storage owner lacks what
+    /// the engine does as that role on the object. Asked for a role with
+    /// chosen grants, so the rule is checked without re-owning storage.
+    #[pg_test]
+    fn ownership_drift_blocking_follows_what_the_engine_uses() {
+        use std::collections::BTreeMap;
+        crate::storage::partition::acquire_partition_ddl_gate();
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:160:g')")
+            .unwrap()
+            .unwrap();
+        let part = format!("_pgrdf_quads_g{g}");
+        Spi::run("CREATE ROLE pgrdf_160_so NOLOGIN").unwrap();
+        let role: pgrx::pg_sys::Oid = Spi::get_one("SELECT 'pgrdf_160_so'::regrole::oid")
+            .unwrap()
+            .unwrap();
+        let rows = || -> BTreeMap<String, (String, bool, String)> {
+            crate::storage::inventory::drift_rows_for(role)
+                .into_iter()
+                .map(|(name, kind, _, _, blocking, cure)| (name, (kind, blocking, cure)))
+                .collect()
+        };
+        let blocking = |name: &str| -> bool {
+            rows()
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not listed"))
+                .1
+        };
+
+        // A role with no rights at all: every object the engine uses blocks.
+        assert!(blocking(&part), "a partition needs ownership");
+        assert!(blocking("_pgrdf_graphs"));
+        assert!(blocking("_pgrdf_graph_id_seq"));
+        let r = rows();
+        let schema = r.get("pgrdf").expect("the pgrdf schema is listed");
+        assert_eq!(schema.0, "schema");
+        assert!(schema.1, "creating partitions needs CREATE on the schema");
+        assert_eq!(schema.2, "ALTER SCHEMA pgrdf OWNER TO pgrdf_160_so");
+        // The 0.6.40 false positive: nothing runs as the storage owner on
+        // the dictionary, so it is listed and never blocking.
+        assert!(
+            !blocking("_pgrdf_dictionary"),
+            "the engine never touches the dictionary as the storage owner"
+        );
+
+        // _pgrdf_graphs: SELECT, plus a privilege LOCK TABLE ... SHARE ROW
+        // EXCLUSIVE accepts. The rule is compared with the real command.
+        // Tried in a subtransaction, so a refusal leaves this one usable.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.o1_can_lock() RETURNS boolean LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               BEGIN \
+                 SET LOCAL ROLE pgrdf_160_so; \
+                 LOCK TABLE pgrdf._pgrdf_graphs IN SHARE ROW EXCLUSIVE MODE; \
+                 RESET ROLE; \
+                 RETURN true; \
+               EXCEPTION WHEN insufficient_privilege THEN \
+                 RETURN false; \
+               END; \
+             END $$",
+        )
+        .unwrap();
+        let can_lock = || -> bool {
+            Spi::get_one::<bool>("SELECT pg_temp.o1_can_lock()")
+                .unwrap()
+                .unwrap()
+        };
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_160_so").unwrap();
+        Spi::run("GRANT SELECT ON pgrdf._pgrdf_graphs TO pgrdf_160_so").unwrap();
+        assert!(
+            blocking("_pgrdf_graphs"),
+            "SELECT alone cannot take the lock"
+        );
+        assert!(!can_lock(), "PostgreSQL agrees: SELECT alone cannot lock");
+        Spi::run("GRANT UPDATE ON pgrdf._pgrdf_graphs TO pgrdf_160_so").unwrap();
+        assert!(!blocking("_pgrdf_graphs"), "SELECT + UPDATE is enough");
+        assert!(can_lock(), "PostgreSQL agrees: UPDATE can lock");
+
+        // The sequence keeps its 0.6.40 rule.
+        Spi::run("GRANT USAGE ON SEQUENCE pgrdf._pgrdf_graph_id_seq TO pgrdf_160_so").unwrap();
+        assert!(blocking("_pgrdf_graph_id_seq"), "USAGE alone is not enough");
+        Spi::run("GRANT SELECT, UPDATE ON SEQUENCE pgrdf._pgrdf_graph_id_seq TO pgrdf_160_so")
+            .unwrap();
+        assert!(!blocking("_pgrdf_graph_id_seq"));
+
+        // The schema: USAGE is held, CREATE is still missing.
+        assert!(
+            rows().get("pgrdf").unwrap().1,
+            "USAGE without CREATE blocks"
+        );
+        Spi::run("GRANT CREATE ON SCHEMA pgrdf TO pgrdf_160_so").unwrap();
+        assert!(!rows().get("pgrdf").unwrap().1, "USAGE + CREATE is enough");
+
+        // A partition is cured by ownership only: no grant is enough.
+        Spi::run(&format!("GRANT ALL ON pgrdf.{part} TO pgrdf_160_so")).unwrap();
+        assert!(blocking(&part), "grants never replace owning a partition");
+        Spi::run(&format!("ALTER TABLE pgrdf.{part} OWNER TO pgrdf_160_so")).unwrap();
+        assert!(
+            !rows().contains_key(&part),
+            "an owned partition is not drift"
+        );
     }
 }

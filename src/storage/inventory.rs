@@ -145,18 +145,32 @@ fn orphan_partitions() -> TableIterator<'static, (name!(relname, String),)> {
     TableIterator::new(rows.into_iter())
 }
 
-/// Storage relations not owned by the storage owner (#153, 0.6.40).
+/// Storage objects not owned by the storage owner (#153, 0.6.40; #160).
 ///
 /// The storage owner is the owner of `_pgrdf_quads`: graph creation,
-/// clear and drop act as that role. A consumer that hands pgRDF's tables
-/// to its own role (one ALTER ... OWNER per relation) leaves behind any
-/// relation a later release adds, and any partition someone else
-/// created; acts on those can then be refused. One row per drifted
-/// table, partition or standalone sequence (a sequence linked to a
-/// column follows its table). `blocking` is true when the storage owner
-/// holds neither the relation owner's rights nor, for a sequence,
-/// USAGE, SELECT and UPDATE on it. `cure` is the statement that
-/// realigns it. Empty when everything agrees: empty is the answer.
+/// clear, drop, lock and the act record run as that role. A consumer
+/// that hands pgRDF's tables to its own role (one ALTER ... OWNER per
+/// relation) leaves behind any relation a later release adds, and any
+/// partition someone else created; acts on those can then be refused.
+/// One row per drifted table, partition, standalone sequence (a
+/// sequence linked to a column follows its table) or the `pgrdf` schema
+/// itself. `cure` is the statement that realigns it. Empty when
+/// everything agrees: empty is the answer.
+///
+/// `blocking` is true exactly when the storage owner lacks something
+/// the engine does as that role on the object (#160):
+///
+/// | object | the engine, as the storage owner, needs |
+/// |---|---|
+/// | a partition | ownership: it drops, truncates, indexes and puts triggers on it |
+/// | `_pgrdf_graphs` | SELECT, and one of UPDATE, DELETE, TRUNCATE (MAINTAIN on PG 17+) for `LOCK TABLE ... SHARE ROW EXCLUSIVE` |
+/// | `_pgrdf_graph_acts` | INSERT |
+/// | `_pgrdf_graph_id_seq` | USAGE, SELECT and UPDATE |
+/// | `_pgrdf_graph_act_id_seq` | USAGE |
+/// | schema `pgrdf` | USAGE and CREATE: it creates partitions there |
+/// | anything else (`_pgrdf_dictionary`, `_pgrdf_staged_ping`, ...) | nothing: listed, never blocking |
+///
+/// Holding the object owner's rights always satisfies the row.
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 #[allow(clippy::type_complexity)]
@@ -171,41 +185,91 @@ fn ownership_drift() -> TableIterator<
         name!(cure, String),
     ),
 > {
+    let owner: pgrx::pg_sys::Oid = Spi::get_one(
+        "SELECT relowner FROM pg_catalog.pg_class \
+         WHERE oid = 'pgrdf._pgrdf_quads'::regclass",
+    )
+    .expect("ownership_drift: storage owner lookup failed")
+    .expect("pgrdf._pgrdf_quads has no owner");
+    TableIterator::new(drift_rows_for(owner).into_iter())
+}
+
+/// One drift row: relname, kind, owner, storage_owner, blocking, cure.
+pub(crate) type DriftRow = (String, String, String, String, bool, String);
+
+/// [`ownership_drift`] computed for `storage_owner`. The exported
+/// function passes the real one; tests pass a role with chosen grants,
+/// so the blocking rule is checked without re-owning the storage.
+pub(crate) fn drift_rows_for(storage_owner: pgrx::pg_sys::Oid) -> Vec<DriftRow> {
+    // LOCK TABLE ... SHARE ROW EXCLUSIVE accepts MAINTAIN from PG 17 on;
+    // older servers do not know the privilege name.
+    let lock_privilege = if cfg!(any(feature = "pg17", feature = "pg18")) {
+        "pg_catalog.has_table_privilege(so.oid, c.oid, 'UPDATE') \
+         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'DELETE') \
+         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'TRUNCATE') \
+         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'MAINTAIN')"
+    } else {
+        "pg_catalog.has_table_privilege(so.oid, c.oid, 'UPDATE') \
+         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'DELETE') \
+         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'TRUNCATE')"
+    };
+    let sql = format!(
+        "WITH so AS (SELECT $1::oid AS oid)
+         SELECT * FROM (
+         SELECT c.relname::text,
+                CASE WHEN c.relkind = 'S' THEN 'sequence'
+                     WHEN c.relispartition THEN 'partition'
+                     ELSE 'table' END,
+                pg_catalog.pg_get_userbyid(c.relowner)::text,
+                pg_catalog.pg_get_userbyid(so.oid)::text,
+                NOT (pg_catalog.pg_has_role(so.oid, c.relowner, 'USAGE')
+                     OR CASE
+                        WHEN c.relkind = 'S' AND c.relname = '_pgrdf_graph_id_seq' THEN
+                             pg_catalog.has_sequence_privilege(so.oid, c.oid, 'USAGE')
+                         AND pg_catalog.has_sequence_privilege(so.oid, c.oid, 'SELECT')
+                         AND pg_catalog.has_sequence_privilege(so.oid, c.oid, 'UPDATE')
+                        WHEN c.relkind = 'S' AND c.relname = '_pgrdf_graph_act_id_seq' THEN
+                             pg_catalog.has_sequence_privilege(so.oid, c.oid, 'USAGE')
+                        WHEN c.relkind = 'S' THEN true
+                        WHEN c.relispartition THEN false
+                        WHEN c.relname = '_pgrdf_graphs' THEN
+                             pg_catalog.has_table_privilege(so.oid, c.oid, 'SELECT')
+                         AND ({lock_privilege})
+                        WHEN c.relname = '_pgrdf_graph_acts' THEN
+                             pg_catalog.has_table_privilege(so.oid, c.oid, 'INSERT')
+                        ELSE true
+                        END),
+                pg_catalog.format('ALTER %s pgrdf.%I OWNER TO %I',
+                       CASE WHEN c.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
+                       c.relname, pg_catalog.pg_get_userbyid(so.oid))
+         FROM pg_catalog.pg_class c, so
+         WHERE c.relnamespace = 'pgrdf'::regnamespace
+           AND c.relkind IN ('r', 'p', 'S')
+           AND c.relowner <> so.oid
+           AND NOT (c.relkind = 'S' AND EXISTS (
+               SELECT 1 FROM pg_catalog.pg_depend d
+               WHERE d.classid = 'pg_catalog.pg_class'::regclass
+                 AND d.objid = c.oid
+                 AND d.refclassid = 'pg_catalog.pg_class'::regclass
+                 AND d.deptype IN ('a', 'i')))
+         UNION ALL
+         SELECT n.nspname::text, 'schema',
+                pg_catalog.pg_get_userbyid(n.nspowner)::text,
+                pg_catalog.pg_get_userbyid(so.oid)::text,
+                NOT (pg_catalog.pg_has_role(so.oid, n.nspowner, 'USAGE')
+                     OR (pg_catalog.has_schema_privilege(so.oid, n.oid, 'USAGE')
+                         AND pg_catalog.has_schema_privilege(so.oid, n.oid, 'CREATE'))),
+                pg_catalog.format('ALTER SCHEMA %I OWNER TO %I',
+                       n.nspname, pg_catalog.pg_get_userbyid(so.oid))
+         FROM pg_catalog.pg_namespace n, so
+         WHERE n.nspname = 'pgrdf' AND n.nspowner <> so.oid
+         ) d(relname, kind, owner, storage_owner, blocking, cure)
+         ORDER BY kind = 'schema', relname"
+    );
     let mut rows = Vec::new();
     Spi::connect(|client| {
         let tup = client
-            .select(
-                "WITH so AS (
-                     SELECT relowner AS oid FROM pg_catalog.pg_class
-                     WHERE oid = 'pgrdf._pgrdf_quads'::regclass)
-                 SELECT c.relname::text,
-                        CASE WHEN c.relkind = 'S' THEN 'sequence'
-                             WHEN c.relispartition THEN 'partition'
-                             ELSE 'table' END,
-                        pg_catalog.pg_get_userbyid(c.relowner)::text,
-                        pg_catalog.pg_get_userbyid(so.oid)::text,
-                        NOT (pg_catalog.pg_has_role(so.oid, c.relowner, 'USAGE')
-                             OR (c.relkind = 'S'
-                                 AND pg_catalog.has_sequence_privilege(so.oid, c.oid, 'USAGE')
-                                 AND pg_catalog.has_sequence_privilege(so.oid, c.oid, 'SELECT')
-                                 AND pg_catalog.has_sequence_privilege(so.oid, c.oid, 'UPDATE'))),
-                        pg_catalog.format('ALTER %s pgrdf.%I OWNER TO %I',
-                               CASE WHEN c.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
-                               c.relname, pg_catalog.pg_get_userbyid(so.oid))
-                 FROM pg_catalog.pg_class c, so
-                 WHERE c.relnamespace = 'pgrdf'::regnamespace
-                   AND c.relkind IN ('r', 'p', 'S')
-                   AND c.relowner <> so.oid
-                   AND NOT (c.relkind = 'S' AND EXISTS (
-                       SELECT 1 FROM pg_catalog.pg_depend d
-                       WHERE d.classid = 'pg_catalog.pg_class'::regclass
-                         AND d.objid = c.oid
-                         AND d.refclassid = 'pg_catalog.pg_class'::regclass
-                         AND d.deptype IN ('a', 'i')))
-                 ORDER BY 1",
-                None,
-                &[],
-            )
+            .select(&sql, None, &[storage_owner.into()])
             .unwrap_or_else(|e| panic!("ownership_drift: enumeration failed: {e}"));
         for row in tup {
             rows.push((
@@ -218,7 +282,7 @@ fn ownership_drift() -> TableIterator<
             ));
         }
     });
-    TableIterator::new(rows.into_iter())
+    rows
 }
 
 #[cfg(any(test, feature = "pg_test"))]
