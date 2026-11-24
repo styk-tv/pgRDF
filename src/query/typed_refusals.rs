@@ -1442,4 +1442,28 @@ mod tests {
         }
         assert_eq!(quads_of("urn:tr:c4"), 3);
     }
+
+    /// XX000 keeps its meaning. A quad whose dictionary row is gone is
+    /// not something a request can ask for: the store is corrupt, and
+    /// the failure stays an internal error. The corruption is made by
+    /// hand here — no supported call produces it.
+    #[pg_test]
+    fn dangling_dictionary_id_stays_xx000() {
+        seed("urn:tr:inv");
+        Spi::run(
+            "DELETE FROM pgrdf._pgrdf_dictionary WHERE lexical_value = 'urn:tr:b' \
+             AND term_type = 1",
+        )
+        .unwrap();
+        let got = outcome(
+            "SELECT count(*) FROM pgrdf.construct(\
+             'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <urn:tr:inv> { ?s ?p ?o } }')",
+        );
+        assert_outcome(
+            got,
+            "XX000",
+            "not found (corrupted projection)",
+            "CONSTRUCT over a dangling dictionary id",
+        );
+    }
 }
