@@ -20,6 +20,97 @@
 //! invariant, and reaching one is a bug to report. The tests below pin
 //! one SQLSTATE per refusal family.
 
+use pgrx::prelude::*;
+
+/// Refuse (22P05) a parsed query or update that holds U+0000 in a term.
+///
+/// A SPARQL string literal may spell the character as `\u0000`;
+/// PostgreSQL `text` cannot hold it. Left alone it went two ways. Where
+/// the term reached SQL text, SPI failed with a Rust `NulError` dump
+/// under XX000. Where it reached a bound parameter nothing failed at
+/// all: `INSERT DATA` stored a term with a NUL in it.
+///
+/// `entry` prefixes the message, `text` is the request as received and
+/// `parsed` its algebra. Only two escapes produce the character, so a
+/// request without them passes without a second look. With one, the
+/// algebra decides: the escape may sit in a comment or follow an escaped
+/// backslash, and then no term holds U+0000.
+pub(crate) fn refuse_nul_term(entry: &str, text: &str, parsed: &impl std::fmt::Debug) {
+    if may_spell_nul(text) && debug_holds_nul(parsed) {
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_UNTRANSLATABLE_CHARACTER,
+            format!(
+                "{entry}: a term contains U+0000 (written \\u0000), \
+                 which PostgreSQL text cannot hold"
+            ),
+        );
+    }
+}
+
+/// Whether `text` could denote U+0000 once parsed: the 4- or 8-digit
+/// escape, or the character itself.
+fn may_spell_nul(text: &str) -> bool {
+    text.contains("\\u0000") || text.contains("\\U00000000") || text.contains('\0')
+}
+
+/// Whether any string inside `value` holds U+0000, read off its `Debug`
+/// rendering. `Debug` writes that character as `\0` and a backslash as
+/// `\\`, so walking the escapes pairwise tells the two apart — and
+/// covers every string of the algebra, whichever variant carries it,
+/// without a hand-written walk that a new variant would slip past.
+fn debug_holds_nul(value: &impl std::fmt::Debug) -> bool {
+    let dump = format!("{value:?}");
+    let mut chars = dump.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.next() == Some('0') {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod unit {
+    use super::*;
+    use spargebra::SparqlParser;
+
+    fn query_holds_nul(q: &str) -> bool {
+        let parsed = SparqlParser::new()
+            .parse_query(q)
+            .expect("test query parses");
+        may_spell_nul(q) && debug_holds_nul(&parsed)
+    }
+
+    #[test]
+    fn nul_is_found_wherever_a_string_sits() {
+        assert!(debug_holds_nul(&"a\0b"));
+        assert!(debug_holds_nul(&vec![Some(("x", "\0"))]));
+        assert!(query_holds_nul(r#"SELECT ?s WHERE { ?s ?p "a\u0000b" }"#));
+        assert!(query_holds_nul(
+            r#"SELECT ?s WHERE { ?s ?p "\U00000000"@en }"#
+        ));
+        assert!(query_holds_nul(
+            r#"SELECT (GROUP_CONCAT(?o; separator="\u0000") AS ?x) WHERE { ?s ?p ?o }"#
+        ));
+        assert!(query_holds_nul(
+            r#"SELECT ?s WHERE { ?s ?p ?o FILTER(REGEX(STR(?o), "\u0000")) }"#
+        ));
+    }
+
+    #[test]
+    fn a_backslash_before_a_zero_is_not_nul() {
+        // backslash, then the digit zero
+        assert!(!debug_holds_nul(&"a\\0b"));
+        assert!(!debug_holds_nul(&"\\\\0"));
+        // two backslashes then `u0000`: an escaped backslash and five
+        // ordinary characters
+        assert!(!query_holds_nul(r#"SELECT ?s WHERE { ?s ?p "a\\u0000b" }"#));
+        // the escape in a comment is in no term
+        assert!(!query_holds_nul("SELECT ?s WHERE { ?s ?p ?o } # \\u0000"));
+        assert!(!query_holds_nul(r#"SELECT ?s WHERE { ?s ?p "0" }"#));
+    }
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
@@ -83,15 +174,6 @@ mod tests {
         Spi::get_one::<i64>("SELECT pgrdf.parse_turtle('<urn:tr:d> <urn:tr:p> <urn:tr:e> .', 0)")
             .unwrap();
         g
-    }
-
-    fn quads_in(graph_id: i64) -> i64 {
-        Spi::get_one_with_args(
-            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
-            &[graph_id.into()],
-        )
-        .unwrap()
-        .unwrap()
     }
 
     /// Every shape pgRDF parses but does not execute refuses 0A000 —
@@ -383,5 +465,100 @@ mod tests {
              OPTIONAL { ?x <urn:tr:p> ?y FILTER(<urn:x:fn>(?y)) } } }",
         );
         assert_eq!(nested.0, "0A000", "nested: {}", nested.1);
+    }
+
+    /// Text that is not SPARQL is the caller's error: 42601 at every
+    /// entry point that parses.
+    #[pg_test]
+    fn syntax_errors_refuse_42601() {
+        for (sql, prefix) in [
+            (
+                "SELECT count(*) FROM pgrdf.sparql('SELEC ?s WHERE { ?s ?p ?o }')",
+                "sparql: parse error: ",
+            ),
+            (
+                "SELECT pgrdf.sparql_sql('SELEC ?s')",
+                "sparql: parse error: ",
+            ),
+            ("SELECT pgrdf.sparql_parse('SELEC ?s')", "sparql_parse: "),
+            (
+                "SELECT count(*) FROM pgrdf.describe('SELEC ?s')",
+                "pgrdf.describe: parse error: ",
+            ),
+        ] {
+            let got = outcome(sql);
+            assert_eq!(got.0, "42601", "{sql}: {}", got.1);
+            assert!(got.1.starts_with(prefix), "{sql}: {}", got.1);
+        }
+    }
+
+    /// A request that parses but is not valid for the function called,
+    /// or that RDF forbids, is 22023.
+    #[pg_test]
+    fn invalid_requests_refuse_22023() {
+        for (sql, fragment) in [
+            (
+                "SELECT count(*) FROM pgrdf.describe('SELECT ?s WHERE { ?s ?p ?o }')",
+                "pgrdf.describe: not a DESCRIBE query",
+            ),
+            (
+                "SELECT count(*) FROM pgrdf.construct('CONSTRUCT WHERE { ?s ?p _:b }')",
+                "WHERE-shorthand prohibits blank nodes in the pattern",
+            ),
+            (
+                "SELECT count(*) FROM pgrdf.construct(\
+                 'CONSTRUCT { \"lit\" ?p ?o } WHERE { ?s ?p ?o }')",
+                "literal not allowed in subject/predicate position",
+            ),
+        ] {
+            assert_outcome(outcome(sql), "22023", fragment, sql);
+        }
+    }
+
+    /// `"\u0000"` in a query or update is a term PostgreSQL text cannot
+    /// hold. It refuses 22P05 before anything runs — no Rust `NulError`
+    /// dump, and no row written with a NUL in it.
+    #[pg_test]
+    fn nul_escape_refuses_22p05_and_writes_nothing() {
+        seed("urn:tr:nul");
+        let dict_before: i64 = Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_dictionary")
+            .unwrap()
+            .unwrap();
+        for q in [
+            r#"SELECT ?s WHERE { ?s ?p "a\u0000b" }"#,
+            r#"SELECT ?s WHERE { ?s ?p "\U00000000" }"#,
+            r#"SELECT ?s WHERE { ?s ?p ?o FILTER(CONTAINS(STR(?o), "\u0000")) }"#,
+            r#"SELECT (CONCAT(STR(?o), "\u0000") AS ?x) WHERE { ?s ?p ?o }"#,
+            r#"SELECT ?s WHERE { VALUES ?o { "a\u0000b" } ?s ?p ?o }"#,
+            r#"ASK { ?s ?p "\u0000"@en }"#,
+            r#"INSERT DATA { <urn:tr:a> <urn:tr:p> "a\u0000b" }"#,
+            r#"DELETE DATA { <urn:tr:a> <urn:tr:p> "a\u0000b" }"#,
+            r#"INSERT { ?s <urn:tr:q> "a\u0000b" } WHERE { ?s <urn:tr:p> ?o }"#,
+            r#"DELETE { ?s ?p ?o } WHERE { ?s ?p ?o FILTER(?o = "\u0000") }"#,
+        ] {
+            assert_outcome(sparql(q), "22P05", "U+0000", q);
+        }
+        for call in [
+            r#"SELECT count(*) FROM pgrdf.construct($q$CONSTRUCT { ?s ?p "a\u0000b" } WHERE { ?s ?p ?o }$q$)"#,
+            r#"SELECT count(*) FROM pgrdf.describe($q$DESCRIBE ?s WHERE { ?s ?p "\u0000" }$q$)"#,
+            r#"SELECT pgrdf.sparql_sql($q$SELECT ?s WHERE { ?s ?p "\u0000" }$q$)"#,
+            r#"SELECT pgrdf.sparql_parse($q$SELECT ?s WHERE { ?s ?p "\u0000" }$q$)"#,
+        ] {
+            assert_outcome(outcome(call), "22P05", "U+0000", call);
+        }
+        let dict_after: i64 = Spi::get_one("SELECT count(*)::bigint FROM pgrdf._pgrdf_dictionary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(dict_after, dict_before, "a refused request interns nothing");
+
+        // The six characters `\u0000` are not the escape when the
+        // backslash is itself escaped, and a comment is not a term.
+        for q in [
+            r#"SELECT ?s WHERE { ?s ?p "a\\u0000b" }"#,
+            "SELECT ?s WHERE { ?s ?p ?o } # \\u0000",
+        ] {
+            let (state, msg) = sparql(q);
+            assert_eq!(state, "00000", "{q}: {msg}");
+        }
     }
 }

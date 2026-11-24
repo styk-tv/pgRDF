@@ -227,6 +227,7 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     let parser = SparqlParser::new();
     match parser.parse_query(query) {
         Ok(parsed) => {
+            crate::query::typed_refusals::refuse_nul_term("sparql", query, &parsed);
             let plan = translate(&parsed);
             let rows = execute(&plan);
             SetOfIterator::new(rows.into_iter())
@@ -240,6 +241,7 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
             // consumed it.
             match SparqlParser::new().parse_update(query) {
                 Ok(update) => {
+                    crate::query::typed_refusals::refuse_nul_term("sparql", query, &update);
                     let rows = execute_update(&update);
                     SetOfIterator::new(rows.into_iter())
                 }
@@ -248,7 +250,10 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
                 // tooling. The update-side error is informational and
                 // would only confuse callers who wrote a malformed
                 // SELECT.
-                Err(_) => panic!("sparql: parse error: {query_err}"),
+                Err(_) => crate::refuse(
+                    PgSqlErrorCode::ERRCODE_SYNTAX_ERROR,
+                    format!("sparql: parse error: {query_err}"),
+                ),
             }
         }
     }
@@ -297,9 +302,13 @@ fn pin_join_order() {
 #[pg_extern]
 fn sparql_sql(query: &str) -> String {
     let parser = SparqlParser::new();
-    let parsed = parser
-        .parse_query(query)
-        .unwrap_or_else(|e| panic!("sparql: parse error: {e}"));
+    let parsed = parser.parse_query(query).unwrap_or_else(|e| {
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_SYNTAX_ERROR,
+            format!("sparql: parse error: {e}"),
+        )
+    });
+    crate::query::typed_refusals::refuse_nul_term("sparql", query, &parsed);
     let plan = translate(&parsed);
     // Inline `$N` → the resolved dict id. Replace the
     // highest-numbered placeholders first so `$1` does not
@@ -414,6 +423,7 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
             format!("pgrdf.construct: parse error: {e}"),
         )
     });
+    crate::query::typed_refusals::refuse_nul_term("pgrdf.construct", query, &parsed);
 
     let (template, pattern) = match parsed {
         Query::Construct {
@@ -446,13 +456,19 @@ fn construct(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // freely admits blank nodes; the W3C shorthand rule does not.
     if is_shorthand {
         if !pattern_is_pure_bgp(&pattern) {
-            panic!(
-                "pgrdf.construct: WHERE-shorthand requires a single BGP — composites not allowed (W3C SPARQL 1.1 §16.2.4)"
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                "pgrdf.construct: WHERE-shorthand requires a single BGP — composites not \
+                 allowed (W3C SPARQL 1.1 §16.2.4)"
+                    .to_string(),
             );
         }
         if template_has_blank_node(&template) {
-            panic!(
-                "pgrdf.construct: WHERE-shorthand prohibits blank nodes in the pattern (W3C SPARQL 1.1 §16.2.4)"
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+                "pgrdf.construct: WHERE-shorthand prohibits blank nodes in the pattern \
+                 (W3C SPARQL 1.1 §16.2.4)"
+                    .to_string(),
             );
         }
     }
@@ -948,8 +964,11 @@ fn classify_template_triple_slots(tp: &TriplePattern) -> TemplateTripleSlots {
     let subject = match &tp.subject {
         TermPattern::NamedNode(n) => ConstructTermSlot::Iri(n.as_str().to_string()),
         TermPattern::Variable(v) => ConstructTermSlot::Variable(v.as_str().to_string()),
-        TermPattern::Literal(_) => panic!(
-            "pgrdf.construct: literal not allowed in subject/predicate position (SPARQL 1.1 §16.2)"
+        TermPattern::Literal(_) => crate::refuse(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "pgrdf.construct: literal not allowed in subject/predicate position \
+             (SPARQL 1.1 §16.2)"
+                .to_string(),
         ),
         TermPattern::BlankNode(b) => ConstructTermSlot::BlankNode(b.as_str().to_string()),
         #[allow(unreachable_patterns)]
@@ -1621,15 +1640,20 @@ fn describe(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
     // entry point — pin the join order so a multi-pattern WHERE can't
     // cross-product (see construct()/sparql()).
     pin_join_order();
-    let parsed = SparqlParser::new()
-        .parse_query(query)
-        .unwrap_or_else(|e| panic!("pgrdf.describe: parse error: {e}"));
+    let parsed = SparqlParser::new().parse_query(query).unwrap_or_else(|e| {
+        crate::refuse(
+            PgSqlErrorCode::ERRCODE_SYNTAX_ERROR,
+            format!("pgrdf.describe: parse error: {e}"),
+        )
+    });
+    crate::query::typed_refusals::refuse_nul_term("pgrdf.describe", query, &parsed);
 
     let pattern = match parsed {
         Query::Describe { pattern, .. } => hide_query_bnodes(&pattern),
-        Query::Select { .. } | Query::Ask { .. } | Query::Construct { .. } => {
-            panic!("pgrdf.describe: not a DESCRIBE query")
-        }
+        Query::Select { .. } | Query::Ask { .. } | Query::Construct { .. } => crate::refuse(
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            "pgrdf.describe: not a DESCRIBE query".to_string(),
+        ),
     };
 
     // spargebra always wraps the DESCRIBE body in an outer
