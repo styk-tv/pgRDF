@@ -119,13 +119,16 @@ pub(crate) struct Transfer {
 /// the same INSERT … WHERE by hand, and that request is not an ADD: W3C
 /// gives it zero solutions and success. So when the shape is present,
 /// the update text is read for the keyword that opens each operation
-/// (`update_heads`) and the operations are matched to the algebra
-/// one by one; only those written as ADD / COPY / MOVE are returned.
+/// (`update_heads`) and the keywords are matched to the algebra
+/// (`transfers_by_keyword`); only what the text wrote as ADD / COPY /
+/// MOVE is returned.
 ///
 /// The two sources are not trusted equally. If the text cannot be read
 /// with confidence, or does not line up with the algebra, the shape
-/// alone decides and every operation that has it is returned: the
-/// failure mode is one refusal too many, never a destination emptied.
+/// alone decides and every operation that has it is returned
+/// (`transfers_by_shape`). Where the text can be matched in more than
+/// one way, every matching counts. The failure mode is one refusal too
+/// many, never a destination emptied.
 ///
 /// The default graph as source always exists and is never returned.
 pub(crate) fn transfers(text: &str, update: &Update) -> Vec<Transfer> {
@@ -290,11 +293,31 @@ impl Head {
         )
     }
 
+    fn is_transfer(self) -> bool {
+        matches!(self, Head::Add | Head::Copy | Head::Move)
+    }
+
+    /// Where the cursor into `ops` may stand once this keyword, met at
+    /// `at`, is accounted for. An ordinary keyword is one operation. A
+    /// transfer is its rewritten operations, or none at all:
+    /// spargebra emits nothing for a transfer onto itself.
+    fn steps(self, ops: &[GraphUpdateOperation], at: usize) -> [Option<usize>; 2] {
+        if self.is_transfer() {
+            let rewritten = self.rewritten(&ops[at..]).map(|(len, _)| at + len);
+            [rewritten, Some(at)]
+        } else {
+            let one = ops.get(at).filter(|op| self.parses_into(op));
+            [one.map(|_| at + 1), None]
+        }
+    }
+
     /// How many of `rest`'s leading operations this ADD / COPY / MOVE
     /// was rewritten into, and its source. `None` when they do not have
-    /// the rewritten form — which is how `COPY <g> TO <g>` looks:
-    /// spargebra emits nothing for a transfer onto itself.
+    /// the rewritten form, or the keyword is not a transfer.
     fn rewritten(self, rest: &[GraphUpdateOperation]) -> Option<(usize, Option<&NamedNode>)> {
+        if !self.is_transfer() {
+            return None;
+        }
         if self == Head::Add {
             let (source, _) = transfer_shape(rest.first()?)?;
             return Some((1, source));
@@ -319,28 +342,56 @@ impl Head {
 /// Match the keywords of the text to the operations of the algebra and
 /// return the transfers that read a named graph. `None` when the two do
 /// not line up one for one — the caller then falls back to the shape.
+///
+/// A transfer onto itself parses to nothing, so a keyword may account
+/// for its rewritten operations or for none, and a text can admit more
+/// than one matching (`ADD <g> TO <g>` next to a hand-written
+/// look-alike). Every matching is considered, and an operation that any
+/// of them attributes to a transfer is returned.
 fn transfers_by_keyword(heads: &[Head], ops: &[GraphUpdateOperation]) -> Option<Vec<Transfer>> {
-    let mut found = Vec::new();
-    let mut at = 0;
-    for &head in heads {
-        if matches!(head, Head::Add | Head::Copy | Head::Move) {
-            if let Some((len, source)) = head.rewritten(&ops[at..]) {
-                if let Some(source) = source {
+    let (h, n) = (heads.len(), ops.len());
+    // completes[i][at]: heads[i..] account for exactly ops[at..]
+    let mut completes = vec![vec![false; n + 1]; h + 1];
+    completes[h][n] = true;
+    for i in (0..h).rev() {
+        for at in 0..=n {
+            completes[i][at] = heads[i]
+                .steps(ops, at)
+                .into_iter()
+                .flatten()
+                .any(|next| completes[i + 1][next]);
+        }
+    }
+    if !completes[0][0] {
+        return None;
+    }
+    // Forward over every position a complete matching passes through.
+    let mut found: Vec<Transfer> = Vec::new();
+    let mut reachable = vec![false; n + 1];
+    reachable[0] = true;
+    for (i, &head) in heads.iter().enumerate() {
+        let mut next_reachable = vec![false; n + 1];
+        for at in (0..=n).filter(|&at| reachable[at]) {
+            for next in head.steps(ops, at).into_iter().flatten() {
+                if !completes[i + 1][next] {
+                    continue;
+                }
+                next_reachable[next] = true;
+                if let Some((_, Some(source))) = head.rewritten(&ops[at..])
+                    && next > at
+                    && !found.iter().any(|t| t.first_op == at)
+                {
                     found.push(Transfer {
                         first_op: at,
                         keyword: head.keyword(),
                         source: source.as_str().to_string(),
                     });
                 }
-                at += len;
             }
-        } else if ops.get(at).is_some_and(|op| head.parses_into(op)) {
-            at += 1;
-        } else {
-            return None;
         }
+        reachable = next_reachable;
     }
-    (at == ops.len()).then_some(found)
+    Some(found)
 }
 
 /// Every operation with the rewritten shape and a named source, without
@@ -592,14 +643,48 @@ mod unit {
     }
 
     #[test]
-    fn when_text_and_algebra_disagree_the_shape_decides() {
-        // `COPY <a> TO <a>` parses to nothing, so the keyword is first
-        // matched to the hand-written pair behind it; the count then does
-        // not add up and the shape rule takes over. One refusal too many
-        // is the safe direction.
-        let q = "COPY <urn:a> TO <urn:a> ; DROP SILENT GRAPH <urn:x> ; \
-                 INSERT { GRAPH <urn:x> { ?s ?p ?o } } WHERE { GRAPH <urn:y> { ?s ?p ?o } }";
-        assert_eq!(found(q), one(0, "ADD/COPY/MOVE", "urn:y"));
+    fn a_transfer_onto_itself_does_not_confuse_the_matching() {
+        // `COPY <a> TO <a>` parses to nothing. The pair behind it looks
+        // like a COPY but is written by hand; only one matching accounts
+        // for all three keywords, and it attributes nothing to COPY.
+        let by_hand = "DROP SILENT GRAPH <urn:x> ; \
+                       INSERT { GRAPH <urn:x> { ?s ?p ?o } } WHERE { GRAPH <urn:y> { ?s ?p ?o } }";
+        assert!(found(&format!("COPY <urn:a> TO <urn:a> ; {by_hand}")).is_empty());
+
+        // Two matchings fit here: the first ADD is the one onto itself
+        // and the last is real, or the other way round. Both operations
+        // are returned — a transfer is never missed.
+        let q = "ADD <urn:a> TO <urn:a> ; \
+                 INSERT { GRAPH <urn:x> { ?s ?p ?o } } WHERE { GRAPH <urn:y> { ?s ?p ?o } } ; \
+                 ADD <urn:typo> TO <urn:g>";
+        assert_eq!(
+            found(q),
+            vec![
+                (0, "ADD", "urn:y".to_string()),
+                (1, "ADD", "urn:typo".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn when_the_text_cannot_be_matched_the_shape_decides() {
+        let update = "DROP SILENT GRAPH <urn:b> ; \
+                      INSERT { GRAPH <urn:b> { ?s ?p ?o } } WHERE { GRAPH <urn:a> { ?s ?p ?o } }";
+        let parsed = SparqlParser::new().parse_update(update).unwrap();
+        // Read with its own text, the pair is hand-written.
+        assert!(transfers(update, &parsed).is_empty());
+        // Given a text that cannot be read, or one that does not account
+        // for the operations, the shape alone decides — and the check is
+        // placed before the DROP.
+        for text in ["COPY <urn:a> TO <urn:b> }", "CLEAR ALL"] {
+            let got = transfers(text, &parsed);
+            assert_eq!(got.len(), 1, "{text}");
+            assert_eq!(
+                (got[0].first_op, got[0].keyword, got[0].source.as_str()),
+                (0, "ADD/COPY/MOVE", "urn:a"),
+                "{text}"
+            );
+        }
     }
 
     #[test]
