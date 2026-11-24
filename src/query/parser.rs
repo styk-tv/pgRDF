@@ -71,13 +71,22 @@ use crate::query::executor::detect_construct_where_shorthand;
 #[pg_extern]
 fn sparql_parse(query: &str) -> pgrx::JsonB {
     match SparqlParser::new().parse_query(query) {
-        Ok(parsed) => pgrx::JsonB(serialize_query(&parsed, query)),
+        Ok(parsed) => {
+            crate::query::typed_refusals::refuse_nul_term("sparql_parse", query, &parsed);
+            pgrx::JsonB(serialize_query(&parsed, query))
+        }
         Err(query_err) => match SparqlParser::new().parse_update(query) {
-            Ok(update) => pgrx::JsonB(serialize_update(&update)),
+            Ok(update) => {
+                crate::query::typed_refusals::refuse_nul_term("sparql_parse", query, &update);
+                pgrx::JsonB(serialize_update(&update))
+            }
             // Surface the *query*-side parser error — the
             // `sparql_parse:` prefix is the locked contract for
             // syntax-error tail.
-            Err(_) => panic!("sparql_parse: {query_err}"),
+            Err(_) => crate::refuse(
+                PgSqlErrorCode::ERRCODE_SYNTAX_ERROR,
+                format!("sparql_parse: {query_err}"),
+            ),
         },
     }
 }
