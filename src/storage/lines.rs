@@ -27,7 +27,7 @@
 //! triple, so one term stored under two dictionary ids is still one term.
 //!
 //! **No term containing U+0000 is emitted.** Versions before 0.6.41 could
-//! store one. The formatter refuses it (XX001), and because PostgreSQL
+//! store one. The formatter refuses it (22021), and because PostgreSQL
 //! formats every row before it returns the first sorted one, a refusal
 //! arrives before any line does.
 
@@ -146,8 +146,16 @@ impl Refusal {
     }
 }
 
-/// Refuse to emit a stored term that contains U+0000: XX001, with the
-/// dictionary id(s), the graph and the cure in the HINT.
+/// Refuse to emit a stored term that contains U+0000: 22021
+/// (character_not_in_repertoire), with the dictionary id(s), the graph and
+/// the cure in the HINT.
+///
+/// The class is 22, a data exception, on purpose: clients and monitoring
+/// read class XX as "the server is broken" (XX001 is PostgreSQL's code for
+/// storage corruption), and this is a refusal with a cure. The code differs
+/// from the ingest refusal's 22P05, so "this input was refused" and "this
+/// database already holds such a term" stay two different answers. The
+/// message's `pgrdf:` prefix is part of the contract.
 fn refuse_stored_nul(graph_id: i64, ids: &[i64], sample: &str) -> ! {
     let ids = ids
         .iter()
@@ -160,7 +168,7 @@ fn refuse_stored_nul(graph_id: i64, ids: &[i64], sample: &str) -> ! {
         format!(": \"{}\"", crate::storage::dict::nul_term_preview(sample))
     };
     crate::refuse_with_hint(
-        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+        pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
         format!(
             "pgrdf: graph {graph_id} holds a term containing U+0000 (dictionary id {ids}), \
              which cannot be exported or digested{shown}"
@@ -182,7 +190,7 @@ fn refuse_stored_nul(graph_id: i64, ids: &[i64], sample: &str) -> ! {
 /// never exported or digested. `style` picks the line form, see
 /// [`style`].
 ///
-/// Refuses XX001 when a term of the row contains U+0000, naming the
+/// Refuses 22021 when a term of the row contains U+0000, naming the
 /// dictionary id and the graph.
 #[allow(clippy::too_many_arguments)]
 #[pg_extern(immutable, parallel_safe, name = "_nt_line")]
@@ -1542,7 +1550,7 @@ mod tests {
     // ── stored U+0000 ──────────────────────────────────────────────────
 
     /// A term containing U+0000, stored by an earlier version, never
-    /// leaves pgRDF: each whole-graph read refuses XX001 (data corrupted)
+    /// leaves pgRDF: each whole-graph read refuses 22021
     /// and the HINT names the dictionary id, the graph and the cure.
     /// The term is refused wherever it sits: in a ground triple, or in a
     /// triple that involves a blank node.
@@ -1564,7 +1572,7 @@ mod tests {
         for g in [986131i64, 986132] {
             for (name, q) in four_reads(g) {
                 let (state, msg, hint) = attempt(&q);
-                assert_eq!(state, "XX001", "{name} on {g}: {msg}");
+                assert_eq!(state, "22021", "{name} on {g}: {msg}");
                 assert!(msg.contains("U+0000"), "{name}: {msg}");
                 assert!(
                     hint.contains(&nul.to_string()) && hint.contains(&g.to_string()),
@@ -1578,7 +1586,7 @@ mod tests {
         }
         // Not even the first line: the refusal comes before any row.
         let (state, _, _) = attempt("SELECT pgrdf.export_graph(986131) LIMIT 1");
-        assert_eq!(state, "XX001", "no partial export");
+        assert_eq!(state, "22021", "no partial export");
 
         // A graph that does not use the term is unaffected.
         new_graph(986133);
@@ -1704,7 +1712,7 @@ mod tests {
         );
 
         let (state, _, _) = attempt("SELECT pgrdf.graph_digest(986137)");
-        assert_eq!(state, "XX001", "the digest itself still refuses");
+        assert_eq!(state, "22021", "the digest itself still refuses");
     }
 
     /// A read that runs to its end closes its cursor, and so does a digest

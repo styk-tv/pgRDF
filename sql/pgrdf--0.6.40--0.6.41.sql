@@ -284,7 +284,7 @@ AS 'MODULE_PATHNAME', 'dedup_graph_wrapper';
 -- graph_digest and structural_digest no longer hold the graph in backend
 -- memory. _nt_line formats one stored triple as one line; PostgreSQL sorts
 -- the lines (on disk past work_mem) and the functions read them through a
--- cursor. It refuses a term containing U+0000 with XX001, so no such term
+-- cursor. It refuses a term containing U+0000 with 22021, so no such term
 -- is exported or digested; nul_term_report() lists the stored terms that
 -- contain one and the graphs using them.
 CREATE  FUNCTION "_nt_line"(

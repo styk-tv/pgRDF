@@ -20,7 +20,7 @@ The code says what kind of refusal it is, and so who has to act.
 | `42710` | It already exists | choose another name | `create_graph` or `CREATE GRAPH` of a taken IRI; binding an IRI or id already bound to another graph |
 | `54000` | A configured limit was exceeded | narrow the request or raise the limit | property-path truncation with `pgrdf.on_path_truncation = 'error'`; a walk past `pgrdf.path_max_pairs`; a diff past `pgrdf.diff_max_rows`; a digest past `pgrdf.digest_max_bnode_quads`; `validate` or `materialize` past `pgrdf.max_inmemory_triples` |
 | `22P05` | A term contains a character PostgreSQL cannot store (U+0000) | fix the data | loading or inserting `"a\u0000b"` |
-| `XX001` | Stored data cannot be read back faithfully | reload the graph | exporting or digesting a graph that holds a term with U+0000, stored by a version before 0.6.41 |
+| `22021` | A stored term holds a character pgRDF cannot emit (U+0000) | reload the graph | exporting or digesting a graph that holds a term with U+0000, stored by a version before 0.6.41 |
 | `55000` | Wrong state for this operation | change the state first | unlocking an unlocked graph; `move_graph` into a non-empty graph; an export or digest before `ALTER EXTENSION pgrdf UPDATE` |
 | `55P03` | The graph is locked | unlock it, or leave it alone | any write to a graph under `lock_graph` |
 | `42501` | Missing privilege, or not the graph's owner | grant it, or act as the owner | creating a graph without `INSERT` on the pgRDF tables; a file loader without `pg_read_server_files`; `stats()` without `EXECUTE`; `clear_graph` on another role's graph under `pgrdf.graph_owner_enforce`; a direct write to the act record |
@@ -67,11 +67,11 @@ SELECT pgrdf.stats();     -- as a role without EXECUTE on it
 
 (In `psql`, `\set VERBOSITY verbose` shows the code next to the message.)
 
-`XX001` cannot be shown with a fresh database, because 0.6.41 no longer
+`22021` cannot be shown with a fresh database, because 0.6.41 no longer
 stores such a term. Its message has this form:
 
 ```
-ERROR:  XX001: pgrdf: graph 7 holds a term containing U+0000 (dictionary id 4211), which cannot be exported or digested
+ERROR:  22021: pgrdf: graph 7 holds a term containing U+0000 (dictionary id 4211), which cannot be exported or digested
 HINT:  Dictionary id 4211 in graph 7 was stored by a version before 0.6.41; pgrdf.nul_term_report() lists every such term and the graphs using it. Reload graph 7 from a source with the character removed or replaced.
 ```
 

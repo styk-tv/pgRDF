@@ -103,7 +103,7 @@ Guides: [04 — Reasoning](04-reasoning.md) · [06 — Validation](06-validation
 Since 0.6.41 the four whole-graph reads (`graph_digest`,
 `structural_digest`, `export_graph`, `graph_manifest`) describe the set
 of asserted triples, stream instead of holding the graph in memory,
-refuse a graph holding a term with U+0000 (`XX001`), and, the export
+refuse a graph holding a term with U+0000 (`22021`), and, the export
 aside, refuse past `pgrdf.digest_max_bnode_quads` blank-node triples
 (`54000`).
 

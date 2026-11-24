@@ -198,7 +198,7 @@ Versions before 0.6.41 could store a term containing the character
 U+0000, which PostgreSQL `text` cannot hold; reading such a term back
 failed or cut it short. Loading now [refuses it](02-loading-rdf.md#characters-that-cannot-be-stored).
 A graph that still holds one is refused by `export_graph`,
-`graph_manifest`, `graph_digest` and `structural_digest` with `XX001`
+`graph_manifest`, `graph_digest` and `structural_digest` with `22021`
 before any line is returned, so no cut-off export leaves the database.
 The message names the term's dictionary id and the graph, and the
 hint the cure: reload the graph from a source with the character

@@ -67,7 +67,7 @@ fn require_graph(graph_id: i64, verb: &str) {
 /// The export is the SET of triples: a triple the graph physically holds
 /// more than once is one line. Lines are sorted by PostgreSQL and read
 /// through a cursor, so the backend holds a batch of lines, not the
-/// graph. A graph holding a term that contains U+0000 refuses XX001
+/// graph. A graph holding a term that contains U+0000 refuses 22021
 /// before the first line is returned.
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]

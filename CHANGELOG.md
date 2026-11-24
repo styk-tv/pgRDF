@@ -84,7 +84,7 @@ refusals carry a SQLSTATE that says what kind of refusal they are.
   read. Every ingest route now refuses it `22P05` before anything is written.
   A database that already holds such a term: `nul_term_report()` lists the
   terms and their graphs, and `export_graph`, `graph_manifest`,
-  `graph_digest` and `structural_digest` refuse `XX001`, naming the term and
+  `graph_digest` and `structural_digest` refuse `22021`, naming the term and
   the cure, instead of returning a line cut at the NUL.
 - **Whole-graph reads could exhaust the server** (#165). `export_graph`,
   `graph_manifest`, `graph_digest` and `structural_digest` held the whole
