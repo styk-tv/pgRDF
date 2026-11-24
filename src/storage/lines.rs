@@ -1672,4 +1672,38 @@ mod tests {
         let (state, _, _) = attempt("SELECT pgrdf.graph_digest(986137)");
         assert_eq!(state, "XX001", "the digest itself still refuses");
     }
+
+    /// A read that runs to its end closes its cursor, and so does a digest
+    /// whose refusal is recorded instead of raised: no sort is left open
+    /// in the transaction. An export the caller stops reading keeps its
+    /// cursor until the transaction ends.
+    #[pg_test]
+    fn finished_reads_leave_no_cursor_open() {
+        let open = || -> i64 {
+            Spi::get_one("SELECT count(*) FROM pg_cursors")
+                .unwrap()
+                .unwrap()
+        };
+        new_graph(986151);
+        fill(986151, &bnode_triples());
+        new_graph(986152);
+        fill(986152, &small_triples());
+        let base = open();
+
+        let _ = read(986151);
+        assert_eq!(open(), base, "after the four reads");
+
+        Spi::run("SET LOCAL pgrdf.digest_max_bnode_quads = 1").unwrap();
+        let report = Spi::get_one::<pgrx::JsonB>(
+            "SELECT pgrdf.validate(986152::bigint, 986151::bigint, 'native', false)",
+        )
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(report["act_recorded"].as_bool(), Some(true), "{report}");
+        assert_eq!(open(), base, "after a digest refused for the record");
+
+        Spi::run("SELECT pgrdf.export_graph(986151) LIMIT 1").unwrap();
+        assert_eq!(open(), base + 1, "an export left unfinished");
+    }
 }

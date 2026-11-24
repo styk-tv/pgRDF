@@ -141,15 +141,6 @@ fn sha256_hex(data: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Read a graph's ASSERTED triples with full term structure, every stored
-/// row, into memory. The whole-graph functions no longer read this way
-/// (see `storage::lines`); the tests keep it as the in-memory reference
-/// the streamed digests are compared against.
-#[cfg(any(test, feature = "pg_test"))]
-pub(crate) fn read_asserted_triples(graph_id: i64) -> Vec<Triple> {
-    read_asserted_triples_where(graph_id, "")
-}
-
 /// The term-structured triple read behind `graph_digest`, narrowed by an
 /// extra SQL condition over the aliases `q` (quad), `s` / `p` / `o`
 /// (dictionary rows) — `graph_diff` reads only the blank-node-bearing
@@ -597,19 +588,6 @@ pub(crate) fn rdfc_digest(graph_id: i64) -> Result<String, Refusal> {
         .collect())
 }
 
-/// RDFC-1.0 over an arbitrary triple set: returns the sorted canonical
-/// N-Triples lines (each `\n`-terminated, blank nodes labelled `_:c14nN`)
-/// and the `rdfc-1.0-sha256` digest of their concatenation: the whole
-/// algorithm over a set held in memory. `graph_digest` computes the same
-/// digest without holding the ground triples ([`rdfc_digest`]); the tests
-/// keep this form as the reference it is compared against. The complexity
-/// budget is per call: an adversarial input raises `pgRDF#117`.
-#[cfg(any(test, feature = "pg_test"))]
-pub(crate) fn canonicalize(triples: Vec<Triple>) -> (Vec<String>, String) {
-    let (lines, digest, _labels) = canonicalize_labeled(triples);
-    (lines, digest)
-}
-
 /// [`canonicalize`] plus the label map: each input blank-node label →
 /// its canonical `c14nN` label. `graph_diff` renders a component's rows
 /// with these labels.
@@ -687,6 +665,31 @@ pub(crate) fn canonicalize_labeled(
     lines.sort();
     let digest = sha256_hex(&lines.concat());
     (lines, digest, canonical.issued.clone())
+}
+
+// The two functions below are compiled for the tests only. They sit at the
+// end of the file, next to the test module.
+
+/// Read a graph's ASSERTED triples with full term structure, every stored
+/// row, into memory. The whole-graph functions no longer read this way
+/// (see `storage::lines`); the tests keep it as the in-memory reference
+/// the streamed digests are compared against.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn read_asserted_triples(graph_id: i64) -> Vec<Triple> {
+    read_asserted_triples_where(graph_id, "")
+}
+
+/// RDFC-1.0 over an arbitrary triple set: returns the sorted canonical
+/// N-Triples lines (each `\n`-terminated, blank nodes labelled `_:c14nN`)
+/// and the `rdfc-1.0-sha256` digest of their concatenation: the whole
+/// algorithm over a set held in memory. `graph_digest` computes the same
+/// digest without holding the ground triples ([`rdfc_digest`]); the tests
+/// keep this form as the reference it is compared against. The complexity
+/// budget is per call: an adversarial input raises `pgRDF#117`.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn canonicalize(triples: Vec<Triple>) -> (Vec<String>, String) {
+    let (lines, digest, _labels) = canonicalize_labeled(triples);
+    (lines, digest)
 }
 
 #[cfg(any(test, feature = "pg_test"))]

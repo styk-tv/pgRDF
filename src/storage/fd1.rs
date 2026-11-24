@@ -110,74 +110,11 @@ fn sha256_hex(data: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[cfg(any(test, feature = "pg_test"))]
-fn is_bnode(t: &CTerm) -> bool {
-    matches!(t, CTerm::BNode(_))
-}
-
 fn bnode_label(t: &CTerm) -> Option<&str> {
     match t {
         CTerm::BNode(b) => Some(b.as_str()),
         _ => None,
     }
-}
-
-/// The fd1 computation over a triple list held in memory: the algorithm
-/// as the fleet's reference states it, kept as the definition the unit
-/// tests exercise and the streamed [`fd1_stream`] is compared against.
-/// Pure — no SPI. The list is taken as given: a repeated triple repeats.
-#[cfg(any(test, feature = "pg_test"))]
-pub(crate) fn fd1_digest(triples: &[Triple]) -> String {
-    // ground: lines whose subject and object are both non-bnode.
-    let mut ground: Vec<String> = triples
-        .iter()
-        .filter(|(s, _, o)| !is_bnode(s) && !is_bnode(o))
-        .map(|(s, p, o)| {
-            format!(
-                "{} {} {} .",
-                fleet_term(s, false, &|b| b.to_string()),
-                fleet_term(p, false, &|b| b.to_string()),
-                fleet_term(o, true, &|b| b.to_string()),
-            )
-        })
-        .collect();
-    ground.sort(); // Rust str ordering is byte-wise == COLLATE "C"
-    let ground_text = ground.join("\n");
-
-    // every distinct bnode label appearing as subject or object
-    let mut bnodes: Vec<&str> = triples
-        .iter()
-        .flat_map(|(s, _, o)| [bnode_label(s), bnode_label(o)])
-        .flatten()
-        .collect();
-    bnodes.sort_unstable();
-    bnodes.dedup();
-
-    // sig(b): sha256 over b's incident lines, self→_:a, other bnode→_:z
-    let mut sigs: Vec<String> = bnodes
-        .iter()
-        .map(|b| {
-            let sub = |label: &str| -> String { if label == *b { "a".into() } else { "z".into() } };
-            let mut lines: Vec<String> = triples
-                .iter()
-                .filter(|(s, _, o)| bnode_label(s) == Some(*b) || bnode_label(o) == Some(*b))
-                .map(|(s, p, o)| {
-                    format!(
-                        "{} {} {} .",
-                        fleet_term(s, false, &sub),
-                        fleet_term(p, false, &sub),
-                        fleet_term(o, true, &sub),
-                    )
-                })
-                .collect();
-            lines.sort();
-            sha256_hex(&lines.join("\n"))
-        })
-        .collect();
-    sigs.sort();
-    let sigs_text = sigs.join("\n");
-
-    sha256_hex(&format!("{ground_text}\n--\n{sigs_text}"))
 }
 
 /// The signature part of the digest: for every blank node, sha256 over
@@ -288,6 +225,72 @@ fn structural_digest(graph_id: i64) -> String {
         Ok(digest) => digest,
         Err(refusal) => refusal.raise("structural_digest", graph_id),
     }
+}
+
+// The reference below is compiled for the tests only. It sits at the end
+// of the file, next to the test module.
+
+/// The fd1 computation over a triple list held in memory: the algorithm
+/// as the fleet's reference states it, kept as the definition the unit
+/// tests exercise and the streamed [`fd1_stream`] is compared against.
+/// Pure — no SPI. The list is taken as given: a repeated triple repeats.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn fd1_digest(triples: &[Triple]) -> String {
+    // ground: lines whose subject and object are both non-bnode.
+    let mut ground: Vec<String> = triples
+        .iter()
+        .filter(|(s, _, o)| !is_bnode(s) && !is_bnode(o))
+        .map(|(s, p, o)| {
+            format!(
+                "{} {} {} .",
+                fleet_term(s, false, &|b| b.to_string()),
+                fleet_term(p, false, &|b| b.to_string()),
+                fleet_term(o, true, &|b| b.to_string()),
+            )
+        })
+        .collect();
+    ground.sort(); // Rust str ordering is byte-wise == COLLATE "C"
+    let ground_text = ground.join("\n");
+
+    // every distinct bnode label appearing as subject or object
+    let mut bnodes: Vec<&str> = triples
+        .iter()
+        .flat_map(|(s, _, o)| [bnode_label(s), bnode_label(o)])
+        .flatten()
+        .collect();
+    bnodes.sort_unstable();
+    bnodes.dedup();
+
+    // sig(b): sha256 over b's incident lines, self→_:a, other bnode→_:z
+    let mut sigs: Vec<String> = bnodes
+        .iter()
+        .map(|b| {
+            let sub = |label: &str| -> String { if label == *b { "a".into() } else { "z".into() } };
+            let mut lines: Vec<String> = triples
+                .iter()
+                .filter(|(s, _, o)| bnode_label(s) == Some(*b) || bnode_label(o) == Some(*b))
+                .map(|(s, p, o)| {
+                    format!(
+                        "{} {} {} .",
+                        fleet_term(s, false, &sub),
+                        fleet_term(p, false, &sub),
+                        fleet_term(o, true, &sub),
+                    )
+                })
+                .collect();
+            lines.sort();
+            sha256_hex(&lines.join("\n"))
+        })
+        .collect();
+    sigs.sort();
+    let sigs_text = sigs.join("\n");
+
+    sha256_hex(&format!("{ground_text}\n--\n{sigs_text}"))
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+fn is_bnode(t: &CTerm) -> bool {
+    matches!(t, CTerm::BNode(_))
 }
 
 #[cfg(any(test, feature = "pg_test"))]
