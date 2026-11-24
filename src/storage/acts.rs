@@ -332,6 +332,11 @@ pub(crate) fn reading(graph_id: i64, what: &'static str) -> ActScope {
     begin(graph_id, what)
 }
 
+/// Record an act that has already happened, in one step.
+pub(crate) fn record(graph_id: i64, act: &'static str, detail: Value) -> Option<i64> {
+    begin(graph_id, act).finish(detail)
+}
+
 /// Does the act table exist? False while the installed SQL is older than
 /// the library.
 pub(crate) fn schema_present() -> bool {

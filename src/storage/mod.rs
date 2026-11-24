@@ -38,6 +38,7 @@ pub mod loader;
 pub mod loader_ta11;
 pub mod lock;
 pub mod partition;
+pub mod quads;
 pub mod shmem_cache;
 pub mod source_digest;
 pub mod staged;

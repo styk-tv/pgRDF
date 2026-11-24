@@ -149,27 +149,10 @@ fn insert_quad(s_id: i64, p_id: i64, o_id: i64, g_id: i64) -> bool {
         Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[g_id.into()])
             .unwrap_or_else(|e| panic!("{PANIC_PREFIX}: add_graph({g_id}) failed: {e}"));
     }
-    // RETURNING gives us the row count so we can report "newly
-    // inserted" vs "deduplicated by NOT EXISTS guard" without a
-    // second probe.
-    let inserted: i64 = Spi::get_one_with_args(
-        "WITH ins AS (
-            INSERT INTO pgrdf._pgrdf_quads
-                  (subject_id, predicate_id, object_id, graph_id, is_inferred)
-            SELECT $1, $2, $3, $4, false
-             WHERE NOT EXISTS (
-                SELECT 1 FROM pgrdf._pgrdf_quads
-                 WHERE subject_id = $1
-                   AND predicate_id = $2
-                   AND object_id = $3
-                   AND graph_id = $4)
-            RETURNING 1)
-         SELECT count(*)::bigint FROM ins",
-        &[s_id.into(), p_id.into(), o_id.into(), g_id.into()],
-    )
-    .unwrap_or_else(|e| panic!("{PANIC_PREFIX}: INSERT quad failed: {e}"))
-    .unwrap_or(0);
-    inserted > 0
+    // The shared writer: a triple already asserted adds nothing, and one
+    // stored only as inferred becomes asserted.
+    let w = crate::storage::quads::insert_row(g_id, s_id, p_id, o_id);
+    w.stored + w.made_asserted > 0
 }
 
 /// Core decode + insert step. Shared between the single-row and

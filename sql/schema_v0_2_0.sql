@@ -33,8 +33,14 @@ CREATE TABLE IF NOT EXISTS _pgrdf_quads_default
     PARTITION OF _pgrdf_quads DEFAULT;
 
 -- Hexastore covering indexes (Index-Only Scan via INCLUDE).
-CREATE INDEX IF NOT EXISTS _pgrdf_idx_spo
-    ON _pgrdf_quads (subject_id, predicate_id, object_id) INCLUDE (is_inferred);
+--
+-- The subject-predicate-object index is not created here on the parent:
+-- since 0.6.41 each partition carries its own UNIQUE index on that key,
+-- which is what makes a graph a set of triples (a parent-level unique
+-- index would have to include graph_id, and could not exist beside a
+-- partition that still holds repeats from an earlier release). The
+-- default partition's is created by `_set_index` at install; a graph
+-- partition gets its own when it is created.
 CREATE INDEX IF NOT EXISTS _pgrdf_idx_pos
     ON _pgrdf_quads (predicate_id, object_id, subject_id) INCLUDE (is_inferred);
 CREATE INDEX IF NOT EXISTS _pgrdf_idx_osp

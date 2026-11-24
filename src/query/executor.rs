@@ -7599,6 +7599,7 @@ fn execute_update(text: &str, update: &Update) -> Vec<pgrx::JsonB> {
     // no-op (xact-scoped, released at the pgrx rollback boundary).
     acquire_partition_ddl_gate();
     let start = std::time::Instant::now();
+    UPDATE_TALLY.with(|t| t.borrow_mut().clear());
     let mut triples_inserted: i64 = 0;
     let mut triples_deleted: i64 = 0;
     let mut graphs_touched: HashSet<i64> = HashSet::new();
@@ -7642,8 +7643,7 @@ fn execute_update(text: &str, update: &Update) -> Vec<pgrx::JsonB> {
                     let s_id = intern_subject(&quad.subject);
                     let p_id = intern_named_node(quad.predicate.as_str());
                     let o_id = intern_object(&quad.object);
-                    insert_quad(s_id, p_id, o_id, g_id);
-                    triples_inserted += 1;
+                    triples_inserted += insert_quad(s_id, p_id, o_id, g_id);
                     touch_written_graph(&mut graphs_touched, g_id);
                 }
             }
@@ -7704,6 +7704,7 @@ fn execute_update(text: &str, update: &Update) -> Vec<pgrx::JsonB> {
                     .unwrap_or_else(|e| panic!("sparql: UPDATE: DELETE quad failed: {e}"))
                     .unwrap_or(0);
                     triples_deleted += n;
+                    tally_update(g_id, 0, n);
                     touch_written_graph(&mut graphs_touched, g_id);
                 }
             }
@@ -7868,6 +7869,21 @@ fn execute_update(text: &str, update: &Update) -> Vec<pgrx::JsonB> {
                 );
                 triples_deleted += n;
             }
+        }
+    }
+
+    // One `update` act per graph this statement changed, with what it
+    // actually stored and removed there. A statement that changed nothing
+    // in a graph records nothing for it; CLEAR, DROP and CREATE record
+    // their own acts.
+    let tally = UPDATE_TALLY.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    for (g_id, (inserted, deleted)) in tally {
+        if inserted + deleted > 0 {
+            crate::storage::acts::record(
+                g_id,
+                "update",
+                json!({ "form": form, "inserted": inserted, "deleted": deleted }),
+            );
         }
     }
 
@@ -8080,7 +8096,7 @@ fn intern_object(t: &Term) -> i64 {
 /// `ON CONFLICT DO NOTHING` would have been the cleaner shape, but
 /// it requires a unique constraint Postgres can attach to — which
 /// `_pgrdf_quads` deliberately doesn't have.
-fn insert_quad(s_id: i64, p_id: i64, o_id: i64, g_id: i64) {
+fn insert_quad(s_id: i64, p_id: i64, o_id: i64, g_id: i64) -> i64 {
     // Auto-create the partition for non-default graphs. graph_id = 0
     // always has the default partition seeded at CREATE EXTENSION
     // (slice 120 contract), so we skip the call to avoid a redundant
@@ -8089,19 +8105,30 @@ fn insert_quad(s_id: i64, p_id: i64, o_id: i64, g_id: i64) {
         Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[g_id.into()])
             .unwrap_or_else(|e| panic!("sparql: UPDATE: add_graph({g_id}) failed: {e}"));
     }
-    Spi::run_with_args(
-        "INSERT INTO pgrdf._pgrdf_quads \
-              (subject_id, predicate_id, object_id, graph_id, is_inferred) \
-         SELECT $1, $2, $3, $4, false \
-          WHERE NOT EXISTS ( \
-             SELECT 1 FROM pgrdf._pgrdf_quads \
-              WHERE subject_id = $1 \
-                AND predicate_id = $2 \
-                AND object_id = $3 \
-                AND graph_id = $4)",
-        &[s_id.into(), p_id.into(), o_id.into(), g_id.into()],
-    )
-    .unwrap_or_else(|e| panic!("sparql: UPDATE: INSERT quad failed: {e}"));
+    // The shared writer: a triple already asserted adds nothing, and one
+    // stored only as inferred becomes asserted. Either way the asserted
+    // set gained it, or it did not: that is the count reported.
+    let w = crate::storage::quads::insert_row(g_id, s_id, p_id, o_id);
+    let gained = w.stored + w.made_asserted;
+    tally_update(g_id, gained, 0);
+    gained
+}
+
+thread_local! {
+    /// What the UPDATE statement in progress did to each graph:
+    /// (triples inserted, triples deleted). Becomes one `update` act per
+    /// graph that changed.
+    static UPDATE_TALLY: std::cell::RefCell<std::collections::BTreeMap<i64, (i64, i64)>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+fn tally_update(g_id: i64, inserted: i64, deleted: i64) {
+    UPDATE_TALLY.with(|t| {
+        let mut t = t.borrow_mut();
+        let e = t.entry(g_id).or_insert((0, 0));
+        e.0 += inserted;
+        e.1 += deleted;
+    });
 }
 
 /// Reverse-lookup a `graph_id` to its IRI for the `graphs_touched`
@@ -8573,8 +8600,7 @@ fn execute_insert_where(template: &[QuadPattern], pattern: &GraphPattern) -> (i6
             }
             for qp in template {
                 let (s_id, p_id, o_id, g_id) = instantiate_template_quad(qp, &binding);
-                insert_quad(s_id, p_id, o_id, g_id);
-                triples_inserted += 1;
+                triples_inserted += insert_quad(s_id, p_id, o_id, g_id);
                 touch_written_graph(&mut graphs_touched, g_id);
             }
         }
@@ -8986,6 +9012,7 @@ fn execute_delete_where(
                 .unwrap_or_else(|e| panic!("sparql: DELETE WHERE: per-row DELETE failed: {e}"))
                 .unwrap_or(0);
                 triples_deleted += n;
+                tally_update(g_id, 0, n);
                 // Always record the graph — operator intent matches
                 // DELETE DATA's behaviour where graphs_touched
                 // surfaces scope even when no row was actually
@@ -9330,14 +9357,14 @@ fn execute_delete_insert_where(
                 })
                 .unwrap_or(0);
                 triples_deleted += n;
+                tally_update(g_id, 0, n);
                 touch_written_graph(&mut graphs_touched, g_id);
             }
 
             // INSERT half — interning path, set-semantic guard.
             for qp in insert {
                 let (s_id, p_id, o_id, g_id) = instantiate_template_quad(qp, &binding);
-                insert_quad(s_id, p_id, o_id, g_id);
-                triples_inserted += 1;
+                triples_inserted += insert_quad(s_id, p_id, o_id, g_id);
                 touch_written_graph(&mut graphs_touched, g_id);
             }
         }

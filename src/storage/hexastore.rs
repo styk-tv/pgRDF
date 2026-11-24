@@ -17,12 +17,9 @@ use pgrx::prelude::*;
 #[pg_extern]
 fn put_quad(s: i64, p: i64, o: i64, g: default!(i64, 0)) {
     crate::storage::lock::require_unlocked(g, "put_quad"); // #107
-    Spi::run_with_args(
-        "INSERT INTO pgrdf._pgrdf_quads (subject_id, predicate_id, object_id, graph_id)
-         VALUES ($1, $2, $3, $4)",
-        &[s.into(), p.into(), o.into(), g.into()],
-    )
-    .expect("put_quad: insert failed");
+    // Through the shared writer: a triple the graph already holds adds
+    // nothing. One triple per call, so no act is recorded here.
+    crate::storage::quads::insert_row(g, s, p, o);
 }
 
 /// Count quads in a graph (0 = default partition).

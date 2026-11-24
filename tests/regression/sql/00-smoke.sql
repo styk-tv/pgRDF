@@ -18,10 +18,13 @@ SELECT count(*)::int FROM pg_class
  WHERE relnamespace = 'pgrdf'::regnamespace
    AND relname IN ('_pgrdf_dictionary','_pgrdf_quads','_pgrdf_quads_default');
 
--- The three hexastore covering indexes on the partitioned table.
--- (Partitioned indexes propagate to child partitions; we just check
--- the parent here so per-graph partitions don't shift the count.)
+-- The hexastore covering indexes. POS and OSP live on the partitioned
+-- table and propagate to its partitions. Since 0.6.41 the
+-- subject-predicate-object index is per partition and UNIQUE (it is what
+-- makes a graph a set of triples); the default partition's is checked
+-- here, so per-graph partitions don't shift the count.
 SELECT count(*)::int FROM pg_indexes
- WHERE schemaname = 'pgrdf' AND indexname IN ('_pgrdf_idx_spo','_pgrdf_idx_pos','_pgrdf_idx_osp');
+ WHERE schemaname = 'pgrdf'
+   AND indexname IN ('_pgrdf_idx_pos','_pgrdf_idx_osp','_pgrdf_quads_default_spo_uniq');
 
 SELECT extversion FROM pg_extension WHERE extname='pgrdf';

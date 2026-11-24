@@ -457,7 +457,7 @@ pub fn prepare_for_load(job: &JobSlot) {
         .max(1);
     // (1) Defer indexes — the SAME drop (incl. the partition-DDL gate) the single-backend bulk path
     // uses; Phase D rebuilds the identical set via `index_ddls()`.
-    crate::storage::loader::bulk_drop_indexes();
+    crate::storage::loader::bulk_drop_indexes(job.graph_id);
     // (2) The UNLOGGED staging table, with the parallel_workers reloption that lets DICT/RESOLVE scan
     // it on all cores. Created here (in a committed worker txn), not by the coordinator, so its
     // ACCESS EXCLUSIVE creation lock is released before DICT/RESOLVE run.

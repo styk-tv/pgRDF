@@ -149,6 +149,12 @@ fn last_call_stats() -> pgrx::JsonB {
     pgrx::JsonB(json!({
         "path_depth_truncations": truncations,
         "filter_clauses_dropped": filter_drops,
+        // The import report of the loader call just made, in this
+        // session: read, stored, made asserted, dropped. null when the
+        // most recent call was not a load. A client that shares
+        // connections reads the loader's return value or the act record
+        // instead: this is per backend.
+        "load": shmem_cache::last_load(),
     }))
 }
 

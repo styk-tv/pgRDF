@@ -159,6 +159,15 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
     );
     as_storage_owner(|| {
         Spi::run(&sql).expect("create_quads_partition: CREATE TABLE failed");
+        // A graph is a set of triples, and this index is what enforces it:
+        // no two rows of the partition share subject, predicate and object.
+        // Same key as the other two hexastore indexes' sibling, so lookups
+        // by subject plan exactly as before.
+        Spi::run(&format!(
+            "CREATE UNIQUE INDEX IF NOT EXISTS {part_name}_spo_uniq ON pgrdf.{part_name} \
+             (subject_id, predicate_id, object_id) INCLUDE (is_inferred)"
+        ))
+        .expect("create_quads_partition: unique index failed");
         // (6) Replicate the parent's ACL onto the new partition.
         inherit_parent_acl(part_name);
         // (7) #150: advance the graph-id sequence past this id, so an id
@@ -937,6 +946,7 @@ mod tests {
             "lock_graph",
             "unlock_graph",
             "sparql",
+            "dedup_graph",
             "set_graph_owner",
             "clear_graph",
             "move_graph",
@@ -950,6 +960,7 @@ mod tests {
             "construct",
             "count_quads",
             "describe",
+            "duplicate_report",
             "export_graph",
             "get_term",
             "graph_diff",
@@ -1026,6 +1037,7 @@ mod tests {
             ("sparql", "SELECT * FROM pgrdf.sparql('CLEAR GRAPH <urn:m:sp>')".into()),
             ("sparql", "SELECT * FROM pgrdf.sparql('DROP GRAPH <urn:m:sp>')".into()),
             ("set_graph_owner", "SELECT pgrdf.set_graph_owner(pgrdf.graph_id('urn:m:c1'), 'pgrdf_145_app')".into()),
+            ("dedup_graph", "SELECT pgrdf.dedup_graph(pgrdf.graph_id('urn:m:c1'))".into()),
             ("clear_graph", "SELECT pgrdf.clear_graph(pgrdf.graph_id('urn:m:c1'))".into()),
             ("clear_graph", "SELECT pgrdf.clear_graph('urn:m:b')".into()),
             ("move_graph", "SELECT pgrdf.move_graph(pgrdf.graph_id('urn:m:c2'), pgrdf.add_graph('urn:m:mv1'))".into()),

@@ -37,8 +37,9 @@ trap cleanup EXIT
 
 q postgres -q -c "CREATE DATABASE $SRC" -c "CREATE DATABASE $DST"
 
-# 1. A database with three graphs (one locked), rows in the default
-#    partition, and a blank node and typed literals in the dictionary.
+# 1. A database with four graphs (one locked, one holding a repeated
+#    row), rows in the default partition, and a blank node and typed
+#    literals in the dictionary.
 q $SRC -q -c "CREATE EXTENSION pgrdf"
 q $SRC -q <<'SQL' >/dev/null
 SELECT pgrdf.parse_turtle_verbose(
@@ -49,6 +50,16 @@ SELECT pgrdf.lock_graph(pgrdf.graph_id('urn:rt:locked'), 'round trip');
 SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:rt:locked'));
 SELECT pgrdf.add_graph('urn:rt:empty');
 SELECT pgrdf.parse_turtle('<urn:rt:d> <urn:rt:p> <urn:rt:o> .', 0);
+-- A graph in the state an older release could leave: a repeated row, and
+-- so a plain index where the unique one would be.
+SELECT pgrdf.parse_turtle('<urn:rt:r> <urn:rt:p> "twice" .', pgrdf.add_graph('urn:rt:repeats'));
+DO $$
+DECLARE part text := '_pgrdf_quads_g' || pgrdf.graph_id('urn:rt:repeats');
+BEGIN
+  EXECUTE format('DROP INDEX pgrdf.%I', part || '_spo_uniq');
+  EXECUTE format('INSERT INTO pgrdf.%I SELECT * FROM pgrdf.%I', part, part);
+  EXECUTE format('CREATE INDEX %I ON pgrdf.%I (subject_id, predicate_id, object_id) INCLUDE (is_inferred)', part || '_spo_idx', part);
+END $$;
 SQL
 
 state() {
@@ -64,6 +75,9 @@ state() {
   q "$db" -c "SELECT iri, pgrdf.graph_digest(graph_id) FROM pgrdf._pgrdf_graphs ORDER BY graph_id"
   echo "-- dictionary"
   q "$db" -c "SELECT id, term_type, lexical_value, datatype_iri_id, language_tag FROM pgrdf._pgrdf_dictionary ORDER BY id"
+  echo "-- graphs holding repeats, and indexes that make the others sets"
+  q "$db" -c "SELECT iri, rows, distinct_rows, surplus, set_enforced FROM pgrdf.duplicate_report() ORDER BY graph_id"
+  q "$db" -c "SELECT indexname FROM pg_indexes WHERE schemaname = 'pgrdf' AND indexname ~ '_spo_(uniq|idx)\$' ORDER BY 1"
   echo "-- lock triggers"
   q "$db" -c "SELECT c.relname, t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
                WHERE c.relnamespace = 'pgrdf'::regnamespace AND NOT t.tgisinternal ORDER BY 1, 2"
@@ -84,7 +98,7 @@ ok "source database: $(q $SRC -c "SELECT count(*) FROM pgrdf._pgrdf_graphs") reg
 # Known and harmless: the parent table's own indexes exist as soon as a
 # partition is attached, so the dump's CREATE INDEX for the same index on
 # the partition reports "already exists". Anything else fails the gate.
-known='relation "_pgrdf_quads_g[0-9]+_(predicate_id_object_id_subject_id|object_id_subject_id_predicate_id|subject_id_predicate_id_object_id)_is_inferr_idx" already exists'
+known='relation "_pgrdf_quads_g[0-9]+_(predicate_id_object_id_subject_id|object_id_subject_id_predicate_id)_is_inferr_idx" already exists'
 unexpected=$(grep 'ERROR:' "$WORK/restore.err" | grep -Ev "$known" || true)
 [ -z "$unexpected" ] || fail "pg_restore reported: $unexpected"
 ok "pg_dump and pg_restore: no error except $(grep -c 'ERROR:' "$WORK/restore.err" || true) known index notices"
@@ -92,7 +106,7 @@ ok "pg_dump and pg_restore: no error except $(grep -c 'ERROR:' "$WORK/restore.er
 # 3. Everything that was there is there.
 state $DST > "$WORK/after.txt"
 diff "$WORK/before.txt" "$WORK/after.txt" || fail "the restored database differs from the source"
-ok "registry, rows, digests, dictionary, lock triggers and the act record are identical"
+ok "registry, rows, digests, dictionary, lock triggers, set indexes and the act record are identical"
 
 # 4. The restored database works, and its allocators continue: a new graph
 #    and a new term get ids above everything dumped.

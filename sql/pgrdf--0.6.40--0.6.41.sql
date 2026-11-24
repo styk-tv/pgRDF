@@ -177,3 +177,100 @@ CREATE  FUNCTION "graph_inventory"() RETURNS TABLE (
 STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'graph_inventory_wrapper';
+
+-- A graph is a set of triples: each partition of the quad table carries a
+-- unique index on (subject, predicate, object), which is what stops a
+-- repeated triple from being stored twice (#155).
+--
+-- This step never rewrites data. The parent table's subject-predicate-object
+-- index is dropped (a parent-level unique index would have to include
+-- graph_id, and could not exist beside a partition that holds repeats), and
+-- each partition gets its own: the unique one where its rows allow it, a
+-- plain one on the same key where they do not, so queries keep their plan.
+-- A partition left without the unique index is named in a WARNING (PostgreSQL
+-- hides a NOTICE raised inside an extension script from the client), listed by
+-- duplicate_report(), still refuses further repeats (writes check for the
+-- row themselves), and is cured with dedup_graph(graph_id) (#157).
+--
+-- Cost: one index build per partition, about what the index it replaces
+-- cost to build.
+CREATE FUNCTION _set_index(part regclass, dedup boolean) RETURNS bigint
+LANGUAGE plpgsql AS $fn$
+DECLARE
+  rel  text := (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = part);
+  cols text := CASE WHEN rel = '_pgrdf_quads_default'
+                    THEN 'graph_id, subject_id, predicate_id, object_id'
+                    ELSE 'subject_id, predicate_id, object_id' END;
+  removed bigint := 0;
+BEGIN
+  EXECUTE pg_catalog.format('DROP INDEX IF EXISTS pgrdf.%I, pgrdf.%I',
+                            rel || '_spo_uniq', rel || '_spo_idx');
+  BEGIN
+    EXECUTE pg_catalog.format('CREATE UNIQUE INDEX %I ON pgrdf.%I (%s) INCLUDE (is_inferred)',
+                              rel || '_spo_uniq', rel, cols);
+    RETURN 0;
+  EXCEPTION WHEN unique_violation THEN
+    IF NOT dedup THEN
+      EXECUTE pg_catalog.format('CREATE INDEX %I ON pgrdf.%I (%s) INCLUDE (is_inferred)',
+                                rel || '_spo_idx', rel, cols);
+      RETURN -1;
+    END IF;
+  END;
+  EXECUTE pg_catalog.format(
+    'WITH gone AS (
+       DELETE FROM pgrdf.%1$I q
+        USING (SELECT ctid,
+                      pg_catalog.row_number() OVER (PARTITION BY %2$s ORDER BY is_inferred, ctid) AS rn
+                 FROM pgrdf.%1$I) r
+        WHERE q.ctid = r.ctid AND r.rn > 1
+       RETURNING 1)
+     SELECT pg_catalog.count(*) FROM gone', rel, cols)
+    INTO removed;
+  EXECUTE pg_catalog.format('CREATE UNIQUE INDEX %I ON pgrdf.%I (%s) INCLUDE (is_inferred)',
+                            rel || '_spo_uniq', rel, cols);
+  RETURN removed;
+END
+$fn$;
+
+DROP INDEX IF EXISTS _pgrdf_idx_spo;
+
+DO $pgrdf_set_index$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN SELECT c.oid::regclass AS part, c.relname
+             FROM pg_catalog.pg_inherits i
+             JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid
+            WHERE i.inhparent = 'pgrdf._pgrdf_quads'::regclass
+            ORDER BY c.relname
+  LOOP
+    IF pgrdf._set_index(r.part, false) = -1 THEN
+      RAISE WARNING 'pgrdf: % holds repeated triples; it is left as it is, without the unique index. See pgrdf.duplicate_report(); pgrdf.dedup_graph(graph_id) cures it.', r.relname;
+    END IF;
+  END LOOP;
+END
+$pgrdf_set_index$;
+
+CREATE  FUNCTION "duplicate_report"() RETURNS TABLE (
+	"graph_id" bigint,  /* Option < i64 > */
+	"iri" TEXT,  /* Option < String > */
+	"rows" bigint,  /* i64 */
+	"distinct_rows" bigint,  /* i64 */
+	"surplus" bigint,  /* i64 */
+	"groups" bigint,  /* i64 */
+	"max_multiplicity" bigint,  /* i64 */
+	"set_enforced" bool,  /* Option < bool > */
+	"locked" bool,  /* Option < bool > */
+	"locked_digest_engine" TEXT,  /* Option < String > */
+	"note" TEXT  /* String */
+)
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'duplicate_report_wrapper';
+
+CREATE  FUNCTION "dedup_graph"(
+	"graph_id" bigint /* i64 */
+) RETURNS bigint /* i64 */
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'dedup_graph_wrapper';

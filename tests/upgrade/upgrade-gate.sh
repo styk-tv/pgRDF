@@ -43,7 +43,23 @@ q postgres -q -c "CREATE DATABASE $UP" -c "CREATE DATABASE $FRESH" \
 q $UP -q -c "CREATE EXTENSION pgrdf VERSION '$PREV'"
 q $UP -q -c "SELECT pgrdf.parse_turtle('<urn:ug:s> <urn:ug:p> \"kept\" . <urn:ug:s> <urn:ug:q> <urn:ug:o> .', pgrdf.add_graph('urn:ug:kept'))" >/dev/null
 kept_before=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")
-ok "installed $PREV; graph urn:ug:kept digest ${kept_before:0:16}…"
+# A graph in the state the previous release left when a source stated one
+# triple twice: the row is stored twice. (Written with plain SQL: the
+# library under test is already the new one and would not store it.) The
+# upgrade must leave the graph exactly as it is.
+q $UP -q -c "SELECT pgrdf.parse_turtle('<urn:ug:r> <urn:ug:p> \"twice\" . <urn:ug:r> <urn:ug:q> <urn:ug:o> .', pgrdf.add_graph('urn:ug:repeats'))" >/dev/null
+# The previous release's library built no per-graph unique index; the one
+# under test does, even on the old SQL. Remove them so both graphs are in
+# the state that release left, then store the repeated row.
+q $UP -q -c "
+DO \$\$DECLARE r record; BEGIN
+  FOR r IN SELECT indexname FROM pg_indexes WHERE schemaname = 'pgrdf' AND indexname ~ '_spo_uniq\$'
+  LOOP EXECUTE format('DROP INDEX pgrdf.%I', r.indexname); END LOOP;
+END\$\$"
+q $UP -q -c "INSERT INTO pgrdf._pgrdf_quads SELECT q.* FROM pgrdf._pgrdf_quads q JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id WHERE q.graph_id = pgrdf.graph_id('urn:ug:repeats') AND o.lexical_value = 'twice'"
+repeats_before=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = pgrdf.graph_id('urn:ug:repeats')")
+[ "$repeats_before" = "3" ] || fail "expected 3 rows for 2 triples in urn:ug:repeats, got $repeats_before"
+ok "installed $PREV; graph urn:ug:kept digest ${kept_before:0:16}…; urn:ug:repeats holds $repeats_before rows for 2 triples"
 
 # 2. A consumer hands every storage table to its own role (ALTER TABLE moves
 #    a column-linked sequence with its table). The graph-id sequence is left
@@ -69,8 +85,11 @@ echo "$before" | grep -q "HINT:  ALTER SEQUENCE pgrdf._pgrdf_graph_id_seq OWNER 
   || fail "before the upgrade, expected the cure in HINT; got: $before"
 ok "before the upgrade: refused 55000 with HINT ALTER SEQUENCE … OWNER TO $STORE"
 
-# 4. The upgrade, as a superuser.
-q $UP -q -c "ALTER EXTENSION pgrdf UPDATE"
+# 4. The upgrade, as a superuser. It names the graph it could not constrain.
+notices=$("${PSQL[@]}" -d $UP -v ON_ERROR_STOP=1 -q -c "ALTER EXTENSION pgrdf UPDATE" 2>&1)
+rg=$(q $UP -c "SELECT pgrdf.graph_id('urn:ug:repeats')")
+echo "$notices" | grep -q "_pgrdf_quads_g${rg} holds repeated triples" \
+  || fail "the upgrade did not name the graph holding repeats; it said: $notices"
 got=$(q $UP -c "SELECT extversion FROM pg_extension WHERE extname = 'pgrdf'")
 [ "$got" = "$CUR" ] || fail "extversion after update is $got, expected $CUR"
 seq_owner=$(q $UP -c "SELECT relowner::regrole FROM pg_class WHERE oid = 'pgrdf._pgrdf_graph_id_seq'::regclass")
@@ -105,6 +124,25 @@ acts_owner=$(q $UP -c "SELECT relowner::regrole FROM pg_class WHERE oid = 'pgrdf
 acts=$(q $UP -c "SELECT string_agg(act, ',' ORDER BY act_id) FROM pgrdf.graph_acts($g1) WHERE acting_role = '$APP'")
 [ "$acts" = "create,load" ] || fail "acts of graph $g1 by $APP: '$acts', expected create,load"
 ok "urn:ug:kept has no recorded owner; graph $g1 is owned by $APP with acts $acts; the act record is owned by $STORE"
+
+# 5c. Set semantics. The upgrade rewrote nothing: the graph holding repeats
+#     has the same rows, is reported, gains no more from a reload, and
+#     dedup_graph cures it. The clean graph got its unique index.
+repeats_after=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $rg")
+[ "$repeats_after" = "$repeats_before" ] || fail "the upgrade changed urn:ug:repeats: $repeats_before -> $repeats_after rows"
+report=$(q $UP -c "SELECT concat_ws('/', rows, distinct_rows, surplus, set_enforced) FROM pgrdf.duplicate_report() WHERE graph_id = $rg")
+[ "$report" = "3/2/1/f" ] || fail "duplicate_report() on urn:ug:repeats: '$report', expected 3/2/1/f"
+others=$(q $UP -c "SELECT count(*) FROM pgrdf.duplicate_report() WHERE graph_id IS DISTINCT FROM $rg")
+[ "$others" = "0" ] || fail "duplicate_report() lists $others other row(s): $(q $UP -c "SELECT string_agg(coalesce(iri, 'dictionary'), ', ') FROM pgrdf.duplicate_report() WHERE graph_id IS DISTINCT FROM $rg")"
+as_app "SELECT pgrdf.parse_turtle('<urn:ug:r> <urn:ug:p> \"twice\" .', $rg)" >/dev/null
+[ "$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $rg")" = "3" ] || fail "a graph holding repeats gained another on reload"
+removed=$(as_app "SELECT pgrdf.dedup_graph($rg)")
+[ "$removed" = "1" ] || fail "dedup_graph removed $removed rows, expected 1"
+[ "$(q $UP -c "SELECT count(*) FROM pgrdf.duplicate_report()")" = "0" ] || fail "duplicate_report() is not empty after the cure"
+dup=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" \
+  -c "INSERT INTO pgrdf._pgrdf_quads SELECT * FROM pgrdf._pgrdf_quads WHERE graph_id = pgrdf.graph_id('urn:ug:kept') LIMIT 1" 2>&1 || true)
+echo "$dup" | grep -q "23505" || fail "the upgraded clean graph accepts a repeated row: $dup"
+ok "urn:ug:repeats untouched by the upgrade ($report), no further repeat on reload, cured by dedup_graph (removed $removed); urn:ug:kept refuses a repeat 23505"
 
 # 6. The graph from before the upgrade is untouched.
 kept_after=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")

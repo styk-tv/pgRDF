@@ -360,10 +360,9 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
 }
 
 /// Flush one accumulated batch of inferred (s, p, o) dict-id triples
-/// into `_pgrdf_quads` as a single unnest-array INSERT with
-/// `is_inferred = TRUE` — the loader's `flush_batch` shape, minus the
-/// plan cache (≤ ~200 statements per materialize; parse cost is noise).
-/// Clears the input vecs and returns the number of rows written.
+/// into `_pgrdf_quads` with `is_inferred = TRUE`, through the shared
+/// set-semantics writer. Clears the input vecs and returns the number of
+/// rows written.
 fn flush_inferred(
     batch_s: &mut Vec<i64>,
     batch_p: &mut Vec<i64>,
@@ -373,31 +372,18 @@ fn flush_inferred(
     if batch_s.is_empty() {
         return 0;
     }
-    let n = batch_s.len() as i64;
     let s_arr = std::mem::take(batch_s);
     let p_arr = std::mem::take(batch_p);
     let o_arr = std::mem::take(batch_o);
-    let int8_oid: pgrx::pg_sys::Oid = pgrx::pg_sys::PgBuiltInOids::INT8OID.into();
-    let int8_array_oid: pgrx::pg_sys::Oid = pgrx::pg_sys::PgBuiltInOids::INT8ARRAYOID.into();
-    // SAFETY: the (value, oid) pairs match by construction
-    // (Vec<i64>/INT8ARRAYOID, i64/INT8OID).
-    let datums = unsafe {
-        [
-            pgrx::datum::DatumWithOid::new(s_arr, int8_array_oid),
-            pgrx::datum::DatumWithOid::new(p_arr, int8_array_oid),
-            pgrx::datum::DatumWithOid::new(o_arr, int8_array_oid),
-            pgrx::datum::DatumWithOid::new(graph_id, int8_oid),
-        ]
-    };
-    Spi::run_with_args(
-        "INSERT INTO pgrdf._pgrdf_quads
-            (subject_id, predicate_id, object_id, graph_id, is_inferred)
-         SELECT s, p, o, $4, TRUE
-           FROM unnest($1::bigint[], $2::bigint[], $3::bigint[]) AS t(s, p, o)",
-        &datums,
+    // Through the shared writer: an inferred triple never duplicates or
+    // changes a stored one.
+    crate::storage::quads::insert_inferred_batch(
+        graph_id,
+        crate::storage::quads::Mode::of(graph_id),
+        s_arr,
+        p_arr,
+        o_arr,
     )
-    .expect("materialize: batched insert inferred failed");
-    n
 }
 
 /// Strict, sound, complete RDFS entailment-rule forward-chain over
