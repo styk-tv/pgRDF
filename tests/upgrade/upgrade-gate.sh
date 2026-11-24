@@ -104,13 +104,28 @@ sig="SELECT p.oid::regprocedure::text || ' -> ' || pg_get_function_result(p.oid)
 rels="SELECT relname || ' ' || relkind::text FROM pg_class
        WHERE relnamespace = 'pgrdf'::regnamespace AND relkind <> 'i'
          AND relname !~ '^_pgrdf_quads_g[0-9]+$' ORDER BY 1"
+# Function privileges, with role names normalised (the two databases have
+# different owners after step 2), and what pg_dump is told to carry.
+acl="SELECT p.oid::regprocedure::text || ' ' || CASE WHEN p.proacl IS NULL THEN 'default'
+              WHEN EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0) THEN 'public'
+              ELSE 'not public' END
+       FROM pg_proc p WHERE p.pronamespace = 'pgrdf'::regnamespace ORDER BY 1"
+dumpcfg="SELECT c.relname || ' ' || quote_literal(e.cond)
+           FROM pg_extension x, unnest(x.extconfig, x.extcondition) AS e(rel, cond)
+           JOIN pg_class c ON c.oid = e.rel
+          WHERE x.extname = 'pgrdf' ORDER BY 1"
 # Captured first, so a query that fails stops the gate instead of comparing
 # two empty outputs.
 fresh_sig=$(q $FRESH -c "$sig"); up_sig=$(q $UP -c "$sig")
 fresh_rels=$(q $FRESH -c "$rels"); up_rels=$(q $UP -c "$rels")
-[ -n "$fresh_sig" ] && [ -n "$fresh_rels" ] || fail "fresh install lists no functions or relations"
+fresh_acl=$(q $FRESH -c "$acl"); up_acl=$(q $UP -c "$acl")
+fresh_cfg=$(q $FRESH -c "$dumpcfg"); up_cfg=$(q $UP -c "$dumpcfg")
+[ -n "$fresh_sig" ] && [ -n "$fresh_rels" ] && [ -n "$fresh_acl" ] && [ -n "$fresh_cfg" ] \
+  || fail "fresh install lists no functions, relations, privileges or dump registrations"
 diff <(echo "$fresh_sig") <(echo "$up_sig") || fail "functions differ between a fresh install and the upgrade"
 diff <(echo "$fresh_rels") <(echo "$up_rels") || fail "relations differ between a fresh install and the upgrade"
-ok "functions ($(echo "$up_sig" | wc -l | tr -d ' ')) and relations ($(echo "$up_rels" | wc -l | tr -d ' ')) match a fresh install"
+diff <(echo "$fresh_acl") <(echo "$up_acl") || fail "function privileges differ between a fresh install and the upgrade"
+diff <(echo "$fresh_cfg") <(echo "$up_cfg") || fail "pg_dump registrations differ between a fresh install and the upgrade"
+ok "functions ($(echo "$up_sig" | wc -l | tr -d ' ')), relations ($(echo "$up_rels" | wc -l | tr -d ' ')), function privileges and pg_dump registrations ($(echo "$up_cfg" | wc -l | tr -d ' ')) match a fresh install"
 
 echo "upgrade gate: $PREV -> $CUR passed"

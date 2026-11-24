@@ -24,3 +24,18 @@ $pgrdf_153$;
 REVOKE EXECUTE ON FUNCTION shmem_reset() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION shmem_cache_prewarm(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION stats() FROM PUBLIC;
+
+-- #152: the registry is dumped without its seed row (graph_id 0). A restore
+-- creates that row itself, and the dumped copy made the registry COPY fail,
+-- which lost every graph's registry row. Calling the function again replaces
+-- the filter.
+SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', 'WHERE graph_id <> 0');
+
+-- #152: the default partition's rows (the default graph, graph_id 0, and any
+-- graph id without its own partition) were not dumped at all.
+SELECT pg_catalog.pg_extension_config_dump('_pgrdf_quads_default', '');
+
+-- #152: the dictionary's rows were dumped but its id allocator was not, so a
+-- restored database handed out dictionary ids from 1 again and the first
+-- load of a new term failed 23505 on the primary key.
+SELECT pg_catalog.pg_extension_config_dump('_pgrdf_dictionary_id_seq', '');

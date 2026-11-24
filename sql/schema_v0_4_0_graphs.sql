@@ -29,11 +29,14 @@ ON CONFLICT (graph_id) DO NOTHING;
 -- Register `_pgrdf_graphs` as a user-data table so `pg_dump` includes
 -- its rows in the dump (rather than treating it as extension-managed
 -- DDL and re-running this install SQL on restore, which would drop
--- every user-bound IRI mapping). LLD v0.4 §3.1 acceptance criterion
--- "pg_dump round-trips the mapping verbatim" depends on this call.
--- The empty filter string includes all rows. Slice 110 verifies the
--- end-to-end round trip via tests/regression/scripts/pg-dump-roundtrip.sh.
-SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', '');
+-- every user-bound IRI mapping).
+--
+-- #152: the filter leaves out the seed row (graph_id 0). A restore runs
+-- CREATE EXTENSION first, which inserts that row, and then COPYs the
+-- dumped rows; with the seed row in the dump the COPY hit the primary key
+-- and aborted, and every graph lost its registry row. The seed row is
+-- never dumped because every install creates it.
+SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', 'WHERE graph_id <> 0');
 
 -- #35: `_pgrdf_dictionary` is also an extension member, but was UNregistered —
 -- so a plain `pg_dump` skipped its row data and a restore rebuilt quads that
@@ -43,8 +46,21 @@ SELECT pg_catalog.pg_extension_config_dump('_pgrdf_graphs', '');
 -- extension's `extconfig` array, no data movement / no rewrite of the dict
 -- heap. The dict table is created in `schema_v0_2_0` (loaded first via
 -- `extension_sql_file!`), so its OID is resolvable here. Round-trip covered by
--- `tests/regression/scripts/pg-dump-roundtrip.sh`.
+-- `tests/upgrade/dump-roundtrip.sh`.
 SELECT pg_catalog.pg_extension_config_dump('_pgrdf_dictionary', '');
+
+-- #152: the default partition is created by this script, so it is an
+-- extension member and `pg_dump` skipped its rows: every triple of the
+-- default graph (graph_id 0), and of any graph id without its own
+-- partition, was missing after a restore. Graph partitions created at run
+-- time are ordinary tables and were always dumped.
+SELECT pg_catalog.pg_extension_config_dump('_pgrdf_quads_default', '');
+
+-- #152: the dictionary's rows were dumped (#35) but its id allocator was
+-- not. A restored database handed out dictionary ids from 1 again, so the
+-- first load that introduced a new term failed on the primary key
+-- (23505). Registering the sequence makes the dump carry its position.
+SELECT pg_catalog.pg_extension_config_dump('_pgrdf_dictionary_id_seq', '');
 
 -- #150 (0.6.39): graph ids come from a sequence, so an id is never handed
 -- out twice. `add_graph(iri)` used to allocate MAX(graph_id) + 1, which gave

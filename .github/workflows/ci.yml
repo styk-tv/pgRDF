@@ -153,6 +153,11 @@ jobs:
           trap '"$bindir/pg_ctl" -D "$work/data" -m fast -w stop >/dev/null || true' EXIT
           PGRDF_UPGRADE_PSQL="$bindir/psql -X -h $work -p 55440 -U postgres" \
             bash tests/upgrade/upgrade-gate.sh "$prev" "$ver"
+          # #152: pg_dump a database holding graphs, restore it into an empty
+          # one, and prove the registry, the triples (default graph included),
+          # the dictionary and both id allocators survive and keep working.
+          PGRDF_UPGRADE_PSQL="$bindir/psql -X -h $work -p 55440 -U postgres" PGRDF_PGBIN="$bindir" \
+            bash tests/upgrade/dump-roundtrip.sh
 
   # Compose-based regression suite. Mirrors the local dev loop
   # (`just build-ext && just test-regression`) byte-for-byte: builds the
@@ -241,14 +246,6 @@ jobs:
         env:
           PGRDF_RUNTIME: docker
         run: bash tests/regression/run.sh
-      - name: Run pg_dump dictionary round-trip (#35)
-        env:
-          PGRDF_RUNTIME: docker
-        # Asserts `_pgrdf_dictionary` survives a plain pg_dump + restore (the
-        # `pg_extension_config_dump` registration). Without it, a restore rebuilt
-        # quads pointing at an empty dictionary. pg_dump is a separate binary, so
-        # this is a shell harness, not a SQL golden.
-        run: bash tests/regression/scripts/pg-dump-dict-roundtrip.sh
       - uses: dtolnay/rust-toolchain@stable
         # The w3c harness is orchestrated by the standalone
         # `pgrdf-oracle` binary (tests/oracle/ — issue #17); run.sh
