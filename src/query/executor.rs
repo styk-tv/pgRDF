@@ -246,7 +246,7 @@ fn sparql(query: &str) -> SetOfIterator<'static, pgrx::JsonB> {
             match SparqlParser::new().parse_update(query) {
                 Ok(update) => {
                     crate::query::typed_refusals::refuse_nul_term("sparql", query, &update);
-                    let rows = execute_update(&update);
+                    let rows = execute_update(query, &update);
                     SetOfIterator::new(rows.into_iter())
                 }
                 // Surface the *query*-side parse error — that's the
@@ -7579,7 +7579,7 @@ fn touch_written_graph(touched: &mut HashSet<i64>, g_id: i64) {
     }
 }
 
-fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
+fn execute_update(text: &str, update: &Update) -> Vec<pgrx::JsonB> {
     // Partition-DDL gate FIRST — the global OUTERMOST lock for the
     // whole UPDATE statement, taken before ANY dictionary internment,
     // quad insert, or `add_graph` / `_pgrdf_graphs` write below.
@@ -7620,8 +7620,15 @@ fn execute_update(update: &Update) -> Vec<pgrx::JsonB> {
     // per-op summary array is a v0.4.4+ follow-up). EMPTY when there
     // are no operations at all (degenerate but well-formed).
     let mut form: &'static str = "EMPTY";
+    // ADD / COPY / MOVE arrive already rewritten into DROP + INSERT …
+    // WHERE; a source graph that does not exist has to refuse before
+    // the first of those runs (#159).
+    let transfers = crate::query::typed_refusals::transfers(text, update);
 
     for (i, op) in update.operations.iter().enumerate() {
+        crate::query::typed_refusals::refuse_transfer_from_unknown_graph(&transfers, i, |iri| {
+            lookup_graph_id(iri).is_some()
+        });
         let op_name = update_op_name(op);
         if i == 0 {
             form = op_name;

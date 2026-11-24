@@ -21,6 +21,9 @@
 //! one SQLSTATE per refusal family.
 
 use pgrx::prelude::*;
+use spargebra::algebra::{GraphPattern, GraphTarget};
+use spargebra::term::{GraphNamePattern, NamedNode, NamedNodePattern, TermPattern};
+use spargebra::{GraphUpdateOperation, Update};
 
 /// Refuse (22P05) a parsed query or update that holds U+0000 in a term.
 ///
@@ -69,6 +72,414 @@ fn debug_holds_nul(value: &impl std::fmt::Debug) -> bool {
     false
 }
 
+// ── ADD / COPY / MOVE from a graph that does not exist ──────────────
+
+/// An ADD, COPY or MOVE of a parsed update whose source is a named
+/// graph.
+pub(crate) struct Transfer {
+    /// Index of the first operation spargebra rewrote it into. The
+    /// source has to exist before this one runs.
+    first_op: usize,
+    /// `ADD`, `COPY` or `MOVE` — or all three when only the shape of the
+    /// algebra identified the operation.
+    keyword: &'static str,
+    /// IRI of the source graph.
+    source: String,
+}
+
+/// Find the ADD / COPY / MOVE operations of `update` that read a named
+/// graph, so the executor can refuse one whose source does not exist
+/// before it writes anything.
+///
+/// Why this is needed. spargebra has no algebra for the three; it
+/// rewrites them while parsing, as W3C SPARQL 1.1 Update §3.2.3–3.2.5
+/// defines them:
+///
+/// ```text
+/// ADD  a TO b   INSERT { GRAPH b { ?s ?p ?o } } WHERE { GRAPH a { ?s ?p ?o } }
+/// COPY a TO b   DROP SILENT b ; <the ADD>
+/// MOVE a TO b   DROP SILENT b ; <the ADD> ; DROP a
+/// ```
+///
+/// A pattern over a graph that does not exist has no solutions, so with
+/// a mistyped source COPY emptied the destination and reported success,
+/// ADD did nothing and reported success, and MOVE was saved only by its
+/// last DROP failing. The rewrite also throws `SILENT` away, so nothing
+/// downstream can tell `COPY SILENT` from `COPY`.
+///
+/// **`SILENT` is therefore not honoured here: `COPY SILENT`,
+/// `ADD SILENT` and `MOVE SILENT` from a graph that does not exist
+/// refuse like the plain forms.** That is stricter than W3C, which lets
+/// `SILENT` turn the error into success. Success would mean the
+/// destination silently emptied; pgRDF refuses instead.
+///
+/// How the operations are found. The rewritten algebra has an exact
+/// shape, and every ADD / COPY / MOVE has it — recognising the shape
+/// cannot miss one, whatever the text looks like. But a caller may write
+/// the same INSERT … WHERE by hand, and that request is not an ADD: W3C
+/// gives it zero solutions and success. So when the shape is present,
+/// the update text is read for the keyword that opens each operation
+/// (`update_heads`) and the operations are matched to the algebra
+/// one by one; only those written as ADD / COPY / MOVE are returned.
+///
+/// The two sources are not trusted equally. If the text cannot be read
+/// with confidence, or does not line up with the algebra, the shape
+/// alone decides and every operation that has it is returned: the
+/// failure mode is one refusal too many, never a destination emptied.
+///
+/// The default graph as source always exists and is never returned.
+pub(crate) fn transfers(text: &str, update: &Update) -> Vec<Transfer> {
+    let ops = &update.operations;
+    let reads_named_graph =
+        |op: &GraphUpdateOperation| matches!(transfer_shape(op), Some((Some(_), _)));
+    if !ops.iter().any(reads_named_graph) {
+        return Vec::new();
+    }
+    update_heads(text)
+        .and_then(|heads| transfers_by_keyword(&heads, ops))
+        .unwrap_or_else(|| transfers_by_shape(ops))
+}
+
+/// Refuse 42704 if operation `index` opens a transfer whose source
+/// graph `exists` says is absent. Called by the executor before each
+/// operation runs, so a source created earlier in the same request
+/// (`CREATE GRAPH <a> ; COPY <a> TO <b>`) counts.
+pub(crate) fn refuse_transfer_from_unknown_graph(
+    transfers: &[Transfer],
+    index: usize,
+    exists: impl Fn(&str) -> bool,
+) {
+    for t in transfers.iter().filter(|t| t.first_op == index) {
+        if !exists(&t.source) {
+            crate::refuse_with_hint(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                format!(
+                    "sparql: {}: source graph <{}> does not exist",
+                    t.keyword, t.source
+                ),
+                "check the source IRI, or CREATE GRAPH it first; SILENT does not \
+                 suppress this refusal"
+                    .to_string(),
+            );
+        }
+    }
+}
+
+fn is_spo(s: &TermPattern, p: &NamedNodePattern, o: &TermPattern) -> bool {
+    matches!(s, TermPattern::Variable(v) if v.as_str() == "s")
+        && matches!(p, NamedNodePattern::Variable(v) if v.as_str() == "p")
+        && matches!(o, TermPattern::Variable(v) if v.as_str() == "o")
+}
+
+/// `Some((source, destination))` when `op` is exactly the INSERT … WHERE
+/// that spargebra's rewrite builds; a `None` source is the default
+/// graph.
+fn transfer_shape(op: &GraphUpdateOperation) -> Option<(Option<&NamedNode>, &GraphNamePattern)> {
+    let GraphUpdateOperation::DeleteInsert {
+        delete,
+        insert,
+        using: None,
+        pattern,
+    } = op
+    else {
+        return None;
+    };
+    let [quad] = insert.as_slice() else {
+        return None;
+    };
+    if !delete.is_empty()
+        || !is_spo(&quad.subject, &quad.predicate, &quad.object)
+        || matches!(quad.graph_name, GraphNamePattern::Variable(_))
+    {
+        return None;
+    }
+    let (source, bgp) = match pattern.as_ref() {
+        GraphPattern::Graph {
+            name: NamedNodePattern::NamedNode(source),
+            inner,
+        } => (Some(source), inner.as_ref()),
+        bgp => (None, bgp),
+    };
+    let GraphPattern::Bgp { patterns } = bgp else {
+        return None;
+    };
+    let [tp] = patterns.as_slice() else {
+        return None;
+    };
+    is_spo(&tp.subject, &tp.predicate, &tp.object).then_some((source, &quad.graph_name))
+}
+
+/// The target of `op` when it is the `DROP SILENT` a COPY / MOVE opens
+/// with.
+fn silent_drop(op: &GraphUpdateOperation) -> Option<&GraphTarget> {
+    match op {
+        GraphUpdateOperation::Drop {
+            silent: true,
+            graph,
+        } => Some(graph),
+        _ => None,
+    }
+}
+
+fn target_is_destination(target: &GraphTarget, destination: &GraphNamePattern) -> bool {
+    match (target, destination) {
+        (GraphTarget::DefaultGraph, GraphNamePattern::DefaultGraph) => true,
+        (GraphTarget::NamedNode(a), GraphNamePattern::NamedNode(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn target_is_source(target: &GraphTarget, source: Option<&NamedNode>) -> bool {
+    match (target, source) {
+        (GraphTarget::DefaultGraph, None) => true,
+        (GraphTarget::NamedNode(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The keyword that opens one operation of an update.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Head {
+    Load,
+    Clear,
+    Drop,
+    Create,
+    /// `INSERT`, `DELETE` or `WITH`.
+    Modify,
+    Add,
+    Copy,
+    Move,
+}
+
+const HEADS: [(&str, Head); 10] = [
+    ("LOAD", Head::Load),
+    ("CLEAR", Head::Clear),
+    ("DROP", Head::Drop),
+    ("CREATE", Head::Create),
+    ("INSERT", Head::Modify),
+    ("DELETE", Head::Modify),
+    ("WITH", Head::Modify),
+    ("ADD", Head::Add),
+    ("COPY", Head::Copy),
+    ("MOVE", Head::Move),
+];
+
+impl Head {
+    fn keyword(self) -> &'static str {
+        match self {
+            Head::Add => "ADD",
+            Head::Copy => "COPY",
+            _ => "MOVE",
+        }
+    }
+
+    /// Whether `op` is what this (non-transfer) keyword parses into.
+    fn parses_into(self, op: &GraphUpdateOperation) -> bool {
+        matches!(
+            (self, op),
+            (Head::Load, GraphUpdateOperation::Load { .. })
+                | (Head::Clear, GraphUpdateOperation::Clear { .. })
+                | (Head::Drop, GraphUpdateOperation::Drop { .. })
+                | (Head::Create, GraphUpdateOperation::Create { .. })
+                | (
+                    Head::Modify,
+                    GraphUpdateOperation::InsertData { .. }
+                        | GraphUpdateOperation::DeleteData { .. }
+                        | GraphUpdateOperation::DeleteInsert { .. }
+                )
+        )
+    }
+
+    /// How many of `rest`'s leading operations this ADD / COPY / MOVE
+    /// was rewritten into, and its source. `None` when they do not have
+    /// the rewritten form — which is how `COPY <g> TO <g>` looks:
+    /// spargebra emits nothing for a transfer onto itself.
+    fn rewritten(self, rest: &[GraphUpdateOperation]) -> Option<(usize, Option<&NamedNode>)> {
+        if self == Head::Add {
+            let (source, _) = transfer_shape(rest.first()?)?;
+            return Some((1, source));
+        }
+        let dropped = silent_drop(rest.first()?)?;
+        let (source, destination) = transfer_shape(rest.get(1)?)?;
+        if !target_is_destination(dropped, destination) {
+            return None;
+        }
+        if self == Head::Copy {
+            return Some((2, source));
+        }
+        match rest.get(2)? {
+            GraphUpdateOperation::Drop { graph, .. } if target_is_source(graph, source) => {
+                Some((3, source))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Match the keywords of the text to the operations of the algebra and
+/// return the transfers that read a named graph. `None` when the two do
+/// not line up one for one — the caller then falls back to the shape.
+fn transfers_by_keyword(heads: &[Head], ops: &[GraphUpdateOperation]) -> Option<Vec<Transfer>> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    for &head in heads {
+        if matches!(head, Head::Add | Head::Copy | Head::Move) {
+            if let Some((len, source)) = head.rewritten(&ops[at..]) {
+                if let Some(source) = source {
+                    found.push(Transfer {
+                        first_op: at,
+                        keyword: head.keyword(),
+                        source: source.as_str().to_string(),
+                    });
+                }
+                at += len;
+            }
+        } else if ops.get(at).is_some_and(|op| head.parses_into(op)) {
+            at += 1;
+        } else {
+            return None;
+        }
+    }
+    (at == ops.len()).then_some(found)
+}
+
+/// Every operation with the rewritten shape and a named source, without
+/// consulting the text. A preceding `DROP SILENT` of the destination is
+/// taken as part of it, so the check still runs before that DROP.
+fn transfers_by_shape(ops: &[GraphUpdateOperation]) -> Vec<Transfer> {
+    let mut found = Vec::new();
+    for (i, op) in ops.iter().enumerate() {
+        let Some((Some(source), destination)) = transfer_shape(op) else {
+            continue;
+        };
+        let opened_by_drop = i > 0
+            && silent_drop(&ops[i - 1]).is_some_and(|t| target_is_destination(t, destination));
+        found.push(Transfer {
+            first_op: if opened_by_drop { i - 1 } else { i },
+            keyword: "ADD/COPY/MOVE",
+            source: source.as_str().to_string(),
+        });
+    }
+    found
+}
+
+/// Read the keyword that opens each operation of an update text that
+/// spargebra has already accepted. `None` when the text cannot be read
+/// with confidence.
+///
+/// Operations are separated by `;` outside any `{ … }`. Getting there
+/// means stepping over what may contain a `;` or a brace without being
+/// one: comments, string literals, IRIs and `\`-escapes. Nothing else is
+/// interpreted. spargebra's grammar lets keywords run together
+/// (`COPYSILENT<a>TO<b>` parses), so a keyword is matched as a prefix of
+/// the word it starts.
+fn update_heads(text: &str) -> Option<Vec<Head>> {
+    let b = text.as_bytes();
+    let mut heads = Vec::new();
+    let mut depth = 0usize;
+    let mut at_head = true;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'#' => i = skip_comment(b, i),
+            b'"' | b'\'' => i = skip_string(b, i)?,
+            // `<` opens an IRI, or is the comparison operator.
+            b'<' => i = skip_iri(b, i).unwrap_or(i + 1),
+            b'\\' => i += 2,
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                i += 1;
+            }
+            b';' if depth == 0 => {
+                at_head = true;
+                i += 1;
+            }
+            c if c.is_ascii_alphabetic() && depth == 0 && at_head => {
+                let start = i;
+                while i < b.len() && b[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                let word = text[start..i].to_ascii_uppercase();
+                if word == "BASE" {
+                    // its IRI is stepped over as any IRI is
+                } else if word.starts_with("PREFIX") {
+                    // step over the prefix label, which may look like a
+                    // keyword (`PREFIX copy: <…>`)
+                    while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b'#') {
+                        i = if b[i] == b'#' {
+                            skip_comment(b, i)
+                        } else {
+                            i + 1
+                        };
+                    }
+                    while *b.get(i)? != b':' {
+                        if b[i].is_ascii_whitespace() {
+                            return None;
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                } else {
+                    heads.push(HEADS.iter().find(|(kw, _)| word.starts_with(kw))?.1);
+                    at_head = false;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    (depth == 0).then_some(heads)
+}
+
+/// Index just past a `#` comment, which runs to the end of the line.
+fn skip_comment(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
+        i += 1;
+    }
+    i
+}
+
+/// Index just past the string literal that opens at `i`; `None` if it
+/// does not close.
+fn skip_string(b: &[u8], mut i: usize) -> Option<usize> {
+    let quote = b[i];
+    let long = b.len() >= i + 3 && b[i + 1] == quote && b[i + 2] == quote;
+    i += if long { 3 } else { 1 };
+    loop {
+        let c = *b.get(i)?;
+        if c == b'\\' {
+            i += 2;
+        } else if long {
+            if c == quote && b.get(i + 1) == Some(&quote) && b.get(i + 2) == Some(&quote) {
+                return Some(i + 3);
+            }
+            i += 1;
+        } else if c == quote {
+            return Some(i + 1);
+        } else if c == b'\n' || c == b'\r' {
+            return None;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Index just past the IRI that opens at `i`; `None` if what follows the
+/// `<` is not one (it is then the comparison operator).
+fn skip_iri(b: &[u8], mut i: usize) -> Option<usize> {
+    loop {
+        i += 1;
+        match *b.get(i)? {
+            b'>' => return Some(i + 1),
+            c if c <= b' ' || b"<\"{}|^`\\".contains(&c) => return None,
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod unit {
     use super::*;
@@ -108,6 +519,113 @@ mod unit {
         // the escape in a comment is in no term
         assert!(!query_holds_nul("SELECT ?s WHERE { ?s ?p ?o } # \\u0000"));
         assert!(!query_holds_nul(r#"SELECT ?s WHERE { ?s ?p "0" }"#));
+    }
+
+    fn found(update: &str) -> Vec<(usize, &'static str, String)> {
+        let parsed = SparqlParser::new()
+            .parse_update(update)
+            .expect("test update parses");
+        transfers(update, &parsed)
+            .into_iter()
+            .map(|t| (t.first_op, t.keyword, t.source))
+            .collect()
+    }
+
+    fn one(
+        first_op: usize,
+        keyword: &'static str,
+        source: &str,
+    ) -> Vec<(usize, &'static str, String)> {
+        vec![(first_op, keyword, source.to_string())]
+    }
+
+    #[test]
+    fn each_transfer_is_found_with_its_keyword_and_first_operation() {
+        assert_eq!(found("ADD <urn:a> TO <urn:b>"), one(0, "ADD", "urn:a"));
+        assert_eq!(found("COPY <urn:a> TO <urn:b>"), one(0, "COPY", "urn:a"));
+        assert_eq!(found("MOVE <urn:a> TO <urn:b>"), one(0, "MOVE", "urn:a"));
+        assert_eq!(
+            found("copy silent graph <urn:a> to default"),
+            one(0, "COPY", "urn:a")
+        );
+        assert_eq!(found("COPYSILENT<urn:a>TO<urn:b>"), one(0, "COPY", "urn:a"));
+        assert_eq!(
+            found("PREFIX copy: <urn:> # move it\nMOVE copy:a TO copy:b"),
+            one(0, "MOVE", "urn:a")
+        );
+        // the check belongs in front of the operation's own first step
+        assert_eq!(
+            found("INSERT DATA { <urn:s> <urn:p> \"a ; } COPY\" } ; COPY <urn:a> TO <urn:b>"),
+            one(1, "COPY", "urn:a")
+        );
+        assert_eq!(
+            found("CREATE GRAPH <urn:a> ; ADD <urn:a> TO <urn:b> ; MOVE <urn:c> TO <urn:d>"),
+            vec![
+                (1, "ADD", "urn:a".to_string()),
+                (2, "MOVE", "urn:c".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn what_is_not_a_transfer_from_a_named_graph_is_left_alone() {
+        // the default graph always exists
+        assert!(found("COPY DEFAULT TO <urn:b>").is_empty());
+        assert!(found("ADD DEFAULT TO <urn:b>").is_empty());
+        // a transfer onto itself parses to nothing
+        assert!(found("MOVE <urn:a> TO <urn:a>").is_empty());
+        // the same algebra, written by hand: not an ADD
+        let by_hand = "INSERT { GRAPH <urn:b> { ?s ?p ?o } } WHERE { GRAPH <urn:a> { ?s ?p ?o } }";
+        assert!(found(by_hand).is_empty());
+        assert!(found(&format!("# COPY it\n{by_hand}")).is_empty());
+        assert!(found(&format!("DROP SILENT GRAPH <urn:b> ; {by_hand}")).is_empty());
+        // and told apart from a real one in the same request
+        assert_eq!(
+            found(&format!("{by_hand} ; ADD <urn:c> TO <urn:d>")),
+            one(1, "ADD", "urn:c")
+        );
+        // other shapes never qualify
+        assert!(
+            found("INSERT { ?s ?p ?o } WHERE { GRAPH <urn:a> { ?s ?p ?o FILTER(?o < 3) } }")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn when_text_and_algebra_disagree_the_shape_decides() {
+        // `COPY <a> TO <a>` parses to nothing, so the keyword is first
+        // matched to the hand-written pair behind it; the count then does
+        // not add up and the shape rule takes over. One refusal too many
+        // is the safe direction.
+        let q = "COPY <urn:a> TO <urn:a> ; DROP SILENT GRAPH <urn:x> ; \
+                 INSERT { GRAPH <urn:x> { ?s ?p ?o } } WHERE { GRAPH <urn:y> { ?s ?p ?o } }";
+        assert_eq!(found(q), one(0, "ADD/COPY/MOVE", "urn:y"));
+    }
+
+    #[test]
+    fn heads_are_read_past_everything_that_may_hide_a_separator() {
+        use Head::*;
+        let heads = |q: &str| update_heads(q);
+        assert_eq!(
+            heads("BASE <urn:x#a;b> PREFIX add: <urn:> CLEAR ALL"),
+            Some(vec![Clear])
+        );
+        assert_eq!(
+            heads(
+                "INSERT DATA { <urn:s> <urn:p> \"\"\"a \" } ; COPY\"\"\" , 'it\\'s }' } ;\n\
+                 # ; DROP ALL\n DELETE { ?s ?p ?o } WHERE { ?s ?p ?o FILTER(?o < 3 && ?o > 1) } ;\
+                 WITH <urn:g> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o } ; LOAD <urn:l> ;"
+            ),
+            Some(vec![Modify, Modify, Modify, Load])
+        );
+        assert_eq!(
+            heads("create graph <urn:a>;drop graph <urn:a>"),
+            Some(vec![Create, Drop])
+        );
+        // unbalanced, unterminated or unknown: no confident reading
+        assert_eq!(heads("COPY <urn:a> TO <urn:b> }"), None);
+        assert_eq!(heads("INSERT DATA { <urn:s> <urn:p> \"open }"), None);
+        assert_eq!(heads("FROBNICATE <urn:a>"), None);
     }
 }
 
@@ -722,5 +1240,121 @@ mod tests {
             "graph_integrity: no graph with id 970998 (see pgrdf._pgrdf_graphs)",
             "graph_integrity",
         );
+    }
+
+    /// COPY / ADD / MOVE from a graph that does not exist refuse 42704
+    /// and leave the destination exactly as it was. Before: COPY emptied
+    /// the destination and reported success, ADD did nothing and
+    /// reported success.
+    #[pg_test]
+    fn copy_add_move_from_unknown_graph_refuse_42704_before_any_write() {
+        let g = seed("urn:tr:dst");
+        for q in [
+            "COPY <urn:tr:typo> TO <urn:tr:dst>",
+            "ADD <urn:tr:typo> TO <urn:tr:dst>",
+            "MOVE <urn:tr:typo> TO <urn:tr:dst>",
+            // spargebra drops SILENT while rewriting these three, so it
+            // cannot be honoured: stricter than W3C, on purpose.
+            "COPY SILENT <urn:tr:typo> TO <urn:tr:dst>",
+            "ADD SILENT <urn:tr:typo> TO <urn:tr:dst>",
+            "MOVE SILENT <urn:tr:typo> TO <urn:tr:dst>",
+            "COPY GRAPH <urn:tr:typo> TO GRAPH <urn:tr:dst>",
+            "copy<urn:tr:typo>to<urn:tr:dst>",
+            "PREFIX tr: <urn:tr:> COPY tr:typo TO tr:dst",
+            // The refusal covers the whole request: the INSERT DATA
+            // before it is rolled back with it.
+            "INSERT DATA { GRAPH <urn:tr:dst> { <urn:tr:x> <urn:tr:p> 1 } } ; \
+             COPY <urn:tr:typo> TO <urn:tr:dst>",
+        ] {
+            let got = sparql(q);
+            assert_outcome(got, "42704", "source graph <urn:tr:typo> does not exist", q);
+            assert_eq!(quads_in(g), 3, "{q}: the destination keeps its triples");
+        }
+        // The default graph as destination is protected the same way.
+        let default_before = quads_in(0);
+        assert!(default_before > 0);
+        assert_outcome(
+            sparql("COPY <urn:tr:typo> TO DEFAULT"),
+            "42704",
+            "source graph <urn:tr:typo> does not exist",
+            "COPY … TO DEFAULT",
+        );
+        assert_eq!(quads_in(0), default_before);
+        let absent: bool = Spi::get_one(
+            "SELECT NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_graphs WHERE iri = 'urn:tr:typo')",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(absent, "a refused source is not created as a side effect");
+    }
+
+    /// Triples in the graph named `iri` (0 when no such graph). By IRI,
+    /// not id: COPY and MOVE drop the destination and re-create it.
+    fn quads_of(iri: &str) -> i64 {
+        Spi::get_one_with_args(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads q \
+               JOIN pgrdf._pgrdf_graphs g USING (graph_id) WHERE g.iri = $1",
+            &[iri.into()],
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    /// What keeps working: an existing source, the default graph as
+    /// source, a source created earlier in the same request, the
+    /// identity case, and an INSERT … WHERE the caller wrote by hand —
+    /// that one is not COPY/ADD/MOVE, and W3C gives a pattern over a
+    /// missing graph zero solutions, not an error.
+    #[pg_test]
+    fn copy_add_move_with_a_real_source_still_work() {
+        seed("urn:tr:src");
+        let ok = |q: &str| {
+            let (state, msg) = sparql(q);
+            assert_eq!(state, "00000", "{q}: {msg}");
+        };
+        ok("COPY <urn:tr:src> TO <urn:tr:c1>");
+        assert_eq!(quads_of("urn:tr:c1"), 3);
+        ok("ADD <urn:tr:src> TO <urn:tr:c1>");
+        assert_eq!(
+            quads_of("urn:tr:c1"),
+            3,
+            "ADD of the same triples adds none"
+        );
+
+        // The default graph always exists, so it is never an unknown
+        // source.
+        ok("COPY DEFAULT TO <urn:tr:c2>");
+        assert!(quads_of("urn:tr:c2") > 0);
+        ok("ADD DEFAULT TO <urn:tr:c2>");
+
+        // The source exists by the time the COPY runs.
+        ok("CREATE GRAPH <urn:tr:fresh> ; COPY <urn:tr:fresh> TO <urn:tr:c2>");
+        assert_eq!(
+            quads_of("urn:tr:c2"),
+            0,
+            "copying an empty graph leaves the target without triples"
+        );
+
+        ok("COPY <urn:tr:src> TO <urn:tr:src>");
+        assert_eq!(
+            quads_of("urn:tr:src"),
+            3,
+            "a copy onto itself changes nothing"
+        );
+
+        ok("MOVE <urn:tr:src> TO <urn:tr:c3>");
+        assert_eq!(quads_of("urn:tr:c3"), 3);
+        assert_eq!(quads_of("urn:tr:src"), 0);
+
+        for q in [
+            "INSERT { GRAPH <urn:tr:c1> { ?s ?p ?o } } WHERE { GRAPH <urn:tr:typo> { ?s ?p ?o } }",
+            // Even beside a real COPY the hand-written one is told apart.
+            "COPY <urn:tr:c1> TO <urn:tr:c4> ; \
+             INSERT { GRAPH <urn:tr:c1> { ?s ?p ?o } } WHERE { GRAPH <urn:tr:typo> { ?s ?p ?o } }",
+        ] {
+            ok(q);
+            assert_eq!(quads_of("urn:tr:c1"), 3);
+        }
+        assert_eq!(quads_of("urn:tr:c4"), 3);
     }
 }
