@@ -6,6 +6,182 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.41] — 2026-11-24
+
+A graph is a set of triples, and pgRDF now keeps a record of who did what to
+it. Loading a file twice no longer doubles the graph, a dump restores
+complete, whole-graph reads no longer grow with the graph, and deliberate
+refusals carry a SQLSTATE that says what kind of refusal they are.
+
+### Changed
+
+- **A graph is a set of triples** (#155). The file loaders stored a triple as
+  many times as its source stated it, and again on every reload; counts,
+  digests and exports then described a bag. Each graph partition now carries a
+  UNIQUE index on (subject, predicate, object), replacing the parent table's
+  index on the same key, and every writer goes through one path that drops a
+  repeat whether it is in the same statement, an earlier batch or an earlier
+  load. Covered: every Turtle, N-Triples, N-Quads and TriG loader, the bulk,
+  streaming and staged routes, SPARQL INSERT, `put_construct_row(s)`,
+  `put_quad`, `copy_graph`, `carve_graph`, `move_graph` and `materialize`.
+  Reloading a file is now idempotent. Blank-node labels are, as before, one
+  node per label across the whole database.
+- **Asserted beats inferred.** Asserting a triple that was stored as inferred
+  used to store nothing, and the next `materialize` deleted the row with the
+  other inferred rows: the assertion was lost. The row now becomes asserted.
+- **`copy_graph` and `carve_graph` return what the destination gained**, not
+  the source's row count. A second copy returns 0.
+- **SPARQL UPDATE reports what it stored.** `triples_inserted` counted the
+  triples the statement asked for; it now counts the ones that were not
+  already there.
+- **Digests, the manifest and the export depend only on the set of triples**
+  (#158). `graph_digest`, `structural_digest`, the manifest's bytes digest
+  and `export_graph` give the same value for a graph that holds a triple
+  twice and for the same graph without the repeat. For a graph without
+  repeats every value is byte-identical to 0.6.40. A locked graph keeps
+  answering the digest recorded for it; `locked_digest_engine` says which
+  version computed it. **If you recorded a digest of a graph that held
+  repeats, it will differ once that graph is cleaned**: `duplicate_report()`
+  names the graphs this applies to.
+- **Typed refusals** (#159). A deliberate refusal on the query path raised
+  `XX000`, the class for "pgRDF has a bug". The SQLSTATE now carries the kind:
+  `0A000` an unsupported query shape (56 sites, including the filter beside
+  a UNION of #114), `42601` a parse error, `22023` / `42704` / `42710` a
+  request error (`CLEAR` or `DROP` of a graph that does not exist, `CREATE`
+  of one that does, `graph_integrity` of an unknown graph), `54000` a limit.
+  `XX000` is left for real invariants. A refusal no longer depends on the
+  data: template checks of an `INSERT`/`DELETE … WHERE` ran per result row,
+  so the same request succeeded when the pattern matched nothing.
+- **`COPY`, `ADD` and `MOVE` from a graph that does not exist refuse `42704`**
+  before anything is written. `COPY <typo> TO <g>` used to empty `<g>` and
+  report success. `SILENT` is not honoured for these three: the parser has
+  discarded it by the time pgRDF sees the operation.
+- **`shmem_reset()`, `shmem_cache_prewarm()` and `stats()` are no longer
+  PUBLIC** (#161). They act on state every database on the server shares. Open
+  `stats()` to a monitoring role with
+  `GRANT EXECUTE ON FUNCTION pgrdf.stats() TO <role>`. `last_call_stats()`
+  stays PUBLIC.
+- **The `pgrdf.` setting prefix is reserved** (PostgreSQL 15+). Setting a name
+  pgRDF does not define is an error instead of a silent placeholder.
+- **`clear_graph` resets the graph's source digest and materialization
+  stamps.** They described content that is no longer there; the history is in
+  the act record.
+
+### Fixed
+
+- **A dump did not restore complete** (#152). Three things were lost: the
+  graph registry (its COPY failed on the seed row every install creates, so
+  every graph lost its IRI, lock state and source digest), every triple of
+  the default graph (its partition's rows were never dumped), and the
+  dictionary's id allocator (a restored database handed out ids from 1 again,
+  and the first load with a new term failed `23505`). All three are fixed, in
+  fresh installs and by the upgrade.
+- **A literal containing U+0000 was stored** (#164). `"\u0000"` is valid RDF
+  and PostgreSQL `text` cannot hold it; the stored term broke every later
+  read. Every ingest route now refuses it `22P05` before anything is written.
+  A database that already holds such a term: `nul_term_report()` lists the
+  terms and their graphs, and `export_graph`, `graph_manifest`,
+  `graph_digest` and `structural_digest` refuse `XX001`, naming the term and
+  the cure, instead of returning a line cut at the NUL.
+- **Whole-graph reads could exhaust the server** (#165). `export_graph`,
+  `graph_manifest`, `graph_digest` and `structural_digest` held the whole
+  graph in backend memory, about 0.95 GB per million triples for the
+  manifest; on an 11.9M-triple graph the backend was killed, which resets
+  every connection. They now stream: PostgreSQL sorts the lines (on disk past
+  `work_mem`) and only the triples that involve a blank node are held, under
+  `pgrdf.digest_max_bnode_quads` (default 5,000,000; past it the call refuses
+  `54000`).
+- **The staged loader stored blank-node subjects as IRIs**, so the node no
+  longer joined its own uses as an object. It also left its graph without a
+  registry row (no IRI, invisible to `graph_inventory()`), and a file it could
+  not load left the database without the indexes it had dropped.
+- **`ownership_drift()` marked tables as blocking that block nothing** (#160).
+  `blocking` is now true exactly when the storage owner lacks what pgRDF does
+  on that object as that role; the `pgrdf` schema is a new row kind.
+- **JSON ingest could store one literal as two terms**: `put_construct_row(s)`
+  kept a language tag's case, while every parser stores it in lower case.
+- The two dict-batched loaders skipped the lock check the other routes share.
+
+### Added
+
+- **The import report** (#156). Every loader returns a `load` object:
+  `triples_read`, `parse_skipped`, `triples_stored`, `inferred_made_asserted`,
+  `duplicates_dropped` and `graph_was_empty`. The same object is on the load's
+  act row and in `last_call_stats()`. The loaders that return a number keep
+  returning triples read.
+- **`duplicate_report()` and `dedup_graph(graph_id)`** (#157). The upgrade
+  rewrites no data: a graph that already holds repeats keeps them, gets a
+  plain index instead of the unique one, and is named in a WARNING. It gains
+  no further repeats. `duplicate_report()` lists such graphs with rows,
+  distinct rows, surplus and the cure; `dedup_graph` removes the surplus rows
+  (keeping an asserted row over an inferred one), builds the unique index and
+  keeps a current materialization current. A locked graph is cured by unlock,
+  dedup, lock.
+- **Graph owner** (#162). A graph records the role that created it (after
+  `SET ROLE`, the role acted as), by name. Graphs that exist today read "not
+  recorded". `set_graph_owner(graph_id, role)` transfers it.
+  `pgrdf.graph_owner_enforce` (default off, superuser-set) reserves drop,
+  clear, lock, unlock, dedup and transfer for the owner and the storage owner.
+- **The act record** (#163, #121). `graph_acts(graph_id, since)`: one row per
+  committed graph-level act (create, rename, load, update, ingest, clear,
+  drop, copy, move, carve, lock, unlock, dedup, materialize, set_owner,
+  validate), never per triple. Each row keeps what PostgreSQL verified
+  (`session_role`, `acting_role`) apart from what the client declares
+  (`application_name`, `requester`, `workspace`, `agent`, `thread`,
+  `on_behalf_of`, `harness`), with the transaction id and a detail object.
+  pgRDF writes it; a role granted on every table still cannot forge, change
+  or delete a row. Lock and unlock acts carry their reasons, and
+  `graph_inventory()` shows the owner, who created the graph and who holds
+  its lock.
+- **Declared identity settings**: `pgrdf.workspace`, `pgrdf.agent`,
+  `pgrdf.thread`, `pgrdf.on_behalf_of`, `pgrdf.harness`. At most 128 bytes,
+  no control characters, checked at `SET`. They are provenance and never
+  authorise anything. A client that shares connections sets all five on every
+  transaction.
+- **`graph_activity(graph_id)`**: the backends inside a graph-level act right
+  now, in this database, with the same identity fields and
+  `pg_stat_activity`'s visibility rule. It reports and never blocks. Needs
+  `shared_preload_libraries`.
+- **`pgrdf.notify_acts`** (default off, superuser-set): each act is followed
+  by `NOTIFY pgrdf_acts '<act_id>:<graph_id>:<act>'`, delivered on commit.
+- **`validate` records its verdict as an act** and reports `act_recorded` and
+  `act_id`. In a read-only transaction it runs and records nothing.
+- **`pgrdf.max_inmemory_triples`** (default 0, off): `materialize` and
+  `validate`, which hold a graph in memory by design, refuse `54000` before
+  reading one larger than this.
+- `graph_manifest` gains `counts.repeats` (only for a graph holding repeats)
+  and `consistent` (its passes read one state: the graph is locked, or the
+  transaction is at least REPEATABLE READ).
+- **W3C SHACL Core: 56 of the 98 tests are vendored (was 25) and all pass**,
+  graded on the `sh:conforms` verdict, which the W3C suite calls partial
+  compliance; the full report is not compared. The fixtures carry the W3C
+  licence notice.
+- Gates run in CI beside the upgrade gate: a dump and restore round trip
+  (registry, triples, digests, dictionary, act record, allocators), and a
+  loader gate for what needs background workers or a second session.
+
+### Upgrade
+
+- `ALTER EXTENSION pgrdf UPDATE` in place. It rewrites no data. It builds one
+  index per graph partition (about the cost of the index it replaces), adds
+  the owner columns and the act record, revokes the three functions from
+  PUBLIC and registers the default partition, the dictionary's id sequence
+  and the act record for dumps.
+- Read the WARNINGs: each names a graph that holds repeated triples and was
+  left as it is. Run `SELECT * FROM pgrdf.duplicate_report()` afterwards.
+- Between swapping the library and running the update, exports and digests
+  refuse `55000` with `ALTER EXTENSION pgrdf UPDATE` as the hint.
+- If something calls `shmem_reset()`, `shmem_cache_prewarm()` or `stats()` as
+  a role that is neither a superuser nor the extension's owner, grant it
+  EXECUTE first or the call fails `42501`.
+- If a client sets a `pgrdf.*` name that pgRDF does not define, that `SET` now
+  fails.
+- Six stable functions added; `surface()` lists 60 stable rows.
+- Restoring a dump still prints two "already exists" errors per graph, for
+  indexes the parent table already gave the partition (#166). The data is
+  complete; a restore run with `--single-transaction` or `--exit-on-error`
+  stops there.
+
 ## [0.6.40] — 2026-10-07
 
 Graph creation works again where pgRDF's tables belong to a role other than
