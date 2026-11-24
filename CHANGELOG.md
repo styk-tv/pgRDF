@@ -176,6 +176,11 @@ refusals carry a SQLSTATE that says what kind of refusal they are.
   EXECUTE first or the call fails `42501`.
 - If a client sets a `pgrdf.*` name that pgRDF does not define, that `SET` now
   fails.
+- **PostgreSQL 18: the server must be 18.7 or later.** The release is built
+  against 18.7, whose headers call a server function that 18.6 and earlier do
+  not have (`heap_datum_check`); on an older 18.x the library does not load
+  ("undefined symbol"). Update the server's minor version first. A library
+  built for 0.6.40 or earlier is not affected and keeps loading on 18.7.
 - Six stable functions added; `surface()` lists 60 stable rows.
 - Restoring a dump still prints two "already exists" errors per graph, for
   indexes the parent table already gave the partition (#166). The data is

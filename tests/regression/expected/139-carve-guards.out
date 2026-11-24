@@ -13,8 +13,8 @@ nbhd_absent_src_0: true
 nbhd_absent_no_dst_311: true
 pred_knows_into_320_is_2: true
 dst320_after_first_2: true
-pred_knows_into_320_again_2: true
-dst320_appended_to_4: true
+pred_knows_into_320_again_0: true
+dst320_still_2: true
 nbhd_overhops_99_stable_8: true
 src_unchanged_8: true
 dict_unchanged_14: true

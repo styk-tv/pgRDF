@@ -63,11 +63,13 @@ SELECT 'nbhd_absent_no_dst_311: ' || (count(*) = 0)
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE c.relname = '_pgrdf_quads_g311' AND n.nspname = 'pgrdf';
 
--- ── SEMANTICS: carve into an already-populated dst APPENDS (no UNIQUE on quads) ──
+-- ── SEMANTICS: carve into an already-populated dst stores a SET (0.6.41): the
+--    triples dst already holds are not stored again, and the call returns
+--    what dst gained ──
 SELECT 'pred_knows_into_320_is_2: ' || (pgrdf.carve_graph(300, 'http://xmlns.com/foaf/0.1/knows', 320) = 2);
 SELECT 'dst320_after_first_2: ' || (count(*) = 2) FROM pgrdf._pgrdf_quads WHERE graph_id = 320;
-SELECT 'pred_knows_into_320_again_2: ' || (pgrdf.carve_graph(300, 'http://xmlns.com/foaf/0.1/knows', 320) = 2);
-SELECT 'dst320_appended_to_4: ' || (count(*) = 4) FROM pgrdf._pgrdf_quads WHERE graph_id = 320;
+SELECT 'pred_knows_into_320_again_0: ' || (pgrdf.carve_graph(300, 'http://xmlns.com/foaf/0.1/knows', 320) = 0);
+SELECT 'dst320_still_2: ' || (count(*) = 2) FROM pgrdf._pgrdf_quads WHERE graph_id = 320;
 
 -- ── EDGE: neighbourhood max_hops >> diameter terminates, no over-carve ─────
 -- (2 hops already reaches the whole 8-quad graph per 138; 99 hops must equal it)
