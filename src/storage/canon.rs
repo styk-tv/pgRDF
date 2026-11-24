@@ -21,7 +21,7 @@
 //!   - W3C rdf-canon conformance subset passes as regression fixtures.
 
 use crate::storage::dict::term_type;
-use crate::storage::lines::{Refusal, Split, style};
+use crate::storage::lines::{Lenient, Refusal, Split, style};
 use pgrx::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -40,6 +40,10 @@ use std::collections::{BTreeMap, HashMap};
 const MAX_NDEGREE_CALLS: usize = 10_000;
 const MAX_PERMUTATION_GROUP: usize = 7;
 const MAX_RECURSION_DEPTH: usize = 32;
+
+/// What the complexity guard raises.
+pub(crate) const BUDGET_EXCEEDED: &str = "pgRDF#117: canonicalization budget exceeded \
+     (adversarial blank-node structure); refusing rather than degrading";
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum CTerm {
@@ -316,10 +320,7 @@ impl CanonState {
     ) -> (String, Issuer) {
         self.ndegree_calls += 1;
         if depth > MAX_RECURSION_DEPTH || self.ndegree_calls > MAX_NDEGREE_CALLS {
-            error!(
-                "pgRDF#117: canonicalization budget exceeded (adversarial blank-node \
-                 structure); refusing rather than degrading"
-            );
+            error!("{BUDGET_EXCEEDED}");
         }
         let mut issuer = issuer;
         // Group related bnodes by their related-hash.
@@ -343,10 +344,7 @@ impl CanonState {
         for (related_hash, group) in hn {
             data.push_str(&related_hash);
             if group.len() > MAX_PERMUTATION_GROUP {
-                error!(
-                    "pgRDF#117: canonicalization budget exceeded (adversarial blank-node \
-                     structure); refusing rather than degrading"
-                );
+                error!("{BUDGET_EXCEEDED}");
             }
             let mut chosen_path = String::new();
             let mut chosen_issuer: Option<Issuer> = None;
@@ -521,6 +519,43 @@ pub(crate) fn digest_or_refusal(graph_id: i64) -> Result<String, Refusal> {
     Ok(digest)
 }
 
+/// A graph's `graph_digest` for a record that must be written whatever
+/// the digest does: the value, or one sentence saying why there is none
+/// (the graph is not registered; it holds more blank-node triples than the
+/// budget, a structure the canonicalization refuses, or a term containing
+/// U+0000).
+pub(crate) fn digest_for_record(graph_id: i64) -> Result<String, String> {
+    if graph_id != 0 {
+        let registered = Spi::get_one_with_args::<bool>(
+            "SELECT EXISTS(SELECT 1 FROM pgrdf._pgrdf_graphs WHERE graph_id = $1)",
+            &[graph_id.into()],
+        )
+        .expect("digest_for_record: registry existence check failed")
+        .unwrap_or(false);
+        if !registered {
+            return Err("the graph is not registered".to_string());
+        }
+    }
+    let _lenient = Lenient::enter();
+    digest_or_refusal(graph_id).map_err(|refusal| refusal.reason())
+}
+
+/// The canonical lines of a blank-node set, or `None` when the complexity
+/// guard refuses it. The guard raises from Rust, inside the pure
+/// canonicalization: nothing in PostgreSQL has seen an error, so it is
+/// safe to turn into a value here. Anything else is passed on.
+fn canonical_lines_or_none(blank: Vec<Triple>) -> Option<Vec<String>> {
+    use pgrx::pg_sys::panic::CaughtError;
+    pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        Some(canonicalize_labeled(blank).0)
+    }))
+    .catch_others(|caught| match caught {
+        CaughtError::ErrorReport(_) => None,
+        other => other.rethrow(),
+    })
+    .execute()
+}
+
 /// The `rdfc-1.0-sha256` digest of a graph's asserted triples, computed
 /// in bounded memory.
 ///
@@ -532,7 +567,17 @@ pub(crate) fn digest_or_refusal(graph_id: i64) -> Result<String, Refusal> {
 /// [`canonicalize`] would build from the whole set in memory.
 pub(crate) fn rdfc_digest(graph_id: i64) -> Result<String, Refusal> {
     let Split { blank, ground } = Split::open(graph_id, style::RDFC)?;
-    let (blank_lines, _digest, _labels) = canonicalize_labeled(blank);
+    let blank_lines = if Lenient::active() {
+        match canonical_lines_or_none(blank) {
+            Some(lines) => lines,
+            None => {
+                ground.close();
+                return Err(Refusal::Complexity);
+            }
+        }
+    } else {
+        canonicalize_labeled(blank).0
+    };
     let mut blank_lines = blank_lines.into_iter().peekable();
     let mut hasher = Sha256::new();
     for line in ground {

@@ -34,6 +34,7 @@
 use crate::storage::canon::{CTerm, TermRef, Triple, nt_term_ref};
 use crate::storage::dict::term_type;
 use pgrx::prelude::*;
+use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -56,14 +57,75 @@ pub(crate) mod style {
     pub const FD1: i32 = 2;
 }
 
+thread_local! {
+    /// While set, [`nt_line`] notes a term containing U+0000 here and skips
+    /// the row instead of raising. See [`Lenient`].
+    static LENIENT: Cell<bool> = const { Cell::new(false) };
+    static LENIENT_NUL: Cell<Option<i64>> = const { Cell::new(None) };
+}
+
+/// Scope in which a whole-graph digest reports what it cannot compute to
+/// the caller instead of raising: `validate` records the shapes graph's
+/// digest in its act, and a digest that cannot be computed must not fail
+/// the validation.
+///
+/// For a stored U+0000 this works through the formatter: it runs in this
+/// backend (a cursor is never planned parallel), and PostgreSQL has
+/// formatted every row by the time the first sorted one is returned, so
+/// what it noted is final after the stream's first batch.
+pub(crate) struct Lenient {
+    was: bool,
+}
+
+impl Lenient {
+    pub(crate) fn enter() -> Self {
+        LENIENT_NUL.with(|n| n.set(None));
+        Lenient {
+            was: LENIENT.with(|l| l.replace(true)),
+        }
+    }
+
+    /// Is a lenient scope open?
+    pub(crate) fn active() -> bool {
+        LENIENT.with(|l| l.get())
+    }
+}
+
+impl Drop for Lenient {
+    fn drop(&mut self) {
+        LENIENT.with(|l| l.set(self.was));
+    }
+}
+
 /// Why a whole-graph digest was not computed.
 pub(crate) enum Refusal {
     /// More distinct blank-node-bearing triples than
     /// `pgrdf.digest_max_bnode_quads`.
     Budget { limit: usize },
+    /// A stored term contains U+0000 (reported only inside [`Lenient`];
+    /// otherwise the formatter raises).
+    StoredNul { term_id: i64 },
+    /// The blank-node structure exceeds the canonicalization budget
+    /// (reported only inside [`Lenient`]; otherwise it raises).
+    Complexity,
 }
 
 impl Refusal {
+    /// One sentence for a record that keeps the reason instead of a value.
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            Refusal::Budget { limit } => format!(
+                "more than {limit} blank-node-bearing triples (pgrdf.digest_max_bnode_quads)"
+            ),
+            Refusal::StoredNul { term_id } => {
+                format!("a stored term contains U+0000 (dictionary id {term_id})")
+            }
+            Refusal::Complexity => {
+                "the blank-node structure exceeds the canonicalization budget".to_string()
+            }
+        }
+    }
+
     /// Raise this refusal as `verb`'s own error.
     pub(crate) fn raise(&self, verb: &str, graph_id: i64) -> ! {
         match self {
@@ -78,6 +140,8 @@ impl Refusal {
                  pgrdf.digest_max_bnode_quads deliberately, with the memory to hold them."
                     .to_string(),
             ),
+            Refusal::StoredNul { term_id } => refuse_stored_nul(graph_id, &[*term_id], ""),
+            Refusal::Complexity => pgrx::error!("{}", crate::storage::canon::BUDGET_EXCEEDED),
         }
     }
 }
@@ -168,6 +232,10 @@ fn nt_line(
                 ids.push(id);
                 sample = value;
             }
+        }
+        if LENIENT.with(|l| l.get()) {
+            LENIENT_NUL.with(|n| n.set(Some(ids[0])));
+            return None;
         }
         refuse_stored_nul(graph_id, &ids, sample);
     }
@@ -359,6 +427,11 @@ impl Lines {
         self.rows += 1;
         self.pending.pop_front()
     }
+    /// Close the cursor before it is exhausted (a refusal the caller will
+    /// report instead of raising).
+    pub(crate) fn close(mut self) {
+        self.portal.close();
+    }
 }
 
 impl Iterator for Lines {
@@ -442,6 +515,12 @@ impl Split {
             if n == 0 || !pending.is_empty() {
                 break;
             }
+        }
+        if Lenient::active()
+            && let Some(term_id) = LENIENT_NUL.with(|n| n.get())
+        {
+            portal.close();
+            return Err(Refusal::StoredNul { term_id });
         }
         Ok(Split {
             blank: blank.into_iter().collect(),
@@ -1553,5 +1632,44 @@ mod tests {
                 "graph {graph_id}: fd1"
             );
         }
+    }
+
+    /// `validate` records the shapes graph's digest in its act, and
+    /// recording never fails the validation: a shapes graph that holds a
+    /// term containing U+0000 has no digest, so the act keeps a null digest
+    /// and the reason. Outside that record the refusal stands.
+    #[pg_test]
+    fn validate_records_why_a_shapes_graph_with_nul_has_no_digest() {
+        let nul = store_nul_literal("x\0y");
+        new_graph(986136);
+        fill(986136, &small_triples());
+        new_graph(986137);
+        fill(986137, &small_triples());
+        put_ids(986137, term_id(I("urn:wg:s")), term_id(I("urn:wg:p")), nul);
+
+        let report = Spi::get_one::<pgrx::JsonB>(
+            "SELECT pgrdf.validate(986136::bigint, 986137::bigint, 'native', false)",
+        )
+        .unwrap()
+        .unwrap()
+        .0;
+        assert_eq!(report["act_recorded"].as_bool(), Some(true), "{report}");
+        let detail = Spi::get_one_with_args::<pgrx::JsonB>(
+            "SELECT detail FROM pgrdf.graph_acts(986136) WHERE act_id = $1",
+            &[report["act_id"].as_i64().unwrap().into()],
+        )
+        .unwrap()
+        .unwrap()
+        .0;
+        assert!(detail["shapes_digest"].is_null(), "{detail}");
+        assert!(
+            detail["shapes_digest_reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("U+0000") && r.contains(&nul.to_string())),
+            "{detail}"
+        );
+
+        let (state, _, _) = attempt("SELECT pgrdf.graph_digest(986137)");
+        assert_eq!(state, "XX001", "the digest itself still refuses");
     }
 }

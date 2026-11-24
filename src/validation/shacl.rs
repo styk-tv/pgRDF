@@ -352,6 +352,14 @@ fn sparql_result_already_present(existing: &[Value], candidate: &Value) -> bool 
     })
 }
 
+/// Validate a data graph against a shapes graph and report.
+///
+/// Each call that answers is one `validate` act on the DATA graph, in the
+/// act record (`pgrdf.graph_acts`): who validated what against what, and
+/// what came out. The report says so in `act_recorded` and `act_id`; when
+/// nothing was recorded `act_reason` says why (the data graph is not
+/// registered, or the transaction is read-only). A call that raises
+/// records nothing.
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn validate(
@@ -360,8 +368,89 @@ fn validate(
     mode: default!(String, "'native'"),
     strict: default!(bool, true),
 ) -> pgrx::JsonB {
+    // Listed in graph_activity() while it runs.
+    let act = crate::storage::acts::begin(data_graph_id, "validate");
+    // Read before the validation, like the data: validate reads inferred
+    // rows, so whether they were current is part of what the verdict means.
+    let materialization = crate::storage::inventory::materialization_of(data_graph_id);
+
+    let pgrx::JsonB(mut report) = validate_report(data_graph_id, shapes_graph_id, mode, strict);
+
+    let (act_id, reason) = record_validation(act, shapes_graph_id, materialization, &report);
+    report["act_recorded"] = json!(act_id.is_some());
+    report["act_id"] = json!(act_id);
+    if let Some(reason) = reason {
+        report["act_reason"] = json!(reason);
+    }
+    pgrx::JsonB(report)
+}
+
+/// Write the `validate` act for a validation that has answered. Returns
+/// the act id, or why nothing was recorded.
+///
+/// Recording never fails the validation: when the shapes graph's digest
+/// cannot be computed the act keeps a null digest and the reason.
+fn record_validation(
+    act: crate::storage::acts::ActScope,
+    shapes_graph_id: i64,
+    materialization: Option<String>,
+    report: &Value,
+) -> (Option<i64>, Option<&'static str>) {
+    let Some(materialization) = materialization else {
+        return (
+            None,
+            Some("the data graph is not registered, so it has no act record"),
+        );
+    };
+    if unsafe { pgrx::pg_sys::XactReadOnly } {
+        return (None, Some("the transaction is read-only"));
+    }
+    if !crate::storage::acts::schema_present() {
+        return (
+            None,
+            Some(
+                "the installed extension SQL predates the act record \
+                 (ALTER EXTENSION pgrdf UPDATE)",
+            ),
+        );
+    }
+    let shapes_iri: Option<String> = Spi::get_one_with_args(
+        "SELECT (SELECT iri FROM pgrdf._pgrdf_graphs WHERE graph_id = $1)",
+        &[shapes_graph_id.into()],
+    )
+    .expect("validate: shapes graph IRI lookup failed");
+    let mut detail = json!({
+        "conforms":         report["conforms"],
+        "results":          report["results"].as_array().map_or(0, Vec::len),
+        "mode":             report["mode"],
+        "shapes_graph_id":  shapes_graph_id,
+        "shapes_graph_iri": shapes_iri,
+        "materialization":  materialization,
+    });
+    match crate::storage::canon::digest_for_record(shapes_graph_id) {
+        Ok(digest) => detail["shapes_digest"] = json!(digest),
+        Err(why) => {
+            detail["shapes_digest"] = Value::Null;
+            detail["shapes_digest_reason"] = json!(why);
+        }
+    }
+    match act.finish(detail) {
+        Some(act_id) => (Some(act_id), None),
+        None => (
+            None,
+            Some("validate was called from inside another graph act"),
+        ),
+    }
+}
+
+/// The validation itself: the report, without the act fields.
+fn validate_report(
+    data_graph_id: i64,
+    shapes_graph_id: i64,
+    mode: String,
+    strict: bool,
+) -> pgrx::JsonB {
     let start = Instant::now();
-    let _listed = crate::storage::acts::reading(data_graph_id, "validate");
 
     // Validate the mode up-front, BEFORE any work. An unknown mode
     // must error — never silently fall back to 'native'. Exact
@@ -2266,5 +2355,260 @@ ex:CourseTaughtByOneProfessor a sh:NodeShape ;
             );
         }
         assert_eq!(p.0["mode"], serde_json::json!("pgrdf"));
+    }
+
+    // ── validate as a recorded act; the in-memory guard ────────────────
+
+    /// A data graph with one foaf:Person and a shapes graph requiring
+    /// `foaf:name`. The property shape is a blank node, as SHACL shapes
+    /// usually are.
+    fn act_fixture(g_data: i64, g_shapes: i64, named: bool) {
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_data.into()]).unwrap();
+        let name = if named { "; foaf:name \"Ann\"" } else { "" };
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                format!(
+                    "@prefix ex: <http://example.org/> .
+                     @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                     ex:ann a foaf:Person {name} ."
+                )
+                .as_str()
+                .into(),
+                g_data.into(),
+            ],
+        )
+        .unwrap();
+        Spi::run_with_args("SELECT pgrdf.add_graph($1)", &[g_shapes.into()]).unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, $2)",
+            &[
+                "@prefix ex: <http://example.org/> .
+                 @prefix sh: <http://www.w3.org/ns/shacl#> .
+                 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+                 ex:PersonShape a sh:NodeShape ;
+                     sh:targetClass foaf:Person ;
+                     sh:property [ sh:path foaf:name ; sh:minCount 1 ] ."
+                    .into(),
+                g_shapes.into(),
+            ],
+        )
+        .unwrap();
+    }
+
+    fn run_validate(args: &str) -> serde_json::Value {
+        Spi::get_one::<pgrx::JsonB>(&format!("SELECT pgrdf.validate({args})"))
+            .unwrap()
+            .unwrap()
+            .0
+    }
+
+    /// The `validate` acts recorded on a graph: (act_id, detail).
+    fn validate_acts(graph_id: i64) -> Vec<(i64, serde_json::Value)> {
+        let mut out = Vec::new();
+        Spi::connect(|c| {
+            for r in c
+                .select(
+                    "SELECT act_id, detail FROM pgrdf.graph_acts($1) WHERE act = 'validate' \
+                     ORDER BY act_id",
+                    None,
+                    &[graph_id.into()],
+                )
+                .unwrap()
+            {
+                out.push((
+                    r.get::<i64>(1).unwrap().unwrap(),
+                    r.get::<pgrx::JsonB>(2).unwrap().unwrap().0,
+                ));
+            }
+        });
+        out
+    }
+
+    /// Run `q` in a subtransaction: "ok", or SQLSTATE|message.
+    fn attempt(q: &str) -> String {
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.v_attempt(q text) RETURNS text \
+             LANGUAGE plpgsql AS $$ DECLARE st text; m text; BEGIN \
+               BEGIN EXECUTE q; RETURN 'ok'; \
+               EXCEPTION WHEN OTHERS THEN \
+                 GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, m = MESSAGE_TEXT; \
+                 RETURN st || '|' || m; \
+               END; \
+             END $$",
+        )
+        .unwrap();
+        Spi::get_one_with_args::<String>("SELECT pg_temp.v_attempt($1)", &[q.into()])
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Each `validate` call writes one `validate` act on the DATA graph.
+    /// Its detail says what was validated against what and what came out:
+    /// the verdict, the result count, the mode, the shapes graph's id, IRI
+    /// and digest, and whether the data graph's materialization was
+    /// current. The report names the act.
+    #[pg_test]
+    fn validate_records_one_act_on_the_data_graph() {
+        act_fixture(8700, 8701, true);
+        let shapes_digest: String = Spi::get_one("SELECT pgrdf.graph_digest(8701)")
+            .unwrap()
+            .unwrap();
+
+        let v = run_validate("8700, 8701");
+        assert_eq!(v["conforms"], serde_json::json!(true));
+        assert_eq!(v["act_recorded"], serde_json::json!(true), "{v}");
+        let act_id = v["act_id"].as_i64().expect("the report names the act");
+        assert!(v.get("act_reason").is_none());
+
+        let acts = validate_acts(8700);
+        assert_eq!(acts.len(), 1, "one act per call");
+        assert_eq!(acts[0].0, act_id);
+        let d = &acts[0].1;
+        assert_eq!(d["conforms"], serde_json::json!(true), "{d}");
+        assert_eq!(d["results"], serde_json::json!(0));
+        assert_eq!(d["mode"], serde_json::json!("native"));
+        assert_eq!(d["shapes_graph_id"], serde_json::json!(8701));
+        assert_eq!(
+            d["shapes_graph_iri"],
+            serde_json::json!("urn:pgrdf:graph:8701")
+        );
+        assert_eq!(d["shapes_digest"], serde_json::json!(shapes_digest));
+        assert_eq!(d["materialization"], serde_json::json!("never"));
+        assert!(
+            validate_acts(8701).is_empty(),
+            "nothing is recorded on the shapes graph"
+        );
+
+        // A failing validation is an act too, with its count.
+        act_fixture(8702, 8703, false);
+        let v = run_validate("8702, 8701, 'pgrdf'");
+        assert_eq!(v["conforms"], serde_json::json!(false));
+        let acts = validate_acts(8702);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(Some(acts[0].0), v["act_id"].as_i64());
+        assert_eq!(acts[0].1["conforms"], serde_json::json!(false));
+        assert_eq!(
+            acts[0].1["results"].as_u64(),
+            Some(v["results"].as_array().unwrap().len() as u64)
+        );
+        assert_eq!(acts[0].1["mode"], serde_json::json!("pgrdf"));
+    }
+
+    /// The act's `materialization` follows `graph_inventory`'s rule for
+    /// the data graph: never, current after `materialize`, stale after a
+    /// later write.
+    #[pg_test]
+    fn validate_act_records_the_materialization_state() {
+        act_fixture(8704, 8705, true);
+        let inventory = || -> String {
+            Spi::get_one(
+                "SELECT materialization FROM pgrdf.graph_inventory() WHERE graph_id = 8704",
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let recorded = || -> String {
+            run_validate("8704, 8705");
+            validate_acts(8704).last().unwrap().1["materialization"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!((recorded(), inventory()), ("never".into(), "never".into()));
+        Spi::run("SELECT pgrdf.materialize(8704, 'rdfs')").unwrap();
+        assert_eq!(
+            (recorded(), inventory()),
+            ("current".into(), "current".into())
+        );
+        Spi::run(
+            "SELECT pgrdf.parse_turtle('<http://example.org/bob> a <http://xmlns.com/foaf/0.1/Person> ; \
+               <http://xmlns.com/foaf/0.1/name> \"Bob\" .', 8704)",
+        )
+        .unwrap();
+        assert_eq!((recorded(), inventory()), ("stale".into(), "stale".into()));
+    }
+
+    /// A data graph that is not registered has no act record to write to:
+    /// the validation still answers and says the act was not recorded.
+    #[pg_test]
+    fn validate_of_an_unregistered_data_graph_records_nothing() {
+        act_fixture(8706, 8707, true);
+        let v = run_validate("999970::bigint, 8707::bigint, 'native', false");
+        assert_eq!(v["conforms"], serde_json::json!(true));
+        assert_eq!(v["act_recorded"], serde_json::json!(false), "{v}");
+        assert!(v["act_id"].is_null());
+        assert!(
+            v["act_reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("not registered")),
+            "{v}"
+        );
+        assert!(validate_acts(999970).is_empty());
+    }
+
+    /// In a read-only transaction nothing can be written: the validation
+    /// answers, with `act_recorded: false`.
+    #[pg_test]
+    fn validate_in_a_read_only_transaction_records_nothing() {
+        act_fixture(8708, 8709, true);
+        Spi::run("SET TRANSACTION READ ONLY").unwrap();
+        let v = run_validate("8708, 8709");
+        assert_eq!(v["conforms"], serde_json::json!(true));
+        assert_eq!(v["act_recorded"], serde_json::json!(false), "{v}");
+        assert!(v["act_id"].is_null());
+        assert!(
+            v["act_reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("read-only")),
+            "{v}"
+        );
+        assert!(validate_acts(8708).is_empty());
+    }
+
+    /// Recording never fails the validation. When the shapes graph's
+    /// digest cannot be computed (more blank-node triples than the digest
+    /// budget; a structure the canonicalization refuses) the act keeps a
+    /// null digest and the reason.
+    #[pg_test]
+    fn validate_act_keeps_a_reason_when_the_shapes_digest_is_refused() {
+        act_fixture(8710, 8711, true);
+        Spi::run("SET LOCAL pgrdf.digest_max_bnode_quads = 1").unwrap();
+        let v = run_validate("8710, 8711");
+        assert_eq!(v["conforms"], serde_json::json!(true));
+        assert_eq!(v["act_recorded"], serde_json::json!(true), "{v}");
+        let d = &validate_acts(8710)[0].1;
+        assert!(d["shapes_digest"].is_null(), "{d}");
+        assert!(
+            d["shapes_digest_reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("pgrdf.digest_max_bnode_quads")),
+            "{d}"
+        );
+        Spi::run("RESET pgrdf.digest_max_bnode_quads").unwrap();
+
+        // A shapes graph whose blank nodes canonicalization refuses (the
+        // W3C suite's adversarial case). It declares no shape, so the
+        // validation is asked for with strict => false.
+        Spi::run("SELECT pgrdf.add_graph(8712)").unwrap();
+        Spi::run_with_args(
+            "SELECT pgrdf.parse_turtle($1, 8712)",
+            &[include_str!("../../tests/fixtures/rdfc10/test074-in.nq").into()],
+        )
+        .unwrap();
+        assert!(
+            attempt("SELECT pgrdf.graph_digest(8712)").contains("pgRDF#117"),
+            "the digest itself refuses this graph"
+        );
+        let v = run_validate("8710::bigint, 8712::bigint, 'native', false");
+        assert_eq!(v["act_recorded"], serde_json::json!(true), "{v}");
+        let d = &validate_acts(8710)[1].1;
+        assert!(d["shapes_digest"].is_null(), "{d}");
+        assert!(
+            d["shapes_digest_reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("canonicalization")),
+            "{d}"
+        );
     }
 }

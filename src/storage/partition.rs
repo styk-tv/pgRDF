@@ -934,6 +934,7 @@ mod tests {
             "copy_graph",
             "carve_graph",
             "materialize",
+            "validate",
             "lock_graph",
             "unlock_graph",
             "sparql",
@@ -971,7 +972,6 @@ mod tests {
             "sparql_sql",
             "structural_digest",
             "surface",
-            "validate",
             "version",
         ];
         // Refused up front for a non-owner, by design (F4), or operator
@@ -1016,6 +1016,7 @@ mod tests {
             ("carve_graph", "SELECT pgrdf.carve_graph(pgrdf.graph_id('urn:m:a'), 'urn:m:p', pgrdf.add_graph('urn:m:c1'))".into()),
             ("carve_graph", "SELECT pgrdf.carve_graph(pgrdf.graph_id('urn:m:a'), ARRAY['urn:m:s'], pgrdf.add_graph('urn:m:c2'), 1)".into()),
             ("materialize", "SELECT pgrdf.materialize(pgrdf.graph_id('urn:m:a'), 'rdfs')".into()),
+            ("validate", "SELECT pgrdf.validate(pgrdf.graph_id('urn:m:a'), pgrdf.graph_id('urn:m:b'), 'native', false)".into()),
             ("lock_graph", "SELECT pgrdf.lock_graph(pgrdf.graph_id('urn:m:a'), 'matrix')".into()),
             ("graph_digest", "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:m:a'))".into()),
             ("unlock_graph", "SELECT pgrdf.unlock_graph(pgrdf.graph_id('urn:m:a'), 'matrix')".into()),
