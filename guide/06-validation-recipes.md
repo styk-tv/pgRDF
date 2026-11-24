@@ -22,8 +22,19 @@ like any other data.
 | `'pgrdf'` | SHACL Core **and** SHACL-SPARQL: `sh:sparql` with `sh:select` on node shapes | Your shapes contain a SPARQL-based constraint. |
 | `'sparql'` | An alternative engine that evaluates few constraints; under strict mode it refuses most shapes | Not recommended. |
 
-The Core engine passes the W3C SHACL Core conformance suite (25 of 25).
 An unknown mode is refused with `22023`.
+
+**Conformance, stated exactly.** The W3C SHACL test suite has 98 Core
+tests. 56 of them are vendored into pgRDF's repository and run on every
+change, and all 56 pass in `'native'` mode. A pass means `validate`
+returns the same `sh:conforms` verdict as the test expects, which the
+W3C suite calls *partial compliance*. Full compliance, a validation
+report that matches the expected one result for result, is not graded.
+55 of the 56 tests expect `conforms: false`, so a pass shows that the
+verdict agrees, not that every expected result was reported. The other
+42 Core tests are not part of that gate.
+`pgrdf.shacl_capability()` lists, feature by feature, what `validate`
+enforces.
 
 ## A Core example
 
@@ -69,11 +80,13 @@ SELECT jsonb_pretty(pgrdf.validate(
             "value": null
         }
     ],
-    "data_triples": 6,
+    "data_triples": 5,
     "shapes_triples": 10,
     "data_graph_id": 1,
     "shapes_graph_id": 2,
-    "elapsed_ms": 2.0
+    "elapsed_ms": 2.0,
+    "act_recorded": true,
+    "act_id": 5
 }
 ```
 
@@ -86,8 +99,11 @@ SELECT jsonb_pretty(pgrdf.validate(
 | `mode` | The mode that ran. |
 | `data_triples`, `shapes_triples` | How many triples each graph held. |
 | `elapsed_ms` | Time spent. |
+| `act_recorded`, `act_id` | Whether this verdict was written to the act record, and the id of its row (`null` when it was not). Since 0.6.41. |
+| `act_reason` | Present only when `act_recorded` is `false`: why. |
 
-The shape of this report is stable, so tooling can rely on it.
+The shape of this report is stable, so tooling can rely on it. The
+`act_*` keys were added in 0.6.41; nothing was removed or renamed.
 
 Because the report is JSONB, you can take it apart in SQL:
 
@@ -97,6 +113,56 @@ SELECT r->>'focusNode' AS node, r->>'resultPath' AS path, r->>'resultMessage' AS
          pgrdf.validate(pgrdf.graph_id('http://example.org/people'),
                         pgrdf.graph_id('http://example.org/shapes')) -> 'results') AS r;
 ```
+
+## The verdict is recorded
+
+Every call that answers is written to the
+[act record](05-graphs.md#the-act-record) as a `validate` act on the
+**data** graph: who validated, against which shapes, and what came
+out. Every further call adds a row. The first call on this page left
+this one:
+
+```sql
+SELECT act_id, acting_role, jsonb_pretty(detail)
+  FROM pgrdf.graph_acts(pgrdf.graph_id('http://example.org/people'))
+ WHERE act = 'validate';
+--  act_id | acting_role |                                       jsonb_pretty
+-- --------+-------------+------------------------------------------------------------------------------------------
+--       5 | postgres    | {                                                                                       +
+--         |             |     "mode": "native",                                                                   +
+--         |             |     "results": 1,                                                                       +
+--         |             |     "conforms": false,                                                                  +
+--         |             |     "shapes_digest": "320dc8d6e812653f1644d2f8d449199794096fc417483f221160e4e66c63caee",+
+--         |             |     "materialization": "never",                                                         +
+--         |             |     "shapes_graph_id": 2,                                                               +
+--         |             |     "shapes_graph_iri": "http://example.org/shapes"                                     +
+--         |             | }
+```
+
+| Key of `detail` | Meaning |
+|---|---|
+| `conforms`, `results` | The verdict, and how many results the report held. The results themselves are not stored. |
+| `mode` | The mode that ran. |
+| `shapes_graph_id`, `shapes_graph_iri` | The shapes graph used. |
+| `shapes_digest` | The shapes graph's `graph_digest` at that moment, so a later reader can tell whether the shapes have changed since. `null`, with a `shapes_digest_reason`, when it could not be computed. |
+| `materialization` | The data graph's materialization state when it was read (`never`, `current`, `stale`, `unknown`). Validation sees inferred triples, so this is part of what the verdict means. |
+
+Two cases answer without recording, and say so in the report:
+
+```sql
+BEGIN READ ONLY;
+SELECT v -> 'conforms' AS conforms, v -> 'act_recorded' AS act_recorded, v -> 'act_reason' AS act_reason
+  FROM pgrdf.validate(pgrdf.graph_id('http://example.org/people'),
+                      pgrdf.graph_id('http://example.org/shapes')) AS v;
+--  conforms | act_recorded |           act_reason
+-- ----------+--------------+--------------------------------
+--  false    | false        | "the transaction is read-only"
+COMMIT;
+```
+
+The other is a data graph that was never created with `add_graph`
+(triples loaded into a bare numeric id): it has no act record to write
+to. A call that raises an error records nothing either.
 
 ## A SHACL-SPARQL example: unique values
 
@@ -184,6 +250,29 @@ A graph id of `NULL` doesn't reach these checks. If
 `pgrdf.graph_id('…')` is given an IRI that doesn't exist, it returns
 `NULL`, and `validate` then returns `NULL` instead of a report. Treat
 a `NULL` result as a failure, or check the ids first.
+
+## Large graphs
+
+`validate` reads the data graph and the shapes graph into the memory
+of the database process, and `materialize` does the same with its
+graph. That is by design, and it means memory use grows with the
+graph. `pgrdf.max_inmemory_triples` puts a ceiling on it: when it is
+above `0`, a call that would read more triples than that (for
+`validate`, data plus shapes) is refused with `54000` before it reads
+anything.
+
+```sql
+SET pgrdf.max_inmemory_triples = 10;
+SELECT pgrdf.validate(pgrdf.graph_id('http://example.org/people'),
+                      pgrdf.graph_id('http://example.org/shapes'));
+-- ERROR:  54000: validate: data graph 1 plus shapes graph 2 holds 15 triples, more than
+--         pgrdf.max_inmemory_triples=10; validate reads them all into backend memory
+-- HINT:  Nothing was read or changed. Raise pgrdf.max_inmemory_triples (0 is no limit) when the
+--        backend has the memory for it, or run on a smaller graph.
+```
+
+The default is `0`, no limit. Any role can set it for its session; an
+operator usually sets it per database with `ALTER DATABASE … SET`.
 
 ## Validating reasoned data
 

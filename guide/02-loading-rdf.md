@@ -39,10 +39,9 @@ quoting avoids escaping quotes inside the data. From an application,
 pass the document as a bind parameter:
 `SELECT pgrdf.parse_turtle($1, $2)`.
 
-Loading appends. Load the same data again and its triples are stored a
-second time, so to reload a graph, clear it first with
-`pgrdf.clear_graph(…)`. SPARQL `INSERT DATA` is different: inserting a
-triple that is already there changes nothing.
+The number is what the loader read, not what the graph gained: a
+triple the graph already holds is read and not stored again. See
+[a graph is a set](#a-graph-is-a-set).
 
 ### Relative IRIs
 
@@ -56,6 +55,99 @@ SELECT pgrdf.parse_turtle('<#me> <http://xmlns.com/foaf/0.1/name> "Me" .',
 ```
 
 Without one, the load fails with `No scheme found in an absolute IRI`.
+
+## A graph is a set
+
+A graph never stores the same triple twice (since 0.6.41). A repeat is
+dropped whether the document states it twice, an earlier load already
+stored it, or it arrives another way: SPARQL `INSERT`, `copy_graph`,
+`carve_graph`, `move_graph`, `materialize`. PostgreSQL enforces it with
+a unique index on each graph.
+
+So loading the same data again changes nothing. Run the load above a
+second time:
+
+```sql
+SELECT pgrdf.parse_turtle($$
+@prefix ex:   <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+ex:alice a foaf:Person ; foaf:name "Alice" ; foaf:knows ex:bob .
+ex:bob   a foaf:Person ; foaf:name "Bob" .
+$$, pgrdf.graph_id('http://example.org/people'));
+--  parse_turtle
+-- --------------
+--             5          (read)
+
+SELECT pgrdf.count_quads(pgrdf.graph_id('http://example.org/people'));
+--  count_quads
+-- -------------
+--            5          (stored: unchanged)
+```
+
+To replace a graph's content instead of adding to it, clear it first
+with `pgrdf.clear_graph(…)`. The [load report](#load-reports) says how
+many triples a load stored and how many it dropped as repeats.
+
+A graph loaded by a version before 0.6.41 can already hold repeated
+triples. It keeps them until you remove them; see
+[repeated triples from earlier versions](05-graphs.md#repeated-triples-from-earlier-versions).
+
+### Blank nodes
+
+A labelled blank node (`_:b1`) is stored under its label, and a label
+names **one node across the whole database**, not one per document or
+per graph. Two consequences:
+
+- Reloading a document that uses labelled blank nodes is idempotent,
+  like any other.
+- Two documents that use the same label are talking about the same
+  node, in whichever graphs they were loaded. Loading one file into two
+  graphs gives two graphs that share its blank nodes, and two unrelated
+  files that both say `_:b0` are joined on it.
+
+```sql
+SELECT pgrdf.add_graph('http://example.org/b1'), pgrdf.add_graph('http://example.org/b2');
+SELECT pgrdf.parse_turtle('_:order <http://example.org/sku> "A1" .', pgrdf.graph_id('http://example.org/b1'));
+SELECT pgrdf.parse_turtle('_:order <http://example.org/qty> 2 .',    pgrdf.graph_id('http://example.org/b2'));
+
+SELECT * FROM pgrdf.sparql(
+  'SELECT ?sku ?qty WHERE { ?o <http://example.org/sku> ?sku . ?o <http://example.org/qty> ?qty }');
+--  {"qty": "2", "sku": "A1"}
+```
+
+The query has no `GRAPH` clause, so it reads both graphs and finds one
+node with a `sku` from the first and a `qty` from the second. Give
+blank nodes labels that are unique to their document before loading, or
+use the anonymous form, when that is not what you want.
+
+An anonymous blank node (`[ … ]`, and the nodes of a `( … )` list) has
+no label in the document. The parser gives it a fresh one on every
+load, so it is never joined with another document's nodes, and
+**loading such a document again adds its blank-node triples again**, as
+new nodes. That is the one case where a reload is not idempotent.
+
+### Asserted beats inferred
+
+`materialize` stores what it derives as *inferred* triples. If you then
+load or insert a triple that is already stored as inferred, the stored
+triple becomes asserted. It is not stored twice, and the next
+`materialize` no longer removes it with the other inferred triples.
+The load report counts these under `inferred_made_asserted`.
+
+### Characters that cannot be stored
+
+`"\u0000"` is a valid RDF literal, and PostgreSQL `text` cannot hold
+the character U+0000. Every loader and SPARQL `INSERT` refuses a term
+that contains it, before anything is written:
+
+```sql
+SELECT pgrdf.parse_turtle(
+  '<http://example.org/a> <http://example.org/p> "a\u0000b" .',
+  pgrdf.graph_id('http://example.org/people'));
+-- ERROR:  22P05: pgrdf: a term contains U+0000, which PostgreSQL text cannot store: "a\u0000b"
+-- HINT:  U+0000 is valid in RDF but cannot be stored. Remove or replace the character in the
+--        source, then load again; nothing from this call was written.
+```
 
 ## TriG and N-Quads
 
@@ -86,7 +178,7 @@ SELECT pgrdf.parse_trig('GRAPH <http://example.org/typo> { <urn:a> <urn:b> <urn:
 ```
 
 Both functions return a JSONB report, including the list of graph ids
-they wrote to.
+they wrote to and the [`load` object](#load-reports).
 
 ## From a file
 
@@ -129,16 +221,63 @@ no such role: the content arrives as a query argument.
 
 ### Load reports
 
-The `_verbose` variants return a JSONB report instead of a count:
+The `_verbose` variants return a JSONB report instead of a count.
+`parse_turtle_verbose(content, graph_id)` is the one for strings,
+`load_turtle_verbose(path, graph_id)` the one for files. Its `load`
+object says what the load did to the graph. Into the `people` graph
+from above, which already holds Alice's name:
 
 ```sql
-SELECT pgrdf.load_turtle_verbose('/tmp/sample.ttl', pgrdf.graph_id('http://example.org/sample'));
--- {"path": "combined", "triples": 7, "elapsed_ms": 0.41, "parse_skipped": 0,
---  "dict_cache_hits": 11, "shmem_cache_hits": 7, "quad_batches": 1, ...}
+SELECT pgrdf.parse_turtle_verbose($$
+@prefix ex:   <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+ex:alice foaf:name "Alice" .
+ex:alice foaf:name "Alice" .
+ex:carol foaf:name "Carol" .
+$$, pgrdf.graph_id('http://example.org/people'));
+-- {"load": {"triples_read": 3, "parse_skipped": 0, "triples_stored": 1,
+--           "inferred_made_asserted": 0, "duplicates_dropped": 2, "graph_was_empty": false},
+--  "path": "combined", "triples": 3, "elapsed_ms": 0.70, "quad_batches": 1, ...}
 ```
 
-`parse_turtle_verbose(content, graph_id)` does the same for strings.
-`path` names the loading strategy that ran.
+| Key of `load` | Meaning |
+|---|---|
+| `triples_read` | Triples the parser produced, repeats included. The loaders that return a number return this. |
+| `parse_skipped` | Malformed statements the parallel N-Triples routes skipped instead of failing. `0` on the standard routes, which fail on the first syntax error. |
+| `triples_stored` | Triples the graph did not hold before and holds now. |
+| `inferred_made_asserted` | Triples that were stored as inferred and are asserted now. |
+| `duplicates_dropped` | The rest: `triples_read` minus the two counts above. It is one total for repeats inside the load and triples the graph already held. |
+| `graph_was_empty` | Whether the graph held no triples before the call. When `true`, every dropped duplicate was a repeat inside the load. `null` for a TriG or N-Quads call whose data names a graph. |
+
+Outside `load`, `path` names the loading strategy that ran and the
+remaining keys are timings and cache counters.
+
+The same object is available three ways:
+
+- in the return value of every loader that returns JSONB: the
+  `_verbose` variants, `parse_trig`, `parse_nquads`,
+  `load_turtle_streaming` and `load_turtle_staged_run`;
+- in `pgrdf.last_call_stats() -> 'load'`, for the last load of this
+  session (`null` when the session's last pgRDF call was not a load);
+- in the `detail` of the load's row in the
+  [act record](05-graphs.md#the-act-record), together with the function
+  called (`entry`) and the strategy (`route`).
+
+Three limits in 0.6.41, all on the staged loader's side:
+
+- After a staged load, `last_call_stats() -> 'load'` is `null`. Read
+  the function's return value.
+- The staged loader's act row records the rows it staged, without
+  `duplicates_dropped`; when the file repeated triples, a second act
+  named `dedup` beside it says how many rows were removed.
+- `load_turtle` (the form that returns a number) tries the staged
+  loader first when it is given an N-Triples file by the owner of the
+  pgRDF tables, with no `base_iri` and `bulk_load` off, outside a
+  transaction block, on a preloaded server. In a database that already
+  holds data that attempt declines and the standard parser loads the
+  file. That route stores the triples as a set like every other, but
+  writes no `load` act and no `last_call_stats()` entry. Use
+  `load_turtle_verbose` when you need the report there.
 
 ## Large loads
 
@@ -157,8 +296,12 @@ SELECT pgrdf.load_turtle_staged_run('/data/latest-truthy.nt',
                                     pgrdf.graph_id('http://example.org/wikidata'),
                                     8);          -- workers; 0 = choose automatically
 -- {"ok": true, "triples": ..., "quads": ..., "n_workers": 8,
+--  "load": {"triples_read": ..., "triples_stored": ..., "duplicates_dropped": ..., ...},
 --  "phase_ms": {"stage": ..., "dict": ..., "resolve": ..., "index": ...}}
 ```
+
+`triples` is what the file stated and `quads` what the graph holds
+afterwards; they differ when the file repeated triples.
 
 Or as a procedure: `CALL pgrdf.load_turtle_staged(path, graph_id, n_workers);`
 
@@ -250,6 +393,7 @@ Suggested order:
 | `turtle parse error … Invalid character …` | The document isn't valid Turtle. Parsing is strict; fix the source. |
 | `… RDF-star …` | Quoted triples are not supported. |
 | `failed to open …` | The path isn't readable by the PostgreSQL server process. |
+| `22P05 … a term contains U+0000` | The data holds a character PostgreSQL cannot store. Remove or replace it in the source. |
 | `55P03 … is locked` | The target graph is locked. See [locking](05-graphs.md#locking-a-graph). |
 | `42704 … unknown graph iri` | `strict => true` and the data names a graph that doesn't exist. |
 

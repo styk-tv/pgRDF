@@ -96,6 +96,12 @@ Every graph keeps its two kinds of triple apart:
 Running `materialize` again replaces the previous inferred set with a
 fresh one, so it is safe to repeat.
 
+A triple is stored once per graph, as asserted or as inferred. If you
+load or insert a triple that `materialize` had already derived, the
+stored triple becomes asserted and the next `materialize` leaves it
+alone. (Before 0.6.41 such an assertion stored nothing, and the next
+`materialize` removed the triple with the other inferred ones.)
+
 ## Is the materialization current?
 
 `graph_inventory()` reports a `materialization` state for every graph:
@@ -130,7 +136,14 @@ SELECT pgrdf.drop_graph(pgrdf.graph_id('http://example.org/zoo'), false);
 ## Performance notes
 
 - The reasoner runs inside the database process, over one graph at a
-  time. Memory use grows with the size of the graph.
+  time. Memory use grows with the size of the graph. To refuse a graph
+  that is too large for the server before it is read, set
+  `pgrdf.max_inmemory_triples` (default `0`, no limit); a larger graph
+  is then refused with `54000`. See
+  [validation](06-validation-recipes.md#large-graphs).
+- Each run is recorded in the graph's
+  [act record](05-graphs.md#the-act-record), with the profile and the
+  counts.
 - Transitive property paths such as `rdfs:subClassOf+` automatically
   use the materialized closure when it is present, and skip the
   recursive walk.
