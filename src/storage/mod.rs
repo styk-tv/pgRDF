@@ -34,6 +34,7 @@ pub mod graphs;
 pub mod hexastore;
 pub mod integrity;
 pub mod inventory;
+pub mod lines;
 pub mod loader;
 pub mod loader_ta11;
 pub mod lock;
