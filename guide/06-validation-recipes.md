@@ -240,8 +240,15 @@ that means nothing:
   ```
 
 - **Shapes that use a constraint the chosen mode can't evaluate** (for
-  example `sh:sparql` under `'native'`) are refused, and the message
+  example `sh:sparql` under `'sparql'`) are refused, and the message
   names the mode that would work.
+
+Strict mode does not catch one case (#174). The default mode,
+`'native'`, evaluates `sh:sparql` in memory over the data graph alone,
+where a `GRAPH <iri> { … }` clause matches nothing. A constraint
+written with that clause, like the unique-SSN example above, finds no
+violation there and the report says `conforms: true`. Validate such
+shapes with `mode => 'pgrdf'`.
 
 Pass `strict => false` to validate anyway. Constraints the mode can't
 evaluate are then skipped.

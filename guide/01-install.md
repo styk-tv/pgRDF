@@ -51,7 +51,7 @@ No image build: copy the files into a stock `postgres:18` container
 before its first start.
 
 ```sh
-VER=0.6.37
+VER=0.6.41
 ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 curl -fsSL https://github.com/styk-tv/pgRDF/releases/download/v$VER/pgrdf-$VER-pg18-glibc-$ARCH.tar.gz | tar -xz
 
@@ -96,7 +96,7 @@ script to `/docker-entrypoint-initdb.d/` that runs
 ## C. An existing PostgreSQL server
 
 ```sh
-VER=0.6.37
+VER=0.6.41
 ARCH=amd64                       # or arm64
 curl -fLO https://github.com/styk-tv/pgRDF/releases/download/v$VER/pgrdf-$VER-pg18-glibc-$ARCH.tar.gz
 curl -fLO https://github.com/styk-tv/pgRDF/releases/download/v$VER/SHA256SUMS

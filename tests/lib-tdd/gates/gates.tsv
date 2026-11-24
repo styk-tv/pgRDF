@@ -151,15 +151,15 @@ src/storage/loader.rs:866	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/storage/loader.rs:1274	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/loader.rs:1767	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/storage/loader.rs:2147	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
-src/storage/loader.rs:2656	refuse	code-on-later-line
+src/storage/loader.rs:2661	refuse	code-on-later-line
 src/storage/lock.rs:219	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/lock.rs:231	refuse	ERRCODE_LOCK_NOT_AVAILABLE
 src/storage/lock.rs:240	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/lock.rs:278	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/lock.rs:289	refuse	ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
 src/storage/lock.rs:293	refuse	ERRCODE_UNDEFINED_OBJECT
-src/storage/quads.rs:560	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/quads.rs:573	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/quads.rs:566	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/quads.rs:579	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/staged/phases.rs:605	panic	_ => panic!("staged STAGE: unsupported object term"),
 src/storage/staged/pool.rs:210	panic	other => panic!("staged worker: unknown phase ordinal {other}"),
 src/validation/shacl.rs:494	refuse	ERRCODE_INVALID_PARAMETER_VALUE

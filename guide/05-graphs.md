@@ -611,7 +611,6 @@ unique index. It returns the number of rows removed.
 
 ```sql
 SELECT pgrdf.dedup_graph(pgrdf.graph_id('http://example.org/old'));
--- NOTICE:  index "_pgrdf_quads_g9_spo_uniq" does not exist, skipping
 --  dedup_graph
 -- -------------
 --            1

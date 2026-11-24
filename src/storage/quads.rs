@@ -47,8 +47,14 @@ DECLARE
                     ELSE 'subject_id, predicate_id, object_id' END;
   removed bigint := 0;
 BEGIN
-  EXECUTE pg_catalog.format('DROP INDEX IF EXISTS pgrdf.%I, pgrdf.%I',
-                            rel || '_spo_uniq', rel || '_spo_idx');
+  -- Dropped only where present, so a caller sees no "does not exist,
+  -- skipping" notice for the one that is not there.
+  IF pg_catalog.to_regclass(pg_catalog.format('pgrdf.%I', rel || '_spo_uniq')) IS NOT NULL THEN
+    EXECUTE pg_catalog.format('DROP INDEX pgrdf.%I', rel || '_spo_uniq');
+  END IF;
+  IF pg_catalog.to_regclass(pg_catalog.format('pgrdf.%I', rel || '_spo_idx')) IS NOT NULL THEN
+    EXECUTE pg_catalog.format('DROP INDEX pgrdf.%I', rel || '_spo_idx');
+  END IF;
   BEGIN
     EXECUTE pg_catalog.format('CREATE UNIQUE INDEX %I ON pgrdf.%I (%s) INCLUDE (is_inferred)',
                               rel || '_spo_uniq', rel, cols);

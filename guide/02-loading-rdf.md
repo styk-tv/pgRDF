@@ -263,21 +263,11 @@ The same object is available three ways:
   [act record](05-graphs.md#the-act-record), together with the function
   called (`entry`) and the strategy (`route`).
 
-Three limits in 0.6.41, all on the staged loader's side:
-
-- After a staged load, `last_call_stats() -> 'load'` is `null`. Read
-  the function's return value.
-- The staged loader's act row records the rows it staged, without
-  `duplicates_dropped`; when the file repeated triples, a second act
-  named `dedup` beside it says how many rows were removed.
-- `load_turtle` (the form that returns a number) tries the staged
-  loader first when it is given an N-Triples file by the owner of the
-  pgRDF tables, with no `base_iri` and `bulk_load` off, outside a
-  transaction block, on a preloaded server. In a database that already
-  holds data that attempt declines and the standard parser loads the
-  file. That route stores the triples as a set like every other, but
-  writes no `load` act and no `last_call_stats()` entry. Use
-  `load_turtle_verbose` when you need the report there.
+One limit in 0.6.41, on the staged loader's side: its act row records
+the rows it attached, without `duplicates_dropped`. When the file
+repeated triples, a second act named `dedup` beside it says how many
+rows were removed, and the function's return value and
+`last_call_stats()` carry the final counts.
 
 ## Large loads
 

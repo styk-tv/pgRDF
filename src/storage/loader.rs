@@ -2633,7 +2633,12 @@ fn staged_load_default(path: &str, graph_id: i64) -> i64 {
     if v.get("fallback").and_then(serde_json::Value::as_bool) == Some(true) {
         let file = File::open(path)
             .unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
-        return ingest_dispatch(BufReader::new(file), graph_id, None).triples;
+        // Recorded like every other load: the staged loader wrote no act
+        // for a load it declined.
+        return recorded_load("load_turtle", graph_id, || {
+            ingest_dispatch(BufReader::new(file), graph_id, None)
+        })
+        .triples;
     }
     if v.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         let phase = v

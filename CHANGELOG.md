@@ -39,17 +39,20 @@ refusals carry a SQLSTATE that says what kind of refusal they are.
   and `export_graph` give the same value for a graph that holds a triple
   twice and for the same graph without the repeat. For a graph without
   repeats every value is byte-identical to 0.6.40. A locked graph keeps
-  answering the digest recorded for it; `locked_digest_engine` says which
-  version computed it. **If you recorded a digest of a graph that held
-  repeats, it will differ once that graph is cleaned**: `duplicate_report()`
-  names the graphs this applies to.
+  answering the digest recorded for it until it is unlocked;
+  `locked_digest_engine` says which version computed it. **If you recorded a
+  digest of a graph that holds repeats, 0.6.41 answers a different one, from
+  the upgrade on and before any cleaning**: `duplicate_report()` names the
+  graphs this applies to.
 - **Typed refusals** (#159). A deliberate refusal on the query path raised
   `XX000`, the class for "pgRDF has a bug". The SQLSTATE now carries the kind:
   `0A000` an unsupported query shape (56 sites, including the filter beside
   a UNION of #114), `42601` a parse error, `22023` / `42704` / `42710` a
   request error (`CLEAR` or `DROP` of a graph that does not exist, `CREATE`
   of one that does, `graph_integrity` of an unknown graph), `54000` a limit.
-  `XX000` is left for real invariants. A refusal no longer depends on the
+  On the query path `XX000` is left for real invariants; loader parse
+  errors, a file that cannot be opened and a few other refusals outside it
+  still raise `XX000`. A refusal no longer depends on the
   data: template checks of an `INSERT`/`DELETE … WHERE` ran per result row,
   so the same request succeeded when the pattern matched nothing.
 - **`COPY`, `ADD` and `MOVE` from a graph that does not exist refuse `42704`**
@@ -108,7 +111,9 @@ refusals carry a SQLSTATE that says what kind of refusal they are.
   `triples_read`, `parse_skipped`, `triples_stored`, `inferred_made_asserted`,
   `duplicates_dropped` and `graph_was_empty`. The same object is on the load's
   act row and in `last_call_stats()`. The loaders that return a number keep
-  returning triples read.
+  returning triples read. One exception: the staged loader's act row carries
+  the rows it attached; the repeats it then removes are a `dedup` act beside
+  it, and its return value has the final counts.
 - **`duplicate_report()` and `dedup_graph(graph_id)`** (#157). The upgrade
   rewrites no data: a graph that already holds repeats keeps them, gets a
   plain index instead of the unique one, and is named in a WARNING. It gains

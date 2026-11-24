@@ -80,6 +80,18 @@ route=$(q $A -c "SELECT detail ->> 'route' FROM pgrdf.graph_acts(500) WHERE act 
 [ "$route" = "staged" ] || fail "the load act's route is '$route'"
 ok "the staged graph is registered with its owner; acts $acts carry the caller's declared identity"
 
+# The same session reads the report back, and so does a load that the
+# staged route declines: this database now holds data, so load_turtle of an
+# N-Triples file tries the staged loader, is told to fall back, and loads
+# through the standard parser. That load is recorded like any other.
+last=$(q $A -c "SELECT pgrdf.load_turtle_staged_run('$WORK/set.nt', 501, 1) -> 'fallback'" \
+  -c "SELECT pgrdf.load_turtle('$WORK/set.nt', pgrdf.add_graph('urn:lg:fallback'))" \
+  -c "SELECT concat_ws('/', l ->> 'triples_read', l ->> 'triples_stored', l ->> 'duplicates_dropped') FROM (SELECT pgrdf.last_call_stats() -> 'load' AS l) x" | tr '\n' ' ')
+[ "$last" = "true 4 4/3/1 " ] || fail "fallback load: got '$last', expected 'true 4 4/3/1 ' (declined, 4 read, report 4/3/1)"
+fb=$(q $A -c "SELECT concat_ws('/', count(*), max(detail -> 'load' ->> 'triples_stored')) FROM pgrdf.graph_acts(pgrdf.graph_id('urn:lg:fallback')) WHERE act = 'load'")
+[ "$fb" = "1/3" ] || fail "fallback load act: '$fb', expected one load act with 3 stored"
+ok "a load the staged route declines is recorded: one load act, and last_call_stats() carries its report"
+
 # ── B. U+0000 through the staged and the streaming routes ───────────────
 printf '<urn:lg:n> <urn:lg:p> "ok" .\n<urn:lg:n> <urn:lg:p> "a\\u0000b" .\n' > "$WORK/nul.nt"
 chmod 644 "$WORK/nul.nt"

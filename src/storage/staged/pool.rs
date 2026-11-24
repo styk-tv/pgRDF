@@ -887,22 +887,25 @@ fn load_turtle_staged_run(path: &str, graph_id: i64, n_workers: default!(i32, 0)
     jobctl::mark_job_done(job_idx);
     jobctl::release_job(job_idx);
 
+    // The import report every loader gives. The staged route loads into an
+    // empty database, so every duplicate came from the file.
+    let load = json!({
+        "triples_read": triples,
+        "parse_skipped": job.parse_skipped,
+        "triples_stored": quads,
+        "inferred_made_asserted": 0,
+        "duplicates_dropped": (triples - quads).max(0),
+        "graph_was_empty": true,
+    });
+    crate::storage::shmem_cache::set_last_load(Some(load.clone()));
+
     pgrx::JsonB(json!({
         "job_id": job_id,
         "ok": true,
         "triples": triples,
         "dict_terms": dict_terms,
         "quads": quads,
-        // The import report every loader gives. The staged route loads
-        // into an empty database, so every duplicate came from the file.
-        "load": {
-            "triples_read": triples,
-            "parse_skipped": job.parse_skipped,
-            "triples_stored": quads,
-            "inferred_made_asserted": 0,
-            "duplicates_dropped": (triples - quads).max(0),
-            "graph_was_empty": true,
-        },
+        "load": load,
         "phase_ms": {
             "stage": stage_ms,
             "dict": dict_ms,
