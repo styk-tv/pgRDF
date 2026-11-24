@@ -1,5 +1,5 @@
 src/inference/reasonable.rs:125	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/inference/reasonable.rs:262	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
+src/inference/reasonable.rs:273	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/query/executor.rs:193	refuse	ERRCODE_PROGRAM_LIMIT_EXCEEDED
 src/query/executor.rs:258	refuse	ERRCODE_SYNTAX_ERROR
 src/query/executor.rs:311	refuse	ERRCODE_SYNTAX_ERROR
@@ -110,16 +110,16 @@ src/query/parser.rs:87	refuse	ERRCODE_SYNTAX_ERROR
 src/query/typed_refusals.rs:44	refuse	ERRCODE_UNTRANSLATABLE_CHARACTER
 src/storage/acts.rs:436	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/acts.rs:461	refuse	ERRCODE_UNDEFINED_OBJECT
-src/storage/canon.rs:424	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/canon.rs:444	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/construct_ingest.rs:70	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/construct_ingest.rs:135	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/construct_ingest.rs:181	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/construct_ingest.rs:221	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/construct_ingest.rs:258	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/diff.rs:48	refuse	ERRCODE_UNDEFINED_OBJECT
-src/storage/diff.rs:405	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/export.rs:86	refuse	ERRCODE_UNDEFINED_OBJECT
-src/storage/fd1.rs:168	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/diff.rs:53	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/diff.rs:418	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/export.rs:50	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/fd1.rs:216	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/graphs.rs:215	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/graphs.rs:223	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/graphs.rs:290	refuse	ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST
@@ -142,6 +142,7 @@ src/storage/hexastore.rs:385	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/hexastore.rs:452	refuse	ERRCODE_DUPLICATE_OBJECT
 src/storage/hexastore.rs:463	refuse	ERRCODE_DUPLICATE_OBJECT
 src/storage/integrity.rs:44	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/lines.rs:268	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/loader.rs:231	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/storage/loader.rs:316	refuse	ERRCODE_INVALID_PARAMETER_VALUE
 src/storage/loader.rs:432	refuse	ERRCODE_INVALID_PARAMETER_VALUE
@@ -150,12 +151,12 @@ src/storage/loader.rs:892	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/storage/loader.rs:1254	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/loader.rs:1729	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
 src/storage/loader.rs:2107	refuse	ERRCODE_FEATURE_NOT_SUPPORTED
-src/storage/lock.rs:184	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/lock.rs:196	refuse	ERRCODE_LOCK_NOT_AVAILABLE
-src/storage/lock.rs:205	refuse	ERRCODE_UNDEFINED_OBJECT
-src/storage/lock.rs:240	refuse	ERRCODE_INVALID_PARAMETER_VALUE
-src/storage/lock.rs:251	refuse	ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
-src/storage/lock.rs:255	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/lock.rs:219	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/lock.rs:231	refuse	ERRCODE_LOCK_NOT_AVAILABLE
+src/storage/lock.rs:240	refuse	ERRCODE_UNDEFINED_OBJECT
+src/storage/lock.rs:278	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/storage/lock.rs:289	refuse	ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+src/storage/lock.rs:293	refuse	ERRCODE_UNDEFINED_OBJECT
 src/storage/staged/phases.rs:594	panic	_ => panic!("staged STAGE: unsupported object term"),
 src/storage/staged/pool.rs:190	panic	other => panic!("staged worker: unknown phase ordinal {other}"),
-src/validation/shacl.rs:405	refuse	ERRCODE_INVALID_PARAMETER_VALUE
+src/validation/shacl.rs:494	refuse	ERRCODE_INVALID_PARAMETER_VALUE
