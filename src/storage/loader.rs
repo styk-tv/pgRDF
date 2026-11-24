@@ -1750,6 +1750,9 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
                lv: Vec<String>,
                di: Vec<Option<i64>>,
                lt: Vec<Option<String>>| {
+        for v in &lv {
+            crate::storage::dict::refuse_nul(v);
+        }
         Spi::run_with_args(
             "INSERT INTO pgrdf._pgrdf_dictionary \
              (id, term_type, lexical_value, datatype_iri_id, language_tag) \
@@ -1956,6 +1959,9 @@ fn ingest_turtle_streaming(
                lt: Vec<Option<String>>| {
         if ids.is_empty() {
             return;
+        }
+        for v in &lv {
+            crate::storage::dict::refuse_nul(v);
         }
         Spi::run_with_args(
             "INSERT INTO pgrdf._pgrdf_dictionary \
@@ -2956,6 +2962,93 @@ mod tests {
             .unwrap();
         Spi::run("RESET ROLE").unwrap();
         r
+    }
+
+    /// Stored terms that contain U+0000, found on raw bytes (length() and
+    /// the regex engine both stop at a NUL).
+    fn nul_terms() -> i64 {
+        Spi::get_one(
+            "SELECT count(*) FROM pgrdf._pgrdf_dictionary \
+             WHERE position('\\x00'::bytea IN pg_catalog.textsend(lexical_value)) > 0",
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    /// U+0000 is valid in an RDF literal (`"\u0000"`) and PostgreSQL text
+    /// cannot hold it: a stored NUL breaks every later read of the term.
+    /// Every ingest route refuses 22P05 before anything is written.
+    /// `load_turtle_streaming` and the staged route are covered by
+    /// tests/upgrade/loader-gate.sh: the first drops and rebuilds the quad
+    /// table's indexes, which deadlocks against parallel tests, and the
+    /// second commits from background workers.
+    #[pg_test]
+    fn every_ingest_route_refuses_u0000() {
+        try_fn();
+        let triple = "<urn:n1:s> <urn:n1:p> \"a\\u0000b\" .\n";
+        let quad = "<urn:n1:s> <urn:n1:p> \"a\\u0000b\" <urn:n1:g> .\n";
+        let path = format!("/tmp/pgrdf-n1-{}.nt", std::process::id());
+        std::fs::write(&path, triple).unwrap();
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:n1:g')")
+            .unwrap()
+            .unwrap();
+        let routes: Vec<(&str, String)> = vec![
+            (
+                "parse_turtle",
+                format!("SELECT pgrdf.parse_turtle($n1${triple}$n1$, {g})"),
+            ),
+            (
+                "parse_turtle_verbose",
+                format!("SELECT pgrdf.parse_turtle_verbose($n1${triple}$n1$, {g})"),
+            ),
+            (
+                "parse_turtle_dict_batched",
+                format!("SELECT pgrdf.parse_turtle_dict_batched($n1${triple}$n1$, {g})"),
+            ),
+            (
+                "parse_nquads",
+                format!("SELECT pgrdf.parse_nquads($n1${quad}$n1$, {g})"),
+            ),
+            (
+                "parse_trig",
+                format!("SELECT pgrdf.parse_trig($n1$<urn:n1:g> {{ {triple} }}$n1$, {g})"),
+            ),
+            (
+                "load_turtle (standard)",
+                format!("SELECT pgrdf.load_turtle('{path}', {g}, 'http://base.example/')"),
+            ),
+            (
+                "load_turtle (bulk)",
+                format!("SELECT pgrdf.load_turtle('{path}', {g}, NULL, true)"),
+            ),
+            (
+                "load_turtle_verbose",
+                format!("SELECT pgrdf.load_turtle_verbose('{path}', {g}, 'http://base.example/')"),
+            ),
+            (
+                "load_turtle_dict_batched",
+                format!("SELECT pgrdf.load_turtle_dict_batched('{path}', {g})"),
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (name, sql) in &routes {
+            let got: String = Spi::get_one_with_args("SELECT pg_temp.ld_try($1)", &[sql.into()])
+                .unwrap()
+                .unwrap();
+            if !got.starts_with("22P05|") {
+                wrong.push(format!("{name}: {got}"));
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            wrong.is_empty(),
+            "routes that did not refuse 22P05: {wrong:#?}"
+        );
+        assert_eq!(nul_terms(), 0, "no term with U+0000 was stored");
+        let rows: i64 = Spi::get_one(&format!("SELECT pgrdf.count_quads({g})"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(rows, 0, "nothing was written");
     }
 
     /// Every server-path loader requires pg_read_server_files (or

@@ -100,7 +100,13 @@ fn decode_term_cell(cell: &Value, position: &str, bnode_map: &mut HashMap<String
                     "{PANIC_PREFIX}: {position}: literal not allowed in subject/predicate position (RDF)"
                 );
             }
-            let language = obj.get("language").and_then(Value::as_str);
+            // Lower case, as every parser route stores it: `"hi"@EN` and
+            // `"hi"@en` are one literal and must be one dictionary term.
+            let language = obj
+                .get("language")
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase);
+            let language = language.as_deref();
             // Language-tagged literals MUST NOT carry a separately
             // resolved datatype id (rdf:langString is implicit per
             // RDF 1.1 §3.3). The construct emitter writes the
@@ -454,5 +460,34 @@ mod tests {
             joined,
             "bnode within-solution joining must survive round-trip"
         );
+    }
+
+    /// Language tags are stored in lower case by every parser route
+    /// (RDF 1.1 allows the conversion, and tags compare case-insensitively).
+    /// A JSON row must land on the same term, or one literal becomes two.
+    #[pg_test]
+    fn language_tag_is_lowercased_like_the_parsers() {
+        let g: i64 = Spi::get_one("SELECT pgrdf.add_graph('urn:tdd:lang:g')")
+            .unwrap()
+            .unwrap();
+        Spi::run(&format!(
+            "SELECT pgrdf.parse_turtle('<urn:l:s> <urn:l:p> \"hi\"@en-US .', {g})"
+        ))
+        .unwrap();
+        let n: i64 = Spi::get_one(&format!(
+            "SELECT pgrdf.put_construct_row('{{\"subject\": {{\"type\": \"iri\", \"value\": \"urn:l:s\"}}, \
+               \"predicate\": {{\"type\": \"iri\", \"value\": \"urn:l:p\"}}, \
+               \"object\": {{\"type\": \"literal\", \"value\": \"hi\", \"language\": \"EN-us\"}}}}'::jsonb, {g})"
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 0, "the same triple: nothing new is stored");
+        let terms: i64 = Spi::get_one(
+            "SELECT count(*) FROM pgrdf._pgrdf_dictionary \
+             WHERE lexical_value = 'hi' AND lower(language_tag) = 'en-us'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(terms, 1, "one term for one literal");
     }
 }

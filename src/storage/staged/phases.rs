@@ -541,13 +541,17 @@ fn itoa_smallint(v: i16) -> &'static str {
 /// parallel, no shared state. The term→column extraction is byte-for-byte the same match the serial
 /// `stage()` used (URI/blank → `as_str()` sans brackets; literal → lexical value sans quotes, with
 /// datatype IRI string XOR language tag), so the staged rows are identical regardless of core count.
-/// Returns `(rows, skipped)`.
-fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64) {
-    let parsed: Vec<(Vec<StagedRow>, i64)> = lines
+/// Returns `(rows, skipped, nul_term)`. `nul_term` is the first term found that contains U+0000:
+/// PostgreSQL text cannot hold it and the COPY would fail on it with an encoding error, so the
+/// caller refuses the load by name instead. It is only reported here, never raised: these closures
+/// run on rayon threads, and an error may only be raised from the backend's own thread.
+fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64, Option<String>) {
+    let parsed: Vec<(Vec<StagedRow>, i64, Option<String>)> = lines
         .par_chunks(STAGE_PARSE_CHUNK)
         .map(|chunk| {
             let mut out: Vec<StagedRow> = Vec::with_capacity(chunk.len());
             let mut skipped: i64 = 0;
+            let mut nul_term: Option<String> = None;
             for line in chunk {
                 for r in NTriplesParser::new().for_reader(line.as_bytes()) {
                     let t = match r {
@@ -589,15 +593,22 @@ fn parse_window_par(lines: &[String]) -> (Vec<StagedRow>, i64) {
                         #[allow(unreachable_patterns)]
                         _ => panic!("staged STAGE: unsupported object term"),
                     };
+                    if nul_term.is_none() {
+                        nul_term = [&s, &p, &o_val]
+                            .into_iter()
+                            .find(|v| v.as_bytes().contains(&0))
+                            .cloned();
+                    }
                     out.push((s, p, o_type, o_val, o_dt, o_lang));
                 }
             }
-            (out, skipped)
+            (out, skipped, nul_term)
         })
         .collect();
-    let skipped: i64 = parsed.iter().map(|(_, s)| *s).sum();
-    let rows: Vec<StagedRow> = parsed.into_iter().flat_map(|(c, _)| c).collect();
-    (rows, skipped)
+    let skipped: i64 = parsed.iter().map(|(_, s, _)| *s).sum();
+    let nul_term = parsed.iter().find_map(|(_, _, n)| n.clone());
+    let rows: Vec<StagedRow> = parsed.into_iter().flat_map(|(c, _, _)| c).collect();
+    (rows, skipped, nul_term)
 }
 
 /// Load one parsed window into `{table}` via server-side **COPY** (the fast path the E160 benchmark
@@ -721,7 +732,10 @@ pub fn stage(job: &JobSlot, w: &WorkerSlot) -> i64 {
         }
 
         // ── Parse this window across all cores, then COPY it in.
-        let (rows, _skipped) = parse_window_par(&window_lines);
+        let (rows, _skipped, nul_term) = parse_window_par(&window_lines);
+        if let Some(term) = nul_term {
+            crate::storage::dict::refuse_nul(&term);
+        }
         staged += rows.len() as i64;
         copy_window(&table, job.job_id, w.shard, window_idx, &rows);
         window_idx += 1;
@@ -1288,12 +1302,27 @@ mod tests {
             "<http://ex/s> <http://ex/p> <http://ex/o> .".to_string(),
             "this is not a valid n-triples line at all".to_string(),
         ];
-        let (rows, skipped) = parse_window_par(&lines);
+        let (rows, skipped, nul_term) = parse_window_par(&lines);
         assert_eq!(rows.len(), 1, "the one well-formed triple is parsed");
         assert!(
             skipped >= 1,
             "the malformed line must be counted as skipped (got {skipped}), not panic"
         );
+        assert_eq!(nul_term, None);
+    }
+
+    /// A literal `"\u0000"` parses as valid N-Triples; PostgreSQL text cannot hold the value, and
+    /// the staging COPY would fail on it with an encoding error. The parser reports the term so the
+    /// worker refuses the load by name (22P05) before the COPY.
+    #[pg_test]
+    fn staged_parse_window_reports_a_term_with_u0000() {
+        let lines = vec![
+            "<http://ex/s> <http://ex/p> <http://ex/o> .".to_string(),
+            "<http://ex/s> <http://ex/p> \"a\\u0000b\" .".to_string(),
+        ];
+        let (rows, _skipped, nul_term) = parse_window_par(&lines);
+        assert_eq!(rows.len(), 2, "both lines are well-formed N-Triples");
+        assert_eq!(nul_term.as_deref(), Some("a\0b"));
     }
 
     /// **Local proxy for "RESOLVE degrades to spill, not OOM."** No box is available to reproduce the
