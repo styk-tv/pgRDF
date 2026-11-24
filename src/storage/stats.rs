@@ -209,6 +209,21 @@ pub(crate) fn shmem_cache_prewarm_impl(limit: i64) -> i64 {
     count
 }
 
+// #161: these three act on state shared by every database on the server
+// (the shared term cache and its counters), so they are not PUBLIC. The
+// installing role and superusers keep them; `stats()` is opened to a
+// monitoring role with a plain `GRANT EXECUTE ON FUNCTION pgrdf.stats()`.
+// `last_call_stats()` reports the caller's own last query and stays PUBLIC.
+pgrx::extension_sql!(
+    r#"
+REVOKE EXECUTE ON FUNCTION shmem_reset() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION shmem_cache_prewarm(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION stats() FROM PUBLIC;
+"#,
+    name = "shared_state_functions_not_public_v0_6_41",
+    requires = [stats, shmem_reset, shmem_cache_prewarm],
+);
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
@@ -286,5 +301,65 @@ mod tests {
             "clean call reports zero — per-call, never cumulative"
         );
         Spi::run("RESET pgrdf.on_path_truncation").unwrap();
+    }
+
+    /// #161: the shared-cache maintenance functions and the instance-wide
+    /// counters are not PUBLIC. One database's role could otherwise reset
+    /// or read state every database on the server shares. `stats()` is
+    /// opened with a plain GRANT; the per-call figures stay PUBLIC.
+    #[pg_test]
+    fn maintenance_functions_are_not_public() {
+        let public_may = |f: &str| -> bool {
+            Spi::get_one_with_args::<bool>(
+                "SELECT has_function_privilege('public', $1, 'EXECUTE')",
+                &[f.into()],
+            )
+            .unwrap()
+            .unwrap()
+        };
+        for f in [
+            "pgrdf.shmem_reset()",
+            "pgrdf.shmem_cache_prewarm(bigint)",
+            "pgrdf.stats()",
+        ] {
+            assert!(!public_may(f), "{f} must not be executable by PUBLIC");
+        }
+        assert!(
+            public_may("pgrdf.last_call_stats()"),
+            "the per-call figures stay PUBLIC"
+        );
+
+        Spi::run("CREATE ROLE pgrdf_161_app NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO pgrdf_161_app").unwrap();
+        // Tried in a subtransaction, so a refusal leaves this one usable.
+        Spi::run(
+            "CREATE FUNCTION pg_temp.t1_try(q text) RETURNS text LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               BEGIN \
+                 SET LOCAL ROLE pgrdf_161_app; \
+                 EXECUTE q; \
+                 RESET ROLE; \
+                 RETURN 'ok'; \
+               EXCEPTION WHEN OTHERS THEN \
+                 RETURN SQLSTATE; \
+               END; \
+             END $$",
+        )
+        .unwrap();
+        let as_app = |q: &str| -> String {
+            Spi::get_one_with_args::<String>("SELECT pg_temp.t1_try($1)", &[q.into()])
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(as_app("SELECT pgrdf.stats()"), "42501");
+        assert_eq!(as_app("SELECT pgrdf.shmem_reset()"), "42501");
+        assert_eq!(as_app("SELECT pgrdf.shmem_cache_prewarm(1)"), "42501");
+        assert_eq!(as_app("SELECT pgrdf.last_call_stats()"), "ok");
+        Spi::run("GRANT EXECUTE ON FUNCTION pgrdf.stats() TO pgrdf_161_app").unwrap();
+        assert_eq!(
+            as_app("SELECT pgrdf.stats()"),
+            "ok",
+            "a GRANT opens stats()"
+        );
     }
 }

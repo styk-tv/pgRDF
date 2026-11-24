@@ -17,3 +17,10 @@ BEGIN
   END IF;
 END
 $pgrdf_153$;
+
+-- #161: functions that act on state shared by every database on the server
+-- are not PUBLIC. stats() is opened with GRANT EXECUTE ON FUNCTION
+-- pgrdf.stats() TO <role>; last_call_stats() stays PUBLIC.
+REVOKE EXECUTE ON FUNCTION shmem_reset() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION shmem_cache_prewarm(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION stats() FROM PUBLIC;
