@@ -264,6 +264,82 @@ impl IngestDictPath {
     }
 }
 
+/// Longest value a declared-identity setting accepts, in bytes.
+pub(crate) const DECLARED_MAX_BYTES: usize = 128;
+
+/// The declared identity of the client: what it says about itself. The
+/// act record and `graph_activity()` copy these as they stand when an act
+/// starts. They are provenance and are never used to authorise anything.
+/// A server that shares connections between clients sets all five on
+/// every transaction (`SET LOCAL`, or `set_config(name, value, true)`).
+pub(crate) static DECLARED_WORKSPACE: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+pub(crate) static DECLARED_AGENT: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+pub(crate) static DECLARED_THREAD: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+pub(crate) static DECLARED_ON_BEHALF_OF: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+pub(crate) static DECLARED_HARNESS: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+
+/// `pgrdf.graph_owner_enforce`: when on, the destructive graph acts belong
+/// to the graph's recorded owner and to the storage owner. Superuser-set
+/// (per database with `ALTER DATABASE ... SET`): a role the rule restricts
+/// must not be able to switch it off.
+pub(crate) static GRAPH_OWNER_ENFORCE: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// `pgrdf.notify_acts`: when on, each recorded act issues
+/// `NOTIFY pgrdf_acts`. Superuser-set: transactions that notify are
+/// serialised against each other at commit, across the whole server.
+pub(crate) static NOTIFY_ACTS: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// Check hook of the five declared-identity settings: at most
+/// [`DECLARED_MAX_BYTES`] bytes (22001), no control characters (22023).
+/// A value is refused, never truncated or cleaned: a reader of the act
+/// record must be able to trust that what it shows is what was set.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn check_declared(
+    newval: *mut *mut std::ffi::c_char,
+    _extra: *mut *mut std::ffi::c_void,
+    _source: pgrx::pg_sys::GucSource::Type,
+) -> bool {
+    let value = unsafe {
+        if newval.is_null() || (*newval).is_null() {
+            return true;
+        }
+        std::ffi::CStr::from_ptr(*newval)
+    };
+    let bytes = value.to_bytes();
+    if bytes.len() > DECLARED_MAX_BYTES {
+        unsafe {
+            pgrx::guc::GucCheckError::new(format!(
+                "a declared-identity setting takes at most {DECLARED_MAX_BYTES} bytes, got {}",
+                bytes.len()
+            ))
+            .with_errcode(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_STRING_DATA_RIGHT_TRUNCATION as i32,
+            )
+            .with_hint("Use a short slug or an id, never a filesystem path.")
+            .apply();
+        }
+        return false;
+    }
+    if bytes.iter().any(|b| *b < 0x20 || *b == 0x7f) {
+        unsafe {
+            pgrx::guc::GucCheckError::new(
+                "a declared-identity setting must not contain control characters",
+            )
+            .with_errcode(
+                pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE as i32,
+            )
+            .apply();
+        }
+        return false;
+    }
+    true
+}
+
 /// Register every pgRDF custom GUC. Called once from `_PG_init`.
 pub fn register() {
     GucRegistry::define_int_guc(
@@ -425,6 +501,80 @@ pub fn register() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    for (name, short, setting) in [
+        (
+            c"pgrdf.workspace",
+            c"Declared identity: the workspace the client works in.",
+            &DECLARED_WORKSPACE,
+        ),
+        (
+            c"pgrdf.agent",
+            c"Declared identity: the agent or seat acting.",
+            &DECLARED_AGENT,
+        ),
+        (
+            c"pgrdf.thread",
+            c"Declared identity: the conversation or session thread.",
+            &DECLARED_THREAD,
+        ),
+        (
+            c"pgrdf.on_behalf_of",
+            c"Declared identity: the person the client acts for.",
+            &DECLARED_ON_BEHALF_OF,
+        ),
+        (
+            c"pgrdf.harness",
+            c"Declared identity: the client software, as <catalog-id>/<version>.",
+            &DECLARED_HARNESS,
+        ),
+    ] {
+        // SAFETY: the check hook is #[pg_guard]ed and only reads its argument.
+        unsafe {
+            GucRegistry::define_string_guc_with_hooks(
+                name,
+                short,
+                c"Copied into the act record (pgrdf.graph_acts) and pgrdf.graph_activity as it \
+                  stands when a graph-level act starts. Stated by the client and never used to \
+                  authorise anything. At most 128 bytes, no control characters. A server that \
+                  shares connections between clients must set all five on every transaction.",
+                setting,
+                GucContext::Userset,
+                GucFlags::default(),
+                Some(check_declared),
+                None,
+                None,
+            );
+        }
+    }
+    GucRegistry::define_bool_guc(
+        c"pgrdf.graph_owner_enforce",
+        c"Reserve the destructive graph acts for the graph's owner.",
+        c"Off by default: privileges alone decide, as before graphs had a recorded owner. \
+          When on, drop_graph, clear_graph, lock_graph, unlock_graph, dedup_graph and \
+          set_graph_owner refuse 42501 unless the caller holds the privileges of the graph's \
+          recorded owner or of the storage owner. A graph with no recorded owner stays \
+          governed by privileges alone. Set by a superuser, usually per database.",
+        &GRAPH_OWNER_ENFORCE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"pgrdf.notify_acts",
+        c"Issue NOTIFY pgrdf_acts for each recorded graph-level act.",
+        c"Off by default. When on, each act row is followed by NOTIFY on channel pgrdf_acts \
+          with the payload <act_id>:<graph_id>:<act>, delivered when the act commits. \
+          PostgreSQL serialises the commits of transactions that notify, across every \
+          database of the server, so this is set by a superuser.",
+        &NOTIFY_ACTS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    // Every pgrdf.* setting is defined above. Reserving the prefix makes a
+    // misspelt name an error instead of a silent new placeholder (PG 15+).
+    #[cfg(not(feature = "pg14"))]
+    unsafe {
+        pgrx::pg_sys::MarkGUCPrefixReserved(c"pgrdf".as_ptr());
+    }
 }
 
 /// The currently-effective `pgrdf.path_max_depth` for this session.
@@ -585,4 +735,14 @@ mod tests {
             Some("index".to_string())
         );
     }
+}
+
+/// `pgrdf.graph_owner_enforce` for this session.
+pub(crate) fn graph_owner_enforce() -> bool {
+    GRAPH_OWNER_ENFORCE.get()
+}
+
+/// `pgrdf.notify_acts` for this session.
+pub(crate) fn notify_acts() -> bool {
+    NOTIFY_ACTS.get()
 }

@@ -361,6 +361,7 @@ fn validate(
     strict: default!(bool, true),
 ) -> pgrx::JsonB {
     let start = Instant::now();
+    let _listed = crate::storage::acts::reading(data_graph_id, "validate");
 
     // Validate the mode up-front, BEFORE any work. An unknown mode
     // must error — never silently fall back to 'native'. Exact

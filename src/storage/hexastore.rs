@@ -111,6 +111,10 @@ fn add_graph(g: i64) -> bool {
         &[g.into()],
     )
     .unwrap_or_else(|e| panic!("add_graph: failed to insert synthetic IRI for graph_id {g}: {e}"));
+    // Every creating route ends here (the IRI overloads, create_graph, the
+    // loaders' implicit create, SPARQL CREATE GRAPH), so this is the one
+    // place the owner and the create act are recorded.
+    crate::storage::acts::record_created(g);
     true
 }
 
@@ -430,11 +434,13 @@ fn add_graph_id_iri(id: i64, iri: &str) -> i64 {
         // upgradable; any other existing IRI takes the conflict path
         // below.
         (Some(existing_iri), None) if existing_iri == synthetic_iri => {
+            let act = crate::storage::acts::begin(id, "rename");
             Spi::run_with_args(
                 "UPDATE pgrdf._pgrdf_graphs SET iri = $2 WHERE graph_id = $1",
                 &[id.into(), iri.into()],
             )
             .unwrap_or_else(|e| panic!("add_graph: upgrade synthetic iri failed: {e}"));
+            act.finish(serde_json::json!({ "from": synthetic_iri, "to": iri }));
             id
         }
         // id is bound to a non-synthetic IRI different from the

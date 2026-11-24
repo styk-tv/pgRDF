@@ -223,8 +223,11 @@ fn put_construct_row(row: pgrx::JsonB, graph_id: default!(i64, 0)) -> i64 {
         );
     }
     crate::storage::lock::require_unlocked(graph_id, "put_construct_row"); // #107
+    let act = crate::storage::acts::begin(graph_id, "ingest");
     let mut bnode_map: HashMap<String, i64> = HashMap::new();
-    ingest_one(&row.0, graph_id, &mut bnode_map)
+    let stored = ingest_one(&row.0, graph_id, &mut bnode_map);
+    act.finish(serde_json::json!({ "rows": 1, "stored": stored }));
+    stored
 }
 
 /// Re-ingest a captured `pgrdf.construct(q)` rowset into the
@@ -263,6 +266,7 @@ fn put_construct_rows(rows: Option<Vec<Option<pgrx::JsonB>>>, graph_id: default!
         // rather than panicking.
         return 0;
     };
+    let act = crate::storage::acts::begin(graph_id, "ingest");
     let mut bnode_map: HashMap<String, i64> = HashMap::new();
     let mut inserted: i64 = 0;
     for (idx, maybe_row) in rows.iter().enumerate() {
@@ -271,6 +275,7 @@ fn put_construct_rows(rows: Option<Vec<Option<pgrx::JsonB>>>, graph_id: default!
         });
         inserted += ingest_one(&row.0, graph_id, &mut bnode_map);
     }
+    act.finish(serde_json::json!({ "rows": rows.len(), "stored": inserted }));
     inserted
 }
 

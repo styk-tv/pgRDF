@@ -152,6 +152,7 @@ fn fd1_digest(triples: &[Triple]) -> String {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn structural_digest(graph_id: i64) -> String {
+    let _listed = crate::storage::acts::reading(graph_id, "structural_digest");
     // Same existence discipline as graph_digest (T-NULL/L9): an absent
     // graph REFUSES — it has no digest; an EMPTY graph answers. Graph 0
     // (the default graph) always exists.

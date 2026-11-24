@@ -92,6 +92,20 @@ g3=$(as_app "SELECT pgrdf.add_graph('urn:ug:after2')")
 [ "$g3" -gt "$high" ] || fail "a dropped id came back: $g3 after dropping $high"
 ok "$APP created $g1 by IRI and $high explicitly, dropped $high, next id $g3"
 
+# 5b. Ownership and the act record. The graph from before the upgrade has
+#     no recorded owner (never a guess); a graph created after it belongs to
+#     the role that created it, not to the storage owner; the act record is
+#     owned by the storage owner and carries the app role's acts.
+kept_owner=$(q $UP -c "SELECT coalesce(owner, '<not recorded>') FROM pgrdf._pgrdf_graphs WHERE iri = 'urn:ug:kept'")
+[ "$kept_owner" = "<not recorded>" ] || fail "the pre-upgrade graph got an owner: $kept_owner"
+new_owner=$(q $UP -c "SELECT owner FROM pgrdf._pgrdf_graphs WHERE graph_id = $g1")
+[ "$new_owner" = "$APP" ] || fail "graph $g1 is owned by '$new_owner', expected $APP"
+acts_owner=$(q $UP -c "SELECT relowner::regrole FROM pg_class WHERE oid = 'pgrdf._pgrdf_graph_acts'::regclass")
+[ "$acts_owner" = "$STORE" ] || fail "the act record is owned by $acts_owner, expected $STORE"
+acts=$(q $UP -c "SELECT string_agg(act, ',' ORDER BY act_id) FROM pgrdf.graph_acts($g1) WHERE acting_role = '$APP'")
+[ "$acts" = "create,load" ] || fail "acts of graph $g1 by $APP: '$acts', expected create,load"
+ok "urn:ug:kept has no recorded owner; graph $g1 is owned by $APP with acts $acts; the act record is owned by $STORE"
+
 # 6. The graph from before the upgrade is untouched.
 kept_after=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")
 [ "$kept_before" = "$kept_after" ] || fail "urn:ug:kept changed across the upgrade"
@@ -114,18 +128,37 @@ dumpcfg="SELECT c.relname || ' ' || quote_literal(e.cond)
            FROM pg_extension x, unnest(x.extconfig, x.extcondition) AS e(rel, cond)
            JOIN pg_class c ON c.oid = e.rel
           WHERE x.extname = 'pgrdf' ORDER BY 1"
+# Columns, indexes and triggers of the extension's own relations. Graph
+# partitions are left out: the two databases hold different graphs.
+shape="SELECT 'column ' || c.relname || '.' || a.attname || ' ' || format_type(a.atttypid, a.atttypmod)
+              || CASE WHEN a.attnotnull THEN ' not null' ELSE '' END
+         FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+        WHERE c.relnamespace = 'pgrdf'::regnamespace AND c.relkind IN ('r', 'p')
+          AND a.attnum > 0 AND NOT a.attisdropped AND c.relname !~ '^_pgrdf_quads_g[0-9]+\$'
+       UNION ALL
+       SELECT 'index ' || indexdef FROM pg_indexes
+        WHERE schemaname = 'pgrdf' AND tablename !~ '^_pgrdf_quads_g[0-9]+\$'
+       UNION ALL
+       SELECT 'trigger ' || c.relname || ' ' || pg_get_triggerdef(t.oid)
+         FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+        WHERE c.relnamespace = 'pgrdf'::regnamespace AND NOT t.tgisinternal
+          AND c.relname !~ '^_pgrdf_quads_g[0-9]+\$'
+        ORDER BY 1"
 # Captured first, so a query that fails stops the gate instead of comparing
 # two empty outputs.
 fresh_sig=$(q $FRESH -c "$sig"); up_sig=$(q $UP -c "$sig")
 fresh_rels=$(q $FRESH -c "$rels"); up_rels=$(q $UP -c "$rels")
 fresh_acl=$(q $FRESH -c "$acl"); up_acl=$(q $UP -c "$acl")
 fresh_cfg=$(q $FRESH -c "$dumpcfg"); up_cfg=$(q $UP -c "$dumpcfg")
+fresh_shape=$(q $FRESH -c "$shape"); up_shape=$(q $UP -c "$shape")
 [ -n "$fresh_sig" ] && [ -n "$fresh_rels" ] && [ -n "$fresh_acl" ] && [ -n "$fresh_cfg" ] \
   || fail "fresh install lists no functions, relations, privileges or dump registrations"
 diff <(echo "$fresh_sig") <(echo "$up_sig") || fail "functions differ between a fresh install and the upgrade"
 diff <(echo "$fresh_rels") <(echo "$up_rels") || fail "relations differ between a fresh install and the upgrade"
 diff <(echo "$fresh_acl") <(echo "$up_acl") || fail "function privileges differ between a fresh install and the upgrade"
 diff <(echo "$fresh_cfg") <(echo "$up_cfg") || fail "pg_dump registrations differ between a fresh install and the upgrade"
-ok "functions ($(echo "$up_sig" | wc -l | tr -d ' ')), relations ($(echo "$up_rels" | wc -l | tr -d ' ')), function privileges and pg_dump registrations ($(echo "$up_cfg" | wc -l | tr -d ' ')) match a fresh install"
+[ -n "$fresh_shape" ] || fail "fresh install lists no columns"
+diff <(echo "$fresh_shape") <(echo "$up_shape") || fail "columns, indexes or triggers differ between a fresh install and the upgrade"
+ok "functions ($(echo "$up_sig" | wc -l | tr -d ' ')), relations ($(echo "$up_rels" | wc -l | tr -d ' ')), columns, indexes and triggers ($(echo "$up_shape" | wc -l | tr -d ' ')), function privileges and pg_dump registrations ($(echo "$up_cfg" | wc -l | tr -d ' ')) match a fresh install"
 
 echo "upgrade gate: $PREV -> $CUR passed"

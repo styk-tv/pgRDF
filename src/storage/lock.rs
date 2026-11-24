@@ -206,6 +206,8 @@ fn lock_graph(graph_id: i64, reason: &str) -> bool {
             format!("lock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
         ),
     }
+    crate::storage::acts::require_graph_owner(graph_id, "lock_graph");
+    let act = crate::storage::acts::begin(graph_id, "lock");
     Spi::run_with_args(
         "UPDATE pgrdf._pgrdf_graphs \
          SET locked = true, lock_reason = $2, locked_at = now(), locked_digest = NULL \
@@ -216,6 +218,15 @@ fn lock_graph(graph_id: i64, reason: &str) -> bool {
     // After the caller's own UPDATE succeeded — so locking still needs
     // UPDATE on _pgrdf_graphs — extend the lock below the engine.
     install_lock_triggers(graph_id, reason);
+    // Who locked it (#121): the lock act, named on the graph while the
+    // lock holds.
+    if let Some(act_id) = act.finish(serde_json::json!({ "reason": reason })) {
+        Spi::run_with_args(
+            "UPDATE pgrdf._pgrdf_graphs SET locked_act = $2 WHERE graph_id = $1",
+            &[graph_id.into(), act_id.into()],
+        )
+        .expect("lock_graph: recording the lock act failed");
+    }
     true
 }
 
@@ -245,16 +256,29 @@ fn unlock_graph(graph_id: i64, reason: &str) -> bool {
             format!("unlock_graph: no graph with id {graph_id} (see pgrdf._pgrdf_graphs)"),
         ),
     }
+    crate::storage::acts::require_graph_owner(graph_id, "unlock_graph");
+    let act = crate::storage::acts::begin(graph_id, "unlock");
     Spi::run_with_args(
         "UPDATE pgrdf._pgrdf_graphs \
          SET locked = false, lock_reason = NULL, locked_at = NULL, locked_digest = NULL \
          WHERE graph_id = $1",
-        &[graph_id.into(), reason.into()],
+        &[graph_id.into()],
     )
     .expect("unlock_graph: update failed");
     drop_lock_triggers(graph_id);
-    // The unlock reason goes to the log — the row's reason column
-    // belongs to the (now absent) lock.
+    // Who unlocked it, and why (#121): the unlock act carries the reason.
+    // The row's reason column belongs to the (now absent) lock. The log
+    // line stays for servers whose SQL predates the act record.
+    if act
+        .finish(serde_json::json!({ "reason": reason }))
+        .is_some()
+    {
+        Spi::run_with_args(
+            "UPDATE pgrdf._pgrdf_graphs SET locked_act = NULL WHERE graph_id = $1",
+            &[graph_id.into()],
+        )
+        .expect("unlock_graph: clearing the lock act failed");
+    }
     pgrx::log!("pgrdf: graph {graph_id} unlocked: {reason}");
     true
 }

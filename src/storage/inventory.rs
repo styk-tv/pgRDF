@@ -46,6 +46,12 @@ fn graph_inventory() -> TableIterator<
         name!(source_sha256, Option<String>),
         name!(source_loads, Option<i32>),
         name!(identity_digest, Option<String>),
+        name!(owner, Option<String>),
+        name!(created_at, Option<pgrx::datum::TimestampWithTimeZone>),
+        name!(created_workspace, Option<String>),
+        name!(created_agent, Option<String>),
+        name!(created_thread, Option<String>),
+        name!(locked_by, Option<String>),
     ),
 > {
     let mut rows = Vec::new();
@@ -77,8 +83,21 @@ fn graph_inventory() -> TableIterator<
                                  AND c.relname = format('_pgrdf_quads_g%s', g.graph_id)
                                  AND t.tgname IN ('pgrdf_lock_row', 'pgrdf_lock_truncate')
                              ) = 2
-                             THEN g.locked_digest END AS identity_digest
+                             THEN g.locked_digest END AS identity_digest,
+                        -- 0.6.41: the recorded owner, who created the graph
+                        -- (the declared identity on its create act), and
+                        -- the role holding the current lock. NULL on a
+                        -- graph that predates the act record.
+                        (j.r ->> 'owner'),
+                        (j.r ->> 'created_at')::timestamptz,
+                        ca.workspace, ca.agent, ca.thread,
+                        la.acting_role
                  FROM pgrdf._pgrdf_graphs g
+                 CROSS JOIN LATERAL (SELECT to_jsonb(g) AS r) j
+                 LEFT JOIN pgrdf._pgrdf_graph_acts ca
+                        ON ca.act_id = (j.r ->> 'created_act')::bigint
+                 LEFT JOIN pgrdf._pgrdf_graph_acts la
+                        ON la.act_id = (j.r ->> 'locked_act')::bigint AND g.locked
                  LEFT JOIN (
                      SELECT graph_id,
                             count(*) FILTER (WHERE NOT is_inferred) AS a,
@@ -104,6 +123,12 @@ fn graph_inventory() -> TableIterator<
                 row.get::<String>(8).unwrap(),
                 row.get::<i32>(9).unwrap(),
                 row.get::<String>(10).unwrap(),
+                row.get::<String>(11).unwrap(),
+                row.get::<pgrx::datum::TimestampWithTimeZone>(12).unwrap(),
+                row.get::<String>(13).unwrap(),
+                row.get::<String>(14).unwrap(),
+                row.get::<String>(15).unwrap(),
+                row.get::<String>(16).unwrap(),
             ));
         }
     });
@@ -163,7 +188,7 @@ fn orphan_partitions() -> TableIterator<'static, (name!(relname, String),)> {
 /// | object | the engine, as the storage owner, needs |
 /// |---|---|
 /// | a partition | ownership: it drops, truncates, indexes and puts triggers on it |
-/// | `_pgrdf_graphs` | SELECT, and one of UPDATE, DELETE, TRUNCATE (MAINTAIN on PG 17+) for `LOCK TABLE ... SHARE ROW EXCLUSIVE` |
+/// | `_pgrdf_graphs` | SELECT and UPDATE: it reads ids, takes `LOCK TABLE ... SHARE ROW EXCLUSIVE`, and records owner and custody columns |
 /// | `_pgrdf_graph_acts` | INSERT |
 /// | `_pgrdf_graph_id_seq` | USAGE, SELECT and UPDATE |
 /// | `_pgrdf_graph_act_id_seq` | USAGE |
@@ -201,20 +226,7 @@ pub(crate) type DriftRow = (String, String, String, String, bool, String);
 /// function passes the real one; tests pass a role with chosen grants,
 /// so the blocking rule is checked without re-owning the storage.
 pub(crate) fn drift_rows_for(storage_owner: pgrx::pg_sys::Oid) -> Vec<DriftRow> {
-    // LOCK TABLE ... SHARE ROW EXCLUSIVE accepts MAINTAIN from PG 17 on;
-    // older servers do not know the privilege name.
-    let lock_privilege = if cfg!(any(feature = "pg17", feature = "pg18")) {
-        "pg_catalog.has_table_privilege(so.oid, c.oid, 'UPDATE') \
-         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'DELETE') \
-         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'TRUNCATE') \
-         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'MAINTAIN')"
-    } else {
-        "pg_catalog.has_table_privilege(so.oid, c.oid, 'UPDATE') \
-         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'DELETE') \
-         OR pg_catalog.has_table_privilege(so.oid, c.oid, 'TRUNCATE')"
-    };
-    let sql = format!(
-        "WITH so AS (SELECT $1::oid AS oid)
+    let sql = "WITH so AS (SELECT $1::oid AS oid)
          SELECT * FROM (
          SELECT c.relname::text,
                 CASE WHEN c.relkind = 'S' THEN 'sequence'
@@ -234,7 +246,7 @@ pub(crate) fn drift_rows_for(storage_owner: pgrx::pg_sys::Oid) -> Vec<DriftRow> 
                         WHEN c.relispartition THEN false
                         WHEN c.relname = '_pgrdf_graphs' THEN
                              pg_catalog.has_table_privilege(so.oid, c.oid, 'SELECT')
-                         AND ({lock_privilege})
+                         AND pg_catalog.has_table_privilege(so.oid, c.oid, 'UPDATE')
                         WHEN c.relname = '_pgrdf_graph_acts' THEN
                              pg_catalog.has_table_privilege(so.oid, c.oid, 'INSERT')
                         ELSE true
@@ -264,12 +276,11 @@ pub(crate) fn drift_rows_for(storage_owner: pgrx::pg_sys::Oid) -> Vec<DriftRow> 
          FROM pg_catalog.pg_namespace n, so
          WHERE n.nspname = 'pgrdf' AND n.nspowner <> so.oid
          ) d(relname, kind, owner, storage_owner, blocking, cure)
-         ORDER BY kind = 'schema', relname"
-    );
+         ORDER BY kind = 'schema', relname";
     let mut rows = Vec::new();
     Spi::connect(|client| {
         let tup = client
-            .select(&sql, None, &[storage_owner.into()])
+            .select(sql, None, &[storage_owner.into()])
             .unwrap_or_else(|e| panic!("ownership_drift: enumeration failed: {e}"));
         for row in tup {
             rows.push((

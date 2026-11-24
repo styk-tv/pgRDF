@@ -403,6 +403,7 @@ fn permutations(items: &[String]) -> Vec<Vec<String>> {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn graph_digest(graph_id: i64) -> String {
+    let _listed = crate::storage::acts::reading(graph_id, "digest");
     // T-NULL-1/2 (LIB v0.6.34, finding L9): an ABSENT graph REFUSES —
     // 42704 undefined_object — instead of silently hashing zero triples.
     // Measured 2026-08-25: a typo'd id and a legitimately EMPTY graph

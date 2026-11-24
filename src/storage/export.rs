@@ -115,6 +115,7 @@ fn export_lines(graph_id: i64) -> Vec<String> {
 #[pg_extern]
 fn export_graph(graph_id: i64) -> SetOfIterator<'static, String> {
     require_graph(graph_id, "export_graph");
+    let _listed = crate::storage::acts::reading(graph_id, "export");
     SetOfIterator::new(export_lines(graph_id).into_iter())
 }
 
@@ -127,6 +128,7 @@ fn export_graph(graph_id: i64) -> SetOfIterator<'static, String> {
 #[pg_extern]
 fn graph_manifest(graph_id: i64) -> pgrx::JsonB {
     require_graph(graph_id, "graph_manifest");
+    let _listed = crate::storage::acts::reading(graph_id, "manifest");
 
     let lines = export_lines(graph_id);
     // The bytes digest is over the export FILE form: every line

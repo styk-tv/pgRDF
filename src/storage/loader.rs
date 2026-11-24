@@ -1088,6 +1088,50 @@ fn maybe_prewarm_once() {
     PREWARM_DONE.with(|c| c.set(true));
 }
 
+/// What a `load` act records about itself: the entry point called, the
+/// route it took, and the loader's counts.
+fn load_detail(entry: &str, stats: &LoaderStats) -> serde_json::Value {
+    json!({
+        "entry": entry,
+        "route": stats.path,
+        "load": {
+            "triples_read": stats.triples,
+            "parse_skipped": stats.parse_skipped,
+        },
+    })
+}
+
+/// Run one loader call as a recorded `load` act on `graph_id`.
+fn recorded_load(
+    entry: &'static str,
+    graph_id: i64,
+    load: impl FnOnce() -> LoaderStats,
+) -> LoaderStats {
+    let act = crate::storage::acts::begin(graph_id, "load");
+    let stats = load();
+    act.finish(load_detail(entry, &stats));
+    stats
+}
+
+/// Record a quad load: one `load` act on every graph the payload wrote
+/// to. The counts are the call's totals; `graphs` lists where they went.
+fn record_quad_load(
+    act: crate::storage::acts::ActScope,
+    entry: &str,
+    default_graph_id: i64,
+    stats: &LoaderStats,
+    graphs: &[i64],
+) {
+    let mut detail = load_detail(entry, stats);
+    detail["graphs"] = json!(graphs);
+    for g in graphs.iter().filter(|g| **g != default_graph_id) {
+        act.also(*g, "load", detail.clone());
+    }
+    if graphs.contains(&default_graph_id) {
+        act.finish(detail);
+    }
+}
+
 fn stats_to_jsonb(stats: &LoaderStats) -> pgrx::JsonB {
     pgrx::JsonB(json!({
         "triples":          stats.triples,
@@ -2243,13 +2287,15 @@ fn load_turtle_streaming(
     require_server_file_read("load_turtle_streaming");
     let base = base_iri.filter(|s| !s.is_empty());
     crate::storage::lock::require_unlocked(graph_id, "load_turtle_streaming"); // #107
-    let stats = streaming_load_guarded(
-        path,
-        graph_id,
-        window_triples.max(1) as usize,
-        id_reserve_block.max(1) as usize,
-        base,
-    );
+    let stats = recorded_load("load_turtle_streaming", graph_id, || {
+        streaming_load_guarded(
+            path,
+            graph_id,
+            window_triples.max(1) as usize,
+            id_reserve_block.max(1) as usize,
+            base,
+        )
+    });
     stats_to_jsonb(&stats)
 }
 
@@ -2655,7 +2701,10 @@ fn load_turtle(
     // Explicit opt-in to the v0.6.2 in-backend parallel bulk path is honoured
     // verbatim — it predates the staged loader and stays the caller's choice.
     if bulk_load {
-        return bulk_load_guarded(path, graph_id, base).triples;
+        return recorded_load("load_turtle", graph_id, || {
+            bulk_load_guarded(path, graph_id, base)
+        })
+        .triples;
     }
     // v0.6.14 format-aware dispatch: prefer the native staged loader, but
     // ONLY when its worker pool is available (pgRDF preloaded), the file is
@@ -2675,7 +2724,14 @@ fn load_turtle(
             // The staged lane is owner-only (its workers run as the
             // caller); a non-owner takes the standard parser below.
             Some(true) if crate::storage::partition::caller_owns_storage() => {
-                return staged_load_default(path, graph_id);
+                let act = crate::storage::acts::begin(graph_id, "load");
+                let triples = staged_load_default(path, graph_id);
+                act.finish(json!({
+                    "entry": "load_turtle",
+                    "route": "staged",
+                    "load": { "triples_read": triples },
+                }));
+                return triples;
             }
             Some(true) => {}
             Some(false) => {
@@ -2694,7 +2750,10 @@ fn load_turtle(
     }
     let file =
         File::open(path).unwrap_or_else(|e| panic!("load_turtle: failed to open {path:?}: {e}"));
-    ingest_dispatch(BufReader::new(file), graph_id, base).triples
+    recorded_load("load_turtle", graph_id, || {
+        ingest_dispatch(BufReader::new(file), graph_id, base)
+    })
+    .triples
 }
 
 /// Same as `load_turtle` but returns JSONB stats: triples,
@@ -2715,13 +2774,15 @@ fn load_turtle_verbose(
 ) -> pgrx::JsonB {
     require_server_file_read("load_turtle_verbose");
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = if bulk_load {
-        bulk_load_guarded(path, graph_id, base)
-    } else {
-        let file = File::open(path)
-            .unwrap_or_else(|e| panic!("load_turtle_verbose: failed to open {path:?}: {e}"));
-        ingest_dispatch(BufReader::new(file), graph_id, base)
-    };
+    let stats = recorded_load("load_turtle_verbose", graph_id, || {
+        if bulk_load {
+            bulk_load_guarded(path, graph_id, base)
+        } else {
+            let file = File::open(path)
+                .unwrap_or_else(|e| panic!("load_turtle_verbose: failed to open {path:?}: {e}"));
+            ingest_dispatch(BufReader::new(file), graph_id, base)
+        }
+    });
     stats_to_jsonb(&stats)
 }
 
@@ -2733,7 +2794,10 @@ fn load_turtle_verbose(
 #[pg_extern]
 fn parse_turtle(content: &str, graph_id: i64, base_iri: default!(Option<&str>, "NULL")) -> i64 {
     let base = base_iri.filter(|s| !s.is_empty());
-    ingest_dispatch(content.as_bytes(), graph_id, base).triples
+    recorded_load("parse_turtle", graph_id, || {
+        ingest_dispatch(content.as_bytes(), graph_id, base)
+    })
+    .triples
 }
 
 /// Verbose variant of `parse_turtle` returning JSONB stats.
@@ -2745,7 +2809,9 @@ fn parse_turtle_verbose(
     base_iri: default!(Option<&str>, "NULL"),
 ) -> pgrx::JsonB {
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = ingest_dispatch(content.as_bytes(), graph_id, base);
+    let stats = recorded_load("parse_turtle_verbose", graph_id, || {
+        ingest_dispatch(content.as_bytes(), graph_id, base)
+    });
     stats_to_jsonb(&stats)
 }
 
@@ -2770,12 +2836,17 @@ fn parse_turtle_dict_batched(
     dict_batch_size: default!(i32, 500),
 ) -> pgrx::JsonB {
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = ingest_turtle_dict_batched(
-        content.as_bytes(),
-        graph_id,
-        base,
-        dict_batch_size.max(1) as usize,
-    );
+    // This entry point calls its ingest loop directly, so it takes the
+    // lock check the shared dispatch gives every other route.
+    crate::storage::lock::require_unlocked(graph_id, "parse_turtle_dict_batched");
+    let stats = recorded_load("parse_turtle_dict_batched", graph_id, || {
+        ingest_turtle_dict_batched(
+            content.as_bytes(),
+            graph_id,
+            base,
+            dict_batch_size.max(1) as usize,
+        )
+    });
     let mut j = stats_to_jsonb(&stats);
     if let serde_json::Value::Object(ref mut m) = j.0 {
         m.insert(
@@ -2808,12 +2879,15 @@ fn load_turtle_dict_batched(
     let file = File::open(path)
         .unwrap_or_else(|e| panic!("load_turtle_dict_batched: failed to open {path:?}: {e}"));
     let base = base_iri.filter(|s| !s.is_empty());
-    let stats = ingest_turtle_dict_batched(
-        BufReader::new(file),
-        graph_id,
-        base,
-        dict_batch_size.max(1) as usize,
-    );
+    crate::storage::lock::require_unlocked(graph_id, "load_turtle_dict_batched");
+    let stats = recorded_load("load_turtle_dict_batched", graph_id, || {
+        ingest_turtle_dict_batched(
+            BufReader::new(file),
+            graph_id,
+            base,
+            dict_batch_size.max(1) as usize,
+        )
+    });
     let mut j = stats_to_jsonb(&stats);
     if let serde_json::Value::Object(ref mut m) = j.0 {
         m.insert(
@@ -2860,6 +2934,7 @@ fn parse_trig(
     if record {
         crate::storage::source_digest::begin_source_record(default_graph_id);
     }
+    let act = crate::storage::acts::begin(default_graph_id, "load");
     let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_trig");
     if record {
         crate::storage::source_digest::finish_source_record_bytes(
@@ -2867,6 +2942,7 @@ fn parse_trig(
             content.as_bytes(),
         );
     }
+    record_quad_load(act, "parse_trig", default_graph_id, &stats, &graphs);
     quad_stats_to_jsonb(&stats, &graphs)
 }
 
@@ -2899,6 +2975,7 @@ fn parse_nquads(
     if record {
         crate::storage::source_digest::begin_source_record(default_graph_id);
     }
+    let act = crate::storage::acts::begin(default_graph_id, "load");
     let (stats, graphs) = ingest_quads_dispatch(parser, default_graph_id, strict, "parse_nquads");
     if record {
         crate::storage::source_digest::finish_source_record_bytes(
@@ -2906,6 +2983,7 @@ fn parse_nquads(
             content.as_bytes(),
         );
     }
+    record_quad_load(act, "parse_nquads", default_graph_id, &stats, &graphs);
     quad_stats_to_jsonb(&stats, &graphs)
 }
 

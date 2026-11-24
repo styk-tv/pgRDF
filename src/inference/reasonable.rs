@@ -129,6 +129,7 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
             ),
         ),
     }
+    let act = crate::storage::acts::begin(graph_id, "materialize");
 
     // 1. Idempotency: wipe prior inferred rows in this graph.
     let dropped: i64 = Spi::connect_mut(|client| {
@@ -336,6 +337,12 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     // asserted count it ran over — graph_inventory()'s `materialization`
     // column derives current/stale from these at read time.
     crate::storage::freshness::stamp_materialize(graph_id, base_count);
+    act.finish(json!({
+        "profile": profile,
+        "base_triples": base_count,
+        "inferred_written": written,
+        "previous_inferred_dropped": dropped,
+    }));
     pgrx::JsonB(json!({
         "base_triples":              base_count,
         "inferred_triples_written":  written,

@@ -5,9 +5,9 @@
 #
 # What must survive: the graph registry with every column (owner, lock
 # state, source digest), each graph's triples and digest, the default
-# partition's rows, the dictionary, and the allocators (graph ids and
-# dictionary ids continue past the dumped values, so nothing is handed out
-# twice). The restore itself must finish without a single error.
+# partition's rows, the dictionary, the act record, and the allocators
+# (graph ids, dictionary ids and act ids continue past the dumped values, so
+# nothing is handed out twice). The restore itself must finish without a single error.
 #
 # Usage: dump-roundtrip.sh
 #   PGRDF_UPGRADE_PSQL is the psql command for a superuser connection
@@ -75,6 +75,7 @@ state() {
 state $SRC > "$WORK/before.txt"
 max_graph=$(q $SRC -c "SELECT max(graph_id) FROM pgrdf._pgrdf_graphs")
 max_term=$(q $SRC -c "SELECT max(id) FROM pgrdf._pgrdf_dictionary")
+max_act=$(q $SRC -c "SELECT max(act_id) FROM pgrdf._pgrdf_graph_acts")
 ok "source database: $(q $SRC -c "SELECT count(*) FROM pgrdf._pgrdf_graphs") registry rows, $(q $SRC -c "SELECT count(*) FROM pgrdf._pgrdf_quads") triples, $max_term terms"
 
 # 2. Dump, then restore into an empty database. Any error stops the restore.
@@ -91,7 +92,7 @@ ok "pg_dump and pg_restore: no error except $(grep -c 'ERROR:' "$WORK/restore.er
 # 3. Everything that was there is there.
 state $DST > "$WORK/after.txt"
 diff "$WORK/before.txt" "$WORK/after.txt" || fail "the restored database differs from the source"
-ok "registry, rows, digests, dictionary and lock triggers are identical"
+ok "registry, rows, digests, dictionary, lock triggers and the act record are identical"
 
 # 4. The restored database works, and its allocators continue: a new graph
 #    and a new term get ids above everything dumped.
@@ -103,11 +104,13 @@ g=$(q $DST -c "SELECT pgrdf.add_graph('urn:rt:after')")
 q $DST -q -c "SELECT pgrdf.parse_turtle('<urn:rt:new-subject> <urn:rt:p> \"new\" .', $g)" >/dev/null
 t=$(q $DST -c "SELECT id FROM pgrdf._pgrdf_dictionary WHERE lexical_value = 'urn:rt:new-subject'")
 [ "$t" -gt "$max_term" ] || fail "dictionary id $t was handed out again (highest before the dump: $max_term)"
+a=$(q $DST -c "SELECT max(act_id) FROM pgrdf.graph_acts($g)")
+[ "$a" -gt "$max_act" ] || fail "act id $a was handed out again (highest before the dump: $max_act)"
 dangling=$(q $DST -c "SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE NOT EXISTS
   (SELECT 1 FROM pgrdf._pgrdf_dictionary d WHERE d.id = q.subject_id)")
 [ "$dangling" = "0" ] || fail "$dangling triples point at missing dictionary terms"
 q $DST -q -c "SELECT pgrdf.unlock_graph(pgrdf.graph_id('urn:rt:locked'), 'round trip done')" \
   -c "SELECT pgrdf.drop_graph(pgrdf.graph_id('urn:rt:locked'), true)" >/dev/null
-ok "after the restore: the lock refuses 55P03, new graph id $g > $max_graph, new term id $t > $max_term"
+ok "after the restore: the lock refuses 55P03, new graph id $g > $max_graph, new term id $t > $max_term, new act id $a > $max_act"
 
 echo "dump round trip: passed"

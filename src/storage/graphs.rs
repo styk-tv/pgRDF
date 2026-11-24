@@ -217,6 +217,7 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         );
     }
     crate::storage::lock::require_unlocked(id, "drop_graph"); // #107
+    crate::storage::acts::require_graph_owner(id, "drop_graph");
     if id == 0 {
         crate::refuse(
             pgrx::pg_sys::errcodes::PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
@@ -303,6 +304,10 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         "drop_graph",
     );
 
+    // Read who is acting, and the graph's IRI, before the row goes: the
+    // drop act keeps the IRI of a graph that no longer exists.
+    let act = crate::storage::acts::begin(id, "drop");
+
     // DETACH + DROP — partition-DDL metadata window under ACCESS
     // EXCLUSIVE on the parent, run as the storage owner. DETACH first
     // so DROP TABLE doesn't need partition-aware locking; the partition
@@ -325,6 +330,7 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         &[id.into()],
     )
     .unwrap_or_else(|e| panic!("drop_graph: _pgrdf_graphs row cleanup failed: {e}"));
+    act.finish(serde_json::json!({ "rows": total, "cascade": cascade }));
 
     total
 }
@@ -463,6 +469,10 @@ fn move_graph(src: i64, dst: i64) -> i64 {
         }
     }
 
+    // One act, recorded on both graphs; the copy and the drop it is made
+    // of record nothing of their own.
+    let act = crate::storage::acts::begin(dst, "move");
+
     // Compose step 1: copy src → dst. Slice 97's `copy_graph`
     // returns the row count copied — that's our return value.
     // Runtime dependency: this SELECT errors until slice 97 lands.
@@ -478,8 +488,15 @@ fn move_graph(src: i64, dst: i64) -> i64 {
     // with the partition. The drop's return value is discarded —
     // we report `copied` as the move count, which is the row count
     // at copy time.
+    // The source's row is written while its registry row still names it.
+    act.also(
+        src,
+        "move",
+        serde_json::json!({ "to": dst, "rows": copied }),
+    );
     Spi::run_with_args("SELECT pgrdf.drop_graph($1::bigint, true)", &[src.into()])
         .unwrap_or_else(|e| panic!("move_graph: drop_graph step failed: {e}"));
+    act.finish(serde_json::json!({ "from": src, "rows": copied }));
 
     copied
 }
@@ -532,6 +549,7 @@ fn clear_graph(id: i64) -> i64 {
         );
     }
     crate::storage::lock::require_unlocked(id, "clear_graph"); // #107
+    crate::storage::acts::require_graph_owner(id, "clear_graph");
     // #145: TRUNCATE is its own privilege, outside the documented grant
     // set. A caller holding SELECT + DELETE on the quad table may already
     // delete every row of the graph; only the TRUNCATE itself runs as the
@@ -581,10 +599,29 @@ fn clear_graph(id: i64) -> i64 {
     // shell stays attached to `_pgrdf_quads`, so the next
     // `INSERT … VALUES (..., $1 = id, ...)` routes here without
     // touching the default partition.
+    let act = crate::storage::acts::begin(id, "clear");
     crate::storage::partition::as_storage_owner(|| {
         Spi::run(&format!("TRUNCATE ONLY pgrdf.{partition_name}"))
             .unwrap_or_else(|e| panic!("clear_graph: TRUNCATE failed: {e}"));
     });
+    // The registry describes the graph as it is now: an empty graph has no
+    // source and no materialization. What it was loaded from stays in the
+    // act record.
+    // As the storage owner: clearing is authorised by DELETE on the quad
+    // table alone (#145), and this is the engine's own bookkeeping.
+    crate::storage::partition::as_storage_owner(|| {
+        Spi::run_with_args(
+            "UPDATE pgrdf._pgrdf_graphs \
+                SET source_sha256 = NULL, source_loads = NULL, \
+                    last_materialize_at = NULL, materialized_base_count = NULL \
+              WHERE graph_id = $1 \
+                AND (source_sha256, source_loads, last_materialize_at, materialized_base_count) \
+                    IS DISTINCT FROM (NULL, NULL, NULL, NULL)",
+            &[id.into()],
+        )
+        .unwrap_or_else(|e| panic!("clear_graph: registry reset failed: {e}"));
+    });
+    act.finish(serde_json::json!({ "rows": total }));
 
     total
 }
@@ -701,6 +738,7 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
     .unwrap_or_else(|e| panic!("copy_graph: dst existence check failed: {e}"))
     .unwrap_or(false);
 
+    let act = crate::storage::acts::begin(dst, "copy");
     if !dst_exists {
         Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[dst.into()])
             .unwrap_or_else(|e| panic!("copy_graph: dst partition creation failed: {e}"));
@@ -716,6 +754,7 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
         .unwrap_or(0);
 
     if count == 0 {
+        act.finish(serde_json::json!({ "from": src, "rows": 0 }));
         return 0;
     }
 
@@ -733,6 +772,7 @@ fn copy_graph(src: i64, dst: i64) -> i64 {
            FROM pgrdf.{src_name}"
     ))
     .unwrap_or_else(|e| panic!("copy_graph: INSERT INTO ... SELECT failed: {e}"));
+    act.finish(serde_json::json!({ "from": src, "rows": count }));
 
     count
 }
@@ -825,6 +865,7 @@ fn carve_graph(src: i64, predicate: &str, dst: i64) -> i64 {
     )
     .unwrap_or_else(|e| panic!("carve_graph: dst existence check failed: {e}"))
     .unwrap_or(false);
+    let act = crate::storage::acts::begin(dst, "carve");
     if !dst_exists {
         Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[dst.into()])
             .unwrap_or_else(|e| panic!("carve_graph: dst partition creation failed: {e}"));
@@ -844,6 +885,9 @@ fn carve_graph(src: i64, predicate: &str, dst: i64) -> i64 {
         &[pred_id.into()],
     )
     .unwrap_or_else(|e| panic!("carve_graph: INSERT INTO ... SELECT failed: {e}"));
+    act.finish(serde_json::json!({
+        "from": src, "by": "predicate", "predicate": predicate, "rows": count
+    }));
 
     count
 }
@@ -931,6 +975,7 @@ fn carve_graph_neighbourhood(
     )
     .unwrap_or_else(|e| panic!("carve_graph: dst existence check failed: {e}"))
     .unwrap_or(false);
+    let act = crate::storage::acts::begin(dst, "carve");
     if !dst_exists {
         Spi::run_with_args("SELECT pgrdf.add_graph($1::bigint)", &[dst.into()])
             .unwrap_or_else(|e| panic!("carve_graph: dst partition creation failed: {e}"));
@@ -1009,6 +1054,9 @@ fn carve_graph_neighbourhood(
              component (raise max_hops to widen)"
         );
     }
+    act.finish(serde_json::json!({
+        "from": src, "by": "neighbourhood", "hops": hops, "rows": count, "boundary": boundary
+    }));
 
     count
 }

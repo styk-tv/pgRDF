@@ -937,6 +937,7 @@ mod tests {
             "lock_graph",
             "unlock_graph",
             "sparql",
+            "set_graph_owner",
             "clear_graph",
             "move_graph",
             "drop_graph",
@@ -952,6 +953,8 @@ mod tests {
             "export_graph",
             "get_term",
             "graph_diff",
+            "graph_activity",
+            "graph_acts",
             "graph_diff_summary",
             "graph_digest",
             "graph_id",
@@ -1022,6 +1025,7 @@ mod tests {
             ("sparql", "SELECT * FROM pgrdf.sparql('INSERT DATA { GRAPH <urn:m:sp> { <urn:m:x> <urn:m:p> <urn:m:y> } }')".into()),
             ("sparql", "SELECT * FROM pgrdf.sparql('CLEAR GRAPH <urn:m:sp>')".into()),
             ("sparql", "SELECT * FROM pgrdf.sparql('DROP GRAPH <urn:m:sp>')".into()),
+            ("set_graph_owner", "SELECT pgrdf.set_graph_owner(pgrdf.graph_id('urn:m:c1'), 'pgrdf_145_app')".into()),
             ("clear_graph", "SELECT pgrdf.clear_graph(pgrdf.graph_id('urn:m:c1'))".into()),
             ("clear_graph", "SELECT pgrdf.clear_graph('urn:m:b')".into()),
             ("move_graph", "SELECT pgrdf.move_graph(pgrdf.graph_id('urn:m:c2'), pgrdf.add_graph('urn:m:mv1'))".into()),
@@ -1307,8 +1311,8 @@ mod tests {
             "the engine never touches the dictionary as the storage owner"
         );
 
-        // _pgrdf_graphs: SELECT, plus a privilege LOCK TABLE ... SHARE ROW
-        // EXCLUSIVE accepts. The rule is compared with the real command.
+        // _pgrdf_graphs: SELECT and UPDATE. UPDATE is also what LOCK TABLE
+        // ... SHARE ROW EXCLUSIVE asks for; compared with the real command.
         // Tried in a subtransaction, so a refusal leaves this one usable.
         Spi::run(
             "CREATE FUNCTION pg_temp.o1_can_lock() RETURNS boolean LANGUAGE plpgsql AS $$ \
