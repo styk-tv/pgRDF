@@ -16,3 +16,6 @@ ex:TestShape
   sh:targetNode 42 ;
   sh:targetNode "aldi"^^xsd:integer ;
 .
+_:b30507
+  rdf:type ex:TestClass ;
+.

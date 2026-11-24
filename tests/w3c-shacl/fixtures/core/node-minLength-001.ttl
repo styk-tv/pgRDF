@@ -23,3 +23,6 @@ ex:TestShape
   sh:targetNode "Hell"@en ;
   sh:targetNode "Hello" ;
 .
+_:b19019
+  rdf:type ex:TestClass ;
+.
