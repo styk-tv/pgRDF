@@ -21,6 +21,7 @@
 //!   - W3C rdf-canon conformance subset passes as regression fixtures.
 
 use crate::storage::dict::term_type;
+use crate::storage::lines::{Refusal, Split, style};
 use pgrx::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -69,18 +70,50 @@ fn nt_escape(s: &str) -> String {
     out
 }
 
+/// A term borrowed from wherever it is held: a [`CTerm`], or the columns
+/// of a row being formatted. One serialiser serves both, so a line made
+/// row by row in SQL and a line made from held triples are the same bytes.
+pub(crate) enum TermRef<'a> {
+    Iri(&'a str),
+    BNode(&'a str),
+    Lit {
+        val: &'a str,
+        dt: Option<&'a str>,
+        lang: Option<&'a str>,
+    },
+}
+
+impl CTerm {
+    pub(crate) fn as_term_ref(&self) -> TermRef<'_> {
+        match self {
+            CTerm::Iri(i) => TermRef::Iri(i),
+            CTerm::BNode(b) => TermRef::BNode(b),
+            CTerm::Lit { val, dt, lang } => TermRef::Lit {
+                val,
+                dt: dt.as_deref(),
+                lang: lang.as_deref(),
+            },
+        }
+    }
+}
+
 /// Serialize one term; blank nodes go through `label` so callers control
 /// the substitution (`_:a`/`_:z` during first-degree hashing, issued
 /// canonical ids at the end).
 pub(crate) fn nt_term(t: &CTerm, label: &dyn Fn(&str) -> String) -> String {
+    nt_term_ref(&t.as_term_ref(), label)
+}
+
+/// [`nt_term`] over a borrowed term.
+pub(crate) fn nt_term_ref(t: &TermRef<'_>, label: &dyn Fn(&str) -> String) -> String {
     match t {
-        CTerm::Iri(i) => format!("<{i}>"),
-        CTerm::BNode(b) => format!("_:{}", label(b)),
-        CTerm::Lit { val, dt, lang } => {
+        TermRef::Iri(i) => format!("<{i}>"),
+        TermRef::BNode(b) => format!("_:{}", label(b)),
+        TermRef::Lit { val, dt, lang } => {
             let esc = nt_escape(val);
             match (lang, dt) {
                 (Some(l), _) => format!("\"{esc}\"@{l}"),
-                (None, Some(d)) if d != "http://www.w3.org/2001/XMLSchema#string" => {
+                (None, Some(d)) if *d != "http://www.w3.org/2001/XMLSchema#string" => {
                     format!("\"{esc}\"^^<{d}>")
                 }
                 _ => format!("\"{esc}\""),
@@ -104,9 +137,11 @@ fn sha256_hex(data: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Read a graph's ASSERTED triples with full term structure — the same
-/// join shape `serialise_graph_to_ntriples` uses (shacl.rs), minus the
-/// inferred rows.
+/// Read a graph's ASSERTED triples with full term structure, every stored
+/// row, into memory. The whole-graph functions no longer read this way
+/// (see `storage::lines`); the tests keep it as the in-memory reference
+/// the streamed digests are compared against.
+#[cfg(any(test, feature = "pg_test"))]
 pub(crate) fn read_asserted_triples(graph_id: i64) -> Vec<Triple> {
     read_asserted_triples_where(graph_id, "")
 }
@@ -170,11 +205,7 @@ pub(crate) fn read_asserted_triples_where(graph_id: i64, extra: &str) -> Vec<Tri
             let o = match o_type {
                 term_type::URI => CTerm::Iri(o_val),
                 term_type::BLANK_NODE => CTerm::BNode(o_val),
-                term_type::LITERAL => CTerm::Lit {
-                    val: o_val,
-                    dt: o_dt,
-                    lang: o_lang,
-                },
+                term_type::LITERAL => crate::storage::lines::literal(o_val, o_dt, o_lang),
                 _ => continue,
             };
             triples.push((s, p, o));
@@ -429,6 +460,16 @@ fn graph_digest(graph_id: i64) -> String {
             );
         }
     }
+    match digest_or_refusal(graph_id) {
+        Ok(digest) => digest,
+        Err(refusal) => refusal.raise("graph_digest", graph_id),
+    }
+}
+
+/// What `graph_digest` answers for a registered graph, or why it cannot
+/// be computed. `graph_digest` raises the refusal; `validate` records it
+/// in its act instead of failing.
+pub(crate) fn digest_or_refusal(graph_id: i64) -> Result<String, Refusal> {
     // 0.6.37 (#142/#143): a locked graph whose lock custody holds — the
     // engine fence plus both partition triggers — cannot change, so its
     // digest is cached on first computation (lazily: locking stays cheap)
@@ -436,6 +477,11 @@ fn graph_digest(graph_id: i64) -> String {
     // hand) means "do not trust the cache": recompute. Open graphs are
     // never cached. A caller who cannot write the cache — read-only
     // transaction, no UPDATE on _pgrdf_graphs — still gets the digest.
+    //
+    // 0.6.41 (#158): the digest is over the SET of triples. A digest cached
+    // by an earlier version over a graph holding repeats is a recorded
+    // fact and keeps being served; `locked_digest_engine` (NULL on such a
+    // cache) says which version computed the value.
     let (locked, cached): (Option<bool>, Option<String>) = Spi::get_two_with_args(
         "SELECT locked, locked_digest FROM pgrdf._pgrdf_graphs WHERE graph_id = $1",
         &[graph_id.into()],
@@ -444,9 +490,9 @@ fn graph_digest(graph_id: i64) -> String {
     let custody_holds =
         locked == Some(true) && crate::storage::lock::lock_trigger_count(graph_id) == Some(2);
     if custody_holds && let Some(d) = cached {
-        return d;
+        return Ok(d);
     }
-    let digest = canonicalize(read_asserted_triples(graph_id)).1;
+    let digest = rdfc_digest(graph_id)?;
     if custody_holds {
         let can_cache = Spi::get_one::<bool>(
             "SELECT current_setting('transaction_read_only') = 'off' \
@@ -455,24 +501,65 @@ fn graph_digest(graph_id: i64) -> String {
         .expect("graph_digest: cache-write check failed")
         .unwrap_or(false);
         if can_cache {
+            // The engine column arrives with the 0.6.41 SQL; a library
+            // swapped in ahead of ALTER EXTENSION UPDATE caches without it.
+            let engine = if crate::storage::lock::digest_engine_column() {
+                ", locked_digest_engine = pgrdf.version()"
+            } else {
+                ""
+            };
             Spi::run_with_args(
-                "UPDATE pgrdf._pgrdf_graphs SET locked_digest = $2 \
-                 WHERE graph_id = $1 AND locked",
+                &format!(
+                    "UPDATE pgrdf._pgrdf_graphs SET locked_digest = $2{engine} \
+                     WHERE graph_id = $1 AND locked"
+                ),
                 &[graph_id.into(), digest.as_str().into()],
             )
             .expect("graph_digest: cache write failed");
         }
     }
-    digest
+    Ok(digest)
+}
+
+/// The `rdfc-1.0-sha256` digest of a graph's asserted triples, computed
+/// in bounded memory.
+///
+/// Canonical labels depend only on the triples that involve a blank node,
+/// so those are the only ones held: de-duplicated, labelled on their own,
+/// and their canonical lines sorted. The ground triples arrive from
+/// PostgreSQL as sorted lines and are merged with them straight into the
+/// hasher, repeats skipped. The result is the hash of the same document
+/// [`canonicalize`] would build from the whole set in memory.
+pub(crate) fn rdfc_digest(graph_id: i64) -> Result<String, Refusal> {
+    let Split { blank, ground } = Split::open(graph_id, style::RDFC)?;
+    let (blank_lines, _digest, _labels) = canonicalize_labeled(blank);
+    let mut blank_lines = blank_lines.into_iter().peekable();
+    let mut hasher = Sha256::new();
+    for line in ground {
+        pgrx::check_for_interrupts!();
+        while let Some(b) = blank_lines.next_if(|b| *b <= line) {
+            hasher.update(b.as_bytes());
+        }
+        hasher.update(line.as_bytes());
+    }
+    for b in blank_lines {
+        hasher.update(b.as_bytes());
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// RDFC-1.0 over an arbitrary triple set: returns the sorted canonical
 /// N-Triples lines (each `\n`-terminated, blank nodes labelled `_:c14nN`)
-/// and the `rdfc-1.0-sha256` digest of their concatenation. This is the
-/// algorithm `graph_digest` runs over a whole graph, factored out so a
-/// caller can canonicalize a SUBSET — `graph_diff` canonicalizes each
-/// blank-node component on its own (SPEC 0.6.37 §3.5). The complexity
+/// and the `rdfc-1.0-sha256` digest of their concatenation: the whole
+/// algorithm over a set held in memory. `graph_digest` computes the same
+/// digest without holding the ground triples ([`rdfc_digest`]); the tests
+/// keep this form as the reference it is compared against. The complexity
 /// budget is per call: an adversarial input raises `pgRDF#117`.
+#[cfg(any(test, feature = "pg_test"))]
 pub(crate) fn canonicalize(triples: Vec<Triple>) -> (Vec<String>, String) {
     let (lines, digest, _labels) = canonicalize_labeled(triples);
     (lines, digest)

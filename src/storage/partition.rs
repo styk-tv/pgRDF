@@ -963,6 +963,7 @@ mod tests {
             "graph_iri",
             "graph_manifest",
             "last_call_stats",
+            "nul_term_report",
             "orphan_partitions",
             "ownership_drift",
             "shacl_capability",

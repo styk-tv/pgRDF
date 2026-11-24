@@ -51,6 +51,13 @@ pub(crate) static PATH_MAX_PAIRS: GucSetting<i32> = GucSetting::<i32>::new(1_000
 /// Past it the call refuses 54000 instead of exhausting the backend.
 pub(crate) static DIFF_MAX_ROWS: GucSetting<i32> = GucSetting::<i32>::new(5_000_000);
 
+/// `pgrdf.digest_max_bnode_quads`: the memory budget of the whole-graph
+/// digests (`graph_digest`, `structural_digest`, and so `graph_manifest`).
+/// They stream a graph's ground triples and hold only its distinct
+/// blank-node-bearing triples, which blank-node labelling needs together.
+/// Past this many the call refuses 54000 instead of exhausting the backend.
+pub(crate) static DIGEST_MAX_BNODE_QUADS: GucSetting<i32> = GucSetting::<i32>::new(5_000_000);
+
 /// `pgrdf.on_path_truncation` — what a query does when a recursive
 /// property-path walk (`+` / `*`) actually hits `pgrdf.path_max_depth`
 /// (issue #14, fail-closed truncation; detected by the per-`+`
@@ -355,6 +362,19 @@ pub fn register() {
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
+        c"pgrdf.digest_max_bnode_quads",
+        c"Memory budget of graph_digest / structural_digest / graph_manifest, in \
+          blank-node-bearing triples.",
+        c"The whole-graph digests stream ground triples and hold only the distinct \
+          triples that involve a blank node. Past this many the call refuses with \
+          SQLSTATE 54000 instead of exhausting the backend; raise it deliberately.",
+        &DIGEST_MAX_BNODE_QUADS,
+        1,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
         c"pgrdf.path_max_pairs",
         c"Memory budget of one SPARQL property-path walk, in (start, reached) pairs.",
         c"A recursive property path (+, *) is walked breadth-first in backend \
@@ -597,6 +617,11 @@ pub(crate) fn path_max_pairs() -> i32 {
 /// Resolved `pgrdf.diff_max_rows` for this call.
 pub(crate) fn diff_max_rows() -> i32 {
     DIFF_MAX_ROWS.get()
+}
+
+/// Resolved `pgrdf.digest_max_bnode_quads` for this call.
+pub(crate) fn digest_max_bnode_quads() -> usize {
+    DIGEST_MAX_BNODE_QUADS.get().max(1) as usize
 }
 
 /// Resolved `pgrdf.ingest_dict_path` for this call, applying the

@@ -177,3 +177,45 @@ CREATE  FUNCTION "graph_inventory"() RETURNS TABLE (
 STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'graph_inventory_wrapper';
+
+-- Whole-graph reads in bounded memory: export_graph, graph_manifest,
+-- graph_digest and structural_digest no longer hold the graph in backend
+-- memory. _nt_line formats one stored triple as one line; PostgreSQL sorts
+-- the lines (on disk past work_mem) and the functions read them through a
+-- cursor. It refuses a term containing U+0000 with XX001, so no such term
+-- is exported or digested; nul_term_report() lists the stored terms that
+-- contain one and the graphs using them.
+CREATE  FUNCTION "_nt_line"(
+	"style" INT, /* i32 */
+	"graph_id" bigint, /* i64 */
+	"s_id" bigint, /* i64 */
+	"s_type" smallint, /* i16 */
+	"s_value" TEXT, /* & str */
+	"p_id" bigint, /* i64 */
+	"p_value" TEXT, /* & str */
+	"o_id" bigint, /* i64 */
+	"o_type" smallint, /* i16 */
+	"o_value" TEXT, /* & str */
+	"o_datatype" TEXT, /* Option < & str > */
+	"o_language" TEXT /* Option < & str > */
+) RETURNS TEXT /* Option < String > */
+IMMUTABLE PARALLEL SAFE 
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'nt_line_wrapper';
+
+CREATE  FUNCTION "nul_term_report"() RETURNS TABLE (
+	"term_id" bigint,  /* i64 */
+	"term_type" smallint,  /* i16 */
+	"preview" TEXT,  /* String */
+	"graph_ids" bigint[]  /* Vec < i64 > */
+)
+STRICT STABLE
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'nul_term_report_wrapper';
+
+-- #158: graph_digest is a function of the SET of triples. A locked graph's
+-- digest is cached in locked_digest; locked_digest_engine records the
+-- engine version that computed it, NULL for a cache written before 0.6.41.
+-- Existing caches are left untouched: a locked graph keeps answering the
+-- digest recorded for it until it is unlocked.
+ALTER TABLE _pgrdf_graphs ADD COLUMN IF NOT EXISTS locked_digest_engine TEXT;
