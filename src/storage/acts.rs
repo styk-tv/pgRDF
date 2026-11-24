@@ -820,14 +820,14 @@ mod tests {
     #[pg_test]
     fn declared_identity_is_copied_per_act() {
         crate::storage::partition::acquire_partition_ddl_gate();
-        Spi::run("SET LOCAL pgrdf.workspace = 'atlas'").unwrap();
+        Spi::run("SET LOCAL pgrdf.workspace = 'alpha'").unwrap();
         Spi::run("SET LOCAL pgrdf.agent = 'loader-1'").unwrap();
-        Spi::run("SET LOCAL pgrdf.thread = '65d9f3b9'").unwrap();
+        Spi::run("SET LOCAL pgrdf.thread = 't-7f3a'").unwrap();
         Spi::run("SET LOCAL pgrdf.on_behalf_of = 'ada'").unwrap();
-        Spi::run("SET LOCAL pgrdf.harness = 'claude-code/2.1.330'").unwrap();
-        Spi::run("SET LOCAL application_name = 'pgrdf-mcp:h1'").unwrap();
+        Spi::run("SET LOCAL pgrdf.harness = 'example-client/1.2.0'").unwrap();
+        Spi::run("SET LOCAL application_name = 'my-client:h1'").unwrap();
         let a: i64 = one("SELECT pgrdf.add_graph('urn:tdd:a3:first')").unwrap();
-        Spi::run("SET LOCAL pgrdf.workspace = 'routes'").unwrap();
+        Spi::run("SET LOCAL pgrdf.workspace = 'beta'").unwrap();
         Spi::run("SET LOCAL pgrdf.agent = ''").unwrap();
         let b: i64 = one("SELECT pgrdf.add_graph('urn:tdd:a3:second')").unwrap();
         let row = |g: i64| -> String {
@@ -841,11 +841,11 @@ mod tests {
         };
         assert_eq!(
             row(a),
-            "atlas|loader-1|65d9f3b9|ada|claude-code/2.1.330|pgrdf-mcp:h1"
+            "alpha|loader-1|t-7f3a|ada|example-client/1.2.0|my-client:h1"
         );
         assert_eq!(
             row(b),
-            "routes|-|65d9f3b9|ada|claude-code/2.1.330|pgrdf-mcp:h1",
+            "beta|-|t-7f3a|ada|example-client/1.2.0|my-client:h1",
             "an empty setting is recorded as not stated"
         );
         // The inventory shows who created each graph.
@@ -855,7 +855,7 @@ mod tests {
         ))
         .unwrap();
         let me: String = one("SELECT current_user::text").unwrap();
-        assert_eq!(inv, format!("{me}|routes|-|65d9f3b9"));
+        assert_eq!(inv, format!("{me}|beta|-|t-7f3a"));
     }
 
     /// The declared settings refuse what a reader could not trust on
