@@ -147,6 +147,14 @@ SELECT g.graph_id, coalesce(q.a, 0), coalesce(q.i, 0), pg_catalog.clock_timestam
                     count(*) FILTER (WHERE is_inferred) AS i
                FROM _pgrdf_quads GROUP BY graph_id) q USING (graph_id);
 
+-- Folding on request: what the engine does by itself after writes.
+CREATE  FUNCTION "_fold_counts"(
+	"graph_id" bigint /* i64 */
+) RETURNS bigint /* i64 */
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', '_fold_counts_wrapper';
+
 -- #176: an act feed a poller can trust.
 CREATE INDEX _pgrdf_graph_acts_xact_idx ON _pgrdf_graph_acts (xact, act_id);
 CREATE INDEX _pgrdf_graph_acts_at_idx ON _pgrdf_graph_acts (at);

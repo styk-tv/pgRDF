@@ -353,6 +353,18 @@ pub(crate) fn fold(graph_id: i64) -> i64 {
     })
 }
 
+/// Fold the finished deltas of one graph into its base row now, and say
+/// how many were folded. The engine does this by itself now and then
+/// after a write; this is the same act on request, for maintenance and
+/// for the gates.
+#[pg_extern]
+fn _fold_counts(graph_id: i64) -> i64 {
+    if !present() {
+        return 0;
+    }
+    fold(graph_id)
+}
+
 /// What the engine holds for one graph.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Stored {

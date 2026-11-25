@@ -159,4 +159,16 @@ pool=$(q $A -c "SELECT string_agg(concat_ws('/', coalesce(a.workspace, '-'), coa
 [ "$pool" = "first/a1 second/- -/-" ] || fail "declared values leaked between transactions: '$pool'"
 ok "each transaction's act carries its own declared values, never the previous one's"
 
+# F. After every route above (staged with a dedup, a declined staged load,
+#    refused loads, loads from two sessions), every graph's stored count is
+#    verified and equal to a scan.
+for db in $A $B; do
+  wrong=$(q $db -c "SELECT count(*) FROM pgrdf.graph_inventory() i
+                     WHERE NOT i.counts_verified
+                        OR i.asserted <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND NOT q.is_inferred)
+                        OR i.inferred <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND q.is_inferred)")
+  [ "$wrong" = "0" ] || fail "$db: $wrong graph(s) unverified or miscounted: $(q $db -c "SELECT string_agg(graph_id || ':' || asserted || '+' || inferred || ':' || counts_verified, ' ') FROM pgrdf.graph_inventory()")"
+done
+ok "every graph's stored count is verified and equal to a scan after the staged, declined, refused and two-session loads"
+
 echo "loader gate: passed"

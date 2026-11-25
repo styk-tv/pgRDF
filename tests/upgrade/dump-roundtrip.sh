@@ -127,4 +127,20 @@ q $DST -q -c "SELECT pgrdf.unlock_graph(pgrdf.graph_id('urn:rt:locked'), 'round 
   -c "SELECT pgrdf.drop_graph(pgrdf.graph_id('urn:rt:locked'), true)" >/dev/null
 ok "after the restore: the lock refuses 55P03, new graph id $g > $max_graph, new term id $t > $max_term, new act id $a > $max_act"
 
+# 5. The stored counts are not dumped: their snapshots and transaction ids
+#    mean nothing in another cluster. So a restored graph is unverified, its
+#    count is still exact (the inventory scans it), and one call cures all.
+unverified=$(q $DST -c "SELECT count(*) FILTER (WHERE NOT counts_verified) || ' of ' || count(*) FROM pgrdf.graph_inventory() WHERE graph_id <> $g")
+restored=${unverified##* }
+[ "$unverified" = "$restored of $restored" ] || fail "restored graphs unverified: $unverified, expected all of them"
+exact="SELECT count(*) FROM pgrdf.graph_inventory() i
+        WHERE i.asserted <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND NOT q.is_inferred)
+           OR i.inferred <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND q.is_inferred)"
+[ "$(q $DST -c "$exact")" = "0" ] || fail "a restored graph's count differs from a scan"
+recounted=$(q $DST -c "SELECT count(*) FROM pgrdf.recount_graph()")
+left=$(q $DST -c "SELECT unverified_graphs FROM pgrdf.graph_totals()")
+[ "$left" = "0" ] || fail "$left graph(s) still unverified after recount_graph()"
+[ "$(q $DST -c "$exact")" = "0" ] || fail "a count differs from a scan after recount_graph()"
+ok "after the restore $unverified graphs are unverified and exact; recount_graph() verified $recounted"
+
 echo "dump round trip: passed"

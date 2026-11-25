@@ -166,6 +166,13 @@ jobs:
           "$bindir/pg_ctl" -D "$work/data" -o "-p 55440 -k $work -c shared_preload_libraries=pgrdf" -w start >/dev/null
           PGRDF_UPGRADE_PSQL="$bindir/psql -X -h $work -p 55440 -U postgres" \
             bash tests/upgrade/loader-gate.sh
+          # 0.6.42: the stored graph counts and the act feed across committed
+          # transactions and several sessions: folding, concurrent writers, a
+          # recount beside an open direct write, an act that commits late, and
+          # the speed of the inventory at 50 graphs and 10M triples, also
+          # under churn.
+          PGRDF_UPGRADE_PSQL="$bindir/psql -X -h $work -p 55440 -U postgres" \
+            bash tests/upgrade/counts-gate.sh
 
   # Compose-based regression suite. Mirrors the local dev loop
   # (`just build-ext && just test-regression`) byte-for-byte: builds the
