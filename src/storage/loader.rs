@@ -2710,7 +2710,7 @@ fn insert_reserved_terms(
                 .len()
         })
     });
-    crate::storage::counts::gained(crate::storage::counts::DICTIONARY, added as i64, 0);
+    crate::storage::counts::terms_gained(added as i64);
 }
 
 /// Guard for `load_turtle(..., bulk_load => TRUE)`. The self-assigned-id

@@ -950,7 +950,7 @@ pub fn dict(job: &JobSlot, _w: &WorkerSlot) -> i64 {
                 .len()
         })
     });
-    crate::storage::counts::gained(crate::storage::counts::DICTIONARY, added as i64, 0);
+    crate::storage::counts::terms_gained(added as i64);
 
     // ── (6) re-sync IDENTITY past the supplied ids; build the RESOLVE join index; widen the dict ──
     // We supplied ids explicitly, so the IDENTITY sequence never advanced — fast-forward it to MAX(id)

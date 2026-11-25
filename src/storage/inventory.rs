@@ -536,7 +536,7 @@ fn graph_totals() -> TableIterator<
     let (terms, terms_verified) = if !sees_all {
         (None, None)
     } else {
-        match crate::storage::counts::stored(crate::storage::counts::DICTIONARY) {
+        match crate::storage::counts::stored_terms() {
             Some(stored) if stored.verified => (Some(stored.asserted), Some(true)),
             _ => (None, Some(false)),
         }
@@ -568,7 +568,7 @@ fn count_terms() -> i64 {
     )
     .unwrap_or(false);
     if may_read
-        && let Some(stored) = crate::storage::counts::stored(crate::storage::counts::DICTIONARY)
+        && let Some(stored) = crate::storage::counts::stored_terms()
         && stored.verified
     {
         return stored.asserted;
@@ -609,7 +609,7 @@ fn recount_terms() -> TableIterator<
                 .to_string(),
         );
     }
-    let was = crate::storage::counts::stored(crate::storage::counts::DICTIONARY);
+    let was = crate::storage::counts::stored_terms();
     let (terms, _) = crate::storage::counts::set_by_scan(crate::storage::counts::DICTIONARY);
     TableIterator::once((
         terms,

@@ -23,12 +23,28 @@ $pgrdf_153$;
 -- dictionary. The counts are seeded below from one pass over the quad
 -- table and one over the dictionary. A write that committed after a pass
 -- read its table and before this script commits would be in no count, so
--- writers wait from here to the end of the upgrade. Readers do not. The
--- dictionary is locked first: that is the order the engine's writers take
--- the two tables in.
+-- writers wait from here to the end of the upgrade. Readers do not.
+--
+-- Run the upgrade with writers quiet. The two locks are taken one after
+-- the other, and no order suits every writer: a load takes the dictionary
+-- before the quad table, materialize and a SPARQL DELETE ... INSERT take
+-- them the other way round. A writer caught between the two can make the
+-- upgrade fail with a deadlock (40P01). The upgrade is one transaction, so
+-- nothing is left half-done: run it again.
 LOCK TABLE _pgrdf_dictionary, _pgrdf_quads IN SHARE MODE;
 
--- The two trigger functions the count tables stand on.
+-- The trigger functions the count tables stand on, and the one rule that
+-- says which keys a count is kept for.
+CREATE FUNCTION "_count_open"()
+	RETURNS trigger
+	LANGUAGE c
+	AS 'MODULE_PATHNAME', '_count_open_wrapper';
+CREATE  FUNCTION "_count_kept"(
+	"key" bigint /* i64 */
+) RETURNS bool /* bool */
+STABLE STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', '_count_kept_wrapper';
 CREATE FUNCTION "_count_bypass"()
 	RETURNS TRIGGER
 	LANGUAGE c
@@ -128,9 +144,16 @@ CREATE TRIGGER pgrdf_count_bypass
 CREATE TRIGGER pgrdf_count_bypass_truncate
     BEFORE TRUNCATE ON _pgrdf_quads_default
     FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('0');
--- #178: the dictionary's count is kept under the id -1 (no graph has a
--- negative id). A term added or removed in plain SQL marks it unverified;
--- an UPDATE cannot change how many terms there are.
+-- Every registered graph has a count row. The engine sets it when it
+-- creates a graph; a registry row that arrives any other way, as all of
+-- them do when a restore fills the registry, opens it here, not set by any
+-- scan.
+CREATE TRIGGER pgrdf_count_open
+    AFTER INSERT ON _pgrdf_graphs
+    FOR EACH ROW EXECUTE FUNCTION _count_open();
+-- #178: the dictionary's count is kept under the key -1. A term added or
+-- removed in plain SQL marks it unverified; an UPDATE cannot change how
+-- many terms there are.
 CREATE TRIGGER pgrdf_count_bypass
     BEFORE INSERT OR DELETE ON _pgrdf_dictionary
     FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('-1');
@@ -178,8 +201,11 @@ BEGIN
 END
 $pgrdf_count_markers$;
 
--- The seed: every registered graph, counted now. One pass over the quad
--- table, about the cost of one graph_inventory() call of 0.6.41.
+-- The seed: every graph the engine keeps a count for, counted now. One
+-- pass over the quad table, about the cost of one graph_inventory() call
+-- of 0.6.41. A registered graph without a partition of its own (a registry
+-- row written by hand) gets no count: its rows live in the default
+-- partition, no write to it is counted, and it is counted by scan.
 INSERT INTO _pgrdf_graph_counts
        (graph_id, asserted, inferred, scanned_at, scan_snapshot, scan_xact, scan_mark, folded_below)
 SELECT g.graph_id, coalesce(q.a, 0), coalesce(q.i, 0), pg_catalog.clock_timestamp(),
@@ -190,7 +216,8 @@ SELECT g.graph_id, coalesce(q.a, 0), coalesce(q.i, 0), pg_catalog.clock_timestam
   LEFT JOIN (SELECT graph_id,
                     count(*) FILTER (WHERE NOT is_inferred) AS a,
                     count(*) FILTER (WHERE is_inferred) AS i
-               FROM _pgrdf_quads GROUP BY graph_id) q USING (graph_id);
+               FROM _pgrdf_quads GROUP BY graph_id) q USING (graph_id)
+ WHERE _count_kept(g.graph_id);
 -- #178: and the dictionary, counted now: one pass over it.
 INSERT INTO _pgrdf_graph_counts
        (graph_id, asserted, scanned_at, scan_snapshot, scan_xact, scan_mark, folded_below)

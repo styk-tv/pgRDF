@@ -258,6 +258,9 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
             &[id.into()],
         )
         .unwrap_or_else(|e| panic!("drop_graph: stale _pgrdf_graphs row cleanup failed: {e}"));
+        // The registry row goes, and with it the count row the registry
+        // opened for it.
+        crate::storage::counts::dropped(id);
         return 0;
     }
 

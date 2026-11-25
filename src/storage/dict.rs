@@ -25,6 +25,75 @@ const TERM_INSERT_COUNTED: &str = "WITH ins AS ( \
            SELECT -1, 1, 0 FROM ins) \
      SELECT id FROM ins";
 
+thread_local! {
+    /// The two term INSERTs, prepared once per backend: [`TERM_INSERT`]
+    /// and [`TERM_INSERT_COUNTED`]. Kept here and not in the query plan
+    /// cache: that one reports what the SPARQL translator reuses, and
+    /// `plan_cache_clear()` has nothing to clear in these. PostgreSQL
+    /// replans a saved statement by itself when its tables change.
+    static TERM_PLANS: std::cell::RefCell<[Option<pgrx::spi::OwnedPreparedStatement>; 2]> =
+        const { std::cell::RefCell::new([None, None]) };
+}
+
+/// Store one new term and return its id, with the engine's writing mark
+/// up. `counted` picks the statement that carries the dictionary's count
+/// delta. Prepared once per backend: planning the two-part statement on
+/// every call cost a quarter of `put_term`'s time for a new term
+/// (measured against the plain INSERT it replaced).
+fn insert_term(
+    counted: bool,
+    term_type: i16,
+    value: &str,
+    datatype_id: Option<i64>,
+    language: Option<&str>,
+) -> i64 {
+    Spi::connect_mut(|client| {
+        TERM_PLANS.with(|plans| {
+            let mut plans = plans.borrow_mut();
+            let slot = &mut plans[counted as usize];
+            if slot.is_none() {
+                let sql = if counted {
+                    TERM_INSERT_COUNTED
+                } else {
+                    TERM_INSERT
+                };
+                *slot = Some(
+                    client
+                        .prepare_mut(
+                            sql,
+                            &[
+                                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
+                                PgOid::BuiltIn(PgBuiltInOids::TEXTOID),
+                                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
+                                PgOid::BuiltIn(PgBuiltInOids::TEXTOID),
+                            ],
+                        )
+                        .expect("put_term_full: prepare failed")
+                        .keep(),
+                );
+            }
+            let plan = slot.as_ref().expect("the term INSERT was just prepared");
+            let _writing = counts::Writing::begin();
+            client
+                .update(
+                    plan,
+                    None,
+                    &[
+                        term_type.into(),
+                        value.into(),
+                        datatype_id.into(),
+                        language.into(),
+                    ],
+                )
+                .expect("put_term_full: insert failed")
+                .first()
+                .get_one::<i64>()
+                .expect("put_term_full: id column")
+                .expect("put_term_full: INSERT … RETURNING returned no row")
+        })
+    })
+}
+
 /// Term-type discriminator. Matches `_pgrdf_dictionary.term_type` (SMALLINT)
 /// in [`sql/schema_v0_2_0.sql`].
 pub mod term_type {
@@ -123,27 +192,11 @@ pub(crate) fn put_term_full(
     // the act ends; outside one (`put_term`) the delta rides in the
     // INSERT's own statement.
     let own_delta = !counts::tally_open() && counts::present();
-    let id: i64 = counts::engine_write(|| {
-        Spi::get_one_with_args(
-            if own_delta {
-                TERM_INSERT_COUNTED
-            } else {
-                TERM_INSERT
-            },
-            &[
-                term_type.into(),
-                value.into(),
-                datatype_id.into(),
-                language.into(),
-            ],
-        )
-    })
-    .expect("put_term_full: insert failed")
-    .expect("put_term_full: INSERT … RETURNING returned no row");
+    let id = insert_term(own_delta, term_type, value, datatype_id, language);
     if own_delta {
         counts::maybe_fold(counts::DICTIONARY);
     } else {
-        counts::gained(counts::DICTIONARY, 1, 0);
+        counts::terms_gained(1);
     }
     // INSERT path: row is still in-flight. Stage the mapping for
     // shmem publication on COMMIT — on ABORT it is silently dropped
@@ -288,7 +341,7 @@ pub(crate) fn put_terms_batch(terms: &[(i16, String, Option<i64>, Option<String>
         })
     });
     // 0.6.42 (#178): what the statement stored is what the count gains.
-    counts::gained(counts::DICTIONARY, added as i64, 0);
+    counts::terms_gained(added as i64);
 
     // Step 2: bulk lookup. Returns rows in JOIN order (input order
     // preserved by the WITH ORDINALITY pattern). The result is a

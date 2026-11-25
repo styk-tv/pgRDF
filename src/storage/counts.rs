@@ -39,16 +39,27 @@
 //! transaction was not visible in that scan's snapshot, or it came later
 //! in the scan's own transaction.
 //!
-//! The dictionary's count (#178) lives in the same tables under the id
-//! [`DICTIONARY`]: the tables are keyed by an id, and no graph has a
-//! negative one. Its `asserted` is the number of terms. Everything above
-//! holds for it unchanged; its bypass trigger is on the dictionary table.
+//! The dictionary's count (#178) lives in the same tables under the key
+//! [`DICTIONARY`], a negative number. Its `asserted` is the number of
+//! terms. Everything above holds for it unchanged; its bypass trigger is
+//! on the dictionary table. The quad side never reaches that key:
+//! `put_quad` and the numeric-id loaders accept a negative graph id, so
+//! the graph entries here ([`gained`], [`stored`], [`counted`]) answer
+//! "no count" for every negative id, and the dictionary has entries of
+//! its own ([`terms_gained`], [`stored_terms`]).
 //!
-//! Which ids are counted (#180): the default graph, the dictionary, and
-//! every graph id that has a partition of its own ([`counted`]). A row
-//! written into an id that was never registered lands in the default
-//! partition and records no delta: such an id has no count row, so
-//! nothing would ever fold or remove what it recorded.
+//! Which graph ids are counted (#180): the default graph, and every id
+//! that has a partition of its own ([`counted`]). A row written into an
+//! id without one lands in the default partition and records no delta.
+//! Readers apply the same rule through `_count_kept`, so a count the
+//! writers do not keep is never called verified, whatever its row says.
+//!
+//! A count row is opened by whoever registers the graph: the engine when
+//! it creates one ([`created`]), and a trigger on the registry for a row
+//! that arrives any other way, which is how every graph gets its row when
+//! a restore fills the registry. A writer never opens one. It would hold
+//! the new row until it commits, and the next writer of that graph would
+//! wait for it.
 
 use crate::storage::partition::as_storage_owner;
 use pgrx::prelude::*;
@@ -147,9 +158,17 @@ CREATE TRIGGER pgrdf_count_bypass_truncate
     BEFORE TRUNCATE ON _pgrdf_quads_default
     FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('0');
 
--- The dictionary's count is kept under the id -1 (no graph has a negative
--- id). A term added or removed in plain SQL marks it unverified; an UPDATE
--- cannot change how many terms there are.
+-- Every registered graph has a count row. The engine sets it when it
+-- creates a graph; a registry row that arrives any other way, as all of
+-- them do when a restore fills the registry, opens it here, not set by any
+-- scan. Deltas then have a row to fold into before the graph's recount.
+CREATE TRIGGER pgrdf_count_open
+    AFTER INSERT ON _pgrdf_graphs
+    FOR EACH ROW EXECUTE FUNCTION _count_open();
+
+-- The dictionary's count is kept under the key -1. A term added or removed
+-- in plain SQL marks it unverified; an UPDATE cannot change how many terms
+-- there are.
 CREATE TRIGGER pgrdf_count_bypass
     BEFORE INSERT OR DELETE ON _pgrdf_dictionary
     FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('-1');
@@ -173,22 +192,30 @@ SELECT -1, pg_catalog.count(*), pg_catalog.clock_timestamp(),
         "schema_v0_4_0_graphs",
         "set_index_v0_6_41",
         _count_delta_guard,
-        _count_bypass
+        _count_bypass,
+        _count_open
     ],
 );
 
-/// The id the dictionary's count is kept under. `asserted` is the number
-/// of terms; `inferred` stays 0.
+/// The key the dictionary's count is kept under. `asserted` is the number
+/// of terms; `inferred` stays 0. Not a graph id: the graph entries of this
+/// module answer "no count" for it.
 pub(crate) const DICTIONARY: i64 = -1;
 
-/// Does the engine keep a count for this id? Always for the default graph
-/// and the dictionary; for any other id when it has a partition of its
-/// own, which is what registering a graph creates. Asked of the system
-/// cache on every write, so the writer reads no table, and never
-/// remembered: a backend that remembered "has one" after the graph was
-/// dropped would record deltas nothing folds, which is #180 itself.
+/// Does the engine keep a count for this graph id? For the default graph,
+/// and for any other id that has a partition of its own, which is what
+/// registering a graph creates. Never for a negative id.
+///
+/// Asked of the system cache on every write, so the writer reads no
+/// table, and never remembered: a backend that remembered "has one" after
+/// the graph was dropped would record deltas nothing folds, which is #180
+/// itself. A relation that carries the partition's name and is not a
+/// partition (one that was detached) does not count: rows of the id go to
+/// the default partition then.
+///
+/// This is the one rule. Readers reach it through [`_count_kept`].
 pub(crate) fn counted(graph_id: i64) -> bool {
-    if graph_id == 0 || graph_id == DICTIONARY {
+    if graph_id == 0 {
         return true;
     }
     if graph_id < 0 {
@@ -198,9 +225,46 @@ pub(crate) fn counted(graph_id: i64) -> bool {
         .expect("a partition name holds no NUL");
     unsafe {
         let ns = pgrx::pg_sys::get_namespace_oid(c"pgrdf".as_ptr(), true);
-        ns != pgrx::pg_sys::InvalidOid
-            && pgrx::pg_sys::get_relname_relid(name.as_ptr(), ns) != pgrx::pg_sys::InvalidOid
+        if ns == pgrx::pg_sys::InvalidOid {
+            return false;
+        }
+        let rel = pgrx::pg_sys::get_relname_relid(name.as_ptr(), ns);
+        rel != pgrx::pg_sys::InvalidOid && pgrx::pg_sys::get_rel_relispartition(rel)
     }
+}
+
+/// Is a count kept under this key of the count tables: the dictionary's
+/// key, or a graph id the writers count ([`counted`])? The readers' side
+/// of the one rule: a count row is called verified only when this holds,
+/// so a row the writers do not keep up (a registered graph without a
+/// partition of its own) never reads as verified.
+#[pg_extern(stable)]
+fn _count_kept(key: i64) -> bool {
+    key == DICTIONARY || counted(key)
+}
+
+/// AFTER INSERT row trigger on the graph registry: open the graph's count
+/// row, not set by any scan, unless it has one. The engine's own
+/// [`created`] sets the row of a graph it creates; this is for registry
+/// rows that arrive any other way, above all a restore's.
+#[pg_trigger]
+fn _count_open<'a>(
+    trigger: &'a pgrx::PgTrigger<'a>,
+) -> Result<Option<PgHeapTuple<'a, AllocatedByPostgres>>, pgrx::PgTriggerError> {
+    let graph = trigger
+        .new()
+        .and_then(|row| row.get_by_name::<i64>("graph_id").ok().flatten());
+    if let (Some(graph_id), true) = (graph, present()) {
+        as_storage_owner(|| {
+            Spi::run_with_args(
+                "INSERT INTO pgrdf._pgrdf_graph_counts (graph_id) VALUES ($1) \
+                 ON CONFLICT (graph_id) DO NOTHING",
+                &[graph_id.into()],
+            )
+        })
+        .expect("opening the graph count failed");
+    }
+    Ok(None)
 }
 
 /// What each graph gained in one engine call: asserted, inferred.
@@ -209,9 +273,10 @@ type Gains = BTreeMap<i64, (i64, i64)>;
 thread_local! {
     /// How many engine quad statements are running in this backend.
     static WRITING: Cell<u32> = const { Cell::new(0) };
-    /// The open tally: nesting depth and what each graph gained.
-    static TALLY: RefCell<(u32, Gains)> =
-        const { RefCell::new((0, BTreeMap::new())) };
+    /// The open tally: nesting depth, what each graph gained, and how
+    /// many terms the dictionary gained.
+    static TALLY: RefCell<(u32, Gains, i64)> =
+        const { RefCell::new((0, BTreeMap::new(), 0)) };
     /// State of the fold dice.
     static DICE: Cell<u64> = const { Cell::new(0) };
 }
@@ -331,15 +396,16 @@ impl Drop for Tally {
         let done = TALLY.with(|t| {
             let mut t = t.borrow_mut();
             t.0 = t.0.saturating_sub(1);
-            (t.0 == 0).then(|| std::mem::take(&mut t.1))
+            (t.0 == 0).then(|| (std::mem::take(&mut t.1), std::mem::take(&mut t.2)))
         });
-        if let Some(gained) = done {
+        if let Some((gained, terms)) = done {
             if std::thread::panicking() {
                 return;
             }
             for (graph_id, (asserted, inferred)) in gained {
                 write_delta(graph_id, asserted, inferred);
             }
+            write_terms_delta(terms);
         }
     }
 }
@@ -352,8 +418,12 @@ pub(crate) fn tally_open() -> bool {
 
 /// Record what one write changed in `graph_id`: into the open tally, or as
 /// a delta at once when no tally is open.
+///
+/// A negative graph id has no count: nothing is recorded for it, here or
+/// in [`write_delta`]. The dictionary's key is negative, and a write into
+/// "graph -1" must never be taken for terms.
 pub(crate) fn gained(graph_id: i64, asserted: i64, inferred: i64) {
-    if asserted == 0 && inferred == 0 {
+    if graph_id < 0 || (asserted == 0 && inferred == 0) {
         return;
     }
     let open = TALLY.with(|t| {
@@ -371,20 +441,52 @@ pub(crate) fn gained(graph_id: i64, asserted: i64, inferred: i64) {
     }
 }
 
-/// Insert one delta, as the caller, through the guard.
+/// Record that the dictionary gained `n` terms: into the open tally, or as
+/// a delta at once when no tally is open. The dictionary's side of
+/// [`gained`], with a slot of its own in the tally.
+pub(crate) fn terms_gained(n: i64) {
+    if n == 0 {
+        return;
+    }
+    let open = TALLY.with(|t| {
+        let mut t = t.borrow_mut();
+        if t.0 == 0 {
+            return false;
+        }
+        t.2 += n;
+        true
+    });
+    if !open {
+        write_terms_delta(n);
+    }
+}
+
+/// Insert one delta of a graph, as the caller, through the guard.
 fn write_delta(graph_id: i64, asserted: i64, inferred: i64) {
     if (asserted == 0 && inferred == 0) || !present() || !counted(graph_id) {
         return;
     }
+    insert_delta(graph_id, asserted, inferred);
+}
+
+/// Insert one delta of the dictionary, as the caller, through the guard.
+fn write_terms_delta(n: i64) {
+    if n == 0 || !present() {
+        return;
+    }
+    insert_delta(DICTIONARY, n, 0);
+}
+
+fn insert_delta(key: i64, asserted: i64, inferred: i64) {
     engine_write(|| {
         Spi::run_with_args(
             "INSERT INTO pgrdf._pgrdf_graph_count_deltas (graph_id, d_asserted, d_inferred) \
              VALUES ($1, $2, $3)",
-            &[graph_id.into(), asserted.into(), inferred.into()],
+            &[key.into(), asserted.into(), inferred.into()],
         )
-        .expect("recording the graph count delta failed");
+        .expect("recording the count delta failed");
     });
-    maybe_fold(graph_id);
+    maybe_fold(key);
 }
 
 /// One writer in [`FOLD_ONE_IN`] folds the graph it just wrote.
@@ -422,27 +524,18 @@ pub(crate) fn maybe_fold(graph_id: i64) {
 /// re-check only that says what this fold removed. A folder that cannot
 /// get the row leaves it to the one that has it.
 ///
-/// An id the engine counts can be without its base row: every graph is
-/// after a restore, until its recount. The fold opens the row then,
-/// unverified, so the deltas have somewhere to go and stay few; readers go
-/// on scanning until a recount sets it. Deleting such deltas without a row
-/// would not do: the row is what a REPEATABLE READ recount fails on when a
-/// fold has moved on since its snapshot.
+/// A missing base row is skipped like a locked one. Opening it here would
+/// put an uncommitted row in a writer's transaction, and the next writer
+/// of that graph would wait on it; two transactions writing two such
+/// graphs in opposite order would deadlock.
 pub(crate) fn fold(graph_id: i64) -> i64 {
-    if !counted(graph_id) {
-        return 0;
-    }
     as_storage_owner(|| {
         // The DELETE below runs on every fold, also when its range is
         // empty, which under a long-held transaction id is every time: it
         // must be the index range and never a pass over the whole table.
         plan_by_index();
         Spi::get_one_with_args::<i64>(
-            "WITH mk AS (INSERT INTO pgrdf._pgrdf_graph_counts (graph_id) \
-                         SELECT $1 WHERE NOT EXISTS ( \
-                                SELECT 1 FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $1) \
-                         ON CONFLICT (graph_id) DO NOTHING), \
-                  b AS (SELECT graph_id, folded_below FROM pgrdf._pgrdf_graph_counts \
+            "WITH b AS (SELECT graph_id, folded_below FROM pgrdf._pgrdf_graph_counts \
                          WHERE graph_id = $1 FOR UPDATE SKIP LOCKED), \
                   w AS (SELECT pg_snapshot_xmin(pg_current_snapshot()) AS w), \
                   gone AS (DELETE FROM pgrdf._pgrdf_graph_count_deltas d USING b, w \
@@ -508,7 +601,7 @@ pub(crate) const BYPASS_APPLIES: &str = "(b.graph_id = c.graph_id OR (b.graph_id
 /// `pgrdf._pgrdf_graph_counts c`.
 pub(crate) fn read_columns() -> String {
     "c.asserted + d.a, c.inferred + d.i, c.change_seq + d.n + y.n, \
-     c.scanned_at IS NOT NULL AND y.n = 0, c.scanned_at"
+     c.scanned_at IS NOT NULL AND y.n = 0 AND pgrdf._count_kept(c.graph_id), c.scanned_at"
         .to_string()
 }
 
@@ -551,10 +644,25 @@ pub(crate) fn plan_by_index() {
     }
 }
 
-/// The stored count of `graph_id`, or `None` when it has no base row (a
-/// graph restored from a dump, or an id that was never registered).
-/// Read as the storage owner: the caller needs no privilege on the tables.
+/// The stored count of graph `graph_id`, or `None` when it has no base
+/// row (an id that was never registered) and for every negative id: the
+/// dictionary's key is not a graph, and `count_quads(-1)` must count the
+/// rows of that id, not the terms. Read as the storage owner: the caller
+/// needs no privilege on the tables.
 pub(crate) fn stored(graph_id: i64) -> Option<Stored> {
+    if graph_id < 0 {
+        return None;
+    }
+    stored_key(graph_id)
+}
+
+/// The stored number of dictionary terms (`asserted`), or `None` when the
+/// dictionary has no count row.
+pub(crate) fn stored_terms() -> Option<Stored> {
+    stored_key(DICTIONARY)
+}
+
+fn stored_key(graph_id: i64) -> Option<Stored> {
     if !present() {
         return None;
     }
@@ -616,14 +724,24 @@ pub(crate) fn scanned(graph_id: i64) -> (i64, i64) {
 /// and the bypass marks that applied until now with it, so it never goes
 /// back: a reader added both to it a moment ago.
 fn scan_stamp() -> String {
+    format!("change_seq = {}, {}", seq_after_scan(), stamp_of_scan())
+}
+
+/// `change_seq` after a scan set the row: past the retired deltas and the
+/// bypass marks that applied, and one more for the scan.
+fn seq_after_scan() -> String {
     format!(
-        "change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1 \
-           + (SELECT count(*) FROM pgrdf._pgrdf_graph_count_bypass b WHERE {BYPASS_APPLIES}), \
-         scanned_at = clock_timestamp(), \
-         scan_snapshot = pg_current_snapshot(), scan_xact = pg_current_xact_id(), \
-         scan_mark = nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
-         folded_below = greatest(c.folded_below, pg_snapshot_xmin(pg_current_snapshot()))"
+        "c.change_seq + (SELECT count(*) FROM gone) + 1 \
+           + (SELECT count(*) FROM pgrdf._pgrdf_graph_count_bypass b WHERE {BYPASS_APPLIES})"
     )
+}
+
+/// When, under which snapshot, in which transaction and where in it.
+fn stamp_of_scan() -> &'static str {
+    "scanned_at = clock_timestamp(), \
+     scan_snapshot = pg_current_snapshot(), scan_xact = pg_current_xact_id(), \
+     scan_mark = nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
+     folded_below = greatest(c.folded_below, pg_snapshot_xmin(pg_current_snapshot()))"
 }
 
 /// Drop the bypass rows no graph needs any more. Run as the storage owner
@@ -651,12 +769,20 @@ fn forget_spent_bypasses() {
 ///
 /// The scan sees every row this transaction wrote, so what the open
 /// tally has gathered for the graph so far is in the number already and
-/// is dropped; what the call gains after this point still counts.
+/// is dropped; what the call gains after this point still counts. The
+/// same holds for the dictionary's key and the tally's terms.
 pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
     if !present() {
         return scanned(graph_id);
     }
-    TALLY.with(|t| t.borrow_mut().1.remove(&graph_id));
+    TALLY.with(|t| {
+        let mut t = t.borrow_mut();
+        if graph_id == DICTIONARY {
+            t.2 = 0;
+        } else {
+            t.1.remove(&graph_id);
+        }
+    });
     as_storage_owner(|| {
         Spi::run_with_args(
             "INSERT INTO pgrdf._pgrdf_graph_counts (graph_id) VALUES ($1) \
@@ -701,14 +827,21 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
 
 /// A graph was created: it is empty, and an empty new partition is
 /// scanned by definition. Whatever an earlier life of the id left behind
-/// goes: a count row (reset) and every delta. The deltas matter. An id can
+/// goes: a count row (reset) and every delta. A row the registry opened a
+/// moment ago, in this transaction, is set the same way and keeps its
+/// `change_seq`, so a new graph starts at 0 whichever came first, its
+/// registry row or its partition. The deltas matter. An id can
 /// take writes while it is unregistered, lose those rows to a DELETE in
 /// plain SQL, which records no negative delta, and be registered
 /// afterwards; a row merely inserted beside the old deltas would then read
 /// them on top of zero, verified. PostgreSQL creates the partition only
 /// when the default partition holds no row of the id and no writer of it
 /// is in flight (the DDL waits for them), so every delta of the id is
-/// finished and visible here.
+/// finished and visible here. In READ COMMITTED, that is. A caller in
+/// REPEATABLE READ deletes by its transaction's snapshot, and a delta
+/// committed after that snapshot survives; it takes a drop that raced a
+/// writer and a plain-SQL delete of that writer's row inside the window to
+/// have such a delta, and that is accepted.
 pub(crate) fn created(graph_id: i64) {
     if !present() {
         return;
@@ -724,8 +857,12 @@ pub(crate) fn created(graph_id: i64) {
                  VALUES ($1, clock_timestamp(), pg_current_snapshot(), pg_current_xact_id(), \
                          nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
                          pg_snapshot_xmin(pg_current_snapshot())) \
-                 ON CONFLICT (graph_id) DO UPDATE SET asserted = 0, inferred = 0, {stamp}",
-                stamp = scan_stamp()
+                 ON CONFLICT (graph_id) DO UPDATE SET asserted = 0, inferred = 0, \
+                        change_seq = CASE WHEN c.scanned_at IS NULL THEN c.change_seq \
+                                          ELSE {seq} END, \
+                        {stamp}",
+                seq = seq_after_scan(),
+                stamp = stamp_of_scan()
             ),
             &[graph_id.into()],
         )
@@ -1265,26 +1402,144 @@ mod tests {
         truth(0).unwrap();
     }
 
-    /// A registered graph whose count row is missing (every graph after a
-    /// restore): a fold opens the row, unverified, so its deltas have
-    /// somewhere to go; a recount then sets it.
+    /// A registry row opens its count row, unverified: that is how every
+    /// graph gets one when a restore fills the registry. No writer ever
+    /// has to open one.
     #[pg_test]
-    fn a_fold_opens_a_missing_count_row() {
-        let g = one("SELECT pgrdf.add_graph('urn:tdd:c180:restored')").unwrap();
+    fn a_registry_row_opens_its_count_row() {
+        // The engine's own graphs first: they take the partition gate, and
+        // every caller takes it before the registry.
+        let g = one("SELECT pgrdf.add_graph('urn:tdd:c180:fresh')").unwrap();
+        let h = 918_012;
+        Spi::run(&format!("SELECT pgrdf.add_graph({h})")).unwrap();
+        // The row a new graph gets from its registry insert does not undo
+        // the stamp its creation set, and its change counter starts at 0
+        // whichever of the two came first.
+        for id in [g, h] {
+            let s = truth(id).unwrap();
+            assert_eq!((s.asserted, s.inferred, s.change_seq), (0, 0, 0));
+        }
+        const G: i64 = 918_011;
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) VALUES ({G}, 'urn:tdd:c180:restored')"
+        ))
+        .unwrap();
+        assert_eq!(
+            Spi::get_one::<String>(&format!(
+                "SELECT concat_ws('|', asserted, inferred, scanned_at IS NULL) \
+                   FROM pgrdf._pgrdf_graph_counts WHERE graph_id = {G}"
+            ))
+            .unwrap()
+            .as_deref(),
+            Some("0|0|t"),
+            "the count row is there, and no scan has set it"
+        );
+    }
+
+    /// A fold never opens a count row. A writer that inserted one would
+    /// hold it until it commits, and the next writer of that graph would
+    /// wait for it: two transactions writing two such graphs in opposite
+    /// order would deadlock.
+    #[pg_test]
+    fn a_fold_skips_a_missing_count_row() {
+        let g = one("SELECT pgrdf.add_graph('urn:tdd:c180:rowless')").unwrap();
         Spi::run(&format!("SELECT pgrdf.put_quad(51, 52, 53, {g})")).unwrap();
         Spi::run(&format!(
             "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = {g}"
         ))
         .unwrap();
-        assert!(crate::storage::counts::stored(g).is_none());
-        crate::storage::counts::fold(g);
-        let opened = crate::storage::counts::stored(g).expect("the fold opened the count row");
-        assert!(!opened.verified, "a row no scan has set is not verified");
+        assert_eq!(crate::storage::counts::fold(g), 0);
+        assert_eq!(
+            one(&format!(
+                "SELECT count(*) FROM pgrdf._pgrdf_graph_counts WHERE graph_id = {g}"
+            )),
+            Some(0)
+        );
         Spi::run(&format!("SELECT pgrdf.recount_graph({g})")).unwrap();
         assert_eq!(truth(g).map(|s| s.asserted), Ok(1));
-        // An id with no graph gets no row from a fold.
-        crate::storage::counts::fold(918_002);
-        assert!(crate::storage::counts::stored(918_002).is_none());
+    }
+
+    /// The writers count an id that has a partition of its own. A
+    /// registered graph without one (a registry row written in plain SQL,
+    /// or left behind by a drop) gets no delta, so no reader may call its
+    /// count verified, whatever its count row says.
+    #[pg_test]
+    fn a_graph_without_its_own_partition_is_never_verified() {
+        const G: i64 = 918_010;
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) VALUES ({G}, 'urn:tdd:c180:nopart')"
+        ))
+        .unwrap();
+        // A stamped count row, as a recount (or an upgrade's seed) leaves.
+        crate::storage::counts::set_by_scan(G);
+        Spi::run(&format!("SELECT pgrdf.put_quad(31, 32, 33, {G})")).unwrap();
+        assert_eq!(
+            Spi::get_one::<String>(&format!(
+                "SELECT concat_ws('|', asserted, counts_verified) FROM pgrdf.graph_inventory({G})"
+            ))
+            .unwrap()
+            .as_deref(),
+            Some("1|f")
+        );
+        assert_eq!(one(&format!("SELECT pgrdf.count_quads({G})")), Some(1));
+    }
+
+    /// A table that was detached keeps the partition's name and is not a
+    /// partition: rows of the id go to the default partition from then
+    /// on. The writer records nothing for them and the reader says
+    /// unverified. The two decide by one rule ([`counted`]).
+    #[pg_test]
+    fn a_detached_partition_is_not_counted() {
+        let g = one("SELECT pgrdf.add_graph('urn:tdd:c180:detached')").unwrap();
+        Spi::run(&format!("SELECT pgrdf.put_quad(21, 22, 23, {g})")).unwrap();
+        assert!(crate::storage::counts::counted(g));
+        Spi::run(&format!(
+            "ALTER TABLE pgrdf._pgrdf_quads DETACH PARTITION pgrdf._pgrdf_quads_g{g}"
+        ))
+        .unwrap();
+        assert!(!crate::storage::counts::counted(g));
+        let before = deltas_of(g);
+        Spi::run(&format!("SELECT pgrdf.put_quad(21, 22, 24, {g})")).unwrap();
+        assert_eq!(
+            deltas_of(g),
+            before,
+            "no delta for a row in the default partition"
+        );
+        assert_eq!(
+            Spi::get_one::<String>(&format!(
+                "SELECT concat_ws('|', asserted, counts_verified) FROM pgrdf.graph_inventory({g})"
+            ))
+            .unwrap()
+            .as_deref(),
+            Some("1|f"),
+            "the one row the engine can see, and not verified"
+        );
+    }
+
+    /// The dictionary's count has a key of its own. A graph id of -1,
+    /// which `put_quad` and the numeric-id loaders accept, must not reach
+    /// it from the quad side: not as a delta, and not as a read.
+    #[pg_test]
+    fn a_negative_graph_id_never_reaches_the_term_count() {
+        let before = terms_truth("start").unwrap();
+        // The load first: it takes the registry before the quad table, as
+        // every engine call does. A single-row write before it in the same
+        // transaction would take them the other way round.
+        Spi::run("SELECT pgrdf.parse_turtle('<urn:neg:a> <urn:neg:b> <urn:neg:c> .', -1)").unwrap();
+        assert_eq!(
+            terms_truth("a load into graph -1"),
+            Ok(before + 3),
+            "three terms, and the triple is not one of them"
+        );
+        assert_eq!(
+            one("SELECT pgrdf.count_quads(-1)"),
+            Some(1),
+            "count_quads(-1) counts the rows of that id, not the terms"
+        );
+        Spi::run("SELECT pgrdf.put_quad(41, 42, 43, -1)").unwrap();
+        assert_eq!(terms_truth("put_quad into graph -1"), Ok(before + 3));
+        assert_eq!(one("SELECT pgrdf.count_quads(-1)"), Some(2));
+        assert!(crate::storage::counts::stored(-1).is_none());
     }
 
     /// Registering a graph sets its count, whatever an earlier life of
