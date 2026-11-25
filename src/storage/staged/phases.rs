@@ -1093,6 +1093,8 @@ pub fn resolve(job: &JobSlot, w: &WorkerSlot) -> i64 {
     // registered with, so it gets the parent's ACL the way a newly
     // created partition does.
     crate::storage::partition::inherit_parent_acl(&part);
+    // 0.6.42: and the count bypass marker a created partition carries.
+    crate::storage::counts::guard_partition(&part, graph_id);
 
     let rows = Spi::get_one_with_args::<i64>(
         "SELECT count(*)::bigint FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
@@ -1101,6 +1103,11 @@ pub fn resolve(job: &JobSlot, w: &WorkerSlot) -> i64 {
     .ok()
     .flatten()
     .unwrap_or(0);
+    // 0.6.42: the partition the graph was registered with is gone and this
+    // one stands in its place, so the stored count is replaced, not added
+    // to: a delta left by a write into the old partition describes rows
+    // that no longer exist. In this transaction, with the triples.
+    crate::storage::counts::replaced(graph_id, rows, 0);
     // The load act, in the transaction that publishes the triples: the
     // act and the data commit together or not at all. Repeats in the file
     // are still in `rows` here; the index phase removes them and records
@@ -1146,6 +1153,8 @@ pub fn build_index(job: &JobSlot, w: &WorkerSlot) {
         let removed = crate::storage::quads::build_set_index(job.graph_id, true);
         jobctl::set_dups_removed(w.job_idx as usize, removed.max(0));
         if removed > 0 {
+            // 0.6.42: the build read the whole partition; count it again.
+            crate::storage::counts::set_by_scan(job.graph_id);
             crate::storage::acts::record(
                 job.graph_id,
                 "dedup",

@@ -8,10 +8,12 @@
 //! Storage is two tables:
 //!
 //! * `_pgrdf_graph_counts` — one base row per graph: asserted, inferred,
-//!   a change counter, when a scan last set the numbers, and whether a
-//!   write has bypassed the engine since;
+//!   a change counter, and when and under which snapshot a scan last set
+//!   the numbers;
 //! * `_pgrdf_graph_count_deltas` — insert-only rows, one per engine write
-//!   that changed a graph.
+//!   that changed a graph;
+//! * `_pgrdf_graph_count_bypass` — insert-only rows, one per write that
+//!   did not come through the engine.
 //!
 //! A graph's count is its base plus the deltas a reader can see at or
 //! above the base row's `folded_below`. Writers only ever insert a delta,
@@ -27,8 +29,15 @@
 //!
 //! * the delta table accepts an INSERT only while the mark is up, so a
 //!   caller cannot choose what is recorded;
-//! * a write to the quad table while the mark is down is a bypass, and
-//!   marks the graph's count unverified until a recount.
+//! * a write to the quad table while the mark is down is a bypass: it
+//!   leaves a row in the bypass log, and the graph's count is unverified
+//!   until a scan that saw that write.
+//!
+//! Nothing here waits. Deltas and bypass marks are inserts; a fold skips a
+//! base row somebody else holds. A bypass applies to a graph when the
+//! scan that last set the graph's count could not have seen it: its
+//! transaction was not visible in that scan's snapshot, or it came later
+//! in the scan's own transaction.
 
 use crate::storage::partition::as_storage_owner;
 use pgrx::prelude::*;
@@ -43,7 +52,9 @@ CREATE TABLE _pgrdf_graph_counts (
     inferred     BIGINT NOT NULL DEFAULT 0,
     change_seq   BIGINT NOT NULL DEFAULT 0,
     scanned_at   TIMESTAMPTZ,
-    bypassed     BOOLEAN NOT NULL DEFAULT false,
+    scan_snapshot pg_snapshot,
+    scan_xact    xid8,
+    scan_mark    BIGINT NOT NULL DEFAULT 0,
     folded_below xid8 NOT NULL DEFAULT '0'
 ) WITH (fillfactor = 50);
 
@@ -56,7 +67,20 @@ CREATE TABLE _pgrdf_graph_count_deltas (
 CREATE INDEX _pgrdf_graph_count_deltas_idx
     ON _pgrdf_graph_count_deltas (graph_id, xact);
 
-REVOKE ALL ON _pgrdf_graph_counts, _pgrdf_graph_count_deltas FROM PUBLIC;
+-- A write to the quad table that did not come through the engine: one
+-- row. graph_id NULL means "some graph": the statement named the parent.
+CREATE SEQUENCE _pgrdf_graph_count_bypass_seq;
+CREATE TABLE _pgrdf_graph_count_bypass (
+    id       BIGINT NOT NULL DEFAULT pg_catalog.nextval('_pgrdf_graph_count_bypass_seq'),
+    graph_id BIGINT,
+    xact     xid8 NOT NULL DEFAULT pg_catalog.pg_current_xact_id()
+);
+CREATE INDEX _pgrdf_graph_count_bypass_idx
+    ON _pgrdf_graph_count_bypass (graph_id, xact);
+
+REVOKE ALL ON _pgrdf_graph_counts, _pgrdf_graph_count_deltas,
+              _pgrdf_graph_count_bypass FROM PUBLIC;
+REVOKE ALL ON SEQUENCE _pgrdf_graph_count_bypass_seq FROM PUBLIC;
 -- The delta rides in the engine's own statement, as the caller. The
 -- guard trigger is what keeps a direct INSERT out.
 GRANT INSERT ON _pgrdf_graph_count_deltas TO PUBLIC;
@@ -78,8 +102,10 @@ CREATE TRIGGER pgrdf_count_bypass_truncate
     FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('0');
 
 -- A fresh install holds the default graph only, and it is empty.
-INSERT INTO _pgrdf_graph_counts (graph_id, scanned_at)
-SELECT graph_id, pg_catalog.clock_timestamp() FROM _pgrdf_graphs;
+INSERT INTO _pgrdf_graph_counts (graph_id, scanned_at, scan_snapshot, scan_xact)
+SELECT graph_id, pg_catalog.clock_timestamp(), pg_catalog.pg_current_snapshot(),
+       pg_catalog.pg_current_xact_id()
+  FROM _pgrdf_graphs;
 "#,
     name = "graph_counts_v0_6_42",
     requires = [
@@ -162,18 +188,14 @@ fn _count_bypass<'a>(
         .extra_args()?
         .first()
         .and_then(|a| a.parse::<i64>().ok());
-    // Unconditional, so the statement always takes the base row lock: a
-    // recount locks that row before it scans, which is what stops it from
-    // clearing a mark for rows its scan did not see.
-    as_storage_owner(|| match graph {
-        Some(g) => Spi::run_with_args(
-            "UPDATE pgrdf._pgrdf_graph_counts \
-                SET bypassed = true, change_seq = change_seq + 1 WHERE graph_id = $1",
-            &[g.into()],
-        ),
-        None => Spi::run(
-            "UPDATE pgrdf._pgrdf_graph_counts SET bypassed = true, change_seq = change_seq + 1",
-        ),
+    // An insert, so a bypass waits on nothing and blocks nothing. Whether
+    // it applies to a graph is decided when the count is read, against
+    // the snapshot of the scan that last set that count.
+    as_storage_owner(|| {
+        Spi::run_with_args(
+            "INSERT INTO pgrdf._pgrdf_graph_count_bypass (graph_id) VALUES ($1)",
+            &[graph.into()],
+        )
     })
     .expect("marking the graph count unverified failed");
     Ok(None)
@@ -341,6 +363,39 @@ pub(crate) struct Stored {
     pub verified: bool,
 }
 
+/// The bypass rows that apply to base row `c`: the scan that set `c`
+/// could not have seen them. A bypass of another transaction applies when
+/// that transaction was not visible in the scan's snapshot. One of the
+/// scan's own transaction applies when it came after the scan: a snapshot
+/// does not list the transaction that took it, so the order inside one
+/// transaction is kept by the row ids, which only grow.
+pub(crate) const BYPASS_APPLIES: &str = "(b.graph_id = c.graph_id OR b.graph_id IS NULL) \
+     AND CASE WHEN b.xact = c.scan_xact THEN b.id > c.scan_mark \
+              ELSE NOT pg_visible_in_snapshot(b.xact, c.scan_snapshot) END";
+
+/// The count columns of base row `c` as a reader sees them: asserted,
+/// inferred, change_seq, verified, scanned_at. For a FROM list that has
+/// `pgrdf._pgrdf_graph_counts c`.
+pub(crate) fn read_columns() -> String {
+    format!(
+        "c.asserted + d.a, c.inferred + d.i, c.change_seq + d.n + y.n, \
+         c.scanned_at IS NOT NULL AND y.n = 0, c.scanned_at"
+    )
+}
+
+/// The two lateral subqueries [`read_columns`] stands on.
+pub(crate) fn read_laterals() -> String {
+    format!(
+        "LATERAL (SELECT coalesce(sum(x.d_asserted), 0)::bigint AS a, \
+                         coalesce(sum(x.d_inferred), 0)::bigint AS i, \
+                         count(*) AS n \
+                    FROM pgrdf._pgrdf_graph_count_deltas x \
+                   WHERE x.graph_id = c.graph_id AND x.xact >= c.folded_below) d ON true \
+         LEFT JOIN LATERAL (SELECT count(*) AS n FROM pgrdf._pgrdf_graph_count_bypass b \
+                             WHERE {BYPASS_APPLIES}) y ON true"
+    )
+}
+
 /// The stored count of `graph_id`, or `None` when it has no base row (a
 /// graph restored from a dump, or an id that was never registered).
 /// Read as the storage owner: the caller needs no privilege on the tables.
@@ -352,16 +407,12 @@ pub(crate) fn stored(graph_id: i64) -> Option<Stored> {
         Spi::connect(|c| {
             let t = c
                 .select(
-                    "SELECT c.asserted + d.a, c.inferred + d.i, c.change_seq + d.n, \
-                            c.scanned_at IS NOT NULL AND NOT c.bypassed \
-                       FROM pgrdf._pgrdf_graph_counts c, \
-                            LATERAL (SELECT coalesce(sum(x.d_asserted), 0)::bigint AS a, \
-                                            coalesce(sum(x.d_inferred), 0)::bigint AS i, \
-                                            count(*) AS n \
-                                       FROM pgrdf._pgrdf_graph_count_deltas x \
-                                      WHERE x.graph_id = c.graph_id \
-                                        AND x.xact >= c.folded_below) d \
-                      WHERE c.graph_id = $1",
+                    &format!(
+                        "SELECT {} FROM pgrdf._pgrdf_graph_counts c LEFT JOIN {} \
+                          WHERE c.graph_id = $1",
+                        read_columns(),
+                        read_laterals()
+                    ),
                     None,
                     &[graph_id.into()],
                 )
@@ -396,10 +447,28 @@ pub(crate) fn scanned(graph_id: i64) -> (i64, i64) {
     })
 }
 
+/// What a scan leaves on the base row besides the numbers: when, under
+/// which snapshot, in which transaction, and where in that transaction.
+const SCAN_STAMP: &str = "scanned_at = clock_timestamp(), \
+     scan_snapshot = pg_current_snapshot(), scan_xact = pg_current_xact_id(), \
+     scan_mark = nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
+     folded_below = greatest(c.folded_below, pg_snapshot_xmin(pg_current_snapshot()))";
+
+/// Drop the bypass rows no graph needs any more. Run as the storage owner
+/// after a scan stamped a base row.
+fn forget_spent_bypasses() {
+    Spi::run(&format!(
+        "DELETE FROM pgrdf._pgrdf_graph_count_bypass b \
+          WHERE NOT EXISTS (SELECT 1 FROM pgrdf._pgrdf_graph_counts c WHERE {BYPASS_APPLIES})"
+    ))
+    .expect("clearing spent bypass marks failed");
+}
+
 /// Set the count of `graph_id` from a scan and mark it verified. Returns
-/// the count it found. Lock first, scan second: a direct writer's marker
-/// always takes the base row, so it either finished before this scan's
-/// snapshot or waits until this commits and marks after.
+/// the count it found. One statement, so the rows it counts, the deltas
+/// it retires and the snapshot it records are the same view: a direct
+/// writer still in flight is not in that snapshot, and its mark applies
+/// again the moment it commits.
 pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
     if !present() {
         return scanned(graph_id);
@@ -411,27 +480,22 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
             &[graph_id.into()],
         )
         .expect("opening the graph count failed");
-        Spi::run_with_args(
-            "SELECT 1 FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $1 FOR UPDATE",
-            &[graph_id.into()],
-        )
-        .expect("locking the graph count failed");
-        Spi::connect_mut(|c| {
+        let found = Spi::connect_mut(|c| {
             let t = c
                 .update(
-                    "WITH w AS (SELECT pg_snapshot_xmin(pg_current_snapshot()) AS w), \
-                          gone AS (DELETE FROM pgrdf._pgrdf_graph_count_deltas \
-                                    WHERE graph_id = $1 RETURNING 1), \
-                          n AS (SELECT count(*) FILTER (WHERE NOT is_inferred) AS a, \
-                                       count(*) FILTER (WHERE is_inferred) AS i \
-                                  FROM pgrdf._pgrdf_quads WHERE graph_id = $1) \
-                     UPDATE pgrdf._pgrdf_graph_counts c \
-                        SET asserted = n.a, inferred = n.i, \
-                            change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1, \
-                            scanned_at = clock_timestamp(), bypassed = false, \
-                            folded_below = greatest(c.folded_below, w.w) \
-                       FROM n, w WHERE c.graph_id = $1 \
-                     RETURNING c.asserted, c.inferred",
+                    &format!(
+                        "WITH gone AS (DELETE FROM pgrdf._pgrdf_graph_count_deltas \
+                                        WHERE graph_id = $1 RETURNING 1), \
+                              n AS (SELECT count(*) FILTER (WHERE NOT is_inferred) AS a, \
+                                           count(*) FILTER (WHERE is_inferred) AS i \
+                                      FROM pgrdf._pgrdf_quads WHERE graph_id = $1) \
+                         UPDATE pgrdf._pgrdf_graph_counts c \
+                            SET asserted = n.a, inferred = n.i, \
+                                change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1, \
+                                {SCAN_STAMP} \
+                           FROM n WHERE c.graph_id = $1 \
+                         RETURNING c.asserted, c.inferred"
+                    ),
                     None,
                     &[graph_id.into()],
                 )
@@ -441,7 +505,9 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
                 row.get::<i64>(1).unwrap().unwrap_or(0),
                 row.get::<i64>(2).unwrap().unwrap_or(0),
             )
-        })
+        });
+        forget_spent_bypasses();
+        found
     })
 }
 
@@ -453,8 +519,11 @@ pub(crate) fn created(graph_id: i64) {
     }
     as_storage_owner(|| {
         Spi::run_with_args(
-            "INSERT INTO pgrdf._pgrdf_graph_counts (graph_id, scanned_at, folded_below) \
-             VALUES ($1, clock_timestamp(), pg_snapshot_xmin(pg_current_snapshot())) \
+            "INSERT INTO pgrdf._pgrdf_graph_counts \
+                    (graph_id, scanned_at, scan_snapshot, scan_xact, scan_mark, folded_below) \
+             VALUES ($1, clock_timestamp(), pg_current_snapshot(), pg_current_xact_id(), \
+                     nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
+                     pg_snapshot_xmin(pg_current_snapshot())) \
              ON CONFLICT (graph_id) DO NOTHING",
             &[graph_id.into()],
         )
@@ -469,22 +538,23 @@ pub(crate) fn dropped(graph_id: i64) {
     }
     TALLY.with(|t| t.borrow_mut().1.remove(&graph_id));
     as_storage_owner(|| {
-        Spi::run_with_args(
-            "DELETE FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = $1",
-            &[graph_id.into()],
-        )
-        .expect("dropping the graph count deltas failed");
-        Spi::run_with_args(
-            "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $1",
-            &[graph_id.into()],
-        )
-        .expect("dropping the graph count failed");
+        for table in [
+            "_pgrdf_graph_count_deltas",
+            "_pgrdf_graph_count_bypass",
+            "_pgrdf_graph_counts",
+        ] {
+            Spi::run_with_args(
+                &format!("DELETE FROM pgrdf.{table} WHERE graph_id = $1"),
+                &[graph_id.into()],
+            )
+            .expect("dropping the graph count failed");
+        }
     });
 }
 
-/// Every row of a graph was removed in one act (TRUNCATE, or a partition
-/// replaced by a new one holding `asserted` rows): the count is known
-/// without a scan, and whatever deltas describe the old rows go.
+/// Every row of a graph was replaced in one act (a TRUNCATE, or a
+/// partition swapped for a new one holding `asserted` rows): the count is
+/// known without a scan, and whatever deltas describe the old rows go.
 pub(crate) fn replaced(graph_id: i64, asserted: i64, inferred: i64) {
     if !present() {
         return;
@@ -498,23 +568,19 @@ pub(crate) fn replaced(graph_id: i64, asserted: i64, inferred: i64) {
         )
         .expect("opening the graph count failed");
         Spi::run_with_args(
-            "SELECT 1 FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $1 FOR UPDATE",
-            &[graph_id.into()],
-        )
-        .expect("locking the graph count failed");
-        Spi::run_with_args(
-            "WITH w AS (SELECT pg_snapshot_xmin(pg_current_snapshot()) AS w), \
-                  gone AS (DELETE FROM pgrdf._pgrdf_graph_count_deltas \
-                            WHERE graph_id = $1 RETURNING 1) \
-             UPDATE pgrdf._pgrdf_graph_counts c \
-                SET asserted = $2, inferred = $3, \
-                    change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1, \
-                    scanned_at = clock_timestamp(), bypassed = false, \
-                    folded_below = greatest(c.folded_below, w.w) \
-               FROM w WHERE c.graph_id = $1",
+            &format!(
+                "WITH gone AS (DELETE FROM pgrdf._pgrdf_graph_count_deltas \
+                                WHERE graph_id = $1 RETURNING 1) \
+                 UPDATE pgrdf._pgrdf_graph_counts c \
+                    SET asserted = $2, inferred = $3, \
+                        change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1, \
+                        {SCAN_STAMP} \
+                  WHERE c.graph_id = $1"
+            ),
             &[graph_id.into(), asserted.into(), inferred.into()],
         )
         .expect("resetting the graph count failed");
+        forget_spent_bypasses();
     });
 }
 

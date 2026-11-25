@@ -29,6 +29,22 @@ fn put_quad(s: i64, p: i64, o: i64, g: default!(i64, 0)) {
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 fn count_quads(g: default!(i64, 0)) -> i64 {
+    // 0.6.42: a caller who may read the quad table gets the count the
+    // engine keeps, when that count is verified. Anyone else, and any
+    // graph whose count is not verified, is answered by the scan below,
+    // which raises what it always raised for a role without SELECT.
+    let may_read = Spi::get_one::<bool>(
+        "SELECT pg_catalog.has_table_privilege('pgrdf._pgrdf_quads', 'SELECT')",
+    )
+    .expect("count_quads: privilege lookup failed")
+    .unwrap_or(false);
+    if may_read {
+        if let Some(stored) = crate::storage::counts::stored(g) {
+            if stored.verified {
+                return stored.asserted + stored.inferred;
+            }
+        }
+    }
     // `SELECT count(*)` always returns exactly one row, so we don't
     // need the scalar-subquery trick `get_term` uses.
     Spi::get_one_with_args::<i64>(
