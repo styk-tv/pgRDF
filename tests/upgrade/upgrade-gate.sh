@@ -51,6 +51,10 @@ q $UP -q -c "SELECT pgrdf.materialize(pgrdf.graph_id('urn:ug:kept'), 'rdfs')" >/
 q $UP -q -c "SELECT pgrdf.add_graph('urn:ug:empty')" >/dev/null
 q $UP -q -c "SELECT pgrdf.parse_turtle('<urn:ug:s> <urn:ug:p> \"old\" .', pgrdf.add_graph('urn:ug:old'))" >/dev/null
 q $UP -q -c "UPDATE pgrdf._pgrdf_graphs SET owner = NULL WHERE iri = 'urn:ug:old'"
+# A registered graph without a partition of its own: a registry row written
+# in plain SQL. Its rows live in the default partition.
+q $UP -q -c "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri, owner) VALUES (777001, 'urn:ug:nopart', current_user)" \
+         -c "SELECT pgrdf.put_quad(1, 2, 3, 777001)"
 kept_before=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")
 kept_structure=$(q $UP -c "SELECT pgrdf.structural_digest(pgrdf.graph_id('urn:ug:kept'))")
 scanned="SELECT string_agg(graph_id || ':' || a || '+' || i, ' ' ORDER BY graph_id)
@@ -107,6 +111,16 @@ blocking=$(q $UP -c "SELECT count(*) FROM pgrdf.ownership_drift() WHERE blocking
 count_owners=$(q $UP -c "SELECT string_agg(DISTINCT relowner::regrole::text, ',') FROM pg_class WHERE relnamespace = 'pgrdf'::regnamespace AND relname LIKE '\\_pgrdf\\_graph\\_count%' AND relkind IN ('r', 'S')")
 [ "$count_owners" = "$STORE" ] || fail "the count tables are owned by '$count_owners', expected $STORE"
 ok "updated to $CUR; the count tables are owned by $STORE; no blocking drift"
+
+# 4a. The writers keep a count for an id that has a partition of its own.
+#     The registered graph without one must not come out of the upgrade
+#     with a count called verified: its next write records nothing, and
+#     the stored number would then be wrong and say it is right.
+q $UP -q -c "SELECT pgrdf.put_quad(1, 2, 4, 777001)"
+np=$(q $UP -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory(777001)")
+[ "$np" = "2 false" ] || fail "a registered graph without a partition of its own reads '$np' after the upgrade and one more write, expected '2 false'"
+q $UP -q -c "DELETE FROM pgrdf._pgrdf_graphs WHERE graph_id = 777001" -c "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = 777001"
+ok "a registered graph without a partition of its own is counted by scan and never called verified (2 rows, one written after the upgrade)"
 
 # 4b. Every graph was counted by the upgrade: verified, and equal to a scan.
 truth="SELECT count(*) FROM pgrdf.graph_inventory() i

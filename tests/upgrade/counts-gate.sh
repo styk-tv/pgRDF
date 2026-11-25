@@ -9,8 +9,10 @@
 #      from four at once.
 #   A3. Writes into a graph id that was never registered leave no count
 #      row behind.
-#   A4. A graph without its count row (the state a restore leaves) keeps
-#      few deltas, reads exact, and is verified by one recount.
+#   A4. A graph whose count row no scan has set (the state a restore
+#      leaves) keeps few deltas, reads exact, and is verified by one recount.
+#   A5. Two transactions folding two graphs without a count row in
+#      opposite order neither wait nor deadlock.
 #   B. Several sessions writing one graph at once: no writer waits on a
 #      count, nothing deadlocks, and the count is exact.
 #   C. A write in plain SQL that commits after a recount scanned the graph
@@ -175,22 +177,50 @@ stray=$(q -c "SELECT (SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE
 true_or_fail "after writes into an unregistered id (the default graph shares its partition)"
 ok "500 committed writes into an id that was never registered are stored, counted by scan, and leave no count row behind"
 
-# ── A4. A graph without its count row (#180) ────────────────────────────
-# Every graph is in this state after a restore, until its recount. Its
-# writes must not pile up as deltas nobody folds: the first fold opens the
-# row, unverified, and the recount then sets it.
+# ── A4. A graph whose count row no scan has set (#180) ─────────────────
+# Every graph is in this state after a restore, until its recount: the
+# registry opened its count row when the restore filled the registry. Its
+# writes fold into that row and do not pile up; it reads exact and
+# unverified; one recount verifies it.
 gz=$(q -c "SELECT pgrdf.add_graph('urn:cg:norow')")
-q -q -c "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $gz"
+q -q -c "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $gz" \
+     -c "INSERT INTO pgrdf._pgrdf_graph_counts (graph_id) VALUES ($gz)"
 writes "$gz" 1 3000
 zpending=$(q -c "SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = $gz")
-[ "$zpending" -lt 1000 ] || fail "$zpending deltas wait for a graph without a count row after 3000 writes: nothing folds them"
+[ "$zpending" -lt 1000 ] || fail "$zpending deltas wait for a graph whose count row no scan has set, after 3000 writes: nothing folds them"
 state=$(q -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($gz)")
-[ "$state" = "3000 false" ] || fail "a graph without a count row reads '$state', expected '3000 false'"
+[ "$state" = "3000 false" ] || fail "a graph whose count row no scan has set reads '$state', expected '3000 false'"
 q -q -c "SELECT pgrdf.recount_graph($gz)" > /dev/null
 state=$(q -c "SELECT asserted || ' ' || counts_verified || ' ' || (SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = $gz) FROM pgrdf.graph_inventory($gz)")
 [ "$state" = "3000 true 0" ] || fail "after its recount the graph reads '$state', expected '3000 true 0'"
-true_or_fail "after the recount of a graph that had no count row"
-ok "a graph without its count row (the state a restore leaves): 3000 committed writes left $zpending deltas, read exact and unverified, and one recount verified it"
+true_or_fail "after the recount of a graph whose count row no scan had set"
+ok "a graph whose count row no scan has set (the state a restore leaves): 3000 committed writes left $zpending deltas, read exact and unverified, and one recount verified it"
+
+# ── A5. Two writers, two graphs without any count row, opposite order ───
+# A fold must never open a count row. A writer that inserted one would
+# hold it until it commits, the next writer of that graph would wait for
+# it, and two transactions taking two such graphs in opposite order would
+# deadlock. (Seen on the build where a fold opened the row: 40P01.)
+g1=$(q -c "SELECT pgrdf.add_graph('urn:cg:rowless:1')")
+g2=$(q -c "SELECT pgrdf.add_graph('urn:cg:rowless:2')")
+writes "$g1" 1 3
+writes "$g2" 1 3
+q -q -c "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id IN ($g1, $g2)"
+both_idle="SELECT count(*) = 2 FROM pg_stat_activity WHERE state = 'idle in transaction' AND datname = '$DB'"
+hold "BEGIN; SELECT pgrdf._fold_counts($g1);"
+hold2 "BEGIN; SELECT pgrdf._fold_counts($g2);"
+until_true "$both_idle"
+say "SELECT pgrdf._fold_counts($g2);"
+sleep 0.5
+[ "$(q -c "$both_idle")" = "t" ] || fail "a writer's fold of a graph without a count row waits on another writer's fold of it"
+say2 "SELECT pgrdf._fold_counts($g1);"
+say "COMMIT;"
+say2 "COMMIT;"
+release
+release2
+q -q -c "SELECT pgrdf.recount_graph($g1)" -c "SELECT pgrdf.recount_graph($g2)" > /dev/null
+true_or_fail "after two writers folded two rowless graphs in opposite order"
+ok "two transactions folding two graphs without a count row in opposite order: neither waited, neither failed"
 
 # ── B. Four sessions, one graph ─────────────────────────────────────────
 gb=$(q -c "SELECT pgrdf.add_graph('urn:cg:b')")
@@ -385,7 +415,9 @@ ok "after $CHURN committed writes while a reader held its snapshot (median, p95 
 hold "BEGIN; SELECT pg_current_xact_id();"
 until_true "SELECT count(*) > 0 FROM pg_stat_activity WHERE state = 'idle in transaction' AND datname = '$DB'"
 writes "$ga" 2000001 "$CHURN"
+new_terms 5000001 "$CHURN"
 waiting=$(q -c "SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = $ga")
+twaiting=$(q -c "SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = -1")
 # With statistics that say every waiting delta belongs to one graph, which
 # is what autovacuum's analyze leaves here sooner or later: a plan that
 # scans the whole delta table once per graph is 50 times slower than the
@@ -393,15 +425,26 @@ waiting=$(q -c "SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph
 q -q -c "ANALYZE pgrdf._pgrdf_graph_count_deltas, pgrdf._pgrdf_graph_counts" > /dev/null
 x_inv=$(under "graph_inventory() with $waiting deltas held back by an open transaction" "$inventory" 25)
 x_one=$(under "graph_inventory(graph_id) with $waiting deltas held back by an open transaction" "$one_row" 25)
+# The dictionary has one key for the whole database, so every call that
+# adds a term anywhere waits in the range of this one read.
+x_tot=$(under "graph_totals() with $twaiting term deltas held back by an open transaction" "SELECT count(*) FROM pgrdf.graph_totals()" 25)
+x_terms=$(under "count_terms() with $twaiting term deltas held back by an open transaction" "SELECT pgrdf.count_terms()" 25)
 true_or_fail "while an open transaction holds the deltas back"
+terms_or_fail "while an open transaction holds the deltas back"
 say "COMMIT;"
 release
 folded=$(q -c "SELECT pgrdf._fold_counts($ga)")
 [ "$folded" -gt 0 ] || fail "nothing folded after the open transaction ended ($waiting deltas were waiting)"
 q -q -c "VACUUM pgrdf._pgrdf_graph_count_deltas, pgrdf._pgrdf_graph_counts" > /dev/null
+tfolded=$(q -c "SELECT pgrdf._fold_counts(-1)")
+[ "$tfolded" -gt 0 ] || fail "no term delta folded after the open transaction ended ($twaiting were waiting)"
+q -q -c "VACUUM pgrdf._pgrdf_graph_count_deltas, pgrdf._pgrdf_graph_counts" > /dev/null
+r_tot=$(under "graph_totals() after the open transaction ended" "SELECT count(*) FROM pgrdf.graph_totals()" 5)
+r_terms=$(under "count_terms() after the open transaction ended" "SELECT pgrdf.count_terms()" 1)
+terms_or_fail "at the end of the gate"
 r_inv=$(under "graph_inventory() after the open transaction ended" "$inventory" 5)
 r_one=$(under "graph_inventory(graph_id) after the open transaction ended" "$one_row" 1)
 true_or_fail "at the end of the gate"
-ok "with $waiting deltas held back by an idle transaction that holds an xid (median, p95 ms): graph_inventory() $x_inv, one graph $x_one, exact throughout; after it ended: $r_inv and $r_one"
+ok "with $waiting deltas of one graph and $twaiting of the dictionary held back by an idle transaction that holds an xid (median, p95 ms): graph_inventory() $x_inv, one graph $x_one, graph_totals() $x_tot, count_terms() $x_terms, exact throughout; after it ended: $r_inv, $r_one, $r_tot and $r_terms"
 
 echo "counts gate: passed"
