@@ -25,6 +25,7 @@ pub mod activity;
 pub mod acts;
 pub mod canon;
 pub mod construct_ingest;
+pub mod counts;
 pub mod dict;
 pub mod diff;
 pub mod export;

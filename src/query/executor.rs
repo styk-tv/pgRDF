@@ -7600,6 +7600,8 @@ fn execute_update(text: &str, update: &Update) -> Vec<pgrx::JsonB> {
     acquire_partition_ddl_gate();
     let start = std::time::Instant::now();
     UPDATE_TALLY.with(|t| t.borrow_mut().clear());
+    // 0.6.42: one count delta per graph for the whole operation.
+    let _counts = crate::storage::counts::Tally::open();
     let mut triples_inserted: i64 = 0;
     let mut triples_deleted: i64 = 0;
     let mut graphs_touched: HashSet<i64> = HashSet::new();
@@ -7690,19 +7692,7 @@ fn execute_update(text: &str, update: &Update) -> Vec<pgrx::JsonB> {
                         touch_written_graph(&mut graphs_touched, g_id);
                         continue;
                     };
-                    let n: i64 = Spi::get_one_with_args(
-                        "WITH d AS (
-                            DELETE FROM pgrdf._pgrdf_quads
-                             WHERE subject_id   = $1
-                               AND predicate_id = $2
-                               AND object_id    = $3
-                               AND graph_id     = $4
-                           RETURNING 1)
-                         SELECT count(*)::bigint FROM d",
-                        &[s.into(), p.into(), o.into(), g_id.into()],
-                    )
-                    .unwrap_or_else(|e| panic!("sparql: UPDATE: DELETE quad failed: {e}"))
-                    .unwrap_or(0);
+                    let n: i64 = crate::storage::quads::delete_row(g_id, s, p, o);
                     triples_deleted += n;
                     tally_update(g_id, 0, n);
                     touch_written_graph(&mut graphs_touched, g_id);
@@ -8231,15 +8221,7 @@ fn clear_graph_by_id(id: i64) -> i64 {
 /// otherwise), so the operation always empties the default-graph
 /// contents per W3C §3.1.3.
 fn clear_default_graph_rows() -> i64 {
-    Spi::get_one(
-        "WITH d AS (
-            DELETE FROM pgrdf._pgrdf_quads
-             WHERE graph_id = 0
-           RETURNING 1)
-         SELECT count(*)::bigint FROM d",
-    )
-    .unwrap_or_else(|e| panic!("sparql: UPDATE: CLEAR/DROP DEFAULT failed: {e}"))
-    .unwrap_or(0)
+    crate::storage::quads::delete_graph_rows(0, false)
 }
 
 /// `pgrdf.drop_graph(id, true)` SPI thunk; cascade defaults to TRUE
@@ -8998,19 +8980,7 @@ fn execute_delete_where(
                 else {
                     continue;
                 };
-                let n: i64 = Spi::get_one_with_args(
-                    "WITH d AS (
-                        DELETE FROM pgrdf._pgrdf_quads
-                         WHERE subject_id   = $1
-                           AND predicate_id = $2
-                           AND object_id    = $3
-                           AND graph_id     = $4
-                       RETURNING 1)
-                     SELECT count(*)::bigint FROM d",
-                    &[s_id.into(), p_id.into(), o_id.into(), g_id.into()],
-                )
-                .unwrap_or_else(|e| panic!("sparql: DELETE WHERE: per-row DELETE failed: {e}"))
-                .unwrap_or(0);
+                let n: i64 = crate::storage::quads::delete_row(g_id, s_id, p_id, o_id);
                 triples_deleted += n;
                 tally_update(g_id, 0, n);
                 // Always record the graph — operator intent matches
@@ -9341,21 +9311,7 @@ fn execute_delete_insert_where(
                 else {
                     continue;
                 };
-                let n: i64 = Spi::get_one_with_args(
-                    "WITH d AS (
-                        DELETE FROM pgrdf._pgrdf_quads
-                         WHERE subject_id   = $1
-                           AND predicate_id = $2
-                           AND object_id    = $3
-                           AND graph_id     = $4
-                       RETURNING 1)
-                     SELECT count(*)::bigint FROM d",
-                    &[s_id.into(), p_id.into(), o_id.into(), g_id.into()],
-                )
-                .unwrap_or_else(|e| {
-                    panic!("sparql: DELETE/INSERT WHERE: per-row DELETE failed: {e}")
-                })
-                .unwrap_or(0);
+                let n: i64 = crate::storage::quads::delete_row(g_id, s_id, p_id, o_id);
                 triples_deleted += n;
                 tally_update(g_id, 0, n);
                 touch_written_graph(&mut graphs_touched, g_id);

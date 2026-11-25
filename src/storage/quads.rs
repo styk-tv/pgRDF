@@ -128,10 +128,13 @@ pub(crate) fn set_enforced(graph_id: i64) -> bool {
 /// The caller decides who runs it (index DDL needs the table's owner).
 pub(crate) fn build_set_index(graph_id: i64, dedup: bool) -> i64 {
     let part = partition_of(graph_id);
-    Spi::get_one_with_args::<i64>(
-        "SELECT pgrdf._set_index(pg_catalog.format('pgrdf.%I', $1::text)::regclass, $2)",
-        &[part.as_str().into(), dedup.into()],
-    )
+    // The dedup inside deletes rows of the partition: an engine write.
+    crate::storage::counts::engine_write(|| {
+        Spi::get_one_with_args::<i64>(
+            "SELECT pgrdf._set_index(pg_catalog.format('pgrdf.%I', $1::text)::regclass, $2)",
+            &[part.as_str().into(), dedup.into()],
+        )
+    })
     .expect("building the set index failed")
     .unwrap_or(0)
 }
@@ -250,6 +253,8 @@ fn run_batch(
         if let Some(inferred) = inferred {
             datums.push(unsafe { DatumWithOid::new(inferred, boolean) });
         }
+        // The engine is writing: the count bypass marker stands down.
+        let _writing = crate::storage::counts::Writing::begin();
         plan_cache::with_plan(sql, |plan| {
             let plan = plan.expect("quad write: plan must be cached after insert");
             client
@@ -278,6 +283,7 @@ pub(crate) fn insert_batch(
     }
     if mode == Mode::Plain {
         let stored = run_batch(INSERT_PLAIN, s, p, o, graph_id, Some(false));
+        crate::storage::counts::gained(graph_id, stored, 0);
         return Written {
             stored,
             made_asserted: 0,
@@ -296,6 +302,8 @@ pub(crate) fn insert_batch(
     } else {
         0
     };
+    // A promoted row leaves the inferred count and joins the asserted one.
+    crate::storage::counts::gained(graph_id, stored + made_asserted, -made_asserted);
     Written {
         stored,
         made_asserted,
@@ -326,15 +334,18 @@ pub(crate) fn insert_inferred_batch(
         Mode::Unenforced => INSERT_UNENFORCED,
         Mode::Plain => INSERT_PLAIN,
     };
-    run_batch(sql, s, p, o, graph_id, Some(true))
+    let stored = run_batch(sql, s, p, o, graph_id, Some(true));
+    crate::storage::counts::gained(graph_id, 0, stored);
+    stored
 }
 
 /// Store one asserted triple (SPARQL UPDATE, JSON ingest, `put_quad`).
 /// The existence check makes it correct on a partition without the unique
 /// index too; `ON CONFLICT` settles a race on one that has it.
 pub(crate) fn insert_row(graph_id: i64, s: i64, p: i64, o: i64) -> Written {
-    let stored: i64 = Spi::get_one_with_args(
-        "WITH ins AS ( \
+    let stored: i64 = crate::storage::counts::engine_write(|| {
+        Spi::get_one_with_args(
+            "WITH ins AS ( \
            INSERT INTO pgrdf._pgrdf_quads \
                  (subject_id, predicate_id, object_id, graph_id, is_inferred) \
            SELECT $1, $2, $3, $4, false \
@@ -345,8 +356,9 @@ pub(crate) fn insert_row(graph_id: i64, s: i64, p: i64, o: i64) -> Written {
            ON CONFLICT DO NOTHING \
            RETURNING 1) \
          SELECT count(*)::bigint FROM ins",
-        &[s.into(), p.into(), o.into(), graph_id.into()],
-    )
+            &[s.into(), p.into(), o.into(), graph_id.into()],
+        )
+    })
     .expect("quad write failed")
     .unwrap_or(0);
     let made_asserted = if stored == 0 {
@@ -354,10 +366,52 @@ pub(crate) fn insert_row(graph_id: i64, s: i64, p: i64, o: i64) -> Written {
     } else {
         0
     };
+    crate::storage::counts::gained(graph_id, stored + made_asserted, -made_asserted);
     Written {
         stored,
         made_asserted,
     }
+}
+
+/// Remove one triple from `graph_id` (SPARQL DELETE). Returns the rows
+/// removed: none or one, or more on a partition that still holds repeats.
+pub(crate) fn delete_row(graph_id: i64, s: i64, p: i64, o: i64) -> i64 {
+    let (asserted, inferred) = crate::storage::counts::engine_write(|| {
+        Spi::get_two_with_args::<i64, i64>(
+            "WITH d AS ( \
+               DELETE FROM pgrdf._pgrdf_quads \
+                WHERE subject_id = $1 AND predicate_id = $2 \
+                  AND object_id = $3 AND graph_id = $4 \
+               RETURNING is_inferred) \
+             SELECT count(*) FILTER (WHERE NOT is_inferred)::bigint, \
+                    count(*) FILTER (WHERE is_inferred)::bigint FROM d",
+            &[s.into(), p.into(), o.into(), graph_id.into()],
+        )
+    })
+    .unwrap_or_else(|e| panic!("quad delete failed: {e}"));
+    let (asserted, inferred) = (asserted.unwrap_or(0), inferred.unwrap_or(0));
+    crate::storage::counts::gained(graph_id, -asserted, -inferred);
+    asserted + inferred
+}
+
+/// Remove the rows of `graph_id` with a DELETE: all of them, or only the
+/// inferred ones. Returns the rows removed.
+pub(crate) fn delete_graph_rows(graph_id: i64, only_inferred: bool) -> i64 {
+    let (asserted, inferred) = crate::storage::counts::engine_write(|| {
+        Spi::get_two_with_args::<i64, i64>(
+            "WITH d AS ( \
+               DELETE FROM pgrdf._pgrdf_quads \
+                WHERE graph_id = $1 AND (is_inferred OR NOT $2) \
+               RETURNING is_inferred) \
+             SELECT count(*) FILTER (WHERE NOT is_inferred)::bigint, \
+                    count(*) FILTER (WHERE is_inferred)::bigint FROM d",
+            &[graph_id.into(), only_inferred.into()],
+        )
+    })
+    .unwrap_or_else(|e| panic!("graph delete failed: {e}"));
+    let (asserted, inferred) = (asserted.unwrap_or(0), inferred.unwrap_or(0));
+    crate::storage::counts::gained(graph_id, -asserted, -inferred);
+    asserted + inferred
 }
 
 /// One row of [`duplicate_report`].
@@ -604,6 +658,11 @@ fn dedup_graph(graph_id: i64) -> i64 {
     let removed =
         crate::storage::partition::as_storage_owner(|| build_set_index(graph_id, true)).max(0);
     let asserted_removed = if removed > 0 { before - asserted() } else { 0 };
+    if removed > 0 {
+        // 0.6.42: the dedup removed rows it does not split by side; it
+        // read the whole partition already, so the count is set by scan.
+        crate::storage::counts::set_by_scan(graph_id);
+    }
     if asserted_removed > 0 {
         // The materialization was stamped with a row count; the set it was
         // computed over has not changed, so the stamp follows the count.
@@ -766,6 +825,10 @@ mod tests {
                         rows(g),
                         repeated(g)
                     ));
+                }
+                // 0.6.42: and the stored count is verified and true.
+                if let Err(e) = crate::storage::counts::testing::truth(g) {
+                    wrong.push(format!("{name}, call {round}: {e}"));
                 }
             }
         }

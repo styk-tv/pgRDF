@@ -168,6 +168,9 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
              (subject_id, predicate_id, object_id) INCLUDE (is_inferred)"
         ))
         .expect("create_quads_partition: unique index failed");
+        // 0.6.42: a write to this partition that does not come through the
+        // engine's writer marks the graph's stored count unverified.
+        crate::storage::counts::guard_partition(part_name, graph_id);
         // (6) Replicate the parent's ACL onto the new partition.
         inherit_parent_acl(part_name);
         // (7) #150: advance the graph-id sequence past this id, so an id
@@ -186,6 +189,8 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
         )
         .expect("create_quads_partition: advancing the graph-id sequence failed");
     });
+    // 0.6.42: the new graph is empty, and its count says so.
+    crate::storage::counts::created(graph_id);
 }
 
 /// Does `pgrdf._pgrdf_graph_id_seq` exist? It arrives with the 0.6.39 SQL;

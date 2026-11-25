@@ -328,6 +328,9 @@ pub(crate) struct ActScope {
     act: &'static str,
     identity: Identity,
     outermost: bool,
+    /// 0.6.42: one act, one count delta per graph it changed. Written
+    /// when the scope closes; nothing is written when it unwinds.
+    _counts: crate::storage::counts::Tally,
 }
 
 /// Enter `act` on `graph_id`: read who is acting, and list this backend
@@ -352,6 +355,7 @@ pub(crate) fn begin(graph_id: i64, act: &'static str) -> ActScope {
         act,
         identity,
         outermost,
+        _counts: crate::storage::counts::Tally::open(),
     }
 }
 
