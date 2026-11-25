@@ -16,9 +16,9 @@ cannot fall behind on.
 
 Measured on one database of 71 graphs and 62.4M triples with 0.6.41:
 `graph_inventory()` took 2.2 to 3.4 s, and one graph's row cost the same. With
-0.6.42, at 52 graphs and 10M triples: the full listing 1.8 ms, one graph's row
-0.4 ms, the act feed 0.1 ms; the listing took 1.7 ms before the triples were
-loaded, and 1.9 ms after 100,000 further writes made while another session
+0.6.42, at 53 graphs and 10M triples: the full listing 1.4 ms, one graph's row
+0.1 ms, the act feed 0.1 ms; the listing took 1.3 ms before the triples were
+loaded, and 1.5 ms after 100,000 further writes made while another session
 held a snapshot open.
 
 ### Changed
@@ -124,7 +124,7 @@ held a snapshot open.
   transaction id. While one such transaction stays open, writes committed
   after it began stay in the read path of the graphs they touched: measured,
   100,000 single-row writes behind one idle open transaction raise the
-  listing from 1.8 ms to about 9 ms, exact throughout, and it returns to 1.8
+  listing from 1.4 ms to about 9 ms, exact throughout, and it returns to 1.4
   ms when that transaction ends. The same transaction holds back
   `graph_act_feed`'s cursor.
 
