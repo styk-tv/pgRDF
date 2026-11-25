@@ -38,12 +38,11 @@ fn count_quads(g: default!(i64, 0)) -> i64 {
     )
     .expect("count_quads: privilege lookup failed")
     .unwrap_or(false);
-    if may_read {
-        if let Some(stored) = crate::storage::counts::stored(g) {
-            if stored.verified {
-                return stored.asserted + stored.inferred;
-            }
-        }
+    if may_read
+        && let Some(stored) = crate::storage::counts::stored(g)
+        && stored.verified
+    {
+        return stored.asserted + stored.inferred;
     }
     // `SELECT count(*)` always returns exactly one row, so we don't
     // need the scalar-subquery trick `get_term` uses.

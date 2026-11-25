@@ -116,11 +116,14 @@ SELECT graph_id, pg_catalog.clock_timestamp(), pg_catalog.pg_current_snapshot(),
     ],
 );
 
+/// What each graph gained in one engine call: asserted, inferred.
+type Gains = BTreeMap<i64, (i64, i64)>;
+
 thread_local! {
     /// How many engine quad statements are running in this backend.
     static WRITING: Cell<u32> = const { Cell::new(0) };
     /// The open tally: nesting depth and what each graph gained.
-    static TALLY: RefCell<(u32, BTreeMap<i64, (i64, i64)>)> =
+    static TALLY: RefCell<(u32, Gains)> =
         const { RefCell::new((0, BTreeMap::new())) };
     /// State of the fold dice.
     static DICE: Cell<u64> = const { Cell::new(0) };
@@ -311,7 +314,7 @@ pub(crate) fn maybe_fold(graph_id: i64) {
         d.set(x);
         x
     });
-    if roll % FOLD_ONE_IN != 0 {
+    if !roll.is_multiple_of(FOLD_ONE_IN) {
         return;
     }
     let read_committed =
@@ -389,10 +392,9 @@ pub(crate) const BYPASS_APPLIES: &str = "(b.graph_id = c.graph_id OR b.graph_id 
 /// inferred, change_seq, verified, scanned_at. For a FROM list that has
 /// `pgrdf._pgrdf_graph_counts c`.
 pub(crate) fn read_columns() -> String {
-    format!(
-        "c.asserted + d.a, c.inferred + d.i, c.change_seq + d.n + y.n, \
-         c.scanned_at IS NOT NULL AND y.n = 0, c.scanned_at"
-    )
+    "c.asserted + d.a, c.inferred + d.i, c.change_seq + d.n + y.n, \
+     c.scanned_at IS NOT NULL AND y.n = 0, c.scanned_at"
+        .to_string()
 }
 
 /// The two lateral subqueries [`read_columns`] stands on.
