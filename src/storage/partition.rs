@@ -1042,6 +1042,7 @@ mod tests {
             "can_drop_graphs",
             "construct",
             "count_quads",
+            "count_terms",
             "describe",
             "duplicate_report",
             "export_graph",
@@ -1077,6 +1078,9 @@ mod tests {
             "load_turtle_staged_run",
             "shmem_reset",
             "stats",
+            // The dictionary belongs to the database: recounting it is the
+            // storage owner's (#178).
+            "recount_terms",
         ];
 
         crate::storage::partition::acquire_partition_ddl_gate();

@@ -7,8 +7,23 @@
 //! shmem with the committed id), then INSERT (stage the new id for
 //! shmem publication on commit).
 
+use crate::storage::counts;
 use crate::storage::shmem_cache;
 use pgrx::prelude::*;
+
+const TERM_INSERT: &str = "INSERT INTO pgrdf._pgrdf_dictionary \
+        (term_type, lexical_value, datatype_iri_id, language_tag) \
+     VALUES ($1, $2, $3, $4) RETURNING id";
+
+/// [`TERM_INSERT`] with the dictionary's count delta in the same
+/// statement: a term added outside any act pays for one statement.
+const TERM_INSERT_COUNTED: &str = "WITH ins AS ( \
+       INSERT INTO pgrdf._pgrdf_dictionary \
+              (term_type, lexical_value, datatype_iri_id, language_tag) \
+       VALUES ($1, $2, $3, $4) RETURNING id), \
+     d AS (INSERT INTO pgrdf._pgrdf_graph_count_deltas (graph_id, d_asserted, d_inferred) \
+           SELECT -1, 1, 0 FROM ins) \
+     SELECT id FROM ins";
 
 /// Term-type discriminator. Matches `_pgrdf_dictionary.term_type` (SMALLINT)
 /// in [`sql/schema_v0_2_0.sql`].
@@ -103,19 +118,33 @@ pub(crate) fn put_term_full(
         shmem_cache::stage_for_commit(term_type, value, datatype_id, language, id);
         return id;
     }
-    let id: i64 = Spi::get_one_with_args(
-        "INSERT INTO pgrdf._pgrdf_dictionary
-            (term_type, lexical_value, datatype_iri_id, language_tag)
-         VALUES ($1, $2, $3, $4) RETURNING id",
-        &[
-            term_type.into(),
-            value.into(),
-            datatype_id.into(),
-            language.into(),
-        ],
-    )
+    // 0.6.42 (#178): the engine keeps the number of terms. Inside an act
+    // the call's tally gathers the new term and one delta is written when
+    // the act ends; outside one (`put_term`) the delta rides in the
+    // INSERT's own statement.
+    let own_delta = !counts::tally_open() && counts::present();
+    let id: i64 = counts::engine_write(|| {
+        Spi::get_one_with_args(
+            if own_delta {
+                TERM_INSERT_COUNTED
+            } else {
+                TERM_INSERT
+            },
+            &[
+                term_type.into(),
+                value.into(),
+                datatype_id.into(),
+                language.into(),
+            ],
+        )
+    })
     .expect("put_term_full: insert failed")
     .expect("put_term_full: INSERT … RETURNING returned no row");
+    if own_delta {
+        counts::maybe_fold(counts::DICTIONARY);
+    } else {
+        counts::gained(counts::DICTIONARY, 1, 0);
+    }
     // INSERT path: row is still in-flight. Stage the mapping for
     // shmem publication on COMMIT — on ABORT it is silently dropped
     // so we never publish ids that don't survive in the table.
@@ -230,27 +259,36 @@ pub(crate) fn put_terms_batch(terms: &[(i16, String, Option<i64>, Option<String>
     // corruption of issue #8 was a SEPARATE bug (the staged DICT
     // phase skipping the empty-dict precondition its siblings
     // enforce), fixed in `loader::staged_load_default`, not here.
-    Spi::run_with_args(
-        "INSERT INTO pgrdf._pgrdf_dictionary
-             (term_type, lexical_value, datatype_iri_id, language_tag)
-         SELECT t.tt, t.lv, t.di, t.lt
-         FROM unnest($1::int2[], $2::text[], $3::int8[], $4::text[])
-              AS t(tt, lv, di, lt)
-         WHERE NOT EXISTS (
-             SELECT 1 FROM pgrdf._pgrdf_dictionary d
-              WHERE d.term_type = t.tt
-                AND d.lexical_value = t.lv
-                AND d.datatype_iri_id IS NOT DISTINCT FROM t.di
-                AND d.language_tag    IS NOT DISTINCT FROM t.lt
-         )",
-        &[
-            term_types.clone().into(),
-            lexicals.clone().into(),
-            datatypes.clone().into(),
-            languages.clone().into(),
-        ],
-    )
-    .expect("put_terms_batch: insert failed");
+    let added = counts::engine_write(|| {
+        Spi::connect_mut(|client| {
+            client
+                .update(
+                    "INSERT INTO pgrdf._pgrdf_dictionary
+                         (term_type, lexical_value, datatype_iri_id, language_tag)
+                     SELECT t.tt, t.lv, t.di, t.lt
+                     FROM unnest($1::int2[], $2::text[], $3::int8[], $4::text[])
+                          AS t(tt, lv, di, lt)
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM pgrdf._pgrdf_dictionary d
+                          WHERE d.term_type = t.tt
+                            AND d.lexical_value = t.lv
+                            AND d.datatype_iri_id IS NOT DISTINCT FROM t.di
+                            AND d.language_tag    IS NOT DISTINCT FROM t.lt
+                     )",
+                    None,
+                    &[
+                        term_types.clone().into(),
+                        lexicals.clone().into(),
+                        datatypes.clone().into(),
+                        languages.clone().into(),
+                    ],
+                )
+                .expect("put_terms_batch: insert failed")
+                .len()
+        })
+    });
+    // 0.6.42 (#178): what the statement stored is what the count gains.
+    counts::gained(counts::DICTIONARY, added as i64, 0);
 
     // Step 2: bulk lookup. Returns rows in JOIN order (input order
     // preserved by the WITH ORDINALITY pattern). The result is a

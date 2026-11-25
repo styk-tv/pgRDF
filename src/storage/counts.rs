@@ -38,6 +38,17 @@
 //! scan that last set the graph's count could not have seen it: its
 //! transaction was not visible in that scan's snapshot, or it came later
 //! in the scan's own transaction.
+//!
+//! The dictionary's count (#178) lives in the same tables under the id
+//! [`DICTIONARY`]: the tables are keyed by an id, and no graph has a
+//! negative one. Its `asserted` is the number of terms. Everything above
+//! holds for it unchanged; its bypass trigger is on the dictionary table.
+//!
+//! Which ids are counted (#180): the default graph, the dictionary, and
+//! every graph id that has a partition of its own ([`counted`]). A row
+//! written into an id that was never registered lands in the default
+//! partition and records no delta: such an id has no count row, so
+//! nothing would ever fold or remove what it recorded.
 
 use crate::storage::partition::as_storage_owner;
 use pgrx::prelude::*;
@@ -136,11 +147,26 @@ CREATE TRIGGER pgrdf_count_bypass_truncate
     BEFORE TRUNCATE ON _pgrdf_quads_default
     FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('0');
 
+-- The dictionary's count is kept under the id -1 (no graph has a negative
+-- id). A term added or removed in plain SQL marks it unverified; an UPDATE
+-- cannot change how many terms there are.
+CREATE TRIGGER pgrdf_count_bypass
+    BEFORE INSERT OR DELETE ON _pgrdf_dictionary
+    FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('-1');
+CREATE TRIGGER pgrdf_count_bypass_truncate
+    BEFORE TRUNCATE ON _pgrdf_dictionary
+    FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('-1');
+
 -- A fresh install holds the default graph only, and it is empty.
 INSERT INTO _pgrdf_graph_counts (graph_id, scanned_at, scan_snapshot, scan_xact)
 SELECT graph_id, pg_catalog.clock_timestamp(), pg_catalog.pg_current_snapshot(),
        pg_catalog.pg_current_xact_id()
   FROM _pgrdf_graphs;
+-- And the dictionary, which is empty too.
+INSERT INTO _pgrdf_graph_counts (graph_id, asserted, scanned_at, scan_snapshot, scan_xact)
+SELECT -1, pg_catalog.count(*), pg_catalog.clock_timestamp(),
+       pg_catalog.pg_current_snapshot(), pg_catalog.pg_current_xact_id()
+  FROM _pgrdf_dictionary;
 "#,
     name = "graph_counts_v0_6_42",
     requires = [
@@ -150,6 +176,32 @@ SELECT graph_id, pg_catalog.clock_timestamp(), pg_catalog.pg_current_snapshot(),
         _count_bypass
     ],
 );
+
+/// The id the dictionary's count is kept under. `asserted` is the number
+/// of terms; `inferred` stays 0.
+pub(crate) const DICTIONARY: i64 = -1;
+
+/// Does the engine keep a count for this id? Always for the default graph
+/// and the dictionary; for any other id when it has a partition of its
+/// own, which is what registering a graph creates. Asked of the system
+/// cache on every write, so the writer reads no table, and never
+/// remembered: a backend that remembered "has one" after the graph was
+/// dropped would record deltas nothing folds, which is #180 itself.
+pub(crate) fn counted(graph_id: i64) -> bool {
+    if graph_id == 0 || graph_id == DICTIONARY {
+        return true;
+    }
+    if graph_id < 0 {
+        return false;
+    }
+    let name = std::ffi::CString::new(format!("_pgrdf_quads_g{graph_id}"))
+        .expect("a partition name holds no NUL");
+    unsafe {
+        let ns = pgrx::pg_sys::get_namespace_oid(c"pgrdf".as_ptr(), true);
+        ns != pgrx::pg_sys::InvalidOid
+            && pgrx::pg_sys::get_relname_relid(name.as_ptr(), ns) != pgrx::pg_sys::InvalidOid
+    }
+}
 
 /// What each graph gained in one engine call: asserted, inferred.
 type Gains = BTreeMap<i64, (i64, i64)>;
@@ -321,7 +373,7 @@ pub(crate) fn gained(graph_id: i64, asserted: i64, inferred: i64) {
 
 /// Insert one delta, as the caller, through the guard.
 fn write_delta(graph_id: i64, asserted: i64, inferred: i64) {
-    if (asserted == 0 && inferred == 0) || !present() {
+    if (asserted == 0 && inferred == 0) || !present() || !counted(graph_id) {
         return;
     }
     engine_write(|| {
@@ -369,14 +421,28 @@ pub(crate) fn maybe_fold(graph_id: i64) {
 /// come from what the DELETE itself returns: after a read-committed
 /// re-check only that says what this fold removed. A folder that cannot
 /// get the row leaves it to the one that has it.
+///
+/// An id the engine counts can be without its base row: every graph is
+/// after a restore, until its recount. The fold opens the row then,
+/// unverified, so the deltas have somewhere to go and stay few; readers go
+/// on scanning until a recount sets it. Deleting such deltas without a row
+/// would not do: the row is what a REPEATABLE READ recount fails on when a
+/// fold has moved on since its snapshot.
 pub(crate) fn fold(graph_id: i64) -> i64 {
+    if !counted(graph_id) {
+        return 0;
+    }
     as_storage_owner(|| {
         // The DELETE below runs on every fold, also when its range is
         // empty, which under a long-held transaction id is every time: it
         // must be the index range and never a pass over the whole table.
         plan_by_index();
         Spi::get_one_with_args::<i64>(
-            "WITH b AS (SELECT graph_id, folded_below FROM pgrdf._pgrdf_graph_counts \
+            "WITH mk AS (INSERT INTO pgrdf._pgrdf_graph_counts (graph_id) \
+                         SELECT $1 WHERE NOT EXISTS ( \
+                                SELECT 1 FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $1) \
+                         ON CONFLICT (graph_id) DO NOTHING), \
+                  b AS (SELECT graph_id, folded_below FROM pgrdf._pgrdf_graph_counts \
                          WHERE graph_id = $1 FOR UPDATE SKIP LOCKED), \
                   w AS (SELECT pg_snapshot_xmin(pg_current_snapshot()) AS w), \
                   gone AS (DELETE FROM pgrdf._pgrdf_graph_count_deltas d USING b, w \
@@ -429,7 +495,11 @@ pub(crate) struct Stored {
 /// scan's own transaction applies when it came after the scan: a snapshot
 /// does not list the transaction that took it, so the order inside one
 /// transaction is kept by the row ids, which only grow.
-pub(crate) const BYPASS_APPLIES: &str = "(b.graph_id = c.graph_id OR b.graph_id IS NULL) \
+///
+/// A bypass with no graph id is a statement on the quad parent: it can
+/// have touched any graph and no term, so it applies to every graph row
+/// and not to the dictionary's.
+pub(crate) const BYPASS_APPLIES: &str = "(b.graph_id = c.graph_id OR (b.graph_id IS NULL AND c.graph_id >= 0)) \
      AND CASE WHEN b.xact = c.scan_xact THEN b.id > c.scan_mark \
               ELSE NOT pg_visible_in_snapshot(b.xact, c.scan_snapshot) END";
 
@@ -513,17 +583,24 @@ pub(crate) fn stored(graph_id: i64) -> Option<Stored> {
     })
 }
 
-/// The asserted and inferred rows of `graph_id`, counted.
+/// The statement that counts what `$1` stands for: the asserted and
+/// inferred rows of a graph, or the terms of the dictionary.
+fn scan_of(id: i64) -> &'static str {
+    if id == DICTIONARY {
+        "SELECT count(*) AS a, 0::bigint AS i FROM pgrdf._pgrdf_dictionary"
+    } else {
+        "SELECT count(*) FILTER (WHERE NOT is_inferred) AS a, \
+                count(*) FILTER (WHERE is_inferred) AS i \
+           FROM pgrdf._pgrdf_quads WHERE graph_id = $1"
+    }
+}
+
+/// The asserted and inferred rows of `graph_id`, counted (for
+/// [`DICTIONARY`]: its terms, and 0).
 pub(crate) fn scanned(graph_id: i64) -> (i64, i64) {
     Spi::connect(|c| {
         let t = c
-            .select(
-                "SELECT count(*) FILTER (WHERE NOT is_inferred), \
-                        count(*) FILTER (WHERE is_inferred) \
-                   FROM pgrdf._pgrdf_quads WHERE graph_id = $1",
-                None,
-                &[graph_id.into()],
-            )
+            .select(scan_of(graph_id), None, &[graph_id.into()])
             .expect("counting the graph failed");
         let row = t.first();
         (
@@ -538,15 +615,16 @@ pub(crate) fn scanned(graph_id: i64) -> (i64, i64) {
 /// `change_seq` takes the retired deltas (`gone`, a CTE of the statement)
 /// and the bypass marks that applied until now with it, so it never goes
 /// back: a reader added both to it a moment ago.
-const SCAN_STAMP: &str = "change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1 \
-       + (SELECT count(*) FROM pgrdf._pgrdf_graph_count_bypass b \
-           WHERE (b.graph_id = c.graph_id OR b.graph_id IS NULL) \
-             AND CASE WHEN b.xact = c.scan_xact THEN b.id > c.scan_mark \
-                      ELSE NOT pg_visible_in_snapshot(b.xact, c.scan_snapshot) END), \
-     scanned_at = clock_timestamp(), \
-     scan_snapshot = pg_current_snapshot(), scan_xact = pg_current_xact_id(), \
-     scan_mark = nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
-     folded_below = greatest(c.folded_below, pg_snapshot_xmin(pg_current_snapshot()))";
+fn scan_stamp() -> String {
+    format!(
+        "change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1 \
+           + (SELECT count(*) FROM pgrdf._pgrdf_graph_count_bypass b WHERE {BYPASS_APPLIES}), \
+         scanned_at = clock_timestamp(), \
+         scan_snapshot = pg_current_snapshot(), scan_xact = pg_current_xact_id(), \
+         scan_mark = nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
+         folded_below = greatest(c.folded_below, pg_snapshot_xmin(pg_current_snapshot()))"
+    )
+}
 
 /// Drop the bypass rows no graph needs any more. Run as the storage owner
 /// after a scan stamped a base row.
@@ -597,14 +675,14 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
                     &format!(
                         "WITH gone AS (DELETE FROM pgrdf._pgrdf_graph_count_deltas \
                                         WHERE graph_id = $1 RETURNING 1), \
-                              n AS (SELECT count(*) FILTER (WHERE NOT is_inferred) AS a, \
-                                           count(*) FILTER (WHERE is_inferred) AS i \
-                                      FROM pgrdf._pgrdf_quads WHERE graph_id = $1) \
+                              n AS ({scan}) \
                          UPDATE pgrdf._pgrdf_graph_counts c \
                             SET asserted = n.a, inferred = n.i, \
-                                {SCAN_STAMP} \
+                                {stamp} \
                            FROM n WHERE c.graph_id = $1 \
-                         RETURNING c.asserted, c.inferred"
+                         RETURNING c.asserted, c.inferred",
+                        stamp = scan_stamp(),
+                        scan = scan_of(graph_id),
                     ),
                     None,
                     &[graph_id.into()],
@@ -622,19 +700,33 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
 }
 
 /// A graph was created: it is empty, and an empty new partition is
-/// scanned by definition.
+/// scanned by definition. Whatever an earlier life of the id left behind
+/// goes: a count row (reset) and every delta. The deltas matter. An id can
+/// take writes while it is unregistered, lose those rows to a DELETE in
+/// plain SQL, which records no negative delta, and be registered
+/// afterwards; a row merely inserted beside the old deltas would then read
+/// them on top of zero, verified. PostgreSQL creates the partition only
+/// when the default partition holds no row of the id and no writer of it
+/// is in flight (the DDL waits for them), so every delta of the id is
+/// finished and visible here.
 pub(crate) fn created(graph_id: i64) {
     if !present() {
         return;
     }
+    TALLY.with(|t| t.borrow_mut().1.remove(&graph_id));
     as_storage_owner(|| {
         Spi::run_with_args(
-            "INSERT INTO pgrdf._pgrdf_graph_counts \
-                    (graph_id, scanned_at, scan_snapshot, scan_xact, scan_mark, folded_below) \
-             VALUES ($1, clock_timestamp(), pg_current_snapshot(), pg_current_xact_id(), \
-                     nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
-                     pg_snapshot_xmin(pg_current_snapshot())) \
-             ON CONFLICT (graph_id) DO NOTHING",
+            &format!(
+                "WITH gone AS (DELETE FROM pgrdf._pgrdf_graph_count_deltas \
+                                WHERE graph_id = $1 RETURNING 1) \
+                 INSERT INTO pgrdf._pgrdf_graph_counts AS c \
+                        (graph_id, scanned_at, scan_snapshot, scan_xact, scan_mark, folded_below) \
+                 VALUES ($1, clock_timestamp(), pg_current_snapshot(), pg_current_xact_id(), \
+                         nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
+                         pg_snapshot_xmin(pg_current_snapshot())) \
+                 ON CONFLICT (graph_id) DO UPDATE SET asserted = 0, inferred = 0, {stamp}",
+                stamp = scan_stamp()
+            ),
             &[graph_id.into()],
         )
         .expect("opening the graph count failed");
@@ -688,20 +780,15 @@ pub(crate) fn replaced(graph_id: i64, asserted: i64, inferred: i64) {
                                 WHERE graph_id = $1 RETURNING 1) \
                  UPDATE pgrdf._pgrdf_graph_counts c \
                     SET asserted = $2, inferred = $3, \
-                        {SCAN_STAMP} \
-                  WHERE c.graph_id = $1"
+                        {stamp} \
+                  WHERE c.graph_id = $1",
+                stamp = scan_stamp()
             ),
             &[graph_id.into(), asserted.into(), inferred.into()],
         )
         .expect("resetting the graph count failed");
         forget_spent_bypasses();
     });
-}
-
-/// The number of dictionary terms the engine holds a count for, or
-/// `None` when it holds none.
-pub(crate) fn dictionary_terms() -> Option<i64> {
-    None
 }
 
 /// Install the bypass marker on a graph's own partition. The caller runs
@@ -906,6 +993,323 @@ mod tests {
             "a dropped graph keeps no count"
         );
         assert!(wrong.is_empty(), "counts that went wrong: {wrong:#?}");
+    }
+
+    // ── the term count (#178) ──────────────────────────────────────────
+
+    /// (terms, terms_verified, the dictionary counted) as this
+    /// transaction sees them.
+    fn terms_state() -> (Option<i64>, Option<bool>, i64) {
+        Spi::connect(|c| {
+            let row = c
+                .select(
+                    "SELECT terms, terms_verified, \
+                            (SELECT count(*) FROM pgrdf._pgrdf_dictionary) \
+                       FROM pgrdf.graph_totals()",
+                    None,
+                    &[],
+                )
+                .unwrap()
+                .first();
+            (
+                row.get::<i64>(1).unwrap(),
+                row.get::<bool>(2).unwrap(),
+                row.get::<i64>(3).unwrap().unwrap(),
+            )
+        })
+    }
+
+    /// `Err` with what is wrong unless the stored term count is verified
+    /// and equal to the dictionary.
+    fn terms_truth(step: &str) -> Result<i64, String> {
+        let (terms, verified, counted) = terms_state();
+        if verified != Some(true) {
+            return Err(format!("after {step}: terms not verified ({verified:?})"));
+        }
+        if terms != Some(counted) {
+            return Err(format!(
+                "after {step}: stored {terms:?}, the dictionary holds {counted}"
+            ));
+        }
+        Ok(counted)
+    }
+
+    #[pg_test]
+    fn a_new_term_is_counted_and_a_known_one_is_not() {
+        let before = terms_truth("start").unwrap();
+        Spi::run("SELECT pgrdf.put_term('urn:t178:one', 1::smallint)").unwrap();
+        assert_eq!(terms_truth("a new term"), Ok(before + 1));
+        Spi::run("SELECT pgrdf.put_term('urn:t178:one', 1::smallint)").unwrap();
+        assert_eq!(terms_truth("the same term again"), Ok(before + 1));
+        assert_eq!(one("SELECT pgrdf.count_terms()"), Some(before + 1));
+    }
+
+    /// Every route that can add a term leaves the stored term count
+    /// verified and equal to the dictionary, and each route did add terms.
+    #[pg_test]
+    fn every_route_that_adds_terms_keeps_the_term_count_true() {
+        let path = format!("/tmp/pgrdf-t178-{}.nt", std::process::id());
+        // Fresh terms per route: an IRI subject, predicate and object, a
+        // typed literal (its datatype IRI is a term too), a tagged one.
+        let nt = |i: usize| {
+            format!(
+                "<urn:t178:r{i}:a> <urn:t178:r{i}:p> <urn:t178:r{i}:b> .\n\
+                 <urn:t178:r{i}:a> <urn:t178:r{i}:q> \"n{i}\"^^<urn:t178:r{i}:dt> .\n\
+                 <urn:t178:r{i}:a> <urn:t178:r{i}:q> \"w{i}\"@en .\n"
+            )
+        };
+        let jrow = |i: usize| {
+            format!(
+                "'{{\"subject\": {{\"type\": \"iri\", \"value\": \"urn:t178:r{i}:a\"}}, \
+                   \"predicate\": {{\"type\": \"iri\", \"value\": \"urn:t178:r{i}:p\"}}, \
+                   \"object\": {{\"type\": \"literal\", \"value\": \"j{i}\"}}}}'::jsonb"
+            )
+        };
+        type Route = Box<dyn Fn(usize, i64, &str) -> String>;
+        let p = path.clone();
+        let p2 = path.clone();
+        let p3 = path.clone();
+        let routes: Vec<(&str, Route)> = vec![
+            (
+                "put_term",
+                Box::new(|i, _, _| {
+                    format!("SELECT pgrdf.put_term('urn:t178:r{i}:lone', 1::smallint)")
+                }),
+            ),
+            (
+                "parse_turtle",
+                Box::new(move |i, g, _| format!("SELECT pgrdf.parse_turtle($t${}$t$, {g})", nt(i))),
+            ),
+            (
+                "parse_turtle_verbose",
+                Box::new(move |i, g, _| {
+                    format!("SELECT pgrdf.parse_turtle_verbose($t${}$t$, {g})", nt(i))
+                }),
+            ),
+            (
+                "parse_turtle_dict_batched",
+                Box::new(move |i, g, _| {
+                    format!(
+                        "SELECT pgrdf.parse_turtle_dict_batched($t${}$t$, {g})",
+                        nt(i)
+                    )
+                }),
+            ),
+            (
+                "parse_nquads",
+                Box::new(move |i, g, _| format!("SELECT pgrdf.parse_nquads($t${}$t$, {g})", nt(i))),
+            ),
+            (
+                "parse_trig",
+                Box::new(move |i, _, iri| {
+                    format!("SELECT pgrdf.parse_trig($t$<{iri}> {{ {} }}$t$)", nt(i))
+                }),
+            ),
+            (
+                "load_turtle",
+                Box::new(move |_, g, _| {
+                    format!("SELECT pgrdf.load_turtle('{p}', {g}, 'http://base.example/')")
+                }),
+            ),
+            (
+                "load_turtle bulk",
+                Box::new(move |_, g, _| {
+                    format!("SELECT pgrdf.load_turtle('{p2}', {g}, NULL, true)")
+                }),
+            ),
+            (
+                "load_turtle_dict_batched",
+                Box::new(move |_, g, _| {
+                    format!("SELECT pgrdf.load_turtle_dict_batched('{p3}', {g})")
+                }),
+            ),
+            (
+                "put_construct_rows",
+                Box::new(move |i, g, _| {
+                    format!("SELECT pgrdf.put_construct_rows(ARRAY[{}], {g})", jrow(i))
+                }),
+            ),
+            (
+                "sparql INSERT DATA",
+                Box::new(|i, _, iri| {
+                    format!(
+                        "SELECT * FROM pgrdf.sparql('INSERT DATA {{ GRAPH <{iri}> {{ \
+                         <urn:t178:r{i}:a> <urn:t178:r{i}:p> \"s{i}\" }} }}')"
+                    )
+                }),
+            ),
+        ];
+        let mut wrong = Vec::new();
+        let mut last = terms_truth("start").unwrap();
+        for (i, (name, sql)) in routes.iter().enumerate() {
+            let iri = format!("urn:tdd:t178:route{i}");
+            let g = one(&format!("SELECT pgrdf.add_graph('{iri}')")).unwrap();
+            std::fs::write(&path, nt(i)).unwrap();
+            for round in 1..=2 {
+                Spi::run(&sql(i, g, &iri)).unwrap_or_else(|e| panic!("{name}: {e}"));
+                match terms_truth(&format!("{name}, call {round}")) {
+                    Err(e) => wrong.push(e),
+                    Ok(now) => {
+                        if round == 1 && now <= last {
+                            wrong.push(format!("{name}: the route added no term"));
+                        }
+                        if round == 2 && now != last {
+                            wrong.push(format!("{name}: a repeat added terms"));
+                        }
+                        last = now;
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        assert!(wrong.is_empty(), "term counts that went wrong: {wrong:#?}");
+    }
+
+    /// A term that rolls back takes its count with it.
+    #[pg_test]
+    fn a_term_that_rolls_back_leaves_no_count() {
+        try_fn();
+        let before = terms_truth("start").unwrap();
+        let r = attempt(
+            "DO $do$ BEGIN PERFORM pgrdf.put_term('urn:t178:undone', 1::smallint); \
+             RAISE EXCEPTION 'undo' USING ERRCODE = 'P0001'; END $do$",
+        );
+        assert_eq!(r, "P0001");
+        assert_eq!(terms_truth("a rolled-back term"), Ok(before));
+    }
+
+    /// A term written in plain SQL: the totals say the term count is not
+    /// verified and give no number, `count_terms()` gives the exact one,
+    /// and `recount_terms()` restores the stored count.
+    #[pg_test]
+    fn a_direct_dictionary_write_leaves_the_term_count_unverified() {
+        let before = terms_truth("start").unwrap();
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_dictionary (term_type, lexical_value) \
+             VALUES (1, 'urn:t178:direct')",
+        )
+        .unwrap();
+        // The totals never scan the dictionary: no stored count to trust,
+        // no number. The exact one is asked for on purpose.
+        assert_eq!(
+            terms_state(),
+            (None, Some(false), before + 1),
+            "after a direct INSERT"
+        );
+        assert_eq!(one("SELECT pgrdf.count_terms()"), Some(before + 1));
+        let cured = Spi::get_one::<String>(
+            "SELECT concat_ws('|', terms, was_terms, was_verified) FROM pgrdf.recount_terms()",
+        )
+        .unwrap();
+        assert_eq!(cured, Some(format!("{}|{}|f", before + 1, before)));
+        assert_eq!(terms_truth("recount_terms"), Ok(before + 1));
+        Spi::run("DELETE FROM pgrdf._pgrdf_dictionary WHERE lexical_value = 'urn:t178:direct'")
+            .unwrap();
+        assert_eq!(
+            terms_state(),
+            (None, Some(false), before),
+            "after a direct DELETE"
+        );
+        assert_eq!(one("SELECT pgrdf.count_terms()"), Some(before));
+        Spi::run("SELECT pgrdf.recount_terms()").unwrap();
+        assert_eq!(terms_truth("the second recount"), Ok(before));
+        // An UPDATE cannot change how many terms there are.
+        Spi::run("SELECT pgrdf.put_term('urn:t178:renamed', 1::smallint)").unwrap();
+        Spi::run(
+            "UPDATE pgrdf._pgrdf_dictionary SET lexical_value = 'urn:t178:renamed-2' \
+              WHERE lexical_value = 'urn:t178:renamed'",
+        )
+        .unwrap();
+        assert_eq!(terms_truth("a direct UPDATE"), Ok(before + 1));
+    }
+
+    /// A plain-SQL write to the quad table says nothing about the
+    /// dictionary: the graphs go unverified, the term count does not.
+    #[pg_test]
+    fn a_direct_quad_write_leaves_the_term_count_verified() {
+        let g = one("SELECT pgrdf.add_graph('urn:tdd:t178:quads')").unwrap();
+        let before = terms_truth("start").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_quads (subject_id, predicate_id, object_id, graph_id) \
+             VALUES (5, 6, 7, {g})"
+        ))
+        .unwrap();
+        assert!(one("SELECT unverified_graphs FROM pgrdf.graph_totals()").unwrap() >= 1);
+        assert_eq!(terms_truth("a direct quad write"), Ok(before));
+    }
+
+    // ── deltas for an id without a count (#180) ────────────────────────
+
+    fn deltas_of(g: i64) -> i64 {
+        one(&format!(
+            "SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = {g}"
+        ))
+        .unwrap()
+    }
+
+    /// A graph id that was never registered has no count, so its writes
+    /// record none: nothing would ever fold or remove those rows.
+    #[pg_test]
+    fn a_write_into_an_unregistered_id_records_no_delta() {
+        const G: i64 = 918_001;
+        Spi::run(&format!("SELECT pgrdf.put_quad(61, 62, 63, {G})")).unwrap();
+        Spi::run(&format!("SELECT pgrdf.put_quad(61, 62, 64, {G})")).unwrap();
+        assert_eq!(
+            one(&format!("SELECT pgrdf.count_quads({G})")),
+            Some(2),
+            "the rows are stored and counted by scan"
+        );
+        assert_eq!(deltas_of(G), 0, "no delta for an id without a count");
+        // The default graph shares that partition and is counted as ever.
+        Spi::run("SELECT pgrdf.put_quad(61, 62, 65, 0)").unwrap();
+        truth(0).unwrap();
+    }
+
+    /// A registered graph whose count row is missing (every graph after a
+    /// restore): a fold opens the row, unverified, so its deltas have
+    /// somewhere to go; a recount then sets it.
+    #[pg_test]
+    fn a_fold_opens_a_missing_count_row() {
+        let g = one("SELECT pgrdf.add_graph('urn:tdd:c180:restored')").unwrap();
+        Spi::run(&format!("SELECT pgrdf.put_quad(51, 52, 53, {g})")).unwrap();
+        Spi::run(&format!(
+            "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = {g}"
+        ))
+        .unwrap();
+        assert!(crate::storage::counts::stored(g).is_none());
+        crate::storage::counts::fold(g);
+        let opened = crate::storage::counts::stored(g).expect("the fold opened the count row");
+        assert!(!opened.verified, "a row no scan has set is not verified");
+        Spi::run(&format!("SELECT pgrdf.recount_graph({g})")).unwrap();
+        assert_eq!(truth(g).map(|s| s.asserted), Ok(1));
+        // An id with no graph gets no row from a fold.
+        crate::storage::counts::fold(918_002);
+        assert!(crate::storage::counts::stored(918_002).is_none());
+    }
+
+    /// Registering a graph sets its count, whatever an earlier life of
+    /// the id left in the delta table.
+    #[pg_test]
+    fn registering_a_graph_resets_its_count() {
+        const G: i64 = 918_003;
+        crate::storage::counts::engine_write(|| {
+            Spi::run(&format!(
+                "INSERT INTO pgrdf._pgrdf_graph_count_deltas (graph_id, d_asserted, d_inferred) \
+                 VALUES ({G}, 7, 0)"
+            ))
+            .unwrap();
+        });
+        Spi::run(&format!("SELECT pgrdf.add_graph({G})")).unwrap();
+        assert_eq!(truth(G).map(|s| (s.asserted, s.inferred)), Ok((0, 0)));
+        assert_eq!(deltas_of(G), 0);
+        // The same when a count row is left over, whatever it says.
+        const H: i64 = 918_004;
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_graph_counts (graph_id, asserted, inferred) VALUES ({H}, 9, 4)"
+        ))
+        .unwrap();
+        Spi::run(&format!("SELECT pgrdf.add_graph({H})")).unwrap();
+        assert_eq!(truth(H).map(|s| (s.asserted, s.inferred)), Ok((0, 0)));
     }
 
     #[pg_test]

@@ -501,7 +501,13 @@ fn recount_graph(
 /// that were counted by scan for this call.
 ///
 /// `terms`, the number of dictionary terms, belongs to the database and
-/// not to a graph: it is NULL when the scope is `own`.
+/// not to a graph: it and `terms_verified` are NULL when the scope is
+/// `own`. For an admin `terms` is the count the engine keeps, and NULL
+/// with `terms_verified` false when that count is not verified. Unlike a
+/// graph's count it is never replaced by a scan here: the dictionary is
+/// as large as the database, the scan would run on every call, and a role
+/// that lists graphs may hold no right to recount. `count_terms()` gives
+/// the exact number on purpose; `recount_terms()` restores the stored one.
 #[search_path(pgrdf, pg_temp)]
 #[pg_extern]
 #[allow(clippy::type_complexity)]
@@ -515,6 +521,7 @@ fn graph_totals() -> TableIterator<
         name!(inferred, i64),
         name!(unverified_graphs, i64),
         name!(terms, Option<i64>),
+        name!(terms_verified, Option<bool>),
     ),
 > {
     let sees_all = caller_sees_all_graphs();
@@ -526,10 +533,13 @@ fn graph_totals() -> TableIterator<
         )
         .unwrap_or(0)
     });
-    let terms = if sees_all {
-        crate::storage::counts::dictionary_terms()
+    let (terms, terms_verified) = if !sees_all {
+        (None, None)
     } else {
-        None
+        match crate::storage::counts::stored(crate::storage::counts::DICTIONARY) {
+            Some(stored) if stored.verified => (Some(stored.asserted), Some(true)),
+            _ => (None, Some(false)),
+        }
     };
     TableIterator::once((
         if sees_all { "all" } else { "own" }.to_string(),
@@ -539,6 +549,72 @@ fn graph_totals() -> TableIterator<
         rows.iter().map(|r| r.3).sum(),
         rows.iter().filter(|r| !r.17).count() as i64,
         terms,
+        terms_verified,
+    ))
+}
+
+/// The number of terms in the dictionary, exact: the count the engine
+/// keeps when it is verified, else a scan. The mirror of `count_quads`
+/// for the dictionary, and like it answered for a caller who may read the
+/// table: the scan raises what it always raised for a role without SELECT.
+/// `graph_totals()` carries the same number for an admin while it is
+/// verified and never scans for it; this is the call that does.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn count_terms() -> i64 {
+    let may_read = crate::storage::partition::read_one::<bool>(
+        "SELECT pg_catalog.has_table_privilege('pgrdf._pgrdf_dictionary', 'SELECT')",
+        &[],
+    )
+    .unwrap_or(false);
+    if may_read
+        && let Some(stored) = crate::storage::counts::stored(crate::storage::counts::DICTIONARY)
+        && stored.verified
+    {
+        return stored.asserted;
+    }
+    crate::storage::partition::read_one::<i64>(
+        "SELECT count(*)::BIGINT FROM pgrdf._pgrdf_dictionary",
+        &[],
+    )
+    .unwrap_or(0)
+}
+
+/// Count the dictionary again and store what the scan finds: the cure for
+/// a term count that is not verified (`terms_verified` false in
+/// `graph_totals()`), which is what a term added or removed in plain SQL,
+/// a restore from a dump, or a privileged role that switched the count
+/// trigger off leaves behind.
+///
+/// One row: the number found, the number that was stored, and whether
+/// that one was verified. The dictionary belongs to the database, so this
+/// is the storage owner's act: any other role is refused 42501. Changes
+/// no term. Not recorded in the act record, which is kept per graph.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+fn recount_terms() -> TableIterator<
+    'static,
+    (
+        name!(terms, i64),
+        name!(was_terms, Option<i64>),
+        name!(was_verified, bool),
+    ),
+> {
+    if !crate::storage::partition::caller_owns_storage() {
+        crate::refuse_with_hint(
+            PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+            "pgrdf: recount_terms: the dictionary's count is recounted by the storage owner"
+                .to_string(),
+            "A role holding the storage owner's privileges can run this.              pgrdf.count_terms() gives the exact number to any role that may read the dictionary."
+                .to_string(),
+        );
+    }
+    let was = crate::storage::counts::stored(crate::storage::counts::DICTIONARY);
+    let (terms, _) = crate::storage::counts::set_by_scan(crate::storage::counts::DICTIONARY);
+    TableIterator::once((
+        terms,
+        was.map(|w| w.asserted),
+        was.map(|w| w.verified).unwrap_or(false),
     ))
 }
 
@@ -1310,9 +1386,69 @@ mod tests {
             as_role(
                 "inv42_dave",
                 "SELECT concat_ws('|', scope, graphs_listed, graphs_total, asserted, inferred, \
-                                  coalesce(terms::text, 'null')) FROM pgrdf.graph_totals()"
+                                  coalesce(terms::text, 'null'), \
+                                  coalesce(terms_verified::text, 'null')) FROM pgrdf.graph_totals()"
             ),
-            format!("own|1|{total}|1|0|null")
+            format!("own|1|{total}|1|0|null|null")
+        );
+        // The dictionary belongs to the database: an admin is told how
+        // many terms it holds, and that the number is the stored one.
+        let admin = t(
+            "SELECT concat_ws('|', terms = (SELECT count(*) FROM pgrdf._pgrdf_dictionary), \
+                            terms_verified) FROM pgrdf.graph_totals()",
+        );
+        assert_eq!(admin.as_deref(), Some("t|t"));
+    }
+
+    /// Recounting the dictionary is the storage owner's act.
+    #[pg_test]
+    fn a_term_recount_is_the_storage_owners() {
+        as_role_fn();
+        app_role("inv42_erin");
+        assert_eq!(
+            as_role(
+                "inv42_erin",
+                "SELECT count(*)::text FROM pgrdf.recount_terms()"
+            ),
+            "42501"
+        );
+        Spi::run("CREATE ROLE inv42_reader NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO inv42_reader").unwrap();
+        Spi::run("GRANT pg_read_all_data TO inv42_reader").unwrap();
+        assert_eq!(
+            as_role(
+                "inv42_reader",
+                "SELECT count(*)::text FROM pgrdf.recount_terms()"
+            ),
+            "42501",
+            "reading everything is not acting on everything"
+        );
+        // It is told the number, though: it sees every graph.
+        assert_eq!(
+            as_role(
+                "inv42_reader",
+                "SELECT concat_ws('|', scope, terms IS NOT NULL, terms_verified) \
+                   FROM pgrdf.graph_totals()"
+            ),
+            "all|t|t"
+        );
+        assert_eq!(
+            n("SELECT count(*) FROM pgrdf.recount_terms()"),
+            Some(1),
+            "the storage owner recounts"
+        );
+        // count_terms() answers a role that may read the dictionary, from
+        // the kept count; a role that may not is refused as a scan would be.
+        let terms = n("SELECT count(*) FROM pgrdf._pgrdf_dictionary").unwrap();
+        assert_eq!(
+            as_role("inv42_erin", "SELECT pgrdf.count_terms()::text"),
+            terms.to_string()
+        );
+        Spi::run("CREATE ROLE inv42_bare NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO inv42_bare").unwrap();
+        assert_eq!(
+            as_role("inv42_bare", "SELECT pgrdf.count_terms()::text"),
+            "42501"
         );
     }
 
