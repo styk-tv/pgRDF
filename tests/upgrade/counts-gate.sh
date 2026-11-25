@@ -275,6 +275,7 @@ ok "at $graphs graphs and $total triples (median, p95 ms): graph_inventory() $t_
 hold "BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM pgrdf.graph_inventory();"
 until_true "SELECT count(*) > 0 FROM pg_stat_activity WHERE state = 'idle in transaction' AND datname = '$DB'"
 writes "$ga" 1000001 "$CHURN"
+q -q -c "ANALYZE pgrdf._pgrdf_graph_count_deltas, pgrdf._pgrdf_graph_counts" > /dev/null
 c_inv=$(under "graph_inventory() after $CHURN writes under a held snapshot" "$inventory" 5)
 c_one=$(under "graph_inventory(graph_id) after $CHURN writes under a held snapshot" "$one_row" 1)
 c_feed=$(under "graph_act_feed(cursor) after $CHURN writes under a held snapshot" "$feed" 2)
@@ -289,6 +290,11 @@ hold "BEGIN; SELECT pg_current_xact_id();"
 until_true "SELECT count(*) > 0 FROM pg_stat_activity WHERE state = 'idle in transaction' AND datname = '$DB'"
 writes "$ga" 2000001 "$CHURN"
 waiting=$(q -c "SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = $ga")
+# With statistics that say every waiting delta belongs to one graph, which
+# is what autovacuum's analyze leaves here sooner or later: a plan that
+# scans the whole delta table once per graph is 50 times slower than the
+# index range, and whether analyze has run must not decide the result.
+q -q -c "ANALYZE pgrdf._pgrdf_graph_count_deltas, pgrdf._pgrdf_graph_counts" > /dev/null
 x_inv=$(under "graph_inventory() with $waiting deltas held back by an open transaction" "$inventory" 25)
 x_one=$(under "graph_inventory(graph_id) with $waiting deltas held back by an open transaction" "$one_row" 25)
 true_or_fail "while an open transaction holds the deltas back"

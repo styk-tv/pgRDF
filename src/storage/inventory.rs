@@ -155,6 +155,7 @@ fn inventory_rows(which: Which) -> Vec<InventoryRow> {
     // Reading only, and through read-only SPI all the way down: a call
     // that lists graphs takes no transaction id.
     let rows: Vec<InventoryRow> = crate::storage::partition::as_storage_owner_reading(|| {
+        crate::storage::counts::plan_by_index();
         let mut rows = Vec::new();
         Spi::connect(|client| {
             // Prepared once per backend (read-only: no transaction id) and

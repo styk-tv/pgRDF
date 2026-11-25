@@ -451,6 +451,30 @@ pub(crate) fn read_laterals() -> String {
     )
 }
 
+/// For the rest of the enclosing owner switch, plan without sequential
+/// scans. The delta and bypass tables are read by index range and by
+/// nothing else, and the planner must not be talked out of it: once
+/// statistics say that every waiting delta belongs to one graph, a
+/// per-graph subquery over the whole table looks cheaper than the range,
+/// and the listing then reads every delta once per graph. Local to the
+/// switch's GUC level, so it ends with it. Tables too small to have an
+/// index path worth taking are unaffected in any way that matters: the
+/// registry holds one row per graph.
+pub(crate) fn plan_by_index() {
+    unsafe {
+        pgrx::pg_sys::set_config_option(
+            c"enable_seqscan".as_ptr(),
+            c"off".as_ptr(),
+            pgrx::pg_sys::GucContext::PGC_USERSET,
+            pgrx::pg_sys::GucSource::PGC_S_SESSION,
+            pgrx::pg_sys::GucAction::GUC_ACTION_LOCAL,
+            true,
+            0,
+            false,
+        );
+    }
+}
+
 /// The stored count of `graph_id`, or `None` when it has no base row (a
 /// graph restored from a dump, or an id that was never registered).
 /// Read as the storage owner: the caller needs no privilege on the tables.
@@ -459,6 +483,7 @@ pub(crate) fn stored(graph_id: i64) -> Option<Stored> {
         return None;
     }
     crate::storage::partition::as_storage_owner_reading(|| {
+        plan_by_index();
         Spi::connect(|c| {
             let t = c
                 .select(
