@@ -535,8 +535,10 @@ mod tests {
         assert_eq!(before, after, "nothing landed");
     }
 
-    /// F5: unlock removes the triggers and direct writes land again; an
-    /// unlocked graph never carries one (the zero-cost path).
+    /// F5: unlock removes the lock triggers and direct writes land again;
+    /// an unlocked graph carries none. (Since 0.6.42 every partition
+    /// carries the two statement-level count markers, which fire once per
+    /// statement and refuse nothing.)
     #[pg_test]
     fn unlock_restores_writes_and_leaves_no_trigger() {
         let gid = 980502;
@@ -544,11 +546,12 @@ mod tests {
         Spi::run(&format!("SELECT pgrdf.unlock_graph({gid}, 'f5 done')")).unwrap();
         let triggers: i64 = Spi::get_one(&format!(
             "SELECT count(*) FROM pg_trigger \
-             WHERE tgrelid = 'pgrdf._pgrdf_quads_g{gid}'::regclass AND NOT tgisinternal"
+             WHERE tgrelid = 'pgrdf._pgrdf_quads_g{gid}'::regclass AND NOT tgisinternal \
+               AND tgname NOT IN ('pgrdf_count_bypass', 'pgrdf_count_bypass_truncate')"
         ))
         .unwrap()
         .unwrap();
-        assert_eq!(triggers, 0, "an unlocked graph carries no trigger");
+        assert_eq!(triggers, 0, "an unlocked graph carries no lock trigger");
         Spi::run("SET ROLE pgrdf_f5_writer2").unwrap();
         assert_eq!(
             f5_try(&format!(

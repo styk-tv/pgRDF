@@ -584,6 +584,12 @@ pub(crate) fn replaced(graph_id: i64, asserted: i64, inferred: i64) {
     });
 }
 
+/// The number of dictionary terms the engine holds a count for, or
+/// `None` when it holds none.
+pub(crate) fn dictionary_terms() -> Option<i64> {
+    None
+}
+
 /// Install the bypass marker on a graph's own partition. The caller runs
 /// this as the storage owner, where it creates or attaches the partition.
 pub(crate) fn guard_partition(part_name: &str, graph_id: i64) {

@@ -355,6 +355,151 @@ fn graph_inventory_by_iri(
     TableIterator::new(inventory_rows(Which::Iri(iri.to_string())).into_iter())
 }
 
+/// The ids of the graphs listed to the caller, in order; with `only`,
+/// that graph alone. Asking for one graph that exists and is not listed
+/// refuses 42501; one that does not exist refuses 42704 under `what`.
+pub(crate) fn listed_graph_ids(only: Option<i64>, what: &str) -> Vec<i64> {
+    let caller = unsafe { pgrx::pg_sys::GetUserId() };
+    let sees_all = caller_sees_all_graphs();
+    crate::storage::partition::as_storage_owner(|| {
+        let ids: Vec<i64> = Spi::connect(|client| {
+            client
+                .select(
+                    &format!(
+                        "SELECT g.graph_id FROM pgrdf._pgrdf_graphs g \
+                          CROSS JOIN LATERAL (SELECT to_jsonb(g) AS r) j \
+                          WHERE {LISTED_TO_CALLER} AND ($3::bigint IS NULL OR g.graph_id = $3) \
+                          ORDER BY g.graph_id"
+                    ),
+                    None,
+                    &[sees_all.into(), caller.into(), only.into()],
+                )
+                .unwrap_or_else(|e| panic!("{what}: graph lookup failed: {e}"))
+                .filter_map(|row| row.get::<i64>(1).ok().flatten())
+                .collect()
+        });
+        if let (true, Some(id)) = (ids.is_empty(), only) {
+            let exists = Spi::get_one_with_args::<bool>(
+                "SELECT EXISTS (SELECT 1 FROM pgrdf._pgrdf_graphs WHERE graph_id = $1)",
+                &[id.into()],
+            )
+            .unwrap_or_else(|e| panic!("{what}: graph lookup failed: {e}"))
+            .unwrap_or(false);
+            if exists {
+                crate::refuse_with_hint(
+                    PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+                    format!("pgrdf: {what}: graph {id} is not listed to this role"),
+                    "The graph's owner or the storage owner can run this, or hand the graph \
+                     over with pgrdf.set_graph_owner(graph_id, role)."
+                        .to_string(),
+                );
+            }
+            crate::refuse(
+                PgSqlErrorCode::ERRCODE_UNDEFINED_OBJECT,
+                format!("pgrdf: {what}: no graph with id {id}"),
+            );
+        }
+        ids
+    })
+}
+
+/// Count a graph again and store what the scan finds: the cure for a
+/// count that is not verified (`counts_verified` false in the
+/// inventory), which is what a write made in plain SQL, a restore, or a
+/// privileged role that switched the count triggers off leaves behind.
+/// `recount_graph(NULL)` does it for every graph listed to the caller.
+///
+/// One row per graph: the count found, the count that was stored, and
+/// whether that one was verified. Changes no triple, so it runs on a
+/// locked graph. Recorded as act `recount`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+#[allow(clippy::type_complexity)]
+fn recount_graph(
+    graph_id: default!(Option<i64>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(graph_id, i64),
+        name!(asserted, i64),
+        name!(inferred, i64),
+        name!(was_asserted, Option<i64>),
+        name!(was_inferred, Option<i64>),
+        name!(was_verified, bool),
+    ),
+> {
+    let mut out = Vec::new();
+    for id in listed_graph_ids(graph_id, "recount_graph") {
+        let was = crate::storage::counts::stored(id);
+        let act = crate::storage::acts::begin(id, "recount");
+        let (asserted, inferred) = crate::storage::counts::set_by_scan(id);
+        let was_verified = was.map(|w| w.verified).unwrap_or(false);
+        act.finish(serde_json::json!({
+            "asserted": asserted,
+            "inferred": inferred,
+            "was_asserted": was.map(|w| w.asserted),
+            "was_inferred": was.map(|w| w.inferred),
+            "was_verified": was_verified,
+        }));
+        out.push((
+            id,
+            asserted,
+            inferred,
+            was.map(|w| w.asserted),
+            was.map(|w| w.inferred),
+            was_verified,
+        ));
+    }
+    TableIterator::new(out.into_iter())
+}
+
+/// Totals over the graphs listed to the caller, in one row, with the
+/// scope they cover stated beside them: `all` for an admin, `own` for any
+/// other role. `graphs_total` is the number of graphs in the database for
+/// every caller, so a client that compares listings can tell "not listed
+/// to me" from "dropped". `unverified_graphs` counts the listed graphs
+/// that were counted by scan for this call.
+///
+/// `terms`, the number of dictionary terms, belongs to the database and
+/// not to a graph: it is NULL when the scope is `own`.
+#[search_path(pgrdf, pg_temp)]
+#[pg_extern]
+#[allow(clippy::type_complexity)]
+fn graph_totals() -> TableIterator<
+    'static,
+    (
+        name!(scope, String),
+        name!(graphs_listed, i64),
+        name!(graphs_total, i64),
+        name!(asserted, i64),
+        name!(inferred, i64),
+        name!(unverified_graphs, i64),
+        name!(terms, Option<i64>),
+    ),
+> {
+    let sees_all = caller_sees_all_graphs();
+    let rows = inventory_rows(Which::All);
+    let graphs_total = crate::storage::partition::as_storage_owner(|| {
+        Spi::get_one::<i64>("SELECT count(*)::bigint FROM pgrdf._pgrdf_graphs")
+            .expect("graph_totals: graph count failed")
+            .unwrap_or(0)
+    });
+    let terms = if sees_all {
+        crate::storage::counts::dictionary_terms()
+    } else {
+        None
+    };
+    TableIterator::once((
+        if sees_all { "all" } else { "own" }.to_string(),
+        rows.len() as i64,
+        graphs_total,
+        rows.iter().map(|r| r.2).sum(),
+        rows.iter().map(|r| r.3).sum(),
+        rows.iter().filter(|r| !r.17).count() as i64,
+        terms,
+    ))
+}
+
 /// The materialization state of one registered graph, by the rule
 /// `graph_inventory()` shows in its `materialization` column: `never`,
 /// `unknown`, `stale` or `current`. `None` when the graph is not
@@ -939,5 +1084,190 @@ mod tests {
             "1|1",
             "an admin"
         );
+    }
+
+    /// A count that a direct write left unverified is cured by a recount,
+    /// which says what it found and what was stored, and is an act.
+    #[pg_test]
+    fn a_recount_restores_a_verified_count() {
+        let g = n("SELECT pgrdf.add_graph('urn:inv42:recount')").unwrap();
+        Spi::run(&format!(
+            "SELECT pgrdf.parse_turtle('<urn:i:s> <urn:i:p> <urn:i:o> .', {g})"
+        ))
+        .unwrap();
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_quads_g{g} (subject_id, predicate_id, object_id, graph_id) \
+             VALUES (5, 6, 7, {g})"
+        ))
+        .unwrap();
+        let verified = |g: i64| {
+            t(&format!(
+                "SELECT concat_ws('|', asserted, counts_verified) FROM pgrdf.graph_inventory({g})"
+            ))
+            .unwrap()
+        };
+        assert_eq!(verified(g), "2|f");
+        let integrity = |g: i64| {
+            t(&format!(
+                "SELECT concat_ws('|', j -> 'stored_count' ->> 'verified', \
+                                  j -> 'stored_count' ->> 'consistent') \
+                   FROM pgrdf.graph_integrity({g}) j"
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            integrity(g),
+            "false|true",
+            "unverified says so; nothing is hidden"
+        );
+        let r = t(&format!(
+            "SELECT concat_ws('|', graph_id = {g}, asserted, inferred, was_asserted, was_verified) \
+               FROM pgrdf.recount_graph({g})"
+        ));
+        assert_eq!(r.as_deref(), Some("t|2|0|1|f"));
+        assert_eq!(verified(g), "2|t");
+        assert_eq!(integrity(g), "true|true");
+        assert_eq!(
+            t(&format!(
+                "SELECT act FROM pgrdf.graph_acts({g}) ORDER BY act_id DESC LIMIT 1"
+            ))
+            .as_deref(),
+            Some("recount")
+        );
+        // A direct write after the recount is a new bypass.
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_quads_g{g} (subject_id, predicate_id, object_id, graph_id) \
+             VALUES (5, 6, 8, {g})"
+        ))
+        .unwrap();
+        assert_eq!(verified(g), "3|f");
+        // A write that rolls back leaves no mark behind.
+        Spi::run(&format!("SELECT pgrdf.recount_graph({g})")).unwrap();
+        as_role_fn();
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION pg_temp.undo(q text) RETURNS void LANGUAGE plpgsql AS $$ \
+             BEGIN EXECUTE q; RAISE EXCEPTION 'undo'; EXCEPTION WHEN OTHERS THEN NULL; END $$",
+        )
+        .unwrap();
+        Spi::run(&format!(
+            "SELECT pg_temp.undo('INSERT INTO pgrdf._pgrdf_quads_g{g} \
+               (subject_id, predicate_id, object_id, graph_id) VALUES (5, 6, 9, {g})')"
+        ))
+        .unwrap();
+        assert_eq!(verified(g), "3|t");
+    }
+
+    /// recount_graph(NULL) cures every graph a parent-level write marked.
+    #[pg_test]
+    fn a_recount_of_everything_cures_a_write_through_the_parent() {
+        let g = n("SELECT pgrdf.add_graph('urn:inv42:all-a')").unwrap();
+        let h = n("SELECT pgrdf.add_graph('urn:inv42:all-b')").unwrap();
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_quads (subject_id, predicate_id, object_id, graph_id) \
+             VALUES (5, 6, 7, {g})"
+        ))
+        .unwrap();
+        let unverified = "SELECT unverified_graphs FROM pgrdf.graph_totals()";
+        assert!(n(unverified).unwrap() >= 2);
+        let cured = n("SELECT count(*) FROM pgrdf.recount_graph()").unwrap();
+        assert!(cured >= 2, "every listed graph is recounted");
+        assert_eq!(n(unverified), Some(0));
+        let rows = t(&format!(
+            "SELECT string_agg(concat_ws('|', asserted, counts_verified), ' ' ORDER BY graph_id) \
+               FROM pgrdf.graph_inventory() WHERE graph_id IN ({g}, {h})"
+        ));
+        assert_eq!(rows.as_deref(), Some("1|t 0|t"));
+        // The spent marks are gone: nothing is left for a reader to weigh.
+        assert_eq!(
+            n("SELECT count(*) FROM pgrdf._pgrdf_graph_count_bypass"),
+            Some(0)
+        );
+    }
+
+    #[pg_test]
+    fn a_recount_refuses_what_is_not_listed_or_not_there() {
+        as_role_fn();
+        let g = n("SELECT pgrdf.add_graph('urn:inv42:not-yours')").unwrap();
+        app_role("inv42_carol");
+        assert_eq!(
+            as_role(
+                "inv42_carol",
+                &format!("SELECT count(*)::text FROM pgrdf.recount_graph({g})")
+            ),
+            "42501"
+        );
+        assert_eq!(
+            as_role(
+                "inv42_carol",
+                "SELECT count(*)::text FROM pgrdf.recount_graph(987654321)"
+            ),
+            "42704"
+        );
+        assert_eq!(
+            as_role(
+                "inv42_carol",
+                "SELECT count(*)::text FROM pgrdf.recount_graph()"
+            ),
+            "0",
+            "nothing listed, nothing recounted"
+        );
+    }
+
+    /// Totals state the scope they cover and never pass a part for the whole.
+    #[pg_test]
+    fn totals_state_their_scope() {
+        as_role_fn();
+        let g = n("SELECT pgrdf.add_graph('urn:inv42:total-admin')").unwrap();
+        Spi::run(&format!(
+            "SELECT pgrdf.parse_turtle('<urn:i:s> <urn:i:p> <urn:i:o> . <urn:i:s> <urn:i:p> <urn:i:x> .', {g})"
+        ))
+        .unwrap();
+        app_role("inv42_dave");
+        as_role(
+            "inv42_dave",
+            "SELECT pgrdf.add_graph('urn:inv42:total-dave')::text",
+        );
+        let dave_graph = n("SELECT pgrdf.graph_id('urn:inv42:total-dave')").unwrap();
+        as_role(
+            "inv42_dave",
+            &format!(
+                "SELECT pgrdf.parse_turtle('<urn:i:s> <urn:i:p> <urn:i:o> .', {dave_graph})::text"
+            ),
+        );
+        let all = t(
+            "SELECT concat_ws('|', scope, graphs_listed = graphs_total, \
+                            asserted = (SELECT count(*) FROM pgrdf._pgrdf_quads WHERE NOT is_inferred), \
+                            unverified_graphs) FROM pgrdf.graph_totals()",
+        );
+        assert_eq!(all.as_deref(), Some("all|t|t|0"));
+        let total = n("SELECT graphs_total FROM pgrdf.graph_totals()").unwrap();
+        assert_eq!(
+            as_role(
+                "inv42_dave",
+                "SELECT concat_ws('|', scope, graphs_listed, graphs_total, asserted, inferred, \
+                                  coalesce(terms::text, 'null')) FROM pgrdf.graph_totals()"
+            ),
+            format!("own|1|{total}|1|0|null")
+        );
+    }
+
+    /// The feed always answers with a cursor, and leaves out the acts of
+    /// the transaction that is asking: those can still roll back.
+    #[pg_test]
+    fn the_act_feed_carries_a_cursor_and_hides_open_acts() {
+        let g = n("SELECT pgrdf.add_graph('urn:inv42:feed')").unwrap();
+        Spi::run(&format!(
+            "SELECT pgrdf.parse_turtle('<urn:i:s> <urn:i:p> <urn:i:o> .', {g})"
+        ))
+        .unwrap();
+        assert!(
+            n(&format!("SELECT count(*) FROM pgrdf.graph_acts({g})")).unwrap() >= 2,
+            "the acts are there for graph_acts"
+        );
+        let row = t(&format!(
+            "SELECT concat_ws('|', count(*), count(act_id), count(complete_below), \
+                              count(next_page)) FROM pgrdf.graph_act_feed(NULL, {g})"
+        ));
+        assert_eq!(row.as_deref(), Some("1|0|1|0"));
     }
 }
