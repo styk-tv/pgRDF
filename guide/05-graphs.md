@@ -202,7 +202,9 @@ none, and are counted by scan whenever asked:
   partition;
 - a registered graph whose registry row was written by hand, or whose
   partition was detached: it is listed, with exact numbers, and
-  `counts_verified` stays `f` whatever `recount_graph` is told.
+  `counts_verified` stays `f` whatever `recount_graph` is told. That
+  includes a registry row with a negative graph id, which pgRDF's own
+  functions refuse to create.
 
 One thing slows it: a transaction that holds a transaction id and
 stays open, most often a session left idle in a transaction. The writes
