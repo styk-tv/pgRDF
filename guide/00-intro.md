@@ -25,7 +25,7 @@ client (psql, psycopg, JDBC, node-postgres, pgx, …) already works.
 | Query | SPARQL 1.1 `SELECT` / `ASK` / `CONSTRUCT` / `DESCRIBE`, aggregates, property paths, named graphs | [03](03-querying.md) |
 | Update | SPARQL 1.1 UPDATE: `INSERT` / `DELETE` `DATA` and `WHERE`, graph management | [03](03-querying.md#sparql-update) |
 | Reason | OWL 2 RL or RDFS materialization, stored beside your data | [04](04-reasoning.md) |
-| Manage graphs | inventory, copy / move / clear / drop, carve subgraphs, write locks, integrity checks, a graph owner, and a record of every graph-level act | [05](05-graphs.md) |
+| Manage graphs | inventory with stored counts, copy / move / clear / drop, carve subgraphs, write locks, integrity checks, a graph owner, and a record of every graph-level act with a feed for clients that poll it | [05](05-graphs.md) |
 | Validate | SHACL Core plus SHACL-SPARQL, returning a JSONB report; 56 of the 98 W3C SHACL Core tests, graded on `sh:conforms` | [06](06-validation-recipes.md) |
 | Identify and export | canonical graph digests (W3C RDFC-1.0), canonical N-Triples export, a portable manifest | [07](07-identity-and-export.md) |
 | Diagnose | typed SQLSTATE errors, per-query completeness, capability listing | [08](08-errors-and-diagnostics.md) |
@@ -79,8 +79,13 @@ custom extensions).
   holds stores nothing.
 - Tables whose names start with `pgrdf._pgrdf_` are internal storage.
   Read graph information through `pgrdf.graph_inventory()` and the
-  other functions instead. Internal tables can change between
-  releases.
+  other functions instead, and write through pgRDF's functions.
+  Internal tables can change between releases, and since 0.6.42 a
+  write made on them in plain SQL leaves the graph's
+  [stored count](05-graphs.md#stored-counts) unverified.
+- Since 0.6.42 `pgrdf.graph_inventory()` lists an admin every graph and
+  any other role the graphs it owns. See
+  [which graphs are listed](05-graphs.md#which-graphs-are-listed).
 - `pgrdf.surface()` lists every function and whether it is part of
   the supported API.
 

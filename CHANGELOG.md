@@ -64,7 +64,7 @@ held a snapshot open.
   speed, for that graph, until a recount. `counts_scanned_at` is when a scan
   last set the count.
 - **`recount_graph(graph_id)`** counts a graph again, stores what it finds and
-  returns it beside what was stored. `recount_graph()` does every graph listed
+  returns it beside what was stored. `recount_graph()` does every graph
   the caller owns, or every graph for a role holding the storage owner's
   privileges; it is allowed to the graph's owner and to the storage owner. It
   changes no triple, runs on a locked graph, and is recorded as act

@@ -16,14 +16,14 @@ The code says what kind of refusal it is, and so who has to act.
 | `0A000` | Valid request that pgRDF does not support | change the request | `SERVICE`, `FILTER EXISTS`, `LANGMATCHES`; a `FILTER` beside a `UNION` |
 | `42601` | The query does not parse | fix the query | an unclosed `{` in a SPARQL query |
 | `22023` | Invalid argument | fix the argument | unknown `materialize` profile or `validate` mode; a negative graph id; a control character in a declared-identity setting |
-| `42704` | Something named does not exist | fix the name, or create it | `graph_digest` of a graph that doesn't exist; `CLEAR GRAPH` of an unknown IRI, or `COPY` from one; `set_graph_owner` to an unknown role |
+| `42704` | Something named does not exist | fix the name, or create it | `graph_digest` of a graph that doesn't exist; `CLEAR GRAPH` of an unknown IRI, or `COPY` from one; `set_graph_owner` to an unknown role; `recount_graph` of an unknown graph id |
 | `42710` | It already exists | choose another name | `create_graph` or `CREATE GRAPH` of a taken IRI; binding an IRI or id already bound to another graph |
 | `54000` | A configured limit was exceeded | narrow the request or raise the limit | property-path truncation with `pgrdf.on_path_truncation = 'error'`; a walk past `pgrdf.path_max_pairs`; a diff past `pgrdf.diff_max_rows`; a digest past `pgrdf.digest_max_bnode_quads`; `validate` or `materialize` past `pgrdf.max_inmemory_triples` |
 | `22P05` | A term contains a character PostgreSQL cannot store (U+0000) | fix the data | loading or inserting `"a\u0000b"` |
 | `22021` | A stored term holds a character pgRDF cannot emit (U+0000) | reload the graph | exporting or digesting a graph that holds a term with U+0000, stored by a version before 0.6.41 |
 | `55000` | Wrong state for this operation | change the state first | unlocking an unlocked graph; `move_graph` into a non-empty graph; an export or digest before `ALTER EXTENSION pgrdf UPDATE` |
 | `55P03` | The graph is locked | unlock it, or leave it alone | any write to a graph under `lock_graph` |
-| `42501` | Missing privilege, or not the graph's owner | grant it, or act as the owner | creating a graph without `INSERT` on the pgRDF tables; a file loader without `pg_read_server_files`; `stats()` without `EXECUTE`; `clear_graph` on another role's graph under `pgrdf.graph_owner_enforce`; a direct write to the act record |
+| `42501` | Missing privilege, or not the graph's owner | grant it, or act as the owner | creating a graph without `INSERT` on the pgRDF tables; a file loader without `pg_read_server_files`; `stats()` without `EXECUTE`; `clear_graph` on another role's graph under `pgrdf.graph_owner_enforce`; `graph_inventory(g)` for a graph that is not listed to the calling role, or `recount_graph(g)` for another role's graph (since 0.6.42); a direct write to the act record or to the stored counts' tables, whatever grants the role holds |
 | `2BP01` | Dependent objects | pass `cascade`, or remove them | `drop_graph(g, cascade => false)` on a graph with inferred triples |
 | `XX000` | A pgRDF defect | report it | see below |
 
@@ -293,13 +293,16 @@ the first three, no rows is the healthy answer.
 | `pgrdf.orphan_partitions()` | Is there storage that belongs to no graph? | [Managing graphs](05-graphs.md#the-inventory) |
 | `pgrdf.graph_activity()` | Who is inside a graph-level act right now? | [Managing graphs](05-graphs.md#who-is-working-on-a-graph-right-now) |
 | `pgrdf.graph_acts()` | Who did what to a graph, and when? | [Managing graphs](05-graphs.md#the-act-record) |
-| `pgrdf.graph_integrity(g)` | Is every triple of this graph well-formed? | [Managing graphs](05-graphs.md#checking-a-graphs-health) |
+| `pgrdf.graph_integrity(g)` | Is every triple of this graph well-formed, and does its stored count agree with a scan? | [Managing graphs](05-graphs.md#checking-a-graphs-health) |
+| `pgrdf.graph_totals()` | How many graphs and triples am I listed, out of how many graphs, and is any count unverified? | [Managing graphs](05-graphs.md#totals) |
+| `pgrdf.graph_act_feed()` | What has been done since I last read the act record? | [Managing graphs](05-graphs.md#following-the-act-record) |
 
 ### ownership_drift
 
 pgRDF does a few things as the *storage owner*, the role that owns
 `pgrdf._pgrdf_quads`: it creates, empties and removes graph partitions,
-allocates graph ids, and writes the act record. When a deployment has
+allocates graph ids, writes the act record and, since 0.6.42, keeps the
+[stored counts](05-graphs.md#stored-counts). When a deployment has
 handed the tables to a role of its own, `ownership_drift()` lists every
 storage object that role does not own:
 
@@ -319,6 +322,7 @@ nothing were marked too, #160):
 | a graph partition | to own it: pgRDF drops, empties, indexes and puts triggers on it |
 | `_pgrdf_graphs` | `SELECT` and `UPDATE` |
 | `_pgrdf_graph_acts` | `INSERT` |
+| `_pgrdf_graph_counts`, `_pgrdf_graph_count_deltas`, `_pgrdf_graph_count_bypass` | to own them: pgRDF keeps the stored counts there, and their guard admits no other role (since 0.6.42) |
 | `_pgrdf_graph_id_seq` | `USAGE`, `SELECT` and `UPDATE` |
 | `_pgrdf_graph_act_id_seq` | `USAGE` |
 | the `pgrdf` schema | `USAGE` and `CREATE` |
@@ -327,6 +331,9 @@ nothing were marked too, #160):
 Holding the object owner's privileges always satisfies a row. A worked
 example is in the
 [install guide](01-install.md#giving-pgrdfs-storage-to-another-role).
+
+The update to 0.6.42 creates the three count tables owned by the
+storage owner, so a database that was only updated lists none of them.
 
 ## Instance counters
 
