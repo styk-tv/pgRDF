@@ -28,4 +28,4 @@ DELETE_INSERT_WHERE|2|2|["http://example.org/g1"]
 DELETE_DATA|1|["http://example.org/g2"]
 0
 
-6
+7
