@@ -54,11 +54,15 @@ held a snapshot open.
   table and the dictionary. The graph registry carries one row trigger
   (`pgrdf_count_open`), which opens a graph's count row when its registry row
   is inserted. They fire once per statement and refuse nothing. Measured against
-  0.6.41 in one sitting, the two versions alternating, four runs each: a load
-  of 1M triples took 25.4 s where it took 25.6 s (medians; no difference
-  beyond the spread between runs), and 100,000 single-row `put_quad` calls
-  took 4.0 s where they took 6.2 s, because that statement is now prepared
-  once per session.
+  0.6.41 in one sitting, the two versions alternating, medians: a load of 1M
+  triples took 25.5 s on both, and a load of 1M triples that brings 1M new
+  terms showed no difference beyond the spread between runs. 100,000
+  single-row `put_quad` calls took 4.1 s where they took 6.2 s, because that
+  statement is now prepared once per session. Adding terms one call at a time
+  costs more than it did, because each new term records a count row of its
+  own: 100,000 `put_term` calls of new terms took 6.0 s where they took 5.7 s,
+  and eight sessions each committing one new term per transaction reached
+  26,400 transactions per second where they reached 29,400 (#182).
 - **`graph_integrity()` reports the stored count against a scan**
   (`stored_count`), and `clean` is false when a verified count differs from
   the scan.
