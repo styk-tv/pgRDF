@@ -9,10 +9,10 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 ## [0.6.42] — 2026-11-25
 
 Knowing the graphs takes milliseconds. pgRDF now keeps a count per graph as it
-writes, so listing the graphs with their sizes no longer reads every triple.
-The listing follows the role that asks, each count says whether it can be
-trusted without a scan, and the act record gains a feed that a polling client
-cannot fall behind on.
+writes, and one for the dictionary, so listing the graphs with their sizes no
+longer reads every triple. The listing follows the role that asks, each count
+says whether it can be trusted without a scan, and the act record gains a feed
+that a polling client cannot fall behind on.
 
 Measured on one database of 71 graphs and 62.4M triples with 0.6.41:
 `graph_inventory()` took 2.2 to 3.4 s, and one graph's row cost the same. With
@@ -29,7 +29,11 @@ held a snapshot open.
   and four are added at the end: `change_seq` moves with every committed
   content change of the graph, so a client can key a cache on it;
   `counts_verified`, `counts_scanned_at` and `last_act_id` are described
-  below. `count_quads()` answers from the stored count too.
+  below. `count_quads()` answers from the stored count too. A count is kept
+  for a graph that has a partition of its own, which is every graph pgRDF's
+  functions create. A graph id that was never registered has none: its rows
+  live in the default partition, as before, and it is counted by scan. So is
+  a registered graph whose registry row was written by hand.
 - **The listing follows the role** (#175). `graph_inventory()` used to return
   every graph to every role that could call it. Now an admin sees every graph:
   a superuser, a role holding the storage owner's privileges, or a role holding
@@ -46,13 +50,19 @@ held a snapshot open.
   with `graph_id(iri)`, and the act record is readable by every role. The database
   remains the boundary between tenants.
 - **Every graph partition carries two statement-level triggers**
-  (`pgrdf_count_bypass`, `pgrdf_count_bypass_truncate`), and so does the quad
-  table. They fire once per statement and refuse nothing. Measured against
-  0.6.41 in one sitting, the two versions alternating, four runs each: a load
-  of 1M triples took 25.4 s where it took 25.6 s (medians; no difference
-  beyond the spread between runs), and 100,000 single-row `put_quad` calls
-  took 4.0 s where they took 6.2 s, because that statement is now prepared
-  once per session.
+  (`pgrdf_count_bypass`, `pgrdf_count_bypass_truncate`), and so do the quad
+  table and the dictionary. The graph registry carries one row trigger
+  (`pgrdf_count_open`), which opens a graph's count row when its registry row
+  is inserted. They fire once per statement and refuse nothing. Measured against
+  0.6.41 in one sitting, the two versions alternating, medians: a load of 1M
+  triples took 25.5 s on both, and a load of 1M triples that brings 1M new
+  terms showed no difference beyond the spread between runs. 100,000
+  single-row `put_quad` calls took 4.1 s where they took 6.2 s, because that
+  statement is now prepared once per session. Adding terms one call at a time
+  costs more than it did, because each new term records a count row of its
+  own: 100,000 `put_term` calls of new terms took 6.0 s where they took 5.7 s,
+  and eight sessions each committing one new term per transaction reached
+  26,400 transactions per second where they reached 29,400 (#182).
 - **`graph_integrity()` reports the stored count against a scan**
   (`stored_count`), and `clean` is false when a verified count differs from
   the scan.
@@ -79,8 +89,20 @@ held a snapshot open.
   for a graph that does not exist.
 - **`graph_totals()`**: one row of totals over the graphs listed to the caller,
   with the scope they cover (`all` or `own`) and the number of graphs in the
-  database beside it. `terms` is reserved for the number of dictionary terms
-  and is NULL in this release.
+  database beside it. For an admin it also carries `terms`, the number of
+  dictionary terms, and `terms_verified`.
+- **A stored count of dictionary terms** (#178), kept the way the graph counts
+  are: every route that adds a term records it in the transaction that adds
+  it. `graph_totals()` returns it as `terms` while it is verified. A term
+  added or removed in plain SQL leaves it unverified, and `terms` is then
+  NULL with `terms_verified` false: unlike a graph's count it is not replaced
+  by a scan there, because the dictionary is as large as the database and
+  `graph_totals()` is a call clients make on every listing. `count_terms()`
+  returns the exact number on purpose (the stored count when verified, else a
+  scan), and `recount_terms()` counts the dictionary again and stores the
+  result; that one is allowed to a role holding the storage owner's
+  privileges. Both columns are NULL for a role that is not an admin: the
+  dictionary belongs to the database, not to a graph.
 - **`graph_act_feed(after, only_graph, page, max_acts)`** (#176): the act
   record in an order a poller can trust. `graph_acts(graph_id, since)` filters
   on the time a row was written inside its transaction, so an act whose
@@ -93,15 +115,19 @@ held a snapshot open.
   until it is NULL, then keep `complete_below`. The acts of the caller's own
   open transaction are left out. Indexes on `(xact, act_id)` and `(at)`.
 - **The listing calls take no transaction id.** `graph_inventory()` in its
-  three forms, `graph_totals()`, `count_quads()` and `graph_act_feed()` read
-  without one, so a session that only lists graphs is not a transaction that
+  three forms, `graph_totals()`, `count_quads()`, `count_terms()` and
+  `graph_act_feed()` read without one, so a session that only lists graphs is not a transaction that
   others must wait out.
 
 ### Upgrading
 
 - `ALTER EXTENSION pgrdf UPDATE` counts every graph once, in one pass over the
-  quad table (about the cost of one 0.6.41 `graph_inventory()` call), and
-  holds writers out from that pass to its commit. Readers are not blocked.
+  quad table (about the cost of one 0.6.41 `graph_inventory()` call), and the
+  dictionary once, and holds writers out from those passes to its commit.
+  Readers are not blocked. **Run it with writers quiet.** It locks the
+  dictionary and the quad table one after the other, and a write caught
+  between the two can make the upgrade fail with a deadlock (`40P01`). The
+  upgrade is one transaction, so nothing is left half-done: run it again.
 - It warns with the number of graphs that have no recorded owner.
 - It drops and re-creates `graph_inventory()`, because the result type
   changed. A view of yours over that function stops the upgrade: drop it
@@ -115,12 +141,14 @@ held a snapshot open.
   renamed role no longer owns its graphs until `set_graph_owner` says so.
 - A database restored from a dump has no stored counts: every graph is
   unverified and counted by scan until `SELECT * FROM pgrdf.recount_graph();`
-  is run once. `pg_upgrade` needs nothing.
+  is run once, and the term count is unverified until
+  `SELECT * FROM pgrdf.recount_terms();`. Writes made before that are
+  counted, and the recount takes them in. `pg_upgrade` needs nothing.
 - A role that switches triggers off (`session_replication_role = replica`,
   which includes a logical replication subscriber's apply; `ALTER TABLE ...
   DISABLE TRIGGER`; `pg_restore --disable-triggers`), or that attaches,
   detaches or drops a partition holding rows, steps outside the detection.
-  `recount_graph` is the cure.
+  `recount_graph` is the cure, and `recount_terms` for the dictionary.
 
 ### Known limits
 

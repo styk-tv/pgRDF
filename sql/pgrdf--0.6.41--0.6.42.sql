@@ -1,8 +1,8 @@
 -- pgRDF 0.6.41 -> 0.6.42
 --
 -- No triple is rewritten by this script. graph_ids, partitions and consumer
--- schemas survive. It counts every graph once, under a lock that keeps
--- writers out until it commits.
+-- schemas survive. It counts every graph and the dictionary once, under a
+-- lock that keeps writers out until it commits.
 
 -- Every upgrade script repeats this alignment (0.6.40, #153): an upgrade
 -- must leave the engine's own allocator usable by the storage owner.
@@ -19,14 +19,32 @@ BEGIN
 END
 $pgrdf_153$;
 
--- #171: the engine keeps a count per graph. The counts are seeded below
--- from one pass over the quad table. A write that committed after that
--- pass read the table and before this script commits would be in no
--- count, so writers wait from here to the end of the upgrade. Readers
--- do not.
-LOCK TABLE _pgrdf_quads IN SHARE MODE;
+-- #171, #178: the engine keeps a count per graph and one for the
+-- dictionary. The counts are seeded below from one pass over the quad
+-- table and one over the dictionary. A write that committed after a pass
+-- read its table and before this script commits would be in no count, so
+-- writers wait from here to the end of the upgrade. Readers do not.
+--
+-- Run the upgrade with writers quiet. The two locks are taken one after
+-- the other, and no order suits every writer: a load takes the dictionary
+-- before the quad table, materialize and a SPARQL DELETE ... INSERT take
+-- them the other way round. A writer caught between the two can make the
+-- upgrade fail with a deadlock (40P01). The upgrade is one transaction, so
+-- nothing is left half-done: run it again.
+LOCK TABLE _pgrdf_dictionary, _pgrdf_quads IN SHARE MODE;
 
--- The two trigger functions the count tables stand on.
+-- The trigger functions the count tables stand on, and the one rule that
+-- says which keys a count is kept for.
+CREATE FUNCTION "_count_open"()
+	RETURNS trigger
+	LANGUAGE c
+	AS 'MODULE_PATHNAME', '_count_open_wrapper';
+CREATE  FUNCTION "_count_kept"(
+	"graph_id" bigint /* i64 */
+) RETURNS bool /* bool */
+STABLE STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', '_count_kept_wrapper';
 CREATE FUNCTION "_count_bypass"()
 	RETURNS TRIGGER
 	LANGUAGE c
@@ -126,6 +144,22 @@ CREATE TRIGGER pgrdf_count_bypass
 CREATE TRIGGER pgrdf_count_bypass_truncate
     BEFORE TRUNCATE ON _pgrdf_quads_default
     FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('0');
+-- Every registered graph has a count row. The engine sets it when it
+-- creates a graph; a registry row that arrives any other way, as all of
+-- them do when a restore fills the registry, opens it here, not set by any
+-- scan.
+CREATE TRIGGER pgrdf_count_open
+    AFTER INSERT ON _pgrdf_graphs
+    FOR EACH ROW EXECUTE FUNCTION _count_open();
+-- #178: the dictionary's count is kept under the key -1. A term added or
+-- removed in plain SQL marks it unverified; an UPDATE cannot change how
+-- many terms there are.
+CREATE TRIGGER pgrdf_count_bypass
+    BEFORE INSERT OR DELETE ON _pgrdf_dictionary
+    FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('-1');
+CREATE TRIGGER pgrdf_count_bypass_truncate
+    BEFORE TRUNCATE ON _pgrdf_dictionary
+    FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('-1');
 -- The count tables belong to the storage owner, like every storage table:
 -- the engine reads and writes them as that role. The bypass log's sequence
 -- is owned by its column and moves with its table.
@@ -167,8 +201,13 @@ BEGIN
 END
 $pgrdf_count_markers$;
 
--- The seed: every registered graph, counted now. One pass over the quad
--- table, about the cost of one graph_inventory() call of 0.6.41.
+-- The seed: every graph the engine keeps a count for, counted now. One
+-- pass over the quad table, about the cost of one graph_inventory() call
+-- of 0.6.41. A registered graph without a partition of its own (a registry
+-- row written by hand) gets no count: its rows live in the default
+-- partition, no write to it is counted, and it is counted by scan. Nor
+-- does a graph registered under a negative id: the keys below 0 are not
+-- graphs', and -1 is the dictionary's, seeded just below.
 INSERT INTO _pgrdf_graph_counts
        (graph_id, asserted, inferred, scanned_at, scan_snapshot, scan_xact, scan_mark, folded_below)
 SELECT g.graph_id, coalesce(q.a, 0), coalesce(q.i, 0), pg_catalog.clock_timestamp(),
@@ -179,7 +218,16 @@ SELECT g.graph_id, coalesce(q.a, 0), coalesce(q.i, 0), pg_catalog.clock_timestam
   LEFT JOIN (SELECT graph_id,
                     count(*) FILTER (WHERE NOT is_inferred) AS a,
                     count(*) FILTER (WHERE is_inferred) AS i
-               FROM _pgrdf_quads GROUP BY graph_id) q USING (graph_id);
+               FROM _pgrdf_quads GROUP BY graph_id) q USING (graph_id)
+ WHERE _count_kept(g.graph_id);
+-- #178: and the dictionary, counted now: one pass over it.
+INSERT INTO _pgrdf_graph_counts
+       (graph_id, asserted, scanned_at, scan_snapshot, scan_xact, scan_mark, folded_below)
+SELECT -1, pg_catalog.count(*), pg_catalog.clock_timestamp(),
+       pg_catalog.pg_current_snapshot(), pg_catalog.pg_current_xact_id(),
+       pg_catalog.nextval('_pgrdf_graph_count_bypass_seq'),
+       pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot())
+  FROM _pgrdf_dictionary;
 
 -- Folding on request: what the engine does by itself after writes.
 CREATE  FUNCTION "_fold_counts"(
@@ -353,11 +401,28 @@ CREATE  FUNCTION "graph_totals"() RETURNS TABLE (
 	"asserted" bigint,  /* i64 */
 	"inferred" bigint,  /* i64 */
 	"unverified_graphs" bigint,  /* i64 */
-	"terms" bigint  /* Option < i64 > */
+	"terms" bigint,  /* Option < i64 > */
+	"terms_verified" bool  /* Option < bool > */
 )
 STRICT
 LANGUAGE c /* Rust */
 AS 'MODULE_PATHNAME', 'graph_totals_wrapper';
+
+-- #178: the exact number of terms on purpose, and the cure for a term
+-- count that is not verified.
+CREATE  FUNCTION "count_terms"() RETURNS bigint /* i64 */
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'count_terms_wrapper';
+
+CREATE  FUNCTION "recount_terms"() RETURNS TABLE (
+	"terms" bigint,  /* i64 */
+	"was_terms" bigint,  /* Option < i64 > */
+	"was_verified" bool  /* bool */
+)
+STRICT
+LANGUAGE c /* Rust */
+AS 'MODULE_PATHNAME', 'recount_terms_wrapper';
 
 -- #175: the listing follows the role from here on. A graph with no recorded
 -- owner (created before 0.6.41) is listed to admins only.

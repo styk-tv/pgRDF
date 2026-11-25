@@ -7,8 +7,97 @@
 //! shmem with the committed id), then INSERT (stage the new id for
 //! shmem publication on commit).
 
+use crate::storage::counts;
 use crate::storage::shmem_cache;
 use pgrx::prelude::*;
+
+const TERM_INSERT: &str = "INSERT INTO pgrdf._pgrdf_dictionary \
+        (term_type, lexical_value, datatype_iri_id, language_tag) \
+     VALUES ($1, $2, $3, $4) RETURNING id";
+
+/// [`TERM_INSERT`] with the dictionary's count delta in the same
+/// statement: a term added outside any act pays for one statement.
+const TERM_INSERT_COUNTED: &str = "WITH ins AS ( \
+       INSERT INTO pgrdf._pgrdf_dictionary \
+              (term_type, lexical_value, datatype_iri_id, language_tag) \
+       VALUES ($1, $2, $3, $4) RETURNING id), \
+     d AS (INSERT INTO pgrdf._pgrdf_graph_count_deltas (graph_id, d_asserted, d_inferred) \
+           SELECT -1, 1, 0 FROM ins) \
+     SELECT id FROM ins";
+
+thread_local! {
+    /// The two term INSERTs, prepared once per backend: [`TERM_INSERT`]
+    /// and [`TERM_INSERT_COUNTED`]. Kept here and not in the query plan
+    /// cache: that one reports what the SPARQL translator reuses, and
+    /// `plan_cache_clear()` has nothing to clear in these. PostgreSQL
+    /// replans a saved statement by itself when its tables change.
+    static TERM_PLANS: std::cell::RefCell<[Option<std::rc::Rc<pgrx::spi::OwnedPreparedStatement>>; 2]> =
+        const { std::cell::RefCell::new([None, None]) };
+}
+
+/// Store one new term and return its id, with the engine's writing mark
+/// up. `counted` picks the statement that carries the dictionary's count
+/// delta. Prepared once per backend: planning the two-part statement on
+/// every call cost a quarter of `put_term`'s time for a new term
+/// (measured against the plain INSERT it replaced).
+///
+/// The plan is taken out of the cell before it runs, so nothing is
+/// borrowed during the INSERT: a trigger on the dictionary that calls
+/// `put_term` comes back in here and finds the cell free.
+fn insert_term(
+    counted: bool,
+    term_type: i16,
+    value: &str,
+    datatype_id: Option<i64>,
+    language: Option<&str>,
+) -> i64 {
+    Spi::connect_mut(|client| {
+        let cached = TERM_PLANS.with(|plans| plans.borrow()[counted as usize].clone());
+        let plan = match cached {
+            Some(plan) => plan,
+            None => {
+                let sql = if counted {
+                    TERM_INSERT_COUNTED
+                } else {
+                    TERM_INSERT
+                };
+                let plan = std::rc::Rc::new(
+                    client
+                        .prepare_mut(
+                            sql,
+                            &[
+                                PgOid::BuiltIn(PgBuiltInOids::INT2OID),
+                                PgOid::BuiltIn(PgBuiltInOids::TEXTOID),
+                                PgOid::BuiltIn(PgBuiltInOids::INT8OID),
+                                PgOid::BuiltIn(PgBuiltInOids::TEXTOID),
+                            ],
+                        )
+                        .expect("put_term_full: prepare failed")
+                        .keep(),
+                );
+                TERM_PLANS.with(|plans| plans.borrow_mut()[counted as usize] = Some(plan.clone()));
+                plan
+            }
+        };
+        let _writing = counts::Writing::begin();
+        client
+            .update(
+                plan.as_ref(),
+                None,
+                &[
+                    term_type.into(),
+                    value.into(),
+                    datatype_id.into(),
+                    language.into(),
+                ],
+            )
+            .expect("put_term_full: insert failed")
+            .first()
+            .get_one::<i64>()
+            .expect("put_term_full: id column")
+            .expect("put_term_full: INSERT … RETURNING returned no row")
+    })
+}
 
 /// Term-type discriminator. Matches `_pgrdf_dictionary.term_type` (SMALLINT)
 /// in [`sql/schema_v0_2_0.sql`].
@@ -103,19 +192,17 @@ pub(crate) fn put_term_full(
         shmem_cache::stage_for_commit(term_type, value, datatype_id, language, id);
         return id;
     }
-    let id: i64 = Spi::get_one_with_args(
-        "INSERT INTO pgrdf._pgrdf_dictionary
-            (term_type, lexical_value, datatype_iri_id, language_tag)
-         VALUES ($1, $2, $3, $4) RETURNING id",
-        &[
-            term_type.into(),
-            value.into(),
-            datatype_id.into(),
-            language.into(),
-        ],
-    )
-    .expect("put_term_full: insert failed")
-    .expect("put_term_full: INSERT … RETURNING returned no row");
+    // 0.6.42 (#178): the engine keeps the number of terms. Inside an act
+    // the call's tally gathers the new term and one delta is written when
+    // the act ends; outside one (`put_term`) the delta rides in the
+    // INSERT's own statement.
+    let own_delta = !counts::tally_open() && counts::present();
+    let id = insert_term(own_delta, term_type, value, datatype_id, language);
+    if own_delta {
+        counts::maybe_fold(counts::DICTIONARY);
+    } else {
+        counts::terms_gained(1);
+    }
     // INSERT path: row is still in-flight. Stage the mapping for
     // shmem publication on COMMIT — on ABORT it is silently dropped
     // so we never publish ids that don't survive in the table.
@@ -230,27 +317,36 @@ pub(crate) fn put_terms_batch(terms: &[(i16, String, Option<i64>, Option<String>
     // corruption of issue #8 was a SEPARATE bug (the staged DICT
     // phase skipping the empty-dict precondition its siblings
     // enforce), fixed in `loader::staged_load_default`, not here.
-    Spi::run_with_args(
-        "INSERT INTO pgrdf._pgrdf_dictionary
-             (term_type, lexical_value, datatype_iri_id, language_tag)
-         SELECT t.tt, t.lv, t.di, t.lt
-         FROM unnest($1::int2[], $2::text[], $3::int8[], $4::text[])
-              AS t(tt, lv, di, lt)
-         WHERE NOT EXISTS (
-             SELECT 1 FROM pgrdf._pgrdf_dictionary d
-              WHERE d.term_type = t.tt
-                AND d.lexical_value = t.lv
-                AND d.datatype_iri_id IS NOT DISTINCT FROM t.di
-                AND d.language_tag    IS NOT DISTINCT FROM t.lt
-         )",
-        &[
-            term_types.clone().into(),
-            lexicals.clone().into(),
-            datatypes.clone().into(),
-            languages.clone().into(),
-        ],
-    )
-    .expect("put_terms_batch: insert failed");
+    let added = counts::engine_write(|| {
+        Spi::connect_mut(|client| {
+            client
+                .update(
+                    "INSERT INTO pgrdf._pgrdf_dictionary
+                         (term_type, lexical_value, datatype_iri_id, language_tag)
+                     SELECT t.tt, t.lv, t.di, t.lt
+                     FROM unnest($1::int2[], $2::text[], $3::int8[], $4::text[])
+                          AS t(tt, lv, di, lt)
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM pgrdf._pgrdf_dictionary d
+                          WHERE d.term_type = t.tt
+                            AND d.lexical_value = t.lv
+                            AND d.datatype_iri_id IS NOT DISTINCT FROM t.di
+                            AND d.language_tag    IS NOT DISTINCT FROM t.lt
+                     )",
+                    None,
+                    &[
+                        term_types.clone().into(),
+                        lexicals.clone().into(),
+                        datatypes.clone().into(),
+                        languages.clone().into(),
+                    ],
+                )
+                .expect("put_terms_batch: insert failed")
+                .len()
+        })
+    });
+    // 0.6.42 (#178): what the statement stored is what the count gains.
+    counts::terms_gained(added as i64);
 
     // Step 2: bulk lookup. Returns rows in JOIN order (input order
     // preserved by the WITH ORDINALITY pattern). The result is a
@@ -358,6 +454,41 @@ mod tests {
         let back: Option<String> =
             Spi::get_one_with_args("SELECT pgrdf.get_term($1)", &[id.into()]).unwrap();
         assert_eq!(back.as_deref(), Some("hello"));
+    }
+
+    /// A trigger on the dictionary may call `put_term` itself. The saved
+    /// INSERT must not be held borrowed while it runs, or the call that
+    /// comes back in finds the cell taken and the write fails.
+    #[pg_test]
+    fn put_term_can_be_entered_again_from_a_trigger() {
+        Spi::run(
+            "CREATE FUNCTION public.tdd_dict_echo() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF NEW.lexical_value = 'urn:tdd:reenter:outer' THEN \
+                 PERFORM pgrdf.put_term('urn:tdd:reenter:inner', 1::smallint); \
+               END IF; \
+               RETURN NEW; \
+             END $$",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE TRIGGER tdd_reenter BEFORE INSERT ON pgrdf._pgrdf_dictionary \
+             FOR EACH ROW EXECUTE FUNCTION public.tdd_dict_echo()",
+        )
+        .unwrap();
+        Spi::run("SELECT pgrdf.put_term('urn:tdd:reenter:outer', 1::smallint)").unwrap();
+        let both = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgrdf._pgrdf_dictionary \
+              WHERE lexical_value IN ('urn:tdd:reenter:outer', 'urn:tdd:reenter:inner')",
+        )
+        .unwrap();
+        assert_eq!(both, Some(2));
+        let counted = Spi::get_one::<bool>(
+            "SELECT terms = (SELECT count(*) FROM pgrdf._pgrdf_dictionary) AND terms_verified \
+               FROM pgrdf.graph_totals()",
+        )
+        .unwrap();
+        assert_eq!(counted, Some(true), "both terms are in the count");
     }
 
     #[pg_test]

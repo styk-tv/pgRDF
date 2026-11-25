@@ -939,7 +939,18 @@ pub fn dict(job: &JobSlot, _w: &WorkerSlot) -> i64 {
          OVERRIDING SYSTEM VALUE \
          SELECT id, term_type, lexical_value, datatype_iri_id, language_tag FROM {d_all}"
     );
-    Spi::run(&ins).expect("staged DICT: OVERRIDING SYSTEM VALUE dict insert failed");
+    // 0.6.42 (#178): the engine keeps the number of terms. This worker's
+    // transaction stores the terms, so it records what it stored: the
+    // delta commits or rolls back with them.
+    let added = crate::storage::counts::engine_write(|| {
+        Spi::connect_mut(|client| {
+            client
+                .update(&ins, None, &[])
+                .expect("staged DICT: OVERRIDING SYSTEM VALUE dict insert failed")
+                .len()
+        })
+    });
+    crate::storage::counts::terms_gained(added as i64);
 
     // ── (6) re-sync IDENTITY past the supplied ids; build the RESOLVE join index; widen the dict ──
     // We supplied ids explicitly, so the IDENTITY sequence never advanced — fast-forward it to MAX(id)

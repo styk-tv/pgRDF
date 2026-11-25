@@ -413,7 +413,11 @@ pub(crate) fn insert_row(graph_id: i64, s: i64, p: i64, o: i64) -> Written {
     // Inside an act the call's tally gathers what was stored and one
     // delta is written when the act ends. Outside one (`put_quad`), the
     // delta rides in the row's own statement.
-    let own_delta = !crate::storage::counts::tally_open() && crate::storage::counts::present();
+    // An id without a count (never registered: the row lands in the
+    // default partition) records none.
+    let own_delta = !crate::storage::counts::tally_open()
+        && crate::storage::counts::present()
+        && crate::storage::counts::counted(graph_id);
     let stored = run_row(
         if own_delta {
             ROW_INSERT_COUNTED

@@ -137,10 +137,36 @@ exact="SELECT count(*) FROM pgrdf.graph_inventory() i
         WHERE i.asserted <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND NOT q.is_inferred)
            OR i.inferred <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND q.is_inferred)"
 [ "$(q $DST -c "$exact")" = "0" ] || fail "a restored graph's count differs from a scan"
+# 5a. A restored graph has its count row already: the registry opened it
+#     when the restore filled the registry. So writes made before the
+#     recount fold into it and do not pile up as rows nothing removes (#180).
+r=$(q $DST -c "SELECT pgrdf.graph_id('urn:rt:empty')")
+opened=$(q $DST -c "SELECT count(*) FROM pgrdf._pgrdf_graph_counts c JOIN pgrdf._pgrdf_graphs USING (graph_id) WHERE c.graph_id <> $g")
+[ "$opened" = "$restored" ] || fail "$opened of the $restored restored graphs have a count row"
+echo "SELECT format('SELECT pgrdf.put_quad(%s, 1, 1, $r);', i) FROM generate_series(1, 1000) i \gexec" | q $DST -q >/dev/null
+waiting=$(q $DST -c "SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = $r")
+[ "$waiting" -lt 300 ] || fail "$waiting deltas wait after 1000 committed writes into a restored graph: nothing folds them before its recount"
+state=$(q $DST -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($r)")
+[ "$state" = "1000 false" ] || fail "a restored graph reads '$state' after 1000 writes, expected '1000 false'"
 recounted=$(q $DST -c "SELECT count(*) FROM pgrdf.recount_graph()")
 left=$(q $DST -c "SELECT unverified_graphs FROM pgrdf.graph_totals()")
 [ "$left" = "0" ] || fail "$left graph(s) still unverified after recount_graph()"
 [ "$(q $DST -c "$exact")" = "0" ] || fail "a count differs from a scan after recount_graph()"
-ok "after the restore $unverified graphs are unverified and exact; recount_graph() verified $recounted"
+ok "after the restore $unverified graphs are unverified and exact, each with its count row; 1000 writes into one before its recount left $waiting deltas; recount_graph() verified $recounted"
+
+# 6. The dictionary's count (#178). CREATE EXTENSION seeds it for an empty
+#    dictionary and the restore fills the dictionary afterwards, in plain
+#    SQL: the totals say the number is not verified and give none (they
+#    never scan the dictionary), count_terms() gives the exact one, and
+#    recount_terms() restores the stored count.
+terms="SELECT coalesce(terms::text, 'null') || ' ' || coalesce(terms_verified::text, 'null') || ' of ' || (SELECT count(*) FROM pgrdf._pgrdf_dictionary) FROM pgrdf.graph_totals()"
+dict=$(q $DST -c "SELECT count(*) FROM pgrdf._pgrdf_dictionary")
+[ "$(q $SRC -c "$terms" | cut -d' ' -f2)" = "true" ] || fail "the source database's term count is not verified: $(q $SRC -c "$terms")"
+[ "$(q $DST -c "$terms")" = "null false of $dict" ] || fail "after the restore the totals read '$(q $DST -c "$terms")', expected 'null false of $dict'"
+[ "$(q $DST -c "SELECT pgrdf.count_terms()")" = "$dict" ] || fail "count_terms() after the restore is not $dict"
+cured=$(q $DST -c "SELECT terms || ' ' || was_verified FROM pgrdf.recount_terms()")
+[ "$cured" = "$dict false" ] || fail "recount_terms() returned '$cured', expected '$dict false'"
+[ "$(q $DST -c "$terms")" = "$dict true of $dict" ] || fail "after recount_terms() the totals read '$(q $DST -c "$terms")', expected '$dict true of $dict'"
+ok "after the restore the term count reads unverified with no number, count_terms() says $dict, and recount_terms() verifies it"
 
 echo "dump round trip: passed"

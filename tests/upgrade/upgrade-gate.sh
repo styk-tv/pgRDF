@@ -31,7 +31,7 @@ ok() { echo "ok   $*"; }
 
 held_pid=""
 cleanup() {
-  exec 3>&- 2>/dev/null || true
+  exec 3>&- || true
   [ -n "$held_pid" ] && kill "$held_pid" 2>/dev/null || true
   "${PSQL[@]}" -d postgres -q -c "DROP DATABASE IF EXISTS $UP" -c "DROP DATABASE IF EXISTS $FRESH" \
     -c "DROP ROLE IF EXISTS $APP" -c "DROP ROLE IF EXISTS $STORE" >/dev/null 2>&1 || true
@@ -51,6 +51,13 @@ q $UP -q -c "SELECT pgrdf.materialize(pgrdf.graph_id('urn:ug:kept'), 'rdfs')" >/
 q $UP -q -c "SELECT pgrdf.add_graph('urn:ug:empty')" >/dev/null
 q $UP -q -c "SELECT pgrdf.parse_turtle('<urn:ug:s> <urn:ug:p> \"old\" .', pgrdf.add_graph('urn:ug:old'))" >/dev/null
 q $UP -q -c "UPDATE pgrdf._pgrdf_graphs SET owner = NULL WHERE iri = 'urn:ug:old'"
+# A registered graph without a partition of its own: a registry row written
+# in plain SQL. Its rows live in the default partition.
+q $UP -q -c "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri, owner) VALUES (777001, 'urn:ug:nopart', current_user)" \
+         -c "SELECT pgrdf.put_quad(1, 2, 3, 777001)"
+# And one registered under a negative id, which the registry does not
+# refuse. The dictionary's count is kept under -1: the two must not meet.
+q $UP -q -c "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri, owner) VALUES (-1, 'urn:ug:negative', current_user)"
 kept_before=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")
 kept_structure=$(q $UP -c "SELECT pgrdf.structural_digest(pgrdf.graph_id('urn:ug:kept'))")
 scanned="SELECT string_agg(graph_id || ':' || a || '+' || i, ' ' ORDER BY graph_id)
@@ -108,6 +115,18 @@ count_owners=$(q $UP -c "SELECT string_agg(DISTINCT relowner::regrole::text, ','
 [ "$count_owners" = "$STORE" ] || fail "the count tables are owned by '$count_owners', expected $STORE"
 ok "updated to $CUR; the count tables are owned by $STORE; no blocking drift"
 
+# 4a. The writers keep a count for an id that has a partition of its own.
+#     The registered graph without one must not come out of the upgrade
+#     with a count called verified: its next write records nothing, and
+#     the stored number would then be wrong and say it is right.
+q $UP -q -c "SELECT pgrdf.put_quad(1, 2, 4, 777001)"
+np=$(q $UP -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory(777001)")
+[ "$np" = "2 false" ] || fail "a registered graph without a partition of its own reads '$np' after the upgrade and one more write, expected '2 false'"
+neg=$(q $UP -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory(-1)")
+[ "$neg" = "0 false" ] || fail "a graph registered as -1 reads '$neg' after the upgrade, expected '0 false': it is not the dictionary"
+q $UP -q -c "DELETE FROM pgrdf._pgrdf_graphs WHERE graph_id IN (777001, -1)" -c "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = 777001"
+ok "a registered graph without a partition of its own is counted by scan and never called verified (2 rows, one written after the upgrade); a graph registered as -1 upgrades and is not shown the term count"
+
 # 4b. Every graph was counted by the upgrade: verified, and equal to a scan.
 truth="SELECT count(*) FROM pgrdf.graph_inventory() i
         WHERE NOT i.counts_verified
@@ -117,6 +136,12 @@ truth="SELECT count(*) FROM pgrdf.graph_inventory() i
                               WHERE q.graph_id = i.graph_id AND q.is_inferred)"
 wrong=$(q $UP -c "$truth")
 [ "$wrong" = "0" ] || fail "$wrong graph(s) are unverified or miscounted after the upgrade: $(q $UP -c "SELECT string_agg(graph_id || ':' || asserted || '+' || inferred || ':' || counts_verified, ' ') FROM pgrdf.graph_inventory()")"
+# And the dictionary (#178): the stored number of terms is verified and
+# equal to the table, which held terms before the upgrade.
+terms="SELECT coalesce(terms::text, 'null') || ' ' || coalesce(terms_verified::text, 'null') || ' of ' || (SELECT count(*) FROM pgrdf._pgrdf_dictionary) FROM pgrdf.graph_totals()"
+dict=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_dictionary")
+[ "$dict" -gt 0 ] || fail "the fixture left the dictionary empty"
+[ "$(q $UP -c "$terms")" = "$dict true of $dict" ] || fail "after the upgrade the term count reads '$(q $UP -c "$terms")', expected '$dict true of $dict'"
 markers=$(q $UP -c "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relname = '_pgrdf_quads_g' || pgrdf.graph_id('urn:ug:kept') AND t.tgname LIKE 'pgrdf_count_bypass%'")
 [ "$markers" = "2" ] || fail "the partition of urn:ug:kept carries $markers count markers, expected 2"
 # The session that was connected before the upgrade writes again: its write
@@ -128,7 +153,11 @@ wait $held_pid || fail "the session held across the upgrade failed: $(cat "$held
 rm -f "$fifo" "$held_out"
 wrong=$(q $UP -c "$truth")
 [ "$wrong" = "0" ] || fail "a session connected before the upgrade wrote an uncounted row: $(q $UP -c "SELECT string_agg(graph_id || ':' || asserted || '+' || inferred || ':' || counts_verified, ' ') FROM pgrdf.graph_inventory()")"
-ok "every graph is verified and equal to a scan, also after a write from a session that was connected before the upgrade"
+# That write brought new terms with it, and they are counted too.
+now=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_dictionary")
+[ "$now" -gt "$dict" ] || fail "the write after the upgrade added no term"
+[ "$(q $UP -c "$terms")" = "$now true of $now" ] || fail "a session connected before the upgrade added uncounted terms: '$(q $UP -c "$terms")', expected '$now true of $now'"
+ok "every graph is verified and equal to a scan, and so is the term count ($dict at the upgrade, $now now), also after a write from a session that was connected before the upgrade"
 
 # 5. The app role creates by IRI and by explicit id, fills, drops, and a
 #    dropped id is never handed out again.
@@ -148,11 +177,16 @@ ok "$APP created $g1 by IRI and $high explicitly, dropped $high, next id $g3"
 #     own refuses 42501 and one that does not exist returns no row.
 listed=$(as_app "SELECT string_agg(iri, ' ' ORDER BY iri) FROM pgrdf.graph_inventory()")
 [ "$listed" = "urn:ug:after urn:ug:after2" ] || fail "$APP is listed '$listed', expected its own two graphs"
-totals=$(as_app "SELECT scope || ' ' || graphs_listed || ' of ' || graphs_total || ' ' || asserted || ' ' || coalesce(terms::text, 'null') FROM pgrdf.graph_totals()")
+totals=$(as_app "SELECT scope || ' ' || graphs_listed || ' of ' || graphs_total || ' ' || asserted || ' ' || coalesce(terms::text, 'null') || ' ' || coalesce(terms_verified::text, 'null') FROM pgrdf.graph_totals()")
 all=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_graphs")
-[ "$totals" = "own 2 of $all 1 null" ] || fail "$APP totals are '$totals', expected 'own 2 of $all 1 null'"
-admin=$(q $UP -c "SELECT scope || ' ' || (graphs_listed = graphs_total) || ' ' || unverified_graphs FROM pgrdf.graph_totals()")
-[ "$admin" = "all true 0" ] || fail "the superuser's totals are '$admin', expected 'all true 0'"
+[ "$totals" = "own 2 of $all 1 null null" ] || fail "$APP totals are '$totals', expected 'own 2 of $all 1 null null'"
+admin=$(q $UP -c "SELECT scope || ' ' || (graphs_listed = graphs_total) || ' ' || unverified_graphs || ' ' || (terms = pgrdf.count_terms()) || ' ' || terms_verified FROM pgrdf.graph_totals()")
+[ "$admin" = "all true 0 true true" ] || fail "the superuser's totals are '$admin', expected 'all true 0 true true'"
+# The app role added terms of its own on the way, with no privilege on the
+# count tables; recounting the dictionary is not its act.
+norecount=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" -c "SET ROLE $APP" \
+  -c "SELECT count(*) FROM pgrdf.recount_terms()" 2>&1 || true)
+echo "$norecount" | grep -q "42501" || fail "$APP running recount_terms() should refuse 42501; got: $norecount"
 foreign=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" -c "SET ROLE $APP" \
   -c "SELECT count(*) FROM pgrdf.graph_inventory('urn:ug:kept')" 2>&1 || true)
 echo "$foreign" | grep -q "42501" || fail "$APP asking for urn:ug:kept should refuse 42501; got: $foreign"
@@ -267,6 +301,18 @@ state=$(q $FRESH -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_
 q $FRESH -q -c "SET ROLE $APP" -c "SELECT pgrdf.recount_graph($fg)" >/dev/null
 state=$(q $FRESH -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($fg)")
 [ "$state" = "2 true" ] || fail "after the hand-over and a recount the row reads '$state', expected '2 true'"
-ok "storage handed to $STORE on $CUR with the report's cures: $APP creates, fills and recounts a graph; a direct write is still seen"
+# The dictionary's count went with the tables: the app role's terms are
+# counted, a term written in plain SQL is seen, and the storage owner (not
+# the app role) recounts.
+fdict=$(q $FRESH -c "SELECT count(*) FROM pgrdf._pgrdf_dictionary")
+[ "$(q $FRESH -c "$terms")" = "$fdict true of $fdict" ] || fail "after the hand-over the term count reads '$(q $FRESH -c "$terms")', expected '$fdict true of $fdict'"
+q $FRESH -q -c "INSERT INTO pgrdf._pgrdf_dictionary (term_type, lexical_value) VALUES (1, 'urn:ug:direct-term')"
+fdict=$((fdict + 1))
+[ "$(q $FRESH -c "$terms")" = "null false of $fdict" ] || fail "after a direct term the totals read '$(q $FRESH -c "$terms")', expected 'null false of $fdict'"
+[ "$(q $FRESH -c "SET ROLE $APP" -c "SELECT pgrdf.count_terms()" | tail -n 1)" = "$fdict" ] || fail "count_terms() as $APP is not $fdict"
+cured=$(q $FRESH -c "SET ROLE $STORE" -c "SELECT terms || ' ' || was_terms || ' ' || was_verified FROM pgrdf.recount_terms()" | tail -n 1)
+[ "$cured" = "$fdict $((fdict - 1)) false" ] || fail "recount_terms() as $STORE returned '$cured', expected '$fdict $((fdict - 1)) false'"
+[ "$(q $FRESH -c "$terms")" = "$fdict true of $fdict" ] || fail "after recount_terms() the totals read '$(q $FRESH -c "$terms")'"
+ok "storage handed to $STORE on $CUR with the report's cures: $APP creates, fills and recounts a graph; a direct write is still seen; the term count follows ($fdict terms, recounted by $STORE)"
 
 echo "upgrade gate: $PREV -> $CUR passed"

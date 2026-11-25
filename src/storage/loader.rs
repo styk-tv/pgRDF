@@ -1842,14 +1842,7 @@ fn ingest_turtle_parallel_bulk(path: &str, graph_id: i64) -> LoaderStats {
         for v in &lv {
             crate::storage::dict::refuse_nul(v);
         }
-        Spi::run_with_args(
-            "INSERT INTO pgrdf._pgrdf_dictionary \
-             (id, term_type, lexical_value, datatype_iri_id, language_tag) \
-             OVERRIDING SYSTEM VALUE \
-             SELECT * FROM unnest($1::int8[], $2::int2[], $3::text[], $4::int8[], $5::text[])",
-            &[ids.into(), tt.into(), lv.into(), di.into(), lt.into()],
-        )
-        .expect("load_turtle: dict bulk insert");
+        insert_reserved_terms(ids, tt, lv, di, lt, "load_turtle: dict bulk insert");
     };
     // tier 1 — URI / BLANK terms + literal datatype IRIs (ids base+1..).
     // Dedup in parallel: each chunk builds a local HashSet, then the sets
@@ -2052,14 +2045,14 @@ fn ingest_turtle_streaming(
         for v in &lv {
             crate::storage::dict::refuse_nul(v);
         }
-        Spi::run_with_args(
-            "INSERT INTO pgrdf._pgrdf_dictionary \
-             (id, term_type, lexical_value, datatype_iri_id, language_tag) \
-             OVERRIDING SYSTEM VALUE \
-             SELECT * FROM unnest($1::int8[], $2::int2[], $3::text[], $4::int8[], $5::text[])",
-            &[ids.into(), tt.into(), lv.into(), di.into(), lt.into()],
-        )
-        .expect("load_turtle_streaming: dict bulk insert");
+        insert_reserved_terms(
+            ids,
+            tt,
+            lv,
+            di,
+            lt,
+            "load_turtle_streaming: dict bulk insert",
+        );
     };
 
     // Defer-index ONCE across the whole multi-window load.
@@ -2689,6 +2682,35 @@ fn fast_path_owner_or_notice(caller: &str) -> bool {
          pgrdf._pgrdf_quads; loading through the standard path"
     );
     false
+}
+
+/// Store terms whose ids the caller reserved, in one statement, and add
+/// them to the dictionary's count (0.6.42, #178): every row of the
+/// statement is a new term, so what it processed is what the count gains.
+fn insert_reserved_terms(
+    ids: Vec<i64>,
+    tt: Vec<i16>,
+    lv: Vec<String>,
+    di: Vec<Option<i64>>,
+    lt: Vec<Option<String>>,
+    what: &str,
+) {
+    let added = crate::storage::counts::engine_write(|| {
+        Spi::connect_mut(|client| {
+            client
+                .update(
+                    "INSERT INTO pgrdf._pgrdf_dictionary \
+                     (id, term_type, lexical_value, datatype_iri_id, language_tag) \
+                     OVERRIDING SYSTEM VALUE \
+                     SELECT * FROM unnest($1::int8[], $2::int2[], $3::text[], $4::int8[], $5::text[])",
+                    None,
+                    &[ids.into(), tt.into(), lv.into(), di.into(), lt.into()],
+                )
+                .unwrap_or_else(|e| panic!("{what}: {e}"))
+                .len()
+        })
+    });
+    crate::storage::counts::terms_gained(added as i64);
 }
 
 /// Guard for `load_turtle(..., bulk_load => TRUE)`. The self-assigned-id
