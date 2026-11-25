@@ -60,12 +60,12 @@ enum Which {
 /// WITH INHERIT FALSE does not hold the privileges until it SET ROLEs.
 /// `pg_read_all_data` does not bypass row-level security; pgRDF uses none.
 pub(crate) fn caller_sees_all_graphs() -> bool {
-    Spi::get_one::<bool>(
+    crate::storage::partition::read_one::<bool>(
         "SELECT pg_catalog.pg_has_role(current_user, c.relowner, 'USAGE') \
              OR pg_catalog.pg_has_role(current_user, 'pg_read_all_data', 'USAGE') \
            FROM pg_catalog.pg_class c WHERE c.oid = 'pgrdf._pgrdf_quads'::regclass",
+        &[],
     )
-    .expect("listing scope lookup failed")
     .unwrap_or(false)
 }
 
@@ -140,7 +140,9 @@ fn inventory_rows(which: Which) -> Vec<InventoryRow> {
             AND ($4::text IS NULL OR g.iri = $4)
           ORDER BY g.graph_id"
     );
-    let rows: Vec<InventoryRow> = crate::storage::partition::as_storage_owner(|| {
+    // Reading only, and through read-only SPI all the way down: a call
+    // that lists graphs takes no transaction id.
+    let rows: Vec<InventoryRow> = crate::storage::partition::as_storage_owner_reading(|| {
         let mut rows = Vec::new();
         Spi::connect(|client| {
             let tup = client
@@ -205,13 +207,12 @@ fn inventory_rows(which: Which) -> Vec<InventoryRow> {
         // One graph asked for and none returned: it does not exist, or it
         // is not the caller's. The two never look alike.
         if rows.is_empty() && !matches!(which, Which::All) {
-            let exists = Spi::get_one_with_args::<bool>(
+            let exists = crate::storage::partition::read_one::<bool>(
                 "SELECT EXISTS (SELECT 1 FROM pgrdf._pgrdf_graphs g \
                                  WHERE ($1::bigint IS NULL OR g.graph_id = $1) \
                                    AND ($2::text IS NULL OR g.iri = $2))",
                 &[by_id.into(), by_iri.into()],
             )
-            .expect("graph_inventory: existence lookup failed")
             .unwrap_or(false);
             if exists {
                 crate::refuse_with_hint(
@@ -479,10 +480,12 @@ fn graph_totals() -> TableIterator<
 > {
     let sees_all = caller_sees_all_graphs();
     let rows = inventory_rows(Which::All);
-    let graphs_total = crate::storage::partition::as_storage_owner(|| {
-        Spi::get_one::<i64>("SELECT count(*)::bigint FROM pgrdf._pgrdf_graphs")
-            .expect("graph_totals: graph count failed")
-            .unwrap_or(0)
+    let graphs_total = crate::storage::partition::as_storage_owner_reading(|| {
+        crate::storage::partition::read_one::<i64>(
+            "SELECT count(*)::bigint FROM pgrdf._pgrdf_graphs",
+            &[],
+        )
+        .unwrap_or(0)
     });
     let terms = if sees_all {
         crate::storage::counts::dictionary_terms()

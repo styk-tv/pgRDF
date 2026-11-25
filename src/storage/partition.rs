@@ -349,11 +349,41 @@ pub(crate) fn require_graph_ddl_privilege(kind: GraphDdl, caller: &str) {
 /// must run fixed, engine-built statements only. This is the one
 /// elevation in the add/clear/drop path, disclosed in the elevation census.
 pub(crate) fn as_storage_owner<R>(f: impl FnOnce() -> R) -> R {
-    let owner: pgrx::pg_sys::Oid = Spi::get_one(
-        "SELECT relowner FROM pg_catalog.pg_class \
-         WHERE oid = 'pgrdf._pgrdf_quads'::regclass",
-    )
-    .expect("storage owner lookup failed")
+    as_storage_owner_impl(false, f)
+}
+
+/// [`as_storage_owner`] for a closure that only reads. The switch itself
+/// then takes no transaction id: pgrx's `Spi::get_one` / `Spi::run` ask
+/// PostgreSQL for one on every call, which turns a session that only
+/// lists graphs into a transaction other sessions must wait out before
+/// they can call anything below it finished. `f` must read through
+/// `Spi::connect` + `select` to keep that true.
+pub(crate) fn as_storage_owner_reading<R>(f: impl FnOnce() -> R) -> R {
+    as_storage_owner_impl(true, f)
+}
+
+/// One row, one column, through read-only SPI: no transaction id is taken.
+pub(crate) fn read_one<T: pgrx::datum::FromDatum + pgrx::datum::IntoDatum>(
+    sql: &str,
+    args: &[pgrx::datum::DatumWithOid<'_>],
+) -> Option<T> {
+    Spi::connect(|c| {
+        c.select(sql, Some(1), args)
+            .unwrap_or_else(|e| panic!("read failed: {e}: {sql}"))
+            .first()
+            .get_one::<T>()
+            .unwrap_or_else(|e| panic!("read failed: {e}: {sql}"))
+    })
+}
+
+fn as_storage_owner_impl<R>(reading: bool, f: impl FnOnce() -> R) -> R {
+    const OWNER: &str = "SELECT relowner FROM pg_catalog.pg_class \
+         WHERE oid = 'pgrdf._pgrdf_quads'::regclass";
+    let owner: pgrx::pg_sys::Oid = if reading {
+        read_one(OWNER, &[])
+    } else {
+        Spi::get_one(OWNER).expect("storage owner lookup failed")
+    }
     .expect("pgrdf._pgrdf_quads has no owner");
     let mut save_userid = pgrx::pg_sys::InvalidOid;
     let mut save_sec: std::ffi::c_int = 0;
@@ -370,8 +400,16 @@ pub(crate) fn as_storage_owner<R>(f: impl FnOnce() -> R) -> R {
         nest_level = pgrx::pg_sys::NewGUCNestLevel();
     }
     pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-        Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
-            .expect("owner switch: restricting search_path failed");
+        if reading {
+            // The same setting, local to the transaction, through a SELECT.
+            read_one::<String>(
+                "SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)",
+                &[],
+            );
+        } else {
+            Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
+                .expect("owner switch: restricting search_path failed");
+        }
         f()
     }))
     .finally(|| unsafe {

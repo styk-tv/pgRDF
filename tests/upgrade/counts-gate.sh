@@ -185,6 +185,13 @@ inventory="SELECT count(*) FROM pgrdf.graph_inventory()"
 one_row="SELECT count(*) FROM pgrdf.graph_inventory($ga)"
 feed="SELECT count(*) FROM pgrdf.graph_act_feed((SELECT max(xact) FROM pgrdf._pgrdf_graph_acts))"
 q -q -c "SELECT pgrdf.recount_graph()" > /dev/null
+# A session that lists graphs takes no transaction id: it must not become a
+# transaction every fold and every feed cursor has to wait out.
+for stmt in "$inventory" "$one_row" "SELECT count(*) FROM pgrdf.graph_inventory('urn:cg:a')" \
+            "SELECT count(*) FROM pgrdf.graph_totals()" "SELECT pgrdf.count_quads($ga)" "$feed"; do
+  xid=$(q -q -c "BEGIN" -c "$stmt" -c "SELECT coalesce(pg_current_xact_id_if_assigned()::text, 'none')" -c "ROLLBACK" | tail -1)
+  [ "$xid" = "none" ] || fail "a read took transaction id $xid: $stmt"
+done
 small=$(q -c "SELECT public.gate_ms('$inventory')")
 # The triples go in with plain SQL, five graphs at a time: the gate is about
 # reading counts, not loading. The recount that follows is the one scan.
@@ -209,7 +216,7 @@ t_one=$(under "graph_inventory(graph_id)" "$one_row" 1)
 t_feed=$(under "graph_act_feed(cursor)" "$feed" 2)
 awk -v big="${t_inv%% *}" -v small="${small%% *}" 'BEGIN { exit !(big <= 2 * small + 1) }' \
   || fail "graph_inventory() took ${small%% *} ms before the triples and ${t_inv%% *} ms after: it grows with the data"
-ok "at $graphs graphs and $total triples (median, p95 ms): graph_inventory() $t_inv, one graph $t_one, feed $t_feed; the inventory took ${small%% *} ms before the triples were there"
+ok "at $graphs graphs and $total triples (median, p95 ms): graph_inventory() $t_inv, one graph $t_one, feed $t_feed; the inventory took ${small%% *} ms before the triples were there; none of the listing calls takes a transaction id"
 
 # ── F. Speed under churn ────────────────────────────────────────────────
 # (ii) A reader holds its snapshot: nothing a fold deletes can be pruned.

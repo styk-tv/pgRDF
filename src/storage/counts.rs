@@ -417,7 +417,7 @@ pub(crate) fn stored(graph_id: i64) -> Option<Stored> {
     if !present() {
         return None;
     }
-    as_storage_owner(|| {
+    crate::storage::partition::as_storage_owner_reading(|| {
         Spi::connect(|c| {
             let t = c
                 .select(
