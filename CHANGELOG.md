@@ -47,8 +47,10 @@ held a snapshot open.
   remains the boundary between tenants.
 - **Every graph partition carries two statement-level triggers**
   (`pgrdf_count_bypass`, `pgrdf_count_bypass_truncate`), and so does the quad
-  table. They fire once per statement and refuse nothing. Measured cost on a
-  load of 1M triples: 0.5%; on 100,000 single-row writes: 2%.
+  table. They fire once per statement and refuse nothing. Measured against
+  0.6.41 on the same machine: a load of 1M triples took 27.9 s where it took
+  27.2 s (about 3%); 100,000 single-row `put_quad` calls took 3.9 s where they
+  took 6.1 s, because that statement is now prepared once per session.
 - **`graph_integrity()` reports the stored count against a scan**
   (`stored_count`), and `clean` is false when a verified count differs from
   the scan.

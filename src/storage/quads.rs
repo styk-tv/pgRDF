@@ -339,34 +339,105 @@ pub(crate) fn insert_inferred_batch(
     stored
 }
 
+const ROW_INSERT: &str = "WITH ins AS ( \
+       INSERT INTO pgrdf._pgrdf_quads \
+             (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+       SELECT $1, $2, $3, $4, false \
+        WHERE NOT EXISTS ( \
+              SELECT 1 FROM pgrdf._pgrdf_quads \
+               WHERE subject_id = $1 AND predicate_id = $2 \
+                 AND object_id = $3 AND graph_id = $4) \
+       ON CONFLICT DO NOTHING \
+       RETURNING 1) \
+     SELECT count(*)::bigint FROM ins";
+
+/// [`ROW_INSERT`] with the graph's count delta in the same statement: a
+/// single-row write outside any act pays for one statement, not two.
+const ROW_INSERT_COUNTED: &str = "WITH ins AS ( \
+       INSERT INTO pgrdf._pgrdf_quads \
+             (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+       SELECT $1, $2, $3, $4, false \
+        WHERE NOT EXISTS ( \
+              SELECT 1 FROM pgrdf._pgrdf_quads \
+               WHERE subject_id = $1 AND predicate_id = $2 \
+                 AND object_id = $3 AND graph_id = $4) \
+       ON CONFLICT DO NOTHING \
+       RETURNING 1), \
+     n AS (SELECT count(*)::bigint AS c FROM ins), \
+     d AS (INSERT INTO pgrdf._pgrdf_graph_count_deltas (graph_id, d_asserted, d_inferred) \
+           SELECT $4, n.c, 0 FROM n WHERE n.c > 0) \
+     SELECT c FROM n";
+
+/// Run one of the single-row statements through the per-backend plan
+/// cache, with the engine's writing mark up.
+fn run_row(sql: &'static str, s: i64, p: i64, o: i64, graph_id: i64) -> i64 {
+    let int8: Oid = PgBuiltInOids::INT8OID.into();
+    Spi::connect_mut(|client| {
+        if !plan_cache::contains(sql) {
+            let prepared = client
+                .prepare_mut(sql, &[PgOid::BuiltIn(PgBuiltInOids::INT8OID); 4])
+                .expect("quad write: prepare failed")
+                .keep();
+            plan_cache::insert(sql.to_string(), prepared);
+            plan_cache::record_miss();
+        } else {
+            plan_cache::record_hit();
+        }
+        // SAFETY: each (value, oid) pair matches by construction.
+        let datums: Vec<DatumWithOid<'_>> = unsafe {
+            vec![
+                DatumWithOid::new(s, int8),
+                DatumWithOid::new(p, int8),
+                DatumWithOid::new(o, int8),
+                DatumWithOid::new(graph_id, int8),
+            ]
+        };
+        let _writing = crate::storage::counts::Writing::begin();
+        plan_cache::with_plan(sql, |plan| {
+            let plan = plan.expect("quad write: plan must be cached after insert");
+            client
+                .update(plan, None, &datums)
+                .expect("quad write failed")
+                .first()
+                .get_one::<i64>()
+                .expect("quad write: count column")
+                .unwrap_or(0)
+        })
+    })
+}
+
 /// Store one asserted triple (SPARQL UPDATE, JSON ingest, `put_quad`).
 /// The existence check makes it correct on a partition without the unique
 /// index too; `ON CONFLICT` settles a race on one that has it.
 pub(crate) fn insert_row(graph_id: i64, s: i64, p: i64, o: i64) -> Written {
-    let stored: i64 = crate::storage::counts::engine_write(|| {
-        Spi::get_one_with_args(
-            "WITH ins AS ( \
-           INSERT INTO pgrdf._pgrdf_quads \
-                 (subject_id, predicate_id, object_id, graph_id, is_inferred) \
-           SELECT $1, $2, $3, $4, false \
-            WHERE NOT EXISTS ( \
-                  SELECT 1 FROM pgrdf._pgrdf_quads \
-                   WHERE subject_id = $1 AND predicate_id = $2 \
-                     AND object_id = $3 AND graph_id = $4) \
-           ON CONFLICT DO NOTHING \
-           RETURNING 1) \
-         SELECT count(*)::bigint FROM ins",
-            &[s.into(), p.into(), o.into(), graph_id.into()],
-        )
-    })
-    .expect("quad write failed")
-    .unwrap_or(0);
+    // Inside an act the call's tally gathers what was stored and one
+    // delta is written when the act ends. Outside one (`put_quad`), the
+    // delta rides in the row's own statement.
+    let own_delta = !crate::storage::counts::tally_open() && crate::storage::counts::present();
+    let stored = run_row(
+        if own_delta {
+            ROW_INSERT_COUNTED
+        } else {
+            ROW_INSERT
+        },
+        s,
+        p,
+        o,
+        graph_id,
+    );
     let made_asserted = if stored == 0 {
         promote(graph_id, vec![s], vec![p], vec![o])
     } else {
         0
     };
-    crate::storage::counts::gained(graph_id, stored + made_asserted, -made_asserted);
+    if own_delta {
+        if stored > 0 {
+            crate::storage::counts::maybe_fold(graph_id);
+        }
+        crate::storage::counts::gained(graph_id, made_asserted, -made_asserted);
+    } else {
+        crate::storage::counts::gained(graph_id, stored + made_asserted, -made_asserted);
+    }
     Written {
         stored,
         made_asserted,

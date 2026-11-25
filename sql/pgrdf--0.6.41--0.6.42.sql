@@ -93,9 +93,7 @@ BEGIN
        current_user,
        (SELECT relowner FROM pg_catalog.pg_class WHERE oid = TG_RELID),
        'USAGE') THEN
-    IF TG_LEVEL = 'STATEMENT' THEN RETURN NULL; END IF;
-    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
-    RETURN NEW;
+    RETURN NULL;
   END IF;
   RAISE EXCEPTION USING
     ERRCODE = '42501',
@@ -104,17 +102,16 @@ BEGIN
     HINT = 'Read them with pgrdf.graph_inventory(); repair one with pgrdf.recount_graph(graph_id).';
 END
 $fn$;
-CREATE TRIGGER pgrdf_counts_row BEFORE INSERT OR UPDATE OR DELETE ON _pgrdf_graph_counts
-    FOR EACH ROW EXECUTE FUNCTION _refuse_count_write();
-CREATE TRIGGER pgrdf_counts_truncate BEFORE TRUNCATE ON _pgrdf_graph_counts
+-- Per statement: the answer depends on the role and the table, never on a
+-- row, and a fold or a recount retires many rows in one statement.
+CREATE TRIGGER pgrdf_counts_guard
+    BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON _pgrdf_graph_counts
     FOR EACH STATEMENT EXECUTE FUNCTION _refuse_count_write();
-CREATE TRIGGER pgrdf_counts_row BEFORE UPDATE OR DELETE ON _pgrdf_graph_count_deltas
-    FOR EACH ROW EXECUTE FUNCTION _refuse_count_write();
-CREATE TRIGGER pgrdf_counts_truncate BEFORE TRUNCATE ON _pgrdf_graph_count_deltas
+CREATE TRIGGER pgrdf_counts_guard
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON _pgrdf_graph_count_deltas
     FOR EACH STATEMENT EXECUTE FUNCTION _refuse_count_write();
-CREATE TRIGGER pgrdf_counts_row BEFORE INSERT OR UPDATE OR DELETE ON _pgrdf_graph_count_bypass
-    FOR EACH ROW EXECUTE FUNCTION _refuse_count_write();
-CREATE TRIGGER pgrdf_counts_truncate BEFORE TRUNCATE ON _pgrdf_graph_count_bypass
+CREATE TRIGGER pgrdf_counts_guard
+    BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON _pgrdf_graph_count_bypass
     FOR EACH STATEMENT EXECUTE FUNCTION _refuse_count_write();
 
 CREATE TRIGGER pgrdf_count_bypass
