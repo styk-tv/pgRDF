@@ -391,7 +391,13 @@ not held up. Measured times are in the [changelog](../CHANGELOG.md).
   and `pgrdf_count_bypass_truncate`, and so do the quad table and the
   dictionary. They fire once per statement and refuse nothing. They are
   how a write in plain SQL turns a count
-  [unverified](05-graphs.md#stored-counts).
+  [unverified](05-graphs.md#stored-counts). The graph registry gains
+  one row trigger, `pgrdf_count_open`, which gives a graph its count row.
+- **Run the update with writers quiet.** It locks the dictionary and
+  the quad table one after the other while it counts them. A write
+  caught between the two can make the update fail with a deadlock
+  (`40P01`). The update is one transaction, so nothing is left
+  half-done: run it again.
 - **Every graph starts verified, and so does
   [the term count](05-graphs.md#the-term-count).** The update's passes
   are the scans: one over the quad table, one over the dictionary.

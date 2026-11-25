@@ -193,10 +193,16 @@ counted every triple of every graph. The count is of the set a graph
 holds: a bulk or streaming load of a file that states a triple twice
 counts it once.
 
-A count is kept for every registered graph. A graph id that was never
-registered (rows written with `put_quad` into an id that has no graph)
-has none: its rows live in the default partition, and
-`count_quads(graph_id)` counts them by scan.
+A count is kept for every graph that has storage of its own, which is
+every graph created through pgRDF's functions. Two kinds of id have
+none, and are counted by scan whenever asked:
+
+- a graph id that was never registered (rows written with `put_quad`
+  into an id that has no graph): its rows live in the default
+  partition;
+- a registered graph whose registry row was written by hand, or whose
+  partition was detached: it is listed, with exact numbers, and
+  `counts_verified` stays `f` whatever `recount_graph` is told.
 
 One thing slows it: a transaction that holds a transaction id and
 stays open, most often a session left idle in a transaction. The writes

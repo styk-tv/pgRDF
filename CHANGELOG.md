@@ -29,9 +29,11 @@ held a snapshot open.
   and four are added at the end: `change_seq` moves with every committed
   content change of the graph, so a client can key a cache on it;
   `counts_verified`, `counts_scanned_at` and `last_act_id` are described
-  below. `count_quads()` answers from the stored count too. A graph id that
-  was never registered has no stored count: its rows live in the default
-  partition, as before, and it is counted by scan.
+  below. `count_quads()` answers from the stored count too. A count is kept
+  for a graph that has a partition of its own, which is every graph pgRDF's
+  functions create. A graph id that was never registered has none: its rows
+  live in the default partition, as before, and it is counted by scan. So is
+  a registered graph whose registry row was written by hand.
 - **The listing follows the role** (#175). `graph_inventory()` used to return
   every graph to every role that could call it. Now an admin sees every graph:
   a superuser, a role holding the storage owner's privileges, or a role holding
@@ -49,7 +51,9 @@ held a snapshot open.
   remains the boundary between tenants.
 - **Every graph partition carries two statement-level triggers**
   (`pgrdf_count_bypass`, `pgrdf_count_bypass_truncate`), and so do the quad
-  table and the dictionary. They fire once per statement and refuse nothing. Measured against
+  table and the dictionary. The graph registry carries one row trigger
+  (`pgrdf_count_open`), which opens a graph's count row when its registry row
+  is inserted. They fire once per statement and refuse nothing. Measured against
   0.6.41 in one sitting, the two versions alternating, four runs each: a load
   of 1M triples took 25.4 s where it took 25.6 s (medians; no difference
   beyond the spread between runs), and 100,000 single-row `put_quad` calls
@@ -116,7 +120,10 @@ held a snapshot open.
 - `ALTER EXTENSION pgrdf UPDATE` counts every graph once, in one pass over the
   quad table (about the cost of one 0.6.41 `graph_inventory()` call), and the
   dictionary once, and holds writers out from those passes to its commit.
-  Readers are not blocked.
+  Readers are not blocked. **Run it with writers quiet.** It locks the
+  dictionary and the quad table one after the other, and a write caught
+  between the two can make the upgrade fail with a deadlock (`40P01`). The
+  upgrade is one transaction, so nothing is left half-done: run it again.
 - It warns with the number of graphs that have no recorded owner.
 - It drops and re-creates `graph_inventory()`, because the result type
   changed. A view of yours over that function stops the upgrade: drop it
@@ -131,7 +138,8 @@ held a snapshot open.
 - A database restored from a dump has no stored counts: every graph is
   unverified and counted by scan until `SELECT * FROM pgrdf.recount_graph();`
   is run once, and the term count is unverified until
-  `SELECT * FROM pgrdf.recount_terms();`. `pg_upgrade` needs nothing.
+  `SELECT * FROM pgrdf.recount_terms();`. Writes made before that are
+  counted, and the recount takes them in. `pg_upgrade` needs nothing.
 - A role that switches triggers off (`session_replication_role = replica`,
   which includes a logical replication subscriber's apply; `ALTER TABLE ...
   DISABLE TRIGGER`; `pg_restore --disable-triggers`), or that attaches,
