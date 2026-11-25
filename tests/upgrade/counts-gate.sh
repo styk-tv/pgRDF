@@ -5,6 +5,12 @@
 #
 #   A. Many committed writes: the count stays equal to a scan through every
 #      fold, and the deltas waiting to be folded stay few.
+#   A2. The same for the dictionary's term count, from one session and
+#      from four at once.
+#   A3. Writes into a graph id that was never registered leave no count
+#      row behind.
+#   A4. A graph without its count row (the state a restore leaves) keeps
+#      few deltas, reads exact, and is verified by one recount.
 #   B. Several sessions writing one graph at once: no writer waits on a
 #      count, nothing deadlocks, and the count is exact.
 #   C. A write in plain SQL that commits after a recount scanned the graph
@@ -15,6 +21,9 @@
 #   E. Speed: the inventory, one graph's row and the feed, at 50 graphs
 #      and PGRDF_GATE_TRIPLES triples, and that the inventory does not grow
 #      with the number of triples.
+#   E2. The feed on a record of PGRDF_GATE_ACTS acts: the cursor-only
+#      call a client starts with, and a poll from the end repeated in one
+#      session, stay within the bounds of E.
 #   F. Speed under churn, twice: while a reader holds its snapshot (the
 #      bounds of E hold), and while an idle transaction holds an xid (the
 #      inventory stays within a wider, stated bound, and returns to the
@@ -22,9 +31,9 @@
 #
 # Usage: counts-gate.sh
 #   PGRDF_UPGRADE_PSQL is the psql command for a superuser connection
-#   (default: psql -X). PGRDF_GATE_TRIPLES (default 10000000) and
-#   PGRDF_GATE_CHURN (default 20000) size parts E and F. The gate creates
-#   and drops its own database.
+#   (default: psql -X). PGRDF_GATE_TRIPLES (default 10000000),
+#   PGRDF_GATE_ACTS (default 200000) and PGRDF_GATE_CHURN (default 20000)
+#   size parts E, E2 and F. The gate creates and drops its own database.
 set -euo pipefail
 
 read -r -a PSQL <<< "${PGRDF_UPGRADE_PSQL:-psql -X}"
@@ -39,8 +48,8 @@ ok() { echo "ok   $*"; }
 held=""
 held2=""
 cleanup() {
-  exec 3>&- 2>/dev/null || true
-  exec 4>&- 2>/dev/null || true
+  exec 3>&- || true
+  exec 4>&- || true
   [ -n "$held" ] && kill "$held" 2>/dev/null || true
   [ -n "$held2" ] && kill "$held2" 2>/dev/null || true
   "${PSQL[@]}" -d postgres -q -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1 || true
@@ -104,6 +113,17 @@ true_or_fail() {
   local wrong; wrong=$(q -c "$truth")
   [ "$wrong" = "0" ] || fail "$1: $wrong graph(s) unverified or miscounted: $(q -c "SELECT string_agg(graph_id || ':' || asserted || '+' || inferred || ':' || counts_verified, ' ') FROM pgrdf.graph_inventory()")"
 }
+# The term count as the totals give it, beside the dictionary counted.
+terms_state="SELECT coalesce(terms::text, 'null') || ' ' || terms_verified || ' of ' || (SELECT count(*) FROM pgrdf._pgrdf_dictionary) FROM pgrdf.graph_totals()"
+terms_or_fail() {
+  local d s; d=$(q -c "SELECT count(*) FROM pgrdf._pgrdf_dictionary"); s=$(q -c "$terms_state")
+  [ "$s" = "$d true of $d" ] || fail "$1: the term count reads '$s', expected '$d true of $d'"
+}
+# n autocommit put_term calls, IRIs urn:cg:t:<from> .. <from+n-1>.
+new_terms() {
+  echo "SELECT format('SELECT pgrdf.put_term(%L, 1::smallint);', 'urn:cg:t:' || i) FROM generate_series($1, $1 + $2 - 1) i \gexec" \
+    | q -q > /dev/null
+}
 # n autocommit single-row writes into graph g, subjects from..from+n-1.
 writes() {
   echo "SELECT format('SELECT pgrdf.put_quad(%s, 1, 1, $1);', i) FROM generate_series($2, $2 + $3 - 1) i \gexec" \
@@ -122,6 +142,55 @@ writes "$ga" 1 500
 state=$(q -c "SELECT asserted || ' ' || change_seq FROM pgrdf.graph_inventory($ga)")
 [ "$state" = "3000 3000" ] || fail "500 writes that stored nothing moved the row to '$state'"
 ok "3000 committed writes: count and change_seq are 3000, $pending deltas wait to be folded; 500 writes that stored nothing moved neither"
+
+# ── A2. Terms (#178) ────────────────────────────────────────────────────
+# The dictionary's count is kept the same way, under one id for the whole
+# database: committed writers, folding, and four sessions at once.
+terms_or_fail "at the start"
+t0=$(q -c "SELECT pgrdf.count_terms()")
+new_terms 1 3000
+terms_or_fail "after 3000 committed new terms"
+[ "$(q -c "SELECT pgrdf.count_terms()")" = "$((t0 + 3000))" ] || fail "3000 new terms moved the count from $t0 to $(q -c "SELECT pgrdf.count_terms()")"
+tpending=$(q -c "SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = -1")
+[ "$tpending" -lt 1000 ] || fail "$tpending deltas of the dictionary are waiting after 3000 new terms: nothing folds them"
+new_terms 1 500
+[ "$(q -c "SELECT pgrdf.count_terms()")" = "$((t0 + 3000))" ] || fail "500 terms that were already there moved the count"
+pids=""
+for s in 1 2 3 4; do
+  new_terms $((s * 100000 + 1)) 1000 &
+  pids="$pids $!"
+done
+for p in $pids; do wait "$p" || fail "a concurrent term writer failed"; done
+terms_or_fail "after four concurrent term writers"
+[ "$(q -c "SELECT pgrdf.count_terms()")" = "$((t0 + 7000))" ] || fail "four writers of 1000 terms left $(q -c "SELECT pgrdf.count_terms()"), expected $((t0 + 7000))"
+ok "7000 committed new terms from one and from four sessions: the term count is verified and equal to the dictionary ($((t0 + 7000))), $tpending deltas waited after the first 3000; terms that were already there moved nothing"
+
+# ── A3. A graph id that was never registered (#180) ─────────────────────
+# Its rows land in the default partition and are counted by scan. It has
+# no count row, so it records no delta: nothing would fold or remove one.
+writes 918001 1 500
+[ "$(q -c "SELECT pgrdf.count_quads(918001)")" = "500" ] || fail "500 writes into an unregistered id stored $(q -c "SELECT pgrdf.count_quads(918001)") rows"
+stray=$(q -c "SELECT (SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = 918001) + (SELECT count(*) FROM pgrdf._pgrdf_graph_counts WHERE graph_id = 918001)")
+[ "$stray" = "0" ] || fail "$stray count rows were recorded for an id that was never registered: nothing folds or removes them"
+true_or_fail "after writes into an unregistered id (the default graph shares its partition)"
+ok "500 committed writes into an id that was never registered are stored, counted by scan, and leave no count row behind"
+
+# ── A4. A graph without its count row (#180) ────────────────────────────
+# Every graph is in this state after a restore, until its recount. Its
+# writes must not pile up as deltas nobody folds: the first fold opens the
+# row, unverified, and the recount then sets it.
+gz=$(q -c "SELECT pgrdf.add_graph('urn:cg:norow')")
+q -q -c "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $gz"
+writes "$gz" 1 3000
+zpending=$(q -c "SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = $gz")
+[ "$zpending" -lt 1000 ] || fail "$zpending deltas wait for a graph without a count row after 3000 writes: nothing folds them"
+state=$(q -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($gz)")
+[ "$state" = "3000 false" ] || fail "a graph without a count row reads '$state', expected '3000 false'"
+q -q -c "SELECT pgrdf.recount_graph($gz)" > /dev/null
+state=$(q -c "SELECT asserted || ' ' || counts_verified || ' ' || (SELECT count(*) FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = $gz) FROM pgrdf.graph_inventory($gz)")
+[ "$state" = "3000 true 0" ] || fail "after its recount the graph reads '$state', expected '3000 true 0'"
+true_or_fail "after the recount of a graph that had no count row"
+ok "a graph without its count row (the state a restore leaves): 3000 committed writes left $zpending deltas, read exact and unverified, and one recount verified it"
 
 # ── B. Four sessions, one graph ─────────────────────────────────────────
 gb=$(q -c "SELECT pgrdf.add_graph('urn:cg:b')")
@@ -240,7 +309,8 @@ q -q -c "SELECT pgrdf.recount_graph()" > /dev/null
 # A session that lists graphs takes no transaction id: it must not become a
 # transaction every fold and every feed cursor has to wait out.
 for stmt in "$inventory" "$one_row" "SELECT count(*) FROM pgrdf.graph_inventory('urn:cg:a')" \
-            "SELECT count(*) FROM pgrdf.graph_totals()" "SELECT pgrdf.count_quads($ga)" "$feed"; do
+            "SELECT count(*) FROM pgrdf.graph_totals()" "SELECT pgrdf.count_quads($ga)" \
+            "SELECT pgrdf.count_terms()" "$feed"; do
   xid=$(q -q -c "BEGIN" -c "$stmt" -c "SELECT coalesce(pg_current_xact_id_if_assigned()::text, 'none')" -c "ROLLBACK" | tail -1)
   [ "$xid" = "none" ] || fail "a read took transaction id $xid: $stmt"
 done
@@ -266,9 +336,35 @@ under() {
 t_inv=$(under "graph_inventory() at $graphs graphs and $total triples" "$inventory" 5)
 t_one=$(under "graph_inventory(graph_id)" "$one_row" 1)
 t_feed=$(under "graph_act_feed(cursor)" "$feed" 2)
+t_tot=$(under "graph_totals()" "SELECT count(*) FROM pgrdf.graph_totals()" 5)
+t_terms=$(under "count_terms()" "SELECT pgrdf.count_terms()" 1)
+terms_or_fail "at speed"
 awk -v big="${t_inv%% *}" -v small="${small%% *}" 'BEGIN { exit !(big <= 2 * small + 1) }' \
   || fail "graph_inventory() took ${small%% *} ms before the triples and ${t_inv%% *} ms after: it grows with the data"
-ok "at $graphs graphs and $total triples (median, p95 ms): graph_inventory() $t_inv, one graph $t_one, feed $t_feed; the inventory took ${small%% *} ms before the triples were there; none of the listing calls takes a transaction id"
+ok "at $graphs graphs and $total triples (median, p95 ms): graph_inventory() $t_inv, one graph $t_one, feed $t_feed, graph_totals() $t_tot, count_terms() $t_terms; the inventory took ${small%% *} ms before the triples were there; none of the listing calls takes a transaction id"
+
+# ── E2. The feed on a long record ───────────────────────────────────────
+# A client that starts with an empty cache wants the cursor and not the
+# history, and then polls from the end, many times in one session. Neither
+# call may walk the record: PGRDF_GATE_ACTS acts of history, written here
+# as rows (the gate is about reading them), spread over the transaction
+# ids used so far.
+ACTS=${PGRDF_GATE_ACTS:-200000}
+q -q -c "INSERT INTO pgrdf._pgrdf_graph_acts (act_id, graph_id, graph_iri, act, at, xact, session_role, acting_role)
+         SELECT nextval('pgrdf._pgrdf_graph_act_id_seq'), $ga, 'urn:cg:a', 'load',
+                now() - make_interval(secs => $ACTS - i),
+                (3 + (pg_current_xact_id()::text::bigint - 4) * i / $ACTS)::text::xid8, 'gate', 'gate'
+           FROM generate_series(1, $ACTS) i" -c "VACUUM ANALYZE pgrdf._pgrdf_graph_acts" > /dev/null
+q -q -c "SELECT pgrdf.parse_turtle('<urn:cg:tail> <urn:cg:p> <urn:cg:o> .', $ge)" > /dev/null
+acts=$(q -c "SELECT count(*) FROM pgrdf._pgrdf_graph_acts")
+mid=$(q -c "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY xact::text::bigint) FROM pgrdf._pgrdf_graph_acts")
+start_row=$(q -c "SELECT count(*) || ' ' || count(act_id) || ' ' || bool_and(complete_below IS NOT NULL) FROM pgrdf.graph_act_feed(max_acts => 1)")
+[ "$start_row" = "1 1 true" ] || fail "the cursor-only call returned '$start_row', expected one row carrying one act and the cursor"
+f_start=$(under "graph_act_feed(max_acts => 1) on $acts acts" "SELECT count(*) FROM pgrdf.graph_act_feed(max_acts => 1)" 2)
+f_end=$(under "graph_act_feed(cursor at the end) on $acts acts" "$feed" 2)
+f_graph=$(under "graph_act_feed(cursor at the end, one graph) on $acts acts" "SELECT count(*) FROM pgrdf.graph_act_feed((SELECT max(xact) FROM pgrdf._pgrdf_graph_acts), $ge)" 2)
+f_page=$(under "graph_act_feed(cursor in the middle), a page of 1000, on $acts acts" "SELECT count(*) FROM pgrdf.graph_act_feed('$mid'::xid8)" 25)
+ok "on a record of $acts acts (median, p95 ms; 51 calls in one session each): the cursor-only call $f_start, a poll from the end $f_end, the same for one graph $f_graph, a page of 1000 from the middle $f_page"
 
 # ── F. Speed under churn ────────────────────────────────────────────────
 # (ii) A reader holds its snapshot: nothing a fold deletes can be pruned.

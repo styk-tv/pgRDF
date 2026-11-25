@@ -143,4 +143,19 @@ left=$(q $DST -c "SELECT unverified_graphs FROM pgrdf.graph_totals()")
 [ "$(q $DST -c "$exact")" = "0" ] || fail "a count differs from a scan after recount_graph()"
 ok "after the restore $unverified graphs are unverified and exact; recount_graph() verified $recounted"
 
+# 6. The dictionary's count (#178). CREATE EXTENSION seeds it for an empty
+#    dictionary and the restore fills the dictionary afterwards, in plain
+#    SQL: the totals say the number is not verified and give none (they
+#    never scan the dictionary), count_terms() gives the exact one, and
+#    recount_terms() restores the stored count.
+terms="SELECT coalesce(terms::text, 'null') || ' ' || coalesce(terms_verified::text, 'null') || ' of ' || (SELECT count(*) FROM pgrdf._pgrdf_dictionary) FROM pgrdf.graph_totals()"
+dict=$(q $DST -c "SELECT count(*) FROM pgrdf._pgrdf_dictionary")
+[ "$(q $SRC -c "$terms" | cut -d' ' -f2)" = "true" ] || fail "the source database's term count is not verified: $(q $SRC -c "$terms")"
+[ "$(q $DST -c "$terms")" = "null false of $dict" ] || fail "after the restore the totals read '$(q $DST -c "$terms")', expected 'null false of $dict'"
+[ "$(q $DST -c "SELECT pgrdf.count_terms()")" = "$dict" ] || fail "count_terms() after the restore is not $dict"
+cured=$(q $DST -c "SELECT terms || ' ' || was_verified FROM pgrdf.recount_terms()")
+[ "$cured" = "$dict false" ] || fail "recount_terms() returned '$cured', expected '$dict false'"
+[ "$(q $DST -c "$terms")" = "$dict true of $dict" ] || fail "after recount_terms() the totals read '$(q $DST -c "$terms")', expected '$dict true of $dict'"
+ok "after the restore the term count reads unverified with no number, count_terms() says $dict, and recount_terms() verifies it"
+
 echo "dump round trip: passed"

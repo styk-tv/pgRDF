@@ -170,6 +170,7 @@ awk 'BEGIN { for (i = 0; i < 60000; i++) printf "<urn:lg:rep:s%d> <urn:lg:rep:p>
 #    Both routes take that path only into an empty dictionary, so each gets
 #    a database of its own. (Checked by removing the fix: without it this
 #    step reports 120001 for the 60000 triples.)
+terms="SELECT coalesce(terms::text, 'null') || ' ' || coalesce(terms_verified::text, 'null') || ' of ' || (SELECT count(*) FROM pgrdf._pgrdf_dictionary) FROM pgrdf.graph_totals()"
 routes=""
 for route in bulk stream; do
   D=pgrdf_loader_gate_$route
@@ -187,20 +188,30 @@ for route in bulk stream; do
   [ "$removed" = "0" ] || fail "$route: the graph still holds repeats"
   got=$(q $D -c "SELECT asserted || ' ' || counts_verified || ' of ' || (SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $g) FROM pgrdf.graph_inventory($g)")
   [ "$got" = "60000 true of 60000" ] || fail "$route: after a load of 60001 statements, 60000 distinct: '$got', expected '60000 true of 60000'"
+  # #178: the route stored its terms itself (ids it reserved), and counted them.
+  got=$(q $D -c "$terms")
+  [ "$got" = "120001 true of 120001" ] || fail "$route: the term count reads '$got', expected '120001 true of 120001'"
   q postgres -q -c "DROP DATABASE $D"
 done
-ok "a bulk load and a streaming load that write a repeated triple before the index is built store 60000 and count 60000 (routes taken:$routes)"
+ok "a bulk load and a streaming load that write a repeated triple before the index is built store 60000 and count 60000, and count their 120001 terms (routes taken:$routes)"
 
 # G. After every route above (staged with a dedup, a declined staged load,
 #    refused loads, loads from two sessions, bulk and streaming), every
 #    graph's stored count is verified and equal to a scan.
+staged_terms=""
 for db in $A $B; do
   wrong=$(q $db -c "SELECT count(*) FROM pgrdf.graph_inventory() i
                      WHERE NOT i.counts_verified
                         OR i.asserted <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND NOT q.is_inferred)
                         OR i.inferred <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND q.is_inferred)")
   [ "$wrong" = "0" ] || fail "$db: $wrong graph(s) unverified or miscounted: $(q $db -c "SELECT string_agg(graph_id || ':' || asserted || '+' || inferred || ':' || counts_verified, ' ') FROM pgrdf.graph_inventory()")"
+  # #178: and the term count, which the staged route's background worker
+  # recorded in its own transaction.
+  dict=$(q $db -c "SELECT count(*) FROM pgrdf._pgrdf_dictionary")
+  staged_terms="$staged_terms $db=$dict"
+  [ "$(q $db -c "$terms")" = "$dict true of $dict" ] || fail "$db: the term count reads '$(q $db -c "$terms")', expected '$dict true of $dict'"
 done
-ok "every graph's stored count is verified and equal to a scan after the staged, declined, refused and two-session loads"
+[ "$(q $A -c "SELECT count(*) FROM pgrdf._pgrdf_dictionary")" -gt 0 ] || fail "$A: the staged load left the dictionary empty"
+ok "every graph's stored count and the term count are verified and equal to a scan after the staged, declined, refused and two-session loads (terms:$staged_terms)"
 
 echo "loader gate: passed"
