@@ -98,7 +98,10 @@ fn inventory_rows(which: Which) -> Vec<InventoryRow> {
         (
             crate::storage::counts::read_columns(),
             format!(
-                "LEFT JOIN pgrdf._pgrdf_graph_counts c ON c.graph_id = g.graph_id LEFT JOIN {}",
+                // Graph ids only: a graph registered by hand under a
+                // negative id must not be joined to the dictionary's row.
+                "LEFT JOIN pgrdf._pgrdf_graph_counts c \
+                        ON c.graph_id = g.graph_id AND g.graph_id >= 0 LEFT JOIN {}",
                 crate::storage::counts::read_laterals()
             ),
         )
@@ -193,7 +196,12 @@ fn inventory_rows(which: Which) -> Vec<InventoryRow> {
             });
             for row in tup {
                 let graph_id = row.get::<i64>(1).unwrap().unwrap_or(0);
-                let verified = row.get::<bool>(20).unwrap().unwrap_or(false);
+                // What the count row says, and the one rule: a count the
+                // writers do not keep (no partition of its own) is never
+                // verified. Everything below follows this value: the scan,
+                // the column, and the totals' unverified_graphs.
+                let verified = row.get::<bool>(20).unwrap().unwrap_or(false)
+                    && crate::storage::counts::counted(graph_id);
                 // A verified count is the stored one. Any other graph is
                 // counted here and now: the numbers returned are exact
                 // either way, and `counts_verified` says which it was.
@@ -610,7 +618,7 @@ fn recount_terms() -> TableIterator<
         );
     }
     let was = crate::storage::counts::stored_terms();
-    let (terms, _) = crate::storage::counts::set_by_scan(crate::storage::counts::DICTIONARY);
+    let terms = crate::storage::counts::set_terms_by_scan();
     TableIterator::once((
         terms,
         was.map(|w| w.asserted),

@@ -40,7 +40,7 @@ CREATE FUNCTION "_count_open"()
 	LANGUAGE c
 	AS 'MODULE_PATHNAME', '_count_open_wrapper';
 CREATE  FUNCTION "_count_kept"(
-	"key" bigint /* i64 */
+	"graph_id" bigint /* i64 */
 ) RETURNS bool /* bool */
 STABLE STRICT
 LANGUAGE c /* Rust */
@@ -205,7 +205,9 @@ $pgrdf_count_markers$;
 -- pass over the quad table, about the cost of one graph_inventory() call
 -- of 0.6.41. A registered graph without a partition of its own (a registry
 -- row written by hand) gets no count: its rows live in the default
--- partition, no write to it is counted, and it is counted by scan.
+-- partition, no write to it is counted, and it is counted by scan. Nor
+-- does a graph registered under a negative id: the keys below 0 are not
+-- graphs', and -1 is the dictionary's, seeded just below.
 INSERT INTO _pgrdf_graph_counts
        (graph_id, asserted, inferred, scanned_at, scan_snapshot, scan_xact, scan_mark, folded_below)
 SELECT g.graph_id, coalesce(q.a, 0), coalesce(q.i, 0), pg_catalog.clock_timestamp(),

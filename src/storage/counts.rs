@@ -44,15 +44,19 @@
 //! terms. Everything above holds for it unchanged; its bypass trigger is
 //! on the dictionary table. The quad side never reaches that key:
 //! `put_quad` and the numeric-id loaders accept a negative graph id, so
-//! the graph entries here ([`gained`], [`stored`], [`counted`]) answer
-//! "no count" for every negative id, and the dictionary has entries of
-//! its own ([`terms_gained`], [`stored_terms`]).
+//! the graph entries here ([`gained`], [`stored`], [`counted`],
+//! [`set_by_scan`], [`created`], [`dropped`], [`replaced`]) answer "no
+//! count" for every negative id, and the dictionary has entries of its
+//! own ([`terms_gained`], [`stored_terms`], [`set_terms_by_scan`]). The
+//! registry does not refuse a negative graph id either, so a "graph -1"
+//! can be registered by hand: it is a graph without a count, and the
+//! dictionary's row is never shown to it.
 //!
 //! Which graph ids are counted (#180): the default graph, and every id
 //! that has a partition of its own ([`counted`]). A row written into an
 //! id without one lands in the default partition and records no delta.
-//! Readers apply the same rule through `_count_kept`, so a count the
-//! writers do not keep is never called verified, whatever its row says.
+//! Readers apply the same rule, so a count the writers do not keep is
+//! never called verified, whatever its row says.
 //!
 //! A count row is opened by whoever registers the graph: the engine when
 //! it creates one ([`created`]), and a trigger on the registry for a row
@@ -213,7 +217,11 @@ pub(crate) const DICTIONARY: i64 = -1;
 /// partition (one that was detached) does not count: rows of the id go to
 /// the default partition then.
 ///
-/// This is the one rule. Readers reach it through [`_count_kept`].
+/// This is the one rule, for writers and readers alike. A reader calls a
+/// count verified only when it holds, whatever the count row says: a row
+/// the writers do not keep up (a registered graph without a partition of
+/// its own) never reads as verified, and no graph-side reader can be shown
+/// the dictionary's row, whose key is negative.
 pub(crate) fn counted(graph_id: i64) -> bool {
     if graph_id == 0 {
         return true;
@@ -233,14 +241,13 @@ pub(crate) fn counted(graph_id: i64) -> bool {
     }
 }
 
-/// Is a count kept under this key of the count tables: the dictionary's
-/// key, or a graph id the writers count ([`counted`])? The readers' side
-/// of the one rule: a count row is called verified only when this holds,
-/// so a row the writers do not keep up (a registered graph without a
-/// partition of its own) never reads as verified.
+/// [`counted`], for SQL: is a count kept for this graph id? The upgrade
+/// script seeds by it. The engine's own readers call [`counted`] directly
+/// (in [`stored`] and in the inventory's row loop), so the listing does
+/// not stand on an EXECUTE privilege the storage owner could lose.
 #[pg_extern(stable)]
-fn _count_kept(key: i64) -> bool {
-    key == DICTIONARY || counted(key)
+fn _count_kept(graph_id: i64) -> bool {
+    counted(graph_id)
 }
 
 /// AFTER INSERT row trigger on the graph registry: open the graph's count
@@ -254,7 +261,9 @@ fn _count_open<'a>(
     let graph = trigger
         .new()
         .and_then(|row| row.get_by_name::<i64>("graph_id").ok().flatten());
-    if let (Some(graph_id), true) = (graph, present()) {
+    // A negative id is not refused by the registry, and it gets no count
+    // row: the keys below 0 are not graphs'.
+    if let (Some(graph_id), true) = (graph.filter(|g| *g >= 0), present()) {
         as_storage_owner(|| {
             Spi::run_with_args(
                 "INSERT INTO pgrdf._pgrdf_graph_counts (graph_id) VALUES ($1) \
@@ -599,9 +608,14 @@ pub(crate) const BYPASS_APPLIES: &str = "(b.graph_id = c.graph_id OR (b.graph_id
 /// The count columns of base row `c` as a reader sees them: asserted,
 /// inferred, change_seq, verified, scanned_at. For a FROM list that has
 /// `pgrdf._pgrdf_graph_counts c`.
+///
+/// `verified` here is what the row says: a scan set it and no bypass
+/// applies. A graph's reader must also ask [`counted`] before it believes
+/// that. There are two such readers, [`stored`] and the inventory's row
+/// loop, and both do.
 pub(crate) fn read_columns() -> String {
     "c.asserted + d.a, c.inferred + d.i, c.change_seq + d.n + y.n, \
-     c.scanned_at IS NOT NULL AND y.n = 0 AND pgrdf._count_kept(c.graph_id), c.scanned_at"
+     c.scanned_at IS NOT NULL AND y.n = 0, c.scanned_at"
         .to_string()
 }
 
@@ -653,7 +667,9 @@ pub(crate) fn stored(graph_id: i64) -> Option<Stored> {
     if graph_id < 0 {
         return None;
     }
-    stored_key(graph_id)
+    let mut stored = stored_key(graph_id)?;
+    stored.verified = stored.verified && counted(graph_id);
+    Some(stored)
 }
 
 /// The stored number of dictionary terms (`asserted`), or `None` when the
@@ -691,24 +707,21 @@ fn stored_key(graph_id: i64) -> Option<Stored> {
     })
 }
 
-/// The statement that counts what `$1` stands for: the asserted and
-/// inferred rows of a graph, or the terms of the dictionary.
-fn scan_of(id: i64) -> &'static str {
-    if id == DICTIONARY {
-        "SELECT count(*) AS a, 0::bigint AS i FROM pgrdf._pgrdf_dictionary"
-    } else {
-        "SELECT count(*) FILTER (WHERE NOT is_inferred) AS a, \
-                count(*) FILTER (WHERE is_inferred) AS i \
-           FROM pgrdf._pgrdf_quads WHERE graph_id = $1"
-    }
-}
+/// Counts the asserted and inferred rows of graph `$1`.
+const SCAN_OF_GRAPH: &str = "SELECT count(*) FILTER (WHERE NOT is_inferred) AS a, \
+            count(*) FILTER (WHERE is_inferred) AS i \
+       FROM pgrdf._pgrdf_quads WHERE graph_id = $1";
 
-/// The asserted and inferred rows of `graph_id`, counted (for
-/// [`DICTIONARY`]: its terms, and 0).
+/// Counts the terms of the dictionary (`$1` is the dictionary's key).
+const SCAN_OF_TERMS: &str = "SELECT count(*) AS a, 0::bigint AS i FROM pgrdf._pgrdf_dictionary \
+      WHERE $1 = -1";
+
+/// The asserted and inferred rows of graph `graph_id`, counted. For any
+/// id, a negative one included: it counts the rows that carry that id.
 pub(crate) fn scanned(graph_id: i64) -> (i64, i64) {
     Spi::connect(|c| {
         let t = c
-            .select(scan_of(graph_id), None, &[graph_id.into()])
+            .select(SCAN_OF_GRAPH, None, &[graph_id.into()])
             .expect("counting the graph failed");
         let row = t.first();
         (
@@ -754,8 +767,9 @@ fn forget_spent_bypasses() {
     .expect("clearing spent bypass marks failed");
 }
 
-/// Set the count of `graph_id` from a scan and mark it verified. Returns
-/// the count it found.
+/// Set the count of graph `graph_id` from a scan and mark it verified.
+/// Returns the count it found. A negative id has no count: its rows are
+/// counted and nothing is stored, least of all under the dictionary's key.
 ///
 /// Lock first, scan second. A fold holds the base row from its statement
 /// to the end of its transaction. If this scanned first and waited for
@@ -769,32 +783,47 @@ fn forget_spent_bypasses() {
 ///
 /// The scan sees every row this transaction wrote, so what the open
 /// tally has gathered for the graph so far is in the number already and
-/// is dropped; what the call gains after this point still counts. The
-/// same holds for the dictionary's key and the tally's terms.
+/// is dropped; what the call gains after this point still counts.
 pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
-    if !present() {
+    if !present() || graph_id < 0 {
         return scanned(graph_id);
     }
-    TALLY.with(|t| {
-        let mut t = t.borrow_mut();
-        if graph_id == DICTIONARY {
-            t.2 = 0;
-        } else {
-            t.1.remove(&graph_id);
-        }
-    });
+    TALLY.with(|t| t.borrow_mut().1.remove(&graph_id));
+    set_key_by_scan(graph_id, SCAN_OF_GRAPH)
+}
+
+/// Set the dictionary's count from a scan and mark it verified. Returns
+/// the number of terms found. The same act as [`set_by_scan`], under the
+/// dictionary's key: lock first, scan second, and the terms the open
+/// tally has gathered so far are in the number already.
+pub(crate) fn set_terms_by_scan() -> i64 {
+    if !present() {
+        return Spi::connect(|c| {
+            c.select(SCAN_OF_TERMS, None, &[DICTIONARY.into()])
+                .expect("counting the dictionary failed")
+                .first()
+                .get::<i64>(1)
+                .unwrap()
+                .unwrap_or(0)
+        });
+    }
+    TALLY.with(|t| t.borrow_mut().2 = 0);
+    set_key_by_scan(DICTIONARY, SCAN_OF_TERMS).0
+}
+
+fn set_key_by_scan(key: i64, scan: &str) -> (i64, i64) {
     as_storage_owner(|| {
         Spi::run_with_args(
             "INSERT INTO pgrdf._pgrdf_graph_counts (graph_id) VALUES ($1) \
              ON CONFLICT (graph_id) DO NOTHING",
-            &[graph_id.into()],
+            &[key.into()],
         )
-        .expect("opening the graph count failed");
+        .expect("opening the count row failed");
         Spi::run_with_args(
             "SELECT 1 FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $1 FOR UPDATE",
-            &[graph_id.into()],
+            &[key.into()],
         )
-        .expect("locking the graph count failed");
+        .expect("locking the count row failed");
         let found = Spi::connect_mut(|c| {
             let t = c
                 .update(
@@ -808,12 +837,11 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
                            FROM n WHERE c.graph_id = $1 \
                          RETURNING c.asserted, c.inferred",
                         stamp = scan_stamp(),
-                        scan = scan_of(graph_id),
                     ),
                     None,
-                    &[graph_id.into()],
+                    &[key.into()],
                 )
-                .expect("setting the graph count failed");
+                .expect("setting the count failed");
             let row = t.first();
             (
                 row.get::<i64>(1).unwrap().unwrap_or(0),
@@ -829,8 +857,9 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
 /// scanned by definition. Whatever an earlier life of the id left behind
 /// goes: a count row (reset) and every delta. A row the registry opened a
 /// moment ago, in this transaction, is set the same way and keeps its
-/// `change_seq`, so a new graph starts at 0 whichever came first, its
-/// registry row or its partition. The deltas matter. An id can
+/// `change_seq` (plus the deltas retired here, which a reader had added to
+/// it), so a new graph starts at 0 whichever came first, its registry row
+/// or its partition, and the counter never goes back. The deltas matter. An id can
 /// take writes while it is unregistered, lose those rows to a DELETE in
 /// plain SQL, which records no negative delta, and be registered
 /// afterwards; a row merely inserted beside the old deltas would then read
@@ -843,7 +872,7 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
 /// writer and a plain-SQL delete of that writer's row inside the window to
 /// have such a delta, and that is accepted.
 pub(crate) fn created(graph_id: i64) {
-    if !present() {
+    if !present() || graph_id < 0 {
         return;
     }
     TALLY.with(|t| t.borrow_mut().1.remove(&graph_id));
@@ -858,7 +887,8 @@ pub(crate) fn created(graph_id: i64) {
                          nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
                          pg_snapshot_xmin(pg_current_snapshot())) \
                  ON CONFLICT (graph_id) DO UPDATE SET asserted = 0, inferred = 0, \
-                        change_seq = CASE WHEN c.scanned_at IS NULL THEN c.change_seq \
+                        change_seq = CASE WHEN c.scanned_at IS NULL \
+                                          THEN c.change_seq + (SELECT count(*) FROM gone) \
                                           ELSE {seq} END, \
                         {stamp}",
                 seq = seq_after_scan(),
@@ -872,7 +902,7 @@ pub(crate) fn created(graph_id: i64) {
 
 /// A graph was dropped: its count goes with it.
 pub(crate) fn dropped(graph_id: i64) {
-    if !present() {
+    if !present() || graph_id < 0 {
         return;
     }
     TALLY.with(|t| t.borrow_mut().1.remove(&graph_id));
@@ -900,7 +930,7 @@ pub(crate) fn dropped(graph_id: i64) {
 /// flight, and the value stored is absolute, not a scan a fold could have
 /// overtaken.
 pub(crate) fn replaced(graph_id: i64, asserted: i64, inferred: i64) {
-    if !present() {
+    if !present() || graph_id < 0 {
         return;
     }
     TALLY.with(|t| t.borrow_mut().1.remove(&graph_id));
@@ -1482,6 +1512,18 @@ mod tests {
             Some("1|f")
         );
         assert_eq!(one(&format!("SELECT pgrdf.count_quads({G})")), Some(1));
+        // The full listing agrees with the one-graph form, and the totals
+        // count it among the graphs that had to be scanned.
+        assert_eq!(
+            Spi::get_one::<String>(&format!(
+                "SELECT concat_ws('|', asserted, counts_verified) FROM pgrdf.graph_inventory() \
+                  WHERE graph_id = {G}"
+            ))
+            .unwrap()
+            .as_deref(),
+            Some("1|f")
+        );
+        assert!(one("SELECT unverified_graphs FROM pgrdf.graph_totals()").unwrap() >= 1);
     }
 
     /// A table that was detached keeps the partition's name and is not a
@@ -1514,6 +1556,16 @@ mod tests {
             Some("1|f"),
             "the one row the engine can see, and not verified"
         );
+        assert_eq!(
+            Spi::get_one::<String>(&format!(
+                "SELECT concat_ws('|', asserted, counts_verified) FROM pgrdf.graph_inventory() \
+                  WHERE graph_id = {g}"
+            ))
+            .unwrap()
+            .as_deref(),
+            Some("1|f")
+        );
+        assert!(one("SELECT unverified_graphs FROM pgrdf.graph_totals()").unwrap() >= 1);
     }
 
     /// The dictionary's count has a key of its own. A graph id of -1,
@@ -1540,6 +1592,52 @@ mod tests {
         assert_eq!(terms_truth("put_quad into graph -1"), Ok(before + 3));
         assert_eq!(one("SELECT pgrdf.count_quads(-1)"), Some(2));
         assert!(crate::storage::counts::stored(-1).is_none());
+    }
+
+    /// The registry has no rule against a negative graph id: a row for
+    /// "graph -1" can be written in plain SQL, and a restore can carry one.
+    /// Such a graph is a graph without a count. It must not be shown the
+    /// dictionary's row, and nothing done to it may touch that row.
+    #[pg_test]
+    fn a_graph_registered_as_minus_one_is_not_the_dictionary() {
+        let before = terms_truth("start").unwrap();
+        let asserted = || one("SELECT asserted FROM pgrdf.graph_totals()").unwrap();
+        let total = asserted();
+        Spi::run(
+            "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri) VALUES (-1, 'urn:tdd:neg:registered')",
+        )
+        .unwrap();
+        let listed = || {
+            Spi::get_one::<String>(
+                "SELECT concat_ws('|', asserted, inferred, counts_verified, change_seq) \
+                   FROM pgrdf.graph_inventory(-1)",
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            listed().as_deref(),
+            Some("0|0|f|0"),
+            "no triple, not verified, and nothing of the dictionary's row"
+        );
+        assert_eq!(asserted(), total, "the terms are not triples");
+        Spi::run("SELECT pgrdf.put_term('urn:tdd:neg:term', 1::smallint)").unwrap();
+        assert_eq!(terms_truth("a term beside a graph -1"), Ok(before + 1));
+        // A recount of that graph counts its triples and stores nothing
+        // under the dictionary's key.
+        assert_eq!(
+            Spi::get_one::<String>(
+                "SELECT concat_ws('|', asserted, inferred) FROM pgrdf.recount_graph(-1)"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("0|0")
+        );
+        assert_eq!(listed().as_deref(), Some("0|0|f|0"));
+        assert_eq!(terms_truth("a recount of graph -1"), Ok(before + 1));
+        // And the recount of everything, which lists that graph too.
+        Spi::run("SELECT count(*) FROM pgrdf.recount_graph()").unwrap();
+        assert_eq!(terms_truth("a recount of every graph"), Ok(before + 1));
+        assert_eq!(asserted(), total);
     }
 
     /// Registering a graph sets its count, whatever an earlier life of

@@ -31,7 +31,7 @@ thread_local! {
     /// cache: that one reports what the SPARQL translator reuses, and
     /// `plan_cache_clear()` has nothing to clear in these. PostgreSQL
     /// replans a saved statement by itself when its tables change.
-    static TERM_PLANS: std::cell::RefCell<[Option<pgrx::spi::OwnedPreparedStatement>; 2]> =
+    static TERM_PLANS: std::cell::RefCell<[Option<std::rc::Rc<pgrx::spi::OwnedPreparedStatement>>; 2]> =
         const { std::cell::RefCell::new([None, None]) };
 }
 
@@ -40,6 +40,10 @@ thread_local! {
 /// delta. Prepared once per backend: planning the two-part statement on
 /// every call cost a quarter of `put_term`'s time for a new term
 /// (measured against the plain INSERT it replaced).
+///
+/// The plan is taken out of the cell before it runs, so nothing is
+/// borrowed during the INSERT: a trigger on the dictionary that calls
+/// `put_term` comes back in here and finds the cell free.
 fn insert_term(
     counted: bool,
     term_type: i16,
@@ -48,16 +52,16 @@ fn insert_term(
     language: Option<&str>,
 ) -> i64 {
     Spi::connect_mut(|client| {
-        TERM_PLANS.with(|plans| {
-            let mut plans = plans.borrow_mut();
-            let slot = &mut plans[counted as usize];
-            if slot.is_none() {
+        let cached = TERM_PLANS.with(|plans| plans.borrow()[counted as usize].clone());
+        let plan = match cached {
+            Some(plan) => plan,
+            None => {
                 let sql = if counted {
                     TERM_INSERT_COUNTED
                 } else {
                     TERM_INSERT
                 };
-                *slot = Some(
+                let plan = std::rc::Rc::new(
                     client
                         .prepare_mut(
                             sql,
@@ -71,26 +75,27 @@ fn insert_term(
                         .expect("put_term_full: prepare failed")
                         .keep(),
                 );
+                TERM_PLANS.with(|plans| plans.borrow_mut()[counted as usize] = Some(plan.clone()));
+                plan
             }
-            let plan = slot.as_ref().expect("the term INSERT was just prepared");
-            let _writing = counts::Writing::begin();
-            client
-                .update(
-                    plan,
-                    None,
-                    &[
-                        term_type.into(),
-                        value.into(),
-                        datatype_id.into(),
-                        language.into(),
-                    ],
-                )
-                .expect("put_term_full: insert failed")
-                .first()
-                .get_one::<i64>()
-                .expect("put_term_full: id column")
-                .expect("put_term_full: INSERT … RETURNING returned no row")
-        })
+        };
+        let _writing = counts::Writing::begin();
+        client
+            .update(
+                plan.as_ref(),
+                None,
+                &[
+                    term_type.into(),
+                    value.into(),
+                    datatype_id.into(),
+                    language.into(),
+                ],
+            )
+            .expect("put_term_full: insert failed")
+            .first()
+            .get_one::<i64>()
+            .expect("put_term_full: id column")
+            .expect("put_term_full: INSERT … RETURNING returned no row")
     })
 }
 
@@ -449,6 +454,41 @@ mod tests {
         let back: Option<String> =
             Spi::get_one_with_args("SELECT pgrdf.get_term($1)", &[id.into()]).unwrap();
         assert_eq!(back.as_deref(), Some("hello"));
+    }
+
+    /// A trigger on the dictionary may call `put_term` itself. The saved
+    /// INSERT must not be held borrowed while it runs, or the call that
+    /// comes back in finds the cell taken and the write fails.
+    #[pg_test]
+    fn put_term_can_be_entered_again_from_a_trigger() {
+        Spi::run(
+            "CREATE FUNCTION public.tdd_dict_echo() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF NEW.lexical_value = 'urn:tdd:reenter:outer' THEN \
+                 PERFORM pgrdf.put_term('urn:tdd:reenter:inner', 1::smallint); \
+               END IF; \
+               RETURN NEW; \
+             END $$",
+        )
+        .unwrap();
+        Spi::run(
+            "CREATE TRIGGER tdd_reenter BEFORE INSERT ON pgrdf._pgrdf_dictionary \
+             FOR EACH ROW EXECUTE FUNCTION public.tdd_dict_echo()",
+        )
+        .unwrap();
+        Spi::run("SELECT pgrdf.put_term('urn:tdd:reenter:outer', 1::smallint)").unwrap();
+        let both = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgrdf._pgrdf_dictionary \
+              WHERE lexical_value IN ('urn:tdd:reenter:outer', 'urn:tdd:reenter:inner')",
+        )
+        .unwrap();
+        assert_eq!(both, Some(2));
+        let counted = Spi::get_one::<bool>(
+            "SELECT terms = (SELECT count(*) FROM pgrdf._pgrdf_dictionary) AND terms_verified \
+               FROM pgrdf.graph_totals()",
+        )
+        .unwrap();
+        assert_eq!(counted, Some(true), "both terms are in the count");
     }
 
     #[pg_test]
