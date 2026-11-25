@@ -371,6 +371,10 @@ pub(crate) fn maybe_fold(graph_id: i64) {
 /// get the row leaves it to the one that has it.
 pub(crate) fn fold(graph_id: i64) -> i64 {
     as_storage_owner(|| {
+        // The DELETE below runs on every fold, also when its range is
+        // empty, which under a long-held transaction id is every time: it
+        // must be the index range and never a pass over the whole table.
+        plan_by_index();
         Spi::get_one_with_args::<i64>(
             "WITH b AS (SELECT graph_id, folded_below FROM pgrdf._pgrdf_graph_counts \
                          WHERE graph_id = $1 FOR UPDATE SKIP LOCKED), \
@@ -459,7 +463,9 @@ pub(crate) fn read_laterals() -> String {
 /// and the listing then reads every delta once per graph. Local to the
 /// switch's GUC level, so it ends with it. Tables too small to have an
 /// index path worth taking are unaffected in any way that matters: the
-/// registry holds one row per graph.
+/// registry holds one row per graph. The count of an unverified graph
+/// ([`scanned`]) is unaffected too: a partition has no index that can
+/// answer it, and the planner still scans the partition (measured).
 pub(crate) fn plan_by_index() {
     unsafe {
         pgrx::pg_sys::set_config_option(
