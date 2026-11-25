@@ -29,7 +29,10 @@ q() { local db=$1; shift; "${PSQL[@]}" -d "$db" -v ON_ERROR_STOP=1 -At "$@"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok   $*"; }
 
+held_pid=""
 cleanup() {
+  exec 3>&- 2>/dev/null || true
+  [ -n "$held_pid" ] && kill "$held_pid" 2>/dev/null || true
   "${PSQL[@]}" -d postgres -q -c "DROP DATABASE IF EXISTS $UP" -c "DROP DATABASE IF EXISTS $FRESH" \
     -c "DROP ROLE IF EXISTS $APP" -c "DROP ROLE IF EXISTS $STORE" >/dev/null 2>&1 || true
 }
@@ -39,75 +42,93 @@ trap cleanup EXIT
 q postgres -q -c "CREATE DATABASE $UP" -c "CREATE DATABASE $FRESH" \
   -c "CREATE ROLE $STORE NOLOGIN" -c "CREATE ROLE $APP NOLOGIN"
 
-# 1. The previous release, with a graph that must survive the upgrade.
+# 1. The previous release, with graphs that must survive the upgrade: one
+#    with asserted and inferred triples, one empty, and one with no recorded
+#    owner, as every graph created before 0.6.41 is.
 q $UP -q -c "CREATE EXTENSION pgrdf VERSION '$PREV'"
-q $UP -q -c "SELECT pgrdf.parse_turtle('<urn:ug:s> <urn:ug:p> \"kept\" . <urn:ug:s> <urn:ug:q> <urn:ug:o> .', pgrdf.add_graph('urn:ug:kept'))" >/dev/null
-# The digest of that graph as the previous release computes it, recorded
-# from released 0.6.40. The library under test cannot compute a digest on
-# the old SQL (it sorts in SQL by a function the upgrade adds), so "the
-# upgrade leaves the digest unchanged" is checked against this constant.
-kept_before=0fdeb2e944b3e46c1f335b1381a5e862b9e287782aa61d0178038ccbbcdaa28f
-kept_structure=300306054a8ce699835c2a6b957f8fd080d68f02e0a2301a429dfde1c56d5815
-# A graph in the state the previous release left when a source stated one
-# triple twice: the row is stored twice. (Written with plain SQL: the
-# library under test is already the new one and would not store it.) The
-# upgrade must leave the graph exactly as it is.
-q $UP -q -c "SELECT pgrdf.parse_turtle('<urn:ug:r> <urn:ug:p> \"twice\" . <urn:ug:r> <urn:ug:q> <urn:ug:o> .', pgrdf.add_graph('urn:ug:repeats'))" >/dev/null
-# The previous release's library built no per-graph unique index; the one
-# under test does, even on the old SQL. Remove them so both graphs are in
-# the state that release left, then store the repeated row.
-q $UP -q -c "
-DO \$\$DECLARE r record; BEGIN
-  FOR r IN SELECT indexname FROM pg_indexes WHERE schemaname = 'pgrdf' AND indexname ~ '_spo_uniq\$'
-  LOOP EXECUTE format('DROP INDEX pgrdf.%I', r.indexname); END LOOP;
-END\$\$"
-q $UP -q -c "INSERT INTO pgrdf._pgrdf_quads SELECT q.* FROM pgrdf._pgrdf_quads q JOIN pgrdf._pgrdf_dictionary o ON o.id = q.object_id WHERE q.graph_id = pgrdf.graph_id('urn:ug:repeats') AND o.lexical_value = 'twice'"
-repeats_before=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = pgrdf.graph_id('urn:ug:repeats')")
-[ "$repeats_before" = "3" ] || fail "expected 3 rows for 2 triples in urn:ug:repeats, got $repeats_before"
-ok "installed $PREV; graph urn:ug:kept; urn:ug:repeats holds $repeats_before rows for 2 triples"
+q $UP -q -c "SELECT pgrdf.parse_turtle('<urn:ug:s> <urn:ug:p> \"kept\" . <urn:ug:s> <urn:ug:q> <urn:ug:o> . <urn:ug:Dog> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <urn:ug:Animal> . <urn:ug:rex> a <urn:ug:Dog> .', pgrdf.add_graph('urn:ug:kept'))" >/dev/null
+q $UP -q -c "SELECT pgrdf.materialize(pgrdf.graph_id('urn:ug:kept'), 'rdfs')" >/dev/null
+q $UP -q -c "SELECT pgrdf.add_graph('urn:ug:empty')" >/dev/null
+q $UP -q -c "SELECT pgrdf.parse_turtle('<urn:ug:s> <urn:ug:p> \"old\" .', pgrdf.add_graph('urn:ug:old'))" >/dev/null
+q $UP -q -c "UPDATE pgrdf._pgrdf_graphs SET owner = NULL WHERE iri = 'urn:ug:old'"
+kept_before=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")
+kept_structure=$(q $UP -c "SELECT pgrdf.structural_digest(pgrdf.graph_id('urn:ug:kept'))")
+scanned="SELECT string_agg(graph_id || ':' || a || '+' || i, ' ' ORDER BY graph_id)
+           FROM (SELECT g.graph_id,
+                        (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = g.graph_id AND NOT q.is_inferred) AS a,
+                        (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = g.graph_id AND q.is_inferred) AS i
+                   FROM pgrdf._pgrdf_graphs g) t"
+inferred_before=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE is_inferred")
+[ "$inferred_before" -gt 0 ] || fail "the fixture derived no inferred triple"
+ok "installed $PREV; graphs urn:ug:kept ($inferred_before inferred), urn:ug:empty, urn:ug:old (no recorded owner)"
 
 # 2. A consumer hands every storage table to its own role (ALTER TABLE moves
-#    a column-linked sequence with its table). The graph-id sequence is left
-#    behind, as it was for a consumer that did this before the release that
-#    added it.
+#    a column-linked sequence with its table).
 q $UP -q -c "GRANT USAGE, CREATE ON SCHEMA pgrdf TO $STORE" -c "
 DO \$\$DECLARE r record; BEGIN
   FOR r IN SELECT relname FROM pg_class
             WHERE relnamespace = 'pgrdf'::regnamespace AND relkind IN ('r', 'p')
   LOOP EXECUTE format('ALTER TABLE pgrdf.%I OWNER TO $STORE', r.relname); END LOOP;
+  FOR r IN SELECT relname FROM pg_class
+            WHERE relnamespace = 'pgrdf'::regnamespace AND relkind = 'S'
+  LOOP EXECUTE format('ALTER SEQUENCE pgrdf.%I OWNER TO $STORE', r.relname); END LOOP;
 END\$\$"
 q $UP -q -c "GRANT USAGE ON SCHEMA pgrdf TO $APP" \
   -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgrdf TO $APP" \
   -c "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgrdf TO $APP"
 ok "storage tables owned by $STORE; $APP holds the documented grants"
 
-# 3. Library already new, SQL still old: graph creation must refuse with
-#    the cure, never a bare permission error.
-before=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" -c "SET ROLE $APP" \
-  -c "SELECT pgrdf.add_graph('urn:ug:before')" 2>&1 || true)
-echo "$before" | grep -q "55000" || fail "before the upgrade, expected 55000; got: $before"
-echo "$before" | grep -q "HINT:  ALTER SEQUENCE pgrdf._pgrdf_graph_id_seq OWNER TO $STORE" \
-  || fail "before the upgrade, expected the cure in HINT; got: $before"
-# The same state, for the reads that need the new SQL: a refusal naming the
-# upgrade, never "function does not exist".
-digest=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" \
-  -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))" 2>&1 || true)
-echo "$digest" | grep -q "55000" && echo "$digest" | grep -q "HINT:  ALTER EXTENSION pgrdf UPDATE" \
-  || fail "before the upgrade, graph_digest should refuse 55000 with the upgrade as HINT; got: $digest"
-ok "before the upgrade: add_graph refused 55000 with HINT ALTER SEQUENCE … OWNER TO $STORE; graph_digest refused 55000 with HINT ALTER EXTENSION pgrdf UPDATE"
+# 3. Library already new, SQL still old. Nothing refuses: a write lands and
+#    is simply in no stored count yet, and the inventory answers through its
+#    old signature with exact counts. One session stays connected across the
+#    upgrade: it wrote before, and it must be counted when it writes after.
+fifo=$(mktemp -u "${TMPDIR:-/tmp}/pgrdf-ug.XXXXXX"); mkfifo "$fifo"
+held_out=$(mktemp "${TMPDIR:-/tmp}/pgrdf-ug-out.XXXXXX")
+"${PSQL[@]}" -d $UP -v ON_ERROR_STOP=1 -At < "$fifo" > "$held_out" 2>&1 &
+held_pid=$!
+exec 3> "$fifo"
+echo "SELECT pgrdf.parse_turtle('<urn:ug:w> <urn:ug:p> \"before the upgrade\" .', pgrdf.graph_id('urn:ug:kept'));" >&3
+for _ in $(seq 1 50); do
+  [ "$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_quads q JOIN pgrdf._pgrdf_dictionary d ON d.id = q.object_id WHERE d.lexical_value = 'before the upgrade'")" = "1" ] && break
+  sleep 0.2
+done
+old_inv=$(q $UP -c "SELECT string_agg(graph_id || ':' || asserted || '+' || inferred, ' ' ORDER BY graph_id) FROM pgrdf.graph_inventory()")
+[ "$old_inv" = "$(q $UP -c "$scanned")" ] || fail "before the upgrade the inventory said '$old_inv', a scan says '$(q $UP -c "$scanned")'"
+ok "before the upgrade: a write landed, and graph_inventory() answers with exact counts ($old_inv)"
 
-# 4. The upgrade, as a superuser. It names the graph it could not constrain.
+# 4. The upgrade, as a superuser. It says how many graphs have no owner.
 notices=$("${PSQL[@]}" -d $UP -v ON_ERROR_STOP=1 -q -c "ALTER EXTENSION pgrdf UPDATE" 2>&1)
-rg=$(q $UP -c "SELECT pgrdf.graph_id('urn:ug:repeats')")
-echo "$notices" | grep -q "_pgrdf_quads_g${rg} holds repeated triples" \
-  || fail "the upgrade did not name the graph holding repeats; it said: $notices"
+echo "$notices" | grep -q "1 graph(s) have no recorded owner" \
+  || fail "the upgrade did not report the graph with no recorded owner; it said: $notices"
 got=$(q $UP -c "SELECT extversion FROM pg_extension WHERE extname = 'pgrdf'")
 [ "$got" = "$CUR" ] || fail "extversion after update is $got, expected $CUR"
-seq_owner=$(q $UP -c "SELECT relowner::regrole FROM pg_class WHERE oid = 'pgrdf._pgrdf_graph_id_seq'::regclass")
-[ "$seq_owner" = "$STORE" ] || fail "graph-id sequence owned by $seq_owner after update, expected $STORE"
 blocking=$(q $UP -c "SELECT count(*) FROM pgrdf.ownership_drift() WHERE blocking")
 [ "$blocking" = "0" ] || fail "ownership_drift() reports $blocking blocking relation(s) after update: $(q $UP -c "SELECT string_agg(relname, ', ') FROM pgrdf.ownership_drift() WHERE blocking")"
-ok "updated to $CUR; graph-id sequence owned by $STORE; no blocking drift"
+count_owners=$(q $UP -c "SELECT string_agg(DISTINCT relowner::regrole::text, ',') FROM pg_class WHERE relnamespace = 'pgrdf'::regnamespace AND relname LIKE '\\_pgrdf\\_graph\\_count%' AND relkind IN ('r', 'S')")
+[ "$count_owners" = "$STORE" ] || fail "the count tables are owned by '$count_owners', expected $STORE"
+ok "updated to $CUR; the count tables are owned by $STORE; no blocking drift"
+
+# 4b. Every graph was counted by the upgrade: verified, and equal to a scan.
+truth="SELECT count(*) FROM pgrdf.graph_inventory() i
+        WHERE NOT i.counts_verified
+           OR i.asserted <> (SELECT count(*) FROM pgrdf._pgrdf_quads q
+                              WHERE q.graph_id = i.graph_id AND NOT q.is_inferred)
+           OR i.inferred <> (SELECT count(*) FROM pgrdf._pgrdf_quads q
+                              WHERE q.graph_id = i.graph_id AND q.is_inferred)"
+wrong=$(q $UP -c "$truth")
+[ "$wrong" = "0" ] || fail "$wrong graph(s) are unverified or miscounted after the upgrade: $(q $UP -c "SELECT string_agg(graph_id || ':' || asserted || '+' || inferred || ':' || counts_verified, ' ') FROM pgrdf.graph_inventory()")"
+markers=$(q $UP -c "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relname = '_pgrdf_quads_g' || pgrdf.graph_id('urn:ug:kept') AND t.tgname LIKE 'pgrdf_count_bypass%'")
+[ "$markers" = "2" ] || fail "the partition of urn:ug:kept carries $markers count markers, expected 2"
+# The session that was connected before the upgrade writes again: its write
+# must be counted. A backend that remembered "no count tables" would leave
+# the graph verified and one row short.
+echo "SELECT pgrdf.parse_turtle('<urn:ug:w> <urn:ug:p> \"after the upgrade\" .', pgrdf.graph_id('urn:ug:kept'));" >&3
+exec 3>&-
+wait $held_pid || fail "the session held across the upgrade failed: $(cat "$held_out")"
+rm -f "$fifo" "$held_out"
+wrong=$(q $UP -c "$truth")
+[ "$wrong" = "0" ] || fail "a session connected before the upgrade wrote an uncounted row: $(q $UP -c "SELECT string_agg(graph_id || ':' || asserted || '+' || inferred || ':' || counts_verified, ' ') FROM pgrdf.graph_inventory()")"
+ok "every graph is verified and equal to a scan, also after a write from a session that was connected before the upgrade"
 
 # 5. The app role creates by IRI and by explicit id, fills, drops, and a
 #    dropped id is never handed out again.
@@ -122,45 +143,54 @@ g3=$(as_app "SELECT pgrdf.add_graph('urn:ug:after2')")
 [ "$g3" -gt "$high" ] || fail "a dropped id came back: $g3 after dropping $high"
 ok "$APP created $g1 by IRI and $high explicitly, dropped $high, next id $g3"
 
-# 5b. Ownership and the act record. The graph from before the upgrade has
-#     no recorded owner (never a guess); a graph created after it belongs to
-#     the role that created it, not to the storage owner; the act record is
-#     owned by the storage owner and carries the app role's acts.
-kept_owner=$(q $UP -c "SELECT coalesce(owner, '<not recorded>') FROM pgrdf._pgrdf_graphs WHERE iri = 'urn:ug:kept'")
-[ "$kept_owner" = "<not recorded>" ] || fail "the pre-upgrade graph got an owner: $kept_owner"
-new_owner=$(q $UP -c "SELECT owner FROM pgrdf._pgrdf_graphs WHERE graph_id = $g1")
-[ "$new_owner" = "$APP" ] || fail "graph $g1 is owned by '$new_owner', expected $APP"
-acts_owner=$(q $UP -c "SELECT relowner::regrole FROM pg_class WHERE oid = 'pgrdf._pgrdf_graph_acts'::regclass")
-[ "$acts_owner" = "$STORE" ] || fail "the act record is owned by $acts_owner, expected $STORE"
-acts=$(q $UP -c "SELECT string_agg(act, ',' ORDER BY act_id) FROM pgrdf.graph_acts($g1) WHERE acting_role = '$APP'")
-[ "$acts" = "create,load" ] || fail "acts of graph $g1 by $APP: '$acts', expected create,load"
-ok "urn:ug:kept has no recorded owner; graph $g1 is owned by $APP with acts $acts; the act record is owned by $STORE"
+# 5b. The listing follows the role. The app role sees the graphs it
+#     created and nothing else; its totals say so; a graph that is not its
+#     own refuses 42501 and one that does not exist returns no row.
+listed=$(as_app "SELECT string_agg(iri, ' ' ORDER BY iri) FROM pgrdf.graph_inventory()")
+[ "$listed" = "urn:ug:after urn:ug:after2" ] || fail "$APP is listed '$listed', expected its own two graphs"
+totals=$(as_app "SELECT scope || ' ' || graphs_listed || ' of ' || graphs_total || ' ' || asserted || ' ' || coalesce(terms::text, 'null') FROM pgrdf.graph_totals()")
+all=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_graphs")
+[ "$totals" = "own 2 of $all 1 null" ] || fail "$APP totals are '$totals', expected 'own 2 of $all 1 null'"
+admin=$(q $UP -c "SELECT scope || ' ' || (graphs_listed = graphs_total) || ' ' || unverified_graphs FROM pgrdf.graph_totals()")
+[ "$admin" = "all true 0" ] || fail "the superuser's totals are '$admin', expected 'all true 0'"
+foreign=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" -c "SET ROLE $APP" \
+  -c "SELECT count(*) FROM pgrdf.graph_inventory('urn:ug:kept')" 2>&1 || true)
+echo "$foreign" | grep -q "42501" || fail "$APP asking for urn:ug:kept should refuse 42501; got: $foreign"
+none=$(as_app "SELECT count(*) FROM pgrdf.graph_inventory('urn:ug:no-such-graph')")
+[ "$none" = "0" ] || fail "an unknown graph returned $none row(s)"
+ok "$APP is listed its own graphs ($totals); urn:ug:kept refuses 42501; an unknown graph returns no row"
 
-# 5c. Set semantics. The upgrade rewrote nothing: the graph holding repeats
-#     has the same rows, is reported, gains no more from a reload, and
-#     dedup_graph cures it. The clean graph got its unique index.
-repeats_after=$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $rg")
-[ "$repeats_after" = "$repeats_before" ] || fail "the upgrade changed urn:ug:repeats: $repeats_before -> $repeats_after rows"
-report=$(q $UP -c "SELECT concat_ws('/', rows, distinct_rows, surplus, set_enforced) FROM pgrdf.duplicate_report() WHERE graph_id = $rg")
-[ "$report" = "3/2/1/f" ] || fail "duplicate_report() on urn:ug:repeats: '$report', expected 3/2/1/f"
-others=$(q $UP -c "SELECT count(*) FROM pgrdf.duplicate_report() WHERE graph_id IS DISTINCT FROM $rg")
-[ "$others" = "0" ] || fail "duplicate_report() lists $others other row(s): $(q $UP -c "SELECT string_agg(coalesce(iri, 'dictionary'), ', ') FROM pgrdf.duplicate_report() WHERE graph_id IS DISTINCT FROM $rg")"
-as_app "SELECT pgrdf.parse_turtle('<urn:ug:r> <urn:ug:p> \"twice\" .', $rg)" >/dev/null
-[ "$(q $UP -c "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $rg")" = "3" ] || fail "a graph holding repeats gained another on reload"
-removed=$(as_app "SELECT pgrdf.dedup_graph($rg)")
-[ "$removed" = "1" ] || fail "dedup_graph removed $removed rows, expected 1"
-[ "$(q $UP -c "SELECT count(*) FROM pgrdf.duplicate_report()")" = "0" ] || fail "duplicate_report() is not empty after the cure"
-dup=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" \
-  -c "INSERT INTO pgrdf._pgrdf_quads SELECT * FROM pgrdf._pgrdf_quads WHERE graph_id = pgrdf.graph_id('urn:ug:kept') LIMIT 1" 2>&1 || true)
-echo "$dup" | grep -q "23505" || fail "the upgraded clean graph accepts a repeated row: $dup"
-ok "urn:ug:repeats untouched by the upgrade ($report), no further repeat on reload, cured by dedup_graph (removed $removed); urn:ug:kept refuses a repeat 23505"
+# 5c. The app role's writes are counted without any privilege on the count
+#     tables, and a write in plain SQL is seen for what it is.
+privs=$(q $UP -c "SELECT string_agg(privilege_type, ',' ORDER BY privilege_type) FROM information_schema.role_table_grants WHERE grantee = 'PUBLIC' AND table_schema = 'pgrdf' AND table_name LIKE '\\_pgrdf\\_graph\\_count%'")
+[ "$privs" = "INSERT" ] || fail "PUBLIC holds '$privs' on the count tables, expected INSERT on the delta table only"
+forged=$("${PSQL[@]}" -d $UP -At -c "\\set VERBOSITY verbose" -c "SET ROLE $APP" \
+  -c "INSERT INTO pgrdf._pgrdf_graph_count_deltas (graph_id, d_asserted, d_inferred) VALUES ($g1, 1000, 0)" 2>&1 || true)
+echo "$forged" | grep -q "42501" || fail "a direct INSERT into the delta table should refuse 42501; got: $forged"
+as_app "INSERT INTO pgrdf._pgrdf_quads_g$g1 (subject_id, predicate_id, object_id, graph_id) SELECT subject_id, object_id, predicate_id, graph_id FROM pgrdf._pgrdf_quads_g$g1" >/dev/null
+state=$(as_app "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($g1)")
+[ "$state" = "2 false" ] || fail "after a direct write, graph $g1 reads '$state', expected '2 false'"
+cured=$(as_app "SELECT asserted || ' ' || was_asserted || ' ' || was_verified FROM pgrdf.recount_graph($g1)")
+[ "$cured" = "2 1 false" ] || fail "recount_graph($g1) returned '$cured', expected '2 1 false'"
+state=$(as_app "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($g1)")
+[ "$state" = "2 true" ] || fail "after the recount, graph $g1 reads '$state', expected '2 true'"
+wrong=$(q $UP -c "$truth")
+[ "$wrong" = "0" ] || fail "$wrong graph(s) are unverified or miscounted at the end of the gate"
+ok "PUBLIC holds INSERT on the delta table only; a forged delta refuses 42501; a direct write reads unverified and exact, and recount_graph cures it"
 
-# 6. The graph from before the upgrade is untouched.
+# 6. The graph from before the upgrade kept its triples: the two rows the
+#    gate added are the only difference, and its digest is what this
+#    library computed for it before the upgrade plus those rows.
+kept_rows=$(q $UP -c "SELECT asserted || '+' || inferred FROM pgrdf.graph_inventory('urn:ug:kept')")
+[ "$kept_rows" = "6+$inferred_before" ] || fail "urn:ug:kept holds $kept_rows, expected 6+$inferred_before"
+q $UP -q -c "SELECT * FROM pgrdf.sparql('DELETE WHERE { GRAPH <urn:ug:kept> { <urn:ug:w> ?p ?o } }')" >/dev/null
 kept_after=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")
-[ "$kept_before" = "$kept_after" ] || fail "urn:ug:kept: graph_digest is $kept_after, the previous release computed $kept_before"
+[ "$kept_before" = "$kept_after" ] || fail "urn:ug:kept: graph_digest is $kept_after, it was $kept_before before the upgrade"
 structure_after=$(q $UP -c "SELECT pgrdf.structural_digest(pgrdf.graph_id('urn:ug:kept'))")
-[ "$kept_structure" = "$structure_after" ] || fail "urn:ug:kept: structural_digest is $structure_after, the previous release computed $kept_structure"
-ok "urn:ug:kept: graph_digest and structural_digest equal what the previous release computed"
+[ "$kept_structure" = "$structure_after" ] || fail "urn:ug:kept: structural_digest is $structure_after, it was $kept_structure before the upgrade"
+wrong=$(q $UP -c "$truth")
+[ "$wrong" = "0" ] || fail "$wrong graph(s) are unverified or miscounted after the SPARQL delete"
+ok "urn:ug:kept: graph_digest and structural_digest are what they were before the upgrade"
 
 # 7. The upgraded database exposes exactly what a fresh install does.
 q $FRESH -q -c "CREATE EXTENSION pgrdf"
@@ -211,5 +241,32 @@ diff <(echo "$fresh_cfg") <(echo "$up_cfg") || fail "pg_dump registrations diffe
 [ -n "$fresh_shape" ] || fail "fresh install lists no columns"
 diff <(echo "$fresh_shape") <(echo "$up_shape") || fail "columns, indexes or triggers differ between a fresh install and the upgrade"
 ok "functions ($(echo "$up_sig" | wc -l | tr -d ' ')), relations ($(echo "$up_rels" | wc -l | tr -d ' ')), columns, indexes and triggers ($(echo "$up_shape" | wc -l | tr -d ' ')), function privileges and pg_dump registrations ($(echo "$up_cfg" | wc -l | tr -d ' ')) match a fresh install"
+
+# 8. The hand-over on the current release, in the fresh database: every
+#    storage table goes to another role, the report's cures are run, and
+#    the app role then creates and fills a graph. The bypass log's sequence
+#    moves with its table; nothing about the counts is left behind.
+q $FRESH -q -c "GRANT USAGE, CREATE ON SCHEMA pgrdf TO $STORE" -c "
+DO \$\$DECLARE r record; BEGIN
+  FOR r IN SELECT relname FROM pg_class
+            WHERE relnamespace = 'pgrdf'::regnamespace AND relkind IN ('r', 'p')
+  LOOP EXECUTE format('ALTER TABLE pgrdf.%I OWNER TO $STORE', r.relname); END LOOP;
+  FOR r IN SELECT cure FROM pgrdf.ownership_drift() WHERE blocking
+  LOOP EXECUTE r.cure; END LOOP;
+END\$\$"
+blocking=$(q $FRESH -c "SELECT count(*) FROM pgrdf.ownership_drift() WHERE blocking")
+[ "$blocking" = "0" ] || fail "after the hand-over and its cures, ownership_drift() still reports: $(q $FRESH -c "SELECT string_agg(relname, ', ') FROM pgrdf.ownership_drift() WHERE blocking")"
+q $FRESH -q -c "GRANT USAGE ON SCHEMA pgrdf TO $APP" \
+  -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgrdf TO $APP" \
+  -c "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgrdf TO $APP"
+fg=$(q $FRESH -c "SET ROLE $APP" -c "SELECT pgrdf.add_graph('urn:ug:handed-over')" | tail -n 1)
+q $FRESH -q -c "SET ROLE $APP" -c "SELECT pgrdf.parse_turtle('<urn:ug:a> <urn:ug:p> <urn:ug:b> .', $fg)" >/dev/null
+q $FRESH -q -c "INSERT INTO pgrdf._pgrdf_quads_g$fg (subject_id, predicate_id, object_id, graph_id) VALUES (5, 6, 7, $fg)"
+state=$(q $FRESH -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($fg)")
+[ "$state" = "2 false" ] || fail "after the hand-over, a direct write reads '$state', expected '2 false'"
+q $FRESH -q -c "SET ROLE $APP" -c "SELECT pgrdf.recount_graph($fg)" >/dev/null
+state=$(q $FRESH -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($fg)")
+[ "$state" = "2 true" ] || fail "after the hand-over and a recount the row reads '$state', expected '2 true'"
+ok "storage handed to $STORE on $CUR with the report's cures: $APP creates, fills and recounts a graph; a direct write is still seen"
 
 echo "upgrade gate: $PREV -> $CUR passed"

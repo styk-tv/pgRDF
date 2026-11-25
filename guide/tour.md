@@ -127,7 +127,11 @@ SELECT graph_id, iri, asserted, inferred, locked, materialization
 ```
 
 (Graph `0` is the built-in default graph. The inventory also reports
-what each graph was loaded from; see [managing graphs](05-graphs.md#the-inventory).)
+what each graph was loaded from; see [managing graphs](05-graphs.md#the-inventory).
+Its counts are kept as pgRDF writes, so the call does not read the
+triples. The tour runs as a superuser, who is listed every graph; since
+0.6.42 any other role is listed
+[the graphs it owns](05-graphs.md#which-graphs-are-listed).)
 
 ## 4. Validate it with SHACL
 

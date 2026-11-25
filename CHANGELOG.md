@@ -6,6 +6,133 @@ once we cut v1.0; pre-1.0 minor bumps may include breaking changes.
 
 ## [Unreleased]
 
+## [0.6.42] — 2026-11-25
+
+Knowing the graphs takes milliseconds. pgRDF now keeps a count per graph as it
+writes, so listing the graphs with their sizes no longer reads every triple.
+The listing follows the role that asks, each count says whether it can be
+trusted without a scan, and the act record gains a feed that a polling client
+cannot fall behind on.
+
+Measured on one database of 71 graphs and 62.4M triples with 0.6.41:
+`graph_inventory()` took 2.2 to 3.4 s, and one graph's row cost the same. With
+0.6.42, at 53 graphs and 10M triples: the full listing 1.4 ms, one graph's row
+0.1 ms, the act feed 0.1 ms; the listing took 1.3 ms before the triples were
+loaded, and 1.5 ms after 100,000 further writes made while another session
+held a snapshot open.
+
+### Changed
+
+- **`graph_inventory()` reads a stored count** (#171). The engine keeps the
+  asserted and inferred counts of every graph and changes them in the
+  transaction that changes the triples. The function's columns are unchanged
+  and four are added at the end: `change_seq` moves with every committed
+  content change of the graph, so a client can key a cache on it;
+  `counts_verified`, `counts_scanned_at` and `last_act_id` are described
+  below. `count_quads()` answers from the stored count too.
+- **The listing follows the role** (#175). `graph_inventory()` used to return
+  every graph to every role that could call it. Now an admin sees every graph:
+  a superuser, a role holding the storage owner's privileges, or a role holding
+  `pg_read_all_data`. Any other role sees the graphs it owns, by the test the
+  owner rule already uses for the destructive acts, so "may drop" and "may
+  list" never disagree. A graph with no recorded owner (created before 0.6.41)
+  is listed to admins only until `set_graph_owner(graph_id, role)` assigns it.
+  The function needs only EXECUTE: a role lists its graphs without any
+  privilege on pgRDF's tables. **If a client of yours lists graphs as a role
+  that is not an admin, it will see fewer graphs after this upgrade**; compare
+  `graphs_listed` with `graphs_total` in `graph_totals()` to tell "not listed
+  to me" from "dropped". This is a listing rule, not secrecy: a role that may
+  read triples can still count any graph with a query and resolve any IRI
+  with `graph_id(iri)`, and the act record is readable by every role. The database
+  remains the boundary between tenants.
+- **Every graph partition carries two statement-level triggers**
+  (`pgrdf_count_bypass`, `pgrdf_count_bypass_truncate`), and so does the quad
+  table. They fire once per statement and refuse nothing. Measured against
+  0.6.41 in one sitting, the two versions alternating, four runs each: a load
+  of 1M triples took 25.4 s where it took 25.6 s (medians; no difference
+  beyond the spread between runs), and 100,000 single-row `put_quad` calls
+  took 4.0 s where they took 6.2 s, because that statement is now prepared
+  once per session.
+- **`graph_integrity()` reports the stored count against a scan**
+  (`stored_count`), and `clean` is false when a verified count differs from
+  the scan.
+
+### Added
+
+- **A verified state on every count.** `counts_verified` is true when a scan
+  set the count and every change since came through pgRDF. A write made in
+  plain SQL on the quad table leaves the count unverified: the graph it names
+  when the statement targets a graph's partition, every graph when it targets
+  the parent table. An unverified graph is counted by scan when asked, so
+  `asserted` and `inferred` are exact in every case; what is lost is the
+  speed, for that graph, until a recount. `counts_scanned_at` is when a scan
+  last set the count.
+- **`recount_graph(graph_id)`** counts a graph again, stores what it finds and
+  returns it beside what was stored. `recount_graph()` does every graph
+  the caller owns, or every graph for a role holding the storage owner's
+  privileges; it is allowed to the graph's owner and to the storage owner. It
+  changes no triple, runs on a locked graph, and is recorded as act
+  `recount`.
+- **`graph_inventory(graph_id)` and `graph_inventory(iri)`**: one graph's row.
+  Three answers that cannot be confused: the row (an empty graph shows 0),
+  `42501` for a graph that exists and is not listed to the caller, and no row
+  for a graph that does not exist.
+- **`graph_totals()`**: one row of totals over the graphs listed to the caller,
+  with the scope they cover (`all` or `own`) and the number of graphs in the
+  database beside it. `terms` is reserved for the number of dictionary terms
+  and is NULL in this release.
+- **`graph_act_feed(after, only_graph, page, max_acts)`** (#176): the act
+  record in an order a poller can trust. `graph_acts(graph_id, since)` filters
+  on the time a row was written inside its transaction, so an act whose
+  transaction commits later was skipped by a client that had already moved
+  past that time. The feed orders acts by transaction and returns one cursor,
+  `complete_below`: everything below it has been delivered in full. Keep it,
+  pass it as `after` on the next call, and drop the act ids already seen. A
+  visible act is committed and is never tentative; only the window above the
+  cursor is open. When more acts remain than `max_acts`, follow `next_page`
+  until it is NULL, then keep `complete_below`. The acts of the caller's own
+  open transaction are left out. Indexes on `(xact, act_id)` and `(at)`.
+- **The listing calls take no transaction id.** `graph_inventory()` in its
+  three forms, `graph_totals()`, `count_quads()` and `graph_act_feed()` read
+  without one, so a session that only lists graphs is not a transaction that
+  others must wait out.
+
+### Upgrading
+
+- `ALTER EXTENSION pgrdf UPDATE` counts every graph once, in one pass over the
+  quad table (about the cost of one 0.6.41 `graph_inventory()` call), and
+  holds writers out from that pass to its commit. Readers are not blocked.
+- It warns with the number of graphs that have no recorded owner.
+- It drops and re-creates `graph_inventory()`, because the result type
+  changed. A view of yours over that function stops the upgrade: drop it
+  before and create it again after. A GRANT or REVOKE you made on the function
+  does not carry over.
+- The stored-count tables are written by the engine only. A role granted
+  `ALL TABLES IN SCHEMA pgrdf` holds privileges on them and is refused all the
+  same (`42501`); nothing needs revoking.
+- A graph's owner is recorded by role name. A role dropped and created again
+  under the same name owns, and is listed, the graphs of the old one; a
+  renamed role no longer owns its graphs until `set_graph_owner` says so.
+- A database restored from a dump has no stored counts: every graph is
+  unverified and counted by scan until `SELECT * FROM pgrdf.recount_graph();`
+  is run once. `pg_upgrade` needs nothing.
+- A role that switches triggers off (`session_replication_role = replica`,
+  which includes a logical replication subscriber's apply; `ALTER TABLE ...
+  DISABLE TRIGGER`; `pg_restore --disable-triggers`), or that attaches,
+  detaches or drops a partition holding rows, steps outside the detection.
+  `recount_graph` is the cure.
+
+### Known limits
+
+- A count's deltas are folded up to the oldest transaction that still holds a
+  transaction id. While one such transaction stays open, writes committed
+  after it began stay in the read path of the graphs they touched: measured,
+  100,000 single-row writes behind one idle open transaction raise the
+  listing from 1.4 ms to about 9 ms, exact throughout, and it returns to 1.4
+  ms when that transaction ends. The same transaction holds back
+  `graph_act_feed`'s cursor.
+
+
 ## [0.6.41] — 2026-11-24
 
 A graph is a set of triples, and pgRDF now keeps a record of who did what to

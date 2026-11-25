@@ -320,6 +320,79 @@ thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
+// 0.6.42 (#176): a feed a poller can trust. `graph_acts(graph_id, since)`
+// filters on `at`, the time the row was written inside its transaction,
+// and `act_id` comes from a sequence: neither follows commit order, so a
+// poller that has advanced past an act never sees it if its transaction
+// commits later. The feed orders by the transaction id the row already
+// carries and returns one cursor with the acts: every transaction below
+// the snapshot's xmin has finished, so everything below that value has
+// been delivered in full. A visible act is committed and cannot be
+// removed; what is open is the window above the cursor, never an act.
+pgrx::extension_sql!(
+    r#"
+CREATE INDEX _pgrdf_graph_acts_xact_idx ON _pgrdf_graph_acts (xact, act_id);
+CREATE INDEX _pgrdf_graph_acts_at_idx ON _pgrdf_graph_acts (at);
+
+CREATE FUNCTION graph_act_feed(
+    after xid8 DEFAULT NULL,
+    only_graph BIGINT DEFAULT NULL,
+    page TEXT DEFAULT NULL,
+    max_acts INTEGER DEFAULT 1000)
+RETURNS TABLE (
+    complete_below xid8, next_page TEXT,
+    act_id BIGINT, graph_id BIGINT, graph_iri TEXT, act TEXT, at TIMESTAMPTZ, xact xid8,
+    session_role TEXT, acting_role TEXT, application_name TEXT, requester TEXT,
+    workspace TEXT, agent TEXT, thread TEXT, on_behalf_of TEXT, harness TEXT, detail JSONB)
+LANGUAGE sql STABLE
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+  -- One statement, so the watermark and the acts come from one snapshot.
+  WITH tok AS (
+    SELECT CASE WHEN graph_act_feed.page IS NULL
+                THEN pg_snapshot_xmin(pg_current_snapshot())
+                ELSE split_part(graph_act_feed.page, ':', 1)::xid8 END AS w,
+           CASE WHEN graph_act_feed.page IS NOT NULL
+                THEN split_part(graph_act_feed.page, ':', 2)::xid8 END AS px,
+           CASE WHEN graph_act_feed.page IS NOT NULL
+                THEN split_part(graph_act_feed.page, ':', 3)::bigint END AS pa,
+           pg_snapshot_xmax(pg_current_snapshot()) AS xmax
+  ), picked AS (
+    SELECT a.*
+      FROM pgrdf._pgrdf_graph_acts a, tok
+     WHERE (graph_act_feed.after IS NULL OR a.xact >= graph_act_feed.after)
+       AND (graph_act_feed.only_graph IS NULL OR a.graph_id = graph_act_feed.only_graph)
+       -- The caller's own open transaction: the only visible acts that
+       -- can still roll back.
+       AND a.xact IS DISTINCT FROM pg_current_xact_id_if_assigned()
+       -- A visible act of this server has a transaction id below the
+       -- snapshot's xmax. One at or above it came with a restore from
+       -- another server; it is history, delivered to a reader that starts
+       -- from the beginning and to no cursor.
+       AND (graph_act_feed.after IS NULL OR a.xact < tok.xmax)
+       AND (tok.px IS NULL OR (a.xact, a.act_id) > (tok.px, tok.pa))
+     ORDER BY a.xact, a.act_id
+     LIMIT greatest(graph_act_feed.max_acts, 1) + 1
+  ), shown AS (
+    SELECT * FROM picked ORDER BY xact, act_id LIMIT greatest(graph_act_feed.max_acts, 1)
+  ), tail AS (
+    SELECT (SELECT count(*) FROM picked) > greatest(graph_act_feed.max_acts, 1) AS more,
+           (SELECT s.xact FROM shown s ORDER BY s.xact DESC, s.act_id DESC LIMIT 1) AS lx,
+           (SELECT s.act_id FROM shown s ORDER BY s.xact DESC, s.act_id DESC LIMIT 1) AS la
+  )
+  SELECT tok.w,
+         CASE WHEN tail.more THEN tok.w::text || ':' || tail.lx::text || ':' || tail.la::text END,
+         p.act_id, p.graph_id, p.graph_iri, p.act, p.at, p.xact,
+         p.session_role, p.acting_role, p.application_name, p.requester,
+         p.workspace, p.agent, p.thread, p.on_behalf_of, p.harness, p.detail
+    FROM tok CROSS JOIN tail LEFT JOIN shown p ON true
+   ORDER BY p.xact, p.act_id
+$fn$;
+"#,
+    name = "graph_act_feed_v0_6_42",
+    requires = ["graph_acts_v0_6_41"],
+);
+
 /// One graph-level act in progress. [`begin`] it before the work and
 /// [`ActScope::finish`] it after; dropped unfinished (an error unwinding
 /// through it) it records nothing and stops being listed.
@@ -328,6 +401,9 @@ pub(crate) struct ActScope {
     act: &'static str,
     identity: Identity,
     outermost: bool,
+    /// 0.6.42: one act, one count delta per graph it changed. Written
+    /// when the scope closes; nothing is written when it unwinds.
+    _counts: crate::storage::counts::Tally,
 }
 
 /// Enter `act` on `graph_id`: read who is acting, and list this backend
@@ -352,6 +428,7 @@ pub(crate) fn begin(graph_id: i64, act: &'static str) -> ActScope {
         act,
         identity,
         outermost,
+        _counts: crate::storage::counts::Tally::open(),
     }
 }
 

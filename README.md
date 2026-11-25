@@ -45,7 +45,7 @@ With Docker and nothing else, run the extension in a stock
 `postgres:18` container:
 
 ```sh
-VER=0.6.41
+VER=0.6.42
 ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 curl -fsSL https://github.com/styk-tv/pgRDF/releases/download/v$VER/pgrdf-$VER-pg18-glibc-$ARCH.tar.gz | tar -xz
 
@@ -76,8 +76,8 @@ from source) are in the [install guide](guide/01-install.md).
 | **Update** | SPARQL 1.1 UPDATE: `INSERT` / `DELETE` `DATA`, `INSERT` / `DELETE … WHERE`, `CREATE` / `CLEAR` / `DROP GRAPH`. Transactional like any SQL. → [Update](guide/03-querying.md#sparql-update) |
 | **Reason** | OWL 2 RL or RDFS materialization, stored beside your data and never mixed into it, with a freshness flag that tells you when to re-run. → [Reasoning](guide/04-reasoning.md) |
 | **Validate** | SHACL Core plus SHACL-SPARQL, with the report returned as JSONB. 56 of the 98 W3C SHACL Core tests are run on every change and all pass, graded on the `sh:conforms` verdict (the suite's partial compliance; full reports are not compared). → [Validation](guide/06-validation-recipes.md) |
-| **Manage graphs** | Inventory with source digests, copy / move / clear / drop, carve out subgraphs by predicate or neighbourhood, write locks that hold against plain SQL too, integrity checks. Any role with table grants can create graphs. → [Graphs](guide/05-graphs.md) |
-| **Know who did what** | Each graph records its owner. Every graph-level act (create, load, update, clear, lock, validate, …) is one row in an act record that pgRDF writes and a role with table grants cannot forge, with the PostgreSQL role that acted kept apart from what the client declares about itself. → [The act record](guide/05-graphs.md#the-act-record) |
+| **Manage graphs** | Inventory with source digests and with counts kept as pgRDF writes, so listing graphs does not read the triples; copy / move / clear / drop, carve out subgraphs by predicate or neighbourhood, write locks that hold against plain SQL too, integrity checks. Any role with table grants can create graphs. → [Graphs](guide/05-graphs.md) |
+| **Know who did what** | Each graph records its owner. Every graph-level act (create, load, update, clear, lock, validate, …) is one row in an act record that pgRDF writes and a role with table grants cannot forge, with the PostgreSQL role that acted kept apart from what the client declares about itself, and a feed that a polling client can follow without missing an act. → [The act record](guide/05-graphs.md#the-act-record) |
 | **Identify, compare, export** | Canonical graph digests (W3C RDFC-1.0), a blank-node-aware diff between two graphs, canonical N-Triples export, and a manifest anyone can check offline with `sha256sum`. → [Identity](guide/07-identity-and-export.md) |
 | **Diagnose** | SQLSTATE codes that say what kind of refusal an error is, per-query completeness figures, and a queryable list of supported functions. → [Diagnostics](guide/08-errors-and-diagnostics.md) |
 

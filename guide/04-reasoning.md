@@ -104,7 +104,8 @@ alone. (Before 0.6.41 such an assertion stored nothing, and the next
 
 ## Is the materialization current?
 
-`graph_inventory()` reports a `materialization` state for every graph:
+`graph_inventory()` reports a `materialization` state for each graph it
+lists:
 
 | State | Meaning |
 |---|---|

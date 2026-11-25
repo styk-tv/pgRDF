@@ -321,6 +321,8 @@ fn drop_graph(id: i64, cascade: default!(bool, "true")) -> i64 {
         Spi::run(&format!("DROP TABLE pgrdf.{part_name}"))
             .unwrap_or_else(|e| panic!("drop_graph: DROP TABLE failed: {e}"));
     });
+    // 0.6.42: the graph's stored count goes with it.
+    crate::storage::counts::dropped(id);
 
     // Remove the IRI binding so `pgrdf.graph_iri(id)` and
     // `pgrdf.graph_id(iri)` start returning NULL post-drop, per
@@ -601,9 +603,13 @@ fn clear_graph(id: i64) -> i64 {
     // touching the default partition.
     let act = crate::storage::acts::begin(id, "clear");
     crate::storage::partition::as_storage_owner(|| {
-        Spi::run(&format!("TRUNCATE ONLY pgrdf.{partition_name}"))
-            .unwrap_or_else(|e| panic!("clear_graph: TRUNCATE failed: {e}"));
+        crate::storage::counts::engine_write(|| {
+            Spi::run(&format!("TRUNCATE ONLY pgrdf.{partition_name}"))
+                .unwrap_or_else(|e| panic!("clear_graph: TRUNCATE failed: {e}"));
+        });
     });
+    // 0.6.42: an emptied partition needs no scan to be counted.
+    crate::storage::counts::replaced(id, 0, 0);
     // The registry describes the graph as it is now: an empty graph has no
     // source and no materialization. What it was loaded from stays in the
     // act record.
@@ -664,23 +670,25 @@ fn copy_as_set(src: i64, dst: i64, predicate_id: Option<i64>) -> i64 {
     )
     .unwrap_or_else(|e| panic!("copy: destination probe failed: {e}"))
     .unwrap_or(false);
-    let stored: i64 = Spi::get_one_with_args(
-        &format!(
-            "WITH ins AS ( \
-               INSERT INTO pgrdf._pgrdf_quads \
-                     (subject_id, predicate_id, object_id, graph_id, is_inferred) \
-               SELECT s.subject_id, s.predicate_id, s.object_id, $2::bigint, {select} \
-                 FROM pgrdf.{src_name} s \
-                WHERE true {filter} {absent} \
-                {group} \
-               ON CONFLICT DO NOTHING \
-               RETURNING 1) \
-             SELECT count(*)::bigint FROM ins"
-        ),
-        &[predicate_id.into(), dst.into()],
-    )
-    .unwrap_or_else(|e| panic!("copy: INSERT ... SELECT failed: {e}"))
-    .unwrap_or(0);
+    let (stored, stored_inferred) = crate::storage::counts::engine_write(|| {
+        Spi::get_two_with_args::<i64, i64>(
+            &format!(
+                "WITH ins AS ( \
+                   INSERT INTO pgrdf._pgrdf_quads \
+                         (subject_id, predicate_id, object_id, graph_id, is_inferred) \
+                   SELECT s.subject_id, s.predicate_id, s.object_id, $2::bigint, {select} \
+                     FROM pgrdf.{src_name} s \
+                    WHERE true {filter} {absent} \
+                    {group} \
+                   ON CONFLICT DO NOTHING \
+                   RETURNING is_inferred) \
+                 SELECT count(*)::bigint, count(*) FILTER (WHERE is_inferred)::bigint FROM ins"
+            ),
+            &[predicate_id.into(), dst.into()],
+        )
+    })
+    .unwrap_or_else(|e| panic!("copy: INSERT ... SELECT failed: {e}"));
+    let (stored, stored_inferred) = (stored.unwrap_or(0), stored_inferred.unwrap_or(0));
     // Asserted in the source, only inferred in the destination: the
     // destination's row becomes asserted (see storage::quads). Possible
     // only when the destination held rows before this copy.
@@ -690,6 +698,7 @@ fn copy_as_set(src: i64, dst: i64, predicate_id: Option<i64>) -> i64 {
             None => "AND $1::bigint IS NULL",
         };
         crate::storage::partition::as_storage_owner(|| {
+            let _writing = crate::storage::counts::Writing::begin();
             Spi::get_one_with_args(
                 &format!(
                     "WITH up AS ( \
@@ -709,6 +718,12 @@ fn copy_as_set(src: i64, dst: i64, predicate_id: Option<i64>) -> i64 {
     } else {
         0
     };
+    // 0.6.42: copied rows keep their side; a promoted row changes it.
+    crate::storage::counts::gained(
+        dst,
+        stored - stored_inferred + made_asserted,
+        stored_inferred - made_asserted,
+    );
     stored + made_asserted
 }
 
@@ -1084,7 +1099,8 @@ fn carve_graph_neighbourhood(
                                 AND d.predicate_id = q.predicate_id AND d.object_id = q.object_id)"
         )
     };
-    let (count, boundary): (Option<i64>, Option<i64>) = Spi::get_two_with_args(
+    let _writing = crate::storage::counts::Writing::begin();
+    let (count, boundary, carved_inferred): (Option<i64>, Option<i64>, Option<i64>) = Spi::get_three_with_args(
         &format!(
             "WITH RECURSIVE frontier(node_id, hop) AS ( \
                  SELECT id, 0 FROM pgrdf._pgrdf_dictionary \
@@ -1112,7 +1128,7 @@ fn carve_graph_neighbourhood(
                    AND q.subject_id NOT IN (SELECT node_id FROM nodes) {absent} \
                  GROUP BY q.subject_id, q.predicate_id, q.object_id \
                  ON CONFLICT DO NOTHING \
-                 RETURNING 1 \
+                 RETURNING is_inferred \
              ), \
              boundary AS ( \
                  SELECT count(DISTINCT e.to_node)::bigint AS n \
@@ -1123,13 +1139,17 @@ fn carve_graph_neighbourhood(
                    ON e.from_node = rim.node_id \
                  WHERE e.to_node NOT IN (SELECT node_id FROM nodes) \
              ) \
-             SELECT (SELECT count(*)::bigint FROM ins), (SELECT n FROM boundary)"
+             SELECT (SELECT count(*)::bigint FROM ins), (SELECT n FROM boundary), \
+                    (SELECT count(*) FILTER (WHERE is_inferred)::bigint FROM ins)"
         ),
         &[seed_iris.into(), hops.into()],
     )
     .unwrap_or_else(|e| panic!("carve_graph: neighbourhood carve failed: {e}"));
+    drop(_writing);
     let count = count.unwrap_or(0);
     let boundary = boundary.unwrap_or(0);
+    let carved_inferred = carved_inferred.unwrap_or(0);
+    crate::storage::counts::gained(dst, count - carved_inferred, carved_inferred);
 
     if boundary > 0 {
         pgrx::notice!(

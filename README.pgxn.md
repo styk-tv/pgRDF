@@ -32,10 +32,11 @@ Every operation is a SQL function call.
   of the 98 W3C SHACL Core tests are run on every change and all pass,
   graded on the `sh:conforms` verdict (the suite's partial compliance;
   full reports are not compared).
-- **Manage graphs:** inventory, copy / move / drop, carving, write
-  locks, integrity checks, a graph owner, and a record of every
-  graph-level act (who created, loaded, cleared, locked or validated a
-  graph).
+- **Manage graphs:** inventory with stored counts (listing graphs does
+  not read the triples), copy / move / drop, carving, write locks,
+  integrity checks, a graph owner, and a record of every graph-level
+  act (who created, loaded, cleared, locked or validated a graph) with
+  a feed for clients that poll it.
 - **Identify and export:** W3C RDFC-1.0 canonical digests, canonical
   N-Triples export, portable manifests.
 

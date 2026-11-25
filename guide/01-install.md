@@ -211,12 +211,31 @@ with the exact `GRANT` in the hint; `pgrdf.can_create_graphs()`,
 question up front. For a read-only role, grant only `USAGE` and
 `SELECT`.
 
+**Never grant `TRIGGER` on pgRDF's tables, and so never `GRANT ALL` on
+them.** The grant above does not include it. pgRDF writes some of its
+tables as their owner (the storage owner), and a trigger that another
+role attached to such a table would run with the storage owner's
+privileges the next time pgRDF writes it. This holds for every pgRDF
+table.
+
 The same grants cover the [act record](05-graphs.md#the-act-record):
 any role with `USAGE` on the schema can read it through
 `pgrdf.graph_acts()`, and no grant lets a role write it. pgRDF writes
 the rows itself; a direct `INSERT`, `UPDATE`, `DELETE` or `TRUNCATE` by
 a role that does not hold the table owner's privileges is refused with
 `42501`, whatever table grants the role has.
+
+Since 0.6.42 the grant on all tables also covers the three tables that
+hold the [stored counts](05-graphs.md#stored-counts). That changes
+nothing: pgRDF writes them itself, and a direct `INSERT`, `UPDATE`,
+`DELETE` or `TRUNCATE` on them by a role that does not hold the table
+owner's privileges is refused with `42501`, whatever table grants the
+role has. Nothing needs revoking.
+
+What `pgrdf.graph_inventory()` lists to the role is a separate matter.
+Since 0.6.42 a role that is not an admin is listed the graphs it owns,
+whatever table grants it holds. See
+[which graphs are listed](05-graphs.md#which-graphs-are-listed).
 
 ### Functions that are not PUBLIC
 
@@ -245,12 +264,16 @@ stays PUBLIC.
 Some deployments make a dedicated role own pgRDF's tables with
 `ALTER TABLE … OWNER TO`. The steps above that run as the owner then run
 as that role, the owner of `pgrdf._pgrdf_quads` (the *storage owner*),
-and so does writing the act record. That role needs the storage
+and so does writing the act record and, since 0.6.42, keeping the
+[stored counts](05-graphs.md#stored-counts). That role needs the storage
 relations, and two of them are sequences that are not tied to a table,
 so `ALTER TABLE` does not move them: the graph-id sequence
 `pgrdf._pgrdf_graph_id_seq` and the act-id sequence
 `pgrdf._pgrdf_graph_act_id_seq`. It also needs `USAGE` and `CREATE` on
-the `pgrdf` schema, where it creates partitions.
+the `pgrdf` schema, where it creates partitions. The three count
+tables of 0.6.42 are storage tables like the others: hand them over
+with the rest. The sequence one of them uses belongs to its table and
+moves with it.
 
 `pgrdf.ownership_drift()` lists each object the storage owner does not
 own, whether that stops pgRDF, and the statement that fixes it. After
@@ -269,7 +292,8 @@ SELECT relname, kind, owner, storage_owner, blocking, cure FROM pgrdf.ownership_
 Run every `cure` whose row says `blocking`. A row that is not blocking
 is listed for completeness: here the schema still belongs to
 `postgres`, and `store` holds what it needs on it. No rows means
-ownership agrees. The rule behind `blocking` is in
+ownership agrees. A count table that was left behind is listed as
+blocking, like a partition. The rule behind `blocking` is in
 [errors and diagnostics](08-errors-and-diagnostics.md#ownership_drift).
 
 Run it after handing the storage over and after every
@@ -316,6 +340,68 @@ HINT:  ALTER EXTENSION pgrdf UPDATE
 
 Graph-level acts made in that window are not written to the act
 record, which the update creates.
+
+### Upgrading to 0.6.42
+
+`ALTER EXTENSION pgrdf UPDATE` rewrites no triple. It counts every
+graph once, in one pass over the stored triples: about what one
+`graph_inventory()` call cost in 0.6.41. The update waits for writes in
+progress, and new writes wait from then until it commits. Readers are
+not held up. Measured times are in the [changelog](../CHANGELOG.md).
+
+- **`graph_inventory()` lists by role from now on.** A role that is not
+  an admin (a superuser, a role holding the storage owner's privileges,
+  or one holding `pg_read_all_data`) is listed the graphs it owns. It
+  used to be listed every graph. An application that lists graphs as
+  such a role sees fewer of them after the update. Make that role an
+  admin, or give it the graphs: see
+  [which graphs are listed](05-graphs.md#which-graphs-are-listed). The
+  rule comes with the new library, at step 2 above, before the update
+  is run.
+- **Read the WARNING.** A graph created before 0.6.41 has no recorded
+  owner, so it is listed to admins only. The update says how many there
+  are:
+
+  ```
+  WARNING:  pgrdf: 2 graph(s) have no recorded owner. Since 0.6.42 pgrdf.graph_inventory() lists a graph to its owner and to admins (a superuser, a role holding the storage owner's privileges, or one holding pg_read_all_data); these are listed to admins only. Assign each with pgrdf.set_graph_owner(graph_id, role).
+  ```
+
+  Run as a superuser or as the storage owner, this gives every such
+  graph to the role `app`:
+
+  ```sql
+  SELECT graph_id, iri, pgrdf.set_graph_owner(graph_id, 'app') AS new_owner
+    FROM pgrdf.graph_inventory()
+   WHERE owner IS NULL AND graph_id <> 0;
+  ```
+
+- **A graph's owner is recorded by role name.** A role that is dropped
+  and created again under the same name owns, and is listed, the graphs
+  of the old one. A renamed role no longer owns its graphs until
+  `set_graph_owner` says so.
+- **`graph_inventory()` returns four more columns**, after the sixteen
+  it had: `change_seq`, `counts_verified`, `counts_scanned_at` and
+  `last_act_id`. A client that reads columns by name is not affected.
+- **The function is dropped and created again**, because its result
+  type changed. A view of yours over `pgrdf.graph_inventory()` stops
+  the update, which then changes nothing: drop the view before, and
+  create it again after. A `GRANT` or `REVOKE` you made on the function
+  itself does not carry over.
+- **Every graph partition gains two triggers**, `pgrdf_count_bypass`
+  and `pgrdf_count_bypass_truncate`, and so does the quad table. They
+  fire once per statement and refuse nothing. They are how a write in
+  plain SQL turns a count
+  [unverified](05-graphs.md#stored-counts).
+- **Every graph starts verified.** The update's pass is the scan.
+- **The count tables are written by pgRDF only.** A role granted
+  `ALL TABLES IN SCHEMA pgrdf` holds privileges on them and is refused
+  all the same (`42501`). Nothing needs granting, and nothing needs
+  revoking.
+- **A restore from a dump needs one call afterwards**: see
+  [dump and restore](#dump-and-restore). `pg_upgrade` needs nothing.
+- **A role that switches triggers off, or changes partitions by hand,
+  steps outside the count's detection.** `recount_graph` is the cure:
+  see [stored counts](05-graphs.md#stored-counts).
 
 ### Upgrading to 0.6.41
 
@@ -373,6 +459,16 @@ allocator (#152).
 The target server needs the same pgRDF files installed; the dump
 contains `CREATE EXTENSION pgrdf`, not the library.
 
+The [stored counts](05-graphs.md#stored-counts) of 0.6.42 are not part
+of a dump. After a restore every graph's count is unverified: the
+inventory still returns exact numbers, by counting each graph on every
+call, at the speed it had before 0.6.42. Run this once, as a superuser
+or as the storage owner, to store the counts again:
+
+```sql
+SELECT * FROM pgrdf.recount_graph();
+```
+
 One thing is not clean yet (#166): the restore prints two errors per
 graph, for indexes the partition already received from its parent
 table. With one graph in the database:
@@ -401,6 +497,8 @@ and check that the errors are only these.
 | `stats() -> 'shmem_ready'` is `false` | `pgrdf` is not in `shared_preload_libraries`, or the server wasn't restarted. Most functions still work, but the shared caches, the parallel staged loader and `graph_activity()` don't. Add it and restart. |
 | `permission denied for function stats` | `stats()` is not PUBLIC since 0.6.41. See [functions that are not PUBLIC](#functions-that-are-not-public). |
 | `export_graph` or a digest refuses with `55000` after new files were installed | The database has not been updated. Run `ALTER EXTENSION pgrdf UPDATE`. |
+| `graph_inventory()` lists fewer graphs than before, or none | Since 0.6.42 a role that is not an admin is listed the graphs it owns. See [which graphs are listed](05-graphs.md#which-graphs-are-listed). |
+| `graph_inventory()` is slow again and `counts_verified` reads `f` | The counts are unverified, as after a restore or a write in plain SQL. Run `SELECT * FROM pgrdf.recount_graph();` as a superuser or as the storage owner. See [stored counts](05-graphs.md#stored-counts). |
 | Server won't start: `could not access file "pgrdf"` | The library isn't where PostgreSQL looks. Check the copy step, or `dynamic_library_path` (route D). |
 | `could not load library … GLIBC_2.39 not found` | The system's glibc is too old. Use Debian 13, Ubuntu 24.04+, or the `postgres:18` image. |
 | `CREATE EXTENSION` can't find `pgrdf.control` | The `share/extension` files weren't copied, or were copied for a different PostgreSQL installation than the running one. |

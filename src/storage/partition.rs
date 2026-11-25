@@ -168,6 +168,9 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
              (subject_id, predicate_id, object_id) INCLUDE (is_inferred)"
         ))
         .expect("create_quads_partition: unique index failed");
+        // 0.6.42: a write to this partition that does not come through the
+        // engine's writer marks the graph's stored count unverified.
+        crate::storage::counts::guard_partition(part_name, graph_id);
         // (6) Replicate the parent's ACL onto the new partition.
         inherit_parent_acl(part_name);
         // (7) #150: advance the graph-id sequence past this id, so an id
@@ -186,6 +189,8 @@ fn create_partition_impl(part_name: &str, graph_id: i64) {
         )
         .expect("create_quads_partition: advancing the graph-id sequence failed");
     });
+    // 0.6.42: the new graph is empty, and its count says so.
+    crate::storage::counts::created(graph_id);
 }
 
 /// Does `pgrdf._pgrdf_graph_id_seq` exist? It arrives with the 0.6.39 SQL;
@@ -344,11 +349,70 @@ pub(crate) fn require_graph_ddl_privilege(kind: GraphDdl, caller: &str) {
 /// must run fixed, engine-built statements only. This is the one
 /// elevation in the add/clear/drop path, disclosed in the elevation census.
 pub(crate) fn as_storage_owner<R>(f: impl FnOnce() -> R) -> R {
-    let owner: pgrx::pg_sys::Oid = Spi::get_one(
-        "SELECT relowner FROM pg_catalog.pg_class \
-         WHERE oid = 'pgrdf._pgrdf_quads'::regclass",
-    )
-    .expect("storage owner lookup failed")
+    as_storage_owner_impl(false, f)
+}
+
+/// [`as_storage_owner`] for a closure that only reads. The switch itself
+/// then takes no transaction id: pgrx's `Spi::get_one` / `Spi::run` ask
+/// PostgreSQL for one on every call, which turns a session that only
+/// lists graphs into a transaction other sessions must wait out before
+/// they can call anything below it finished. `f` must read through
+/// `Spi::connect` + `select` to keep that true.
+///
+/// Read-only SPI runs under the calling statement's snapshot. That is
+/// right for a function that only reads; a function that writes and then
+/// lists in the same call would not see its own writes this way and must
+/// use [`as_storage_owner`].
+pub(crate) fn as_storage_owner_reading<R>(f: impl FnOnce() -> R) -> R {
+    as_storage_owner_impl(true, f)
+}
+
+/// One row, one column, through read-only SPI: no transaction id is taken.
+pub(crate) fn read_one<T: pgrx::datum::FromDatum + pgrx::datum::IntoDatum>(
+    sql: &str,
+    args: &[pgrx::datum::DatumWithOid<'_>],
+) -> Option<T> {
+    Spi::connect(|c| {
+        c.select(sql, Some(1), args)
+            .unwrap_or_else(|e| panic!("read failed: {e}: {sql}"))
+            .first()
+            .get_one::<T>()
+            .unwrap_or_else(|e| panic!("read failed: {e}: {sql}"))
+    })
+}
+
+/// The owner of the quad table, read from the system cache: no query.
+pub(crate) fn storage_owner_oid() -> Option<pgrx::pg_sys::Oid> {
+    unsafe {
+        let ns = pgrx::pg_sys::get_namespace_oid(c"pgrdf".as_ptr(), true);
+        if ns == pgrx::pg_sys::InvalidOid {
+            return None;
+        }
+        let rel = pgrx::pg_sys::get_relname_relid(c"_pgrdf_quads".as_ptr(), ns);
+        if rel == pgrx::pg_sys::InvalidOid {
+            return None;
+        }
+        let tup = pgrx::pg_sys::SearchSysCache1(
+            pgrx::pg_sys::SysCacheIdentifier::RELOID as i32,
+            pgrx::pg_sys::Datum::from(rel),
+        );
+        if tup.is_null() {
+            return None;
+        }
+        let owner = (*(pgrx::pg_sys::GETSTRUCT(tup) as pgrx::pg_sys::Form_pg_class)).relowner;
+        pgrx::pg_sys::ReleaseSysCache(tup);
+        Some(owner)
+    }
+}
+
+fn as_storage_owner_impl<R>(reading: bool, f: impl FnOnce() -> R) -> R {
+    const OWNER: &str = "SELECT relowner FROM pg_catalog.pg_class \
+         WHERE oid = 'pgrdf._pgrdf_quads'::regclass";
+    let owner: pgrx::pg_sys::Oid = if reading {
+        storage_owner_oid()
+    } else {
+        Spi::get_one(OWNER).expect("storage owner lookup failed")
+    }
     .expect("pgrdf._pgrdf_quads has no owner");
     let mut save_userid = pgrx::pg_sys::InvalidOid;
     let mut save_sec: std::ffi::c_int = 0;
@@ -365,8 +429,25 @@ pub(crate) fn as_storage_owner<R>(f: impl FnOnce() -> R) -> R {
         nest_level = pgrx::pg_sys::NewGUCNestLevel();
     }
     pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-        Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
-            .expect("owner switch: restricting search_path failed");
+        if reading {
+            // The same setting, local to the transaction, set directly:
+            // no statement, so no transaction id and no round trip.
+            unsafe {
+                pgrx::pg_sys::set_config_option(
+                    c"search_path".as_ptr(),
+                    c"pg_catalog, pg_temp".as_ptr(),
+                    pgrx::pg_sys::GucContext::PGC_USERSET,
+                    pgrx::pg_sys::GucSource::PGC_S_SESSION,
+                    pgrx::pg_sys::GucAction::GUC_ACTION_LOCAL,
+                    true,
+                    0,
+                    false,
+                );
+            }
+        } else {
+            Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
+                .expect("owner switch: restricting search_path failed");
+        }
         f()
     }))
     .finally(|| unsafe {
@@ -948,6 +1029,7 @@ mod tests {
             "unlock_graph",
             "sparql",
             "dedup_graph",
+            "recount_graph",
             "set_graph_owner",
             "clear_graph",
             "move_graph",
@@ -965,6 +1047,7 @@ mod tests {
             "export_graph",
             "get_term",
             "graph_diff",
+            "graph_act_feed",
             "graph_activity",
             "graph_acts",
             "graph_diff_summary",
@@ -974,6 +1057,7 @@ mod tests {
             "graph_inventory",
             "graph_iri",
             "graph_manifest",
+            "graph_totals",
             "last_call_stats",
             "nul_term_report",
             "orphan_partitions",
@@ -1040,6 +1124,7 @@ mod tests {
             ("sparql", "SELECT * FROM pgrdf.sparql('DROP GRAPH <urn:m:sp>')".into()),
             ("set_graph_owner", "SELECT pgrdf.set_graph_owner(pgrdf.graph_id('urn:m:c1'), 'pgrdf_145_app')".into()),
             ("dedup_graph", "SELECT pgrdf.dedup_graph(pgrdf.graph_id('urn:m:c1'))".into()),
+            ("recount_graph", "SELECT pgrdf.recount_graph(pgrdf.graph_id('urn:m:c1'))".into()),
             ("clear_graph", "SELECT pgrdf.clear_graph(pgrdf.graph_id('urn:m:c1'))".into()),
             ("clear_graph", "SELECT pgrdf.clear_graph('urn:m:b')".into()),
             ("move_graph", "SELECT pgrdf.move_graph(pgrdf.graph_id('urn:m:c2'), pgrdf.add_graph('urn:m:mv1'))".into()),

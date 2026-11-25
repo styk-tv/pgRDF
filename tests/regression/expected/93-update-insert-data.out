@@ -19,4 +19,4 @@ InsertData
 DELETE_INSERT_WHERE|0|0
 update-malformed-still-uses-query-parse-error: t
 
-3
+4

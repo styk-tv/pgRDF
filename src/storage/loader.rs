@@ -1645,7 +1645,13 @@ fn bulk_rebuild_indexes(graph_id: i64) -> i64 {
     // conflict handling. Clean input pays one index build, as before. If
     // the build finds repeats (the file repeated a triple), the surplus
     // rows are removed and the index is built: the count comes back.
-    crate::storage::quads::build_set_index(graph_id, true)
+    let removed = crate::storage::quads::build_set_index(graph_id, true);
+    if removed > 0 {
+        // 0.6.42: the load counted every row it wrote; the build removed
+        // the repeats, so the count is set from the partition it just read.
+        crate::storage::counts::set_by_scan(graph_id);
+    }
+    removed
 }
 
 /// v0.6.2 — parallel bulk-ingest fast path (`load_turtle(..., bulk_load

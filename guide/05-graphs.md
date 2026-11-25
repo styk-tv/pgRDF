@@ -22,6 +22,9 @@ and checking their health.
 - A graph records the role that created it, and every graph-level act
   (create, load, clear, lock, …) is written to
   [the act record](#the-act-record).
+- pgRDF keeps a count of each graph's triples as it writes (since
+  0.6.42), so [listing graphs](#the-inventory) does not read the
+  triples.
 
 ## Create and look up
 
@@ -88,8 +91,11 @@ SELECT pgrdf.can_create_graphs(), pgrdf.can_clear_graphs(), pgrdf.can_drop_graph
 
 ## The inventory
 
-`pgrdf.graph_inventory()` lists every graph with its size, lock state,
-reasoning freshness, what it was loaded from, and who owns it:
+`pgrdf.graph_inventory()` lists graphs with their size, lock state,
+reasoning freshness, what they were loaded from, and who owns them.
+Since 0.6.42 the listing follows the role that asks: an admin is listed
+every graph, any other role the graphs it owns (see
+[which graphs are listed](#which-graphs-are-listed)). As a superuser:
 
 ```sql
 SELECT graph_id, iri, asserted, inferred, locked, materialization, source_loads
@@ -113,6 +119,13 @@ SELECT graph_id, iri, asserted, inferred, locked, materialization, source_loads
 | `created_at` | When the graph was created. `NULL` like `owner`. |
 | `created_workspace`, `created_agent`, `created_thread` | What the creating client [declared about itself](#declared-identity), if anything. |
 | `locked_by` | The role that took the current lock. `NULL` for an open graph. |
+| `change_seq` | A number that moves with every committed change to the graph's triples. Since 0.6.42; see [stored counts](#stored-counts). |
+| `counts_verified` | `t`: `asserted` and `inferred` are the count pgRDF keeps. `f`: the graph was counted by scan for this call. The numbers are exact either way. Since 0.6.42. |
+| `counts_scanned_at` | When the kept count was last set from the whole graph. `NULL` for a graph that has none yet, which is the state after a restore. Since 0.6.42. |
+| `last_act_id` | The `act_id` of the graph's newest row in [the act record](#the-act-record). `NULL` when it has none. Since 0.6.42. |
+
+The four columns added in 0.6.42 come last; the sixteen before them
+keep their order.
 
 `asserted` and `inferred` count stored rows. They equal the number of
 triples except for a graph that
@@ -129,11 +142,192 @@ SELECT iri, asserted + inferred AS total
 ```
 
 For a single number, `pgrdf.count_quads(graph_id)` returns asserted plus
-inferred triples for one graph.
+inferred triples for one graph. It answers for any graph id, to any
+role that holds `SELECT` on `pgrdf._pgrdf_quads`; the listing rule does
+not apply to it. Since 0.6.42 it reads the
+[stored count](#stored-counts) when that count is verified, and counts
+the triples otherwise.
 
 `pgrdf.orphan_partitions()` lists storage partitions that no longer
 belong to any graph. It should return no rows. If it returns some,
 that storage can't be reached through SPARQL.
+
+### One graph
+
+Since 0.6.42 the inventory also answers for one graph, by id or by IRI,
+with the row the full listing has for it:
+
+```sql
+SELECT graph_id, asserted, inferred, materialization
+  FROM pgrdf.graph_inventory('http://example.org/people');
+--  graph_id | asserted | inferred | materialization
+-- ----------+----------+----------+-----------------
+--         1 |       14 |        8 | stale
+
+SELECT asserted, inferred FROM pgrdf.graph_inventory(1);   -- the same graph, by id
+```
+
+There are three answers, and they never look alike:
+
+| The graph | Answer |
+|---|---|
+| is listed to you | its row; an empty graph shows `0` and `0` |
+| exists and is not listed to you | refused with `42501` |
+| does not exist | no row |
+
+A quoted number is read as an IRI: `graph_inventory('42')` looks for a
+graph named `42`. Write `graph_inventory(42)` for the id.
+
+Ask this way when you want one graph. A filter on the full listing
+(`FROM pgrdf.graph_inventory() WHERE graph_id = 1`) builds every row
+first.
+
+### Stored counts
+
+Since 0.6.42 pgRDF keeps the asserted and inferred count of every graph
+and changes it in the transaction that changes the triples. The
+inventory reads those counts and no longer counts triples, so a call
+takes milliseconds whatever the graphs hold: its cost follows the
+number of graphs, not the number of triples. Before 0.6.42 every call
+counted every triple of every graph. The count is of the set a graph
+holds: a bulk or streaming load of a file that states a triple twice
+counts it once.
+
+One thing slows it: a transaction that holds a transaction id and
+stays open, most often a session left idle in a transaction. The writes
+other sessions commit after it began are added up on every call until
+it ends. The counts are exact throughout. The listing calls themselves
+(`graph_inventory()` in its three forms, `graph_totals()` and
+`count_quads()`) take no transaction id, so a session that only lists
+graphs holds nobody up. Other pgRDF read functions still take one
+(#177). Measured times are in the [changelog](../CHANGELOG.md).
+
+**`change_seq` works as a cache key.** It moves whenever a committed
+write changes the graph's triples, and stays where it is when a write
+stores nothing, such as a load of triples the graph already holds. It
+never goes back. While `counts_verified` is true, two reads that show
+the same `graph_id` and `change_seq` saw the same triples. A client can
+keep what it derived from a graph beside that pair, and derive it again
+when the number differs.
+
+- A recount and a clear move it even when no triple changed. Read a new
+  value as "look again", not as proof of a change.
+- An act that touches no triple (a lock, a validation, a change of
+  owner) does not move it. `last_act_id` moves with those.
+- It belongs to one graph in one database on one server. It starts
+  again after a dump and restore, and for a graph that is dropped and
+  created again. Do not compare a value read from a standby with one
+  read from its primary.
+
+**A count is verified** when a scan set it and every change since came
+through pgRDF's own functions. That is the normal state. A write made
+in plain SQL on the table that holds the triples leaves a count
+unverified:
+
+- on a graph's own partition (`pgrdf._pgrdf_quads_g<id>`): that graph;
+- through the parent table `pgrdf._pgrdf_quads`: every graph, because
+  such a statement does not say which graphs it touches.
+
+An unverified graph is counted by scan whenever it is asked for, so
+`asserted` and `inferred` are exact in every case. What is lost is the
+speed, for that graph, until it is counted again. A plain SQL write
+that is rolled back changes nothing.
+
+```sql
+SELECT pgrdf.add_graph('http://example.org/scratch');   -- 3
+SELECT pgrdf.parse_turtle(
+  '<http://example.org/a> <http://example.org/p> <http://example.org/b> .', 3);
+
+DELETE FROM pgrdf._pgrdf_quads_g3;   -- plain SQL, on the graph's own partition
+
+SELECT graph_id, asserted, counts_verified FROM pgrdf.graph_inventory();
+--  graph_id | asserted | counts_verified
+-- ----------+----------+-----------------
+--         0 |        0 | t
+--         1 |       14 | t
+--         2 |       10 | t
+--         3 |        0 | f
+```
+
+`pgrdf.recount_graph(graph_id)` counts the graph again, stores what it
+finds and marks the count verified. It returns the count found beside
+the count that was stored:
+
+```sql
+SELECT * FROM pgrdf.recount_graph(3);
+--  graph_id | asserted | inferred | was_asserted | was_inferred | was_verified
+-- ----------+----------+----------+--------------+--------------+--------------
+--         3 |        0 |        0 |            1 |            0 | f
+```
+
+- It is allowed to the graph's owner and to a role that holds the
+  storage owner's privileges. Another role's graph is refused with
+  `42501`, an unknown graph id with `42704`.
+- Being listed a graph is not enough. A role that sees every graph
+  through `pg_read_all_data` is refused too: a recount leaves a row in
+  the act record of the graph.
+- `pgrdf.recount_graph()`, without an argument, recounts every graph
+  you own, one row each, and every graph when you hold the storage
+  owner's privileges. That is the cure after a write through the parent
+  table.
+- It changes no triple, so it runs on a locked graph.
+- It can run while other sessions write. A write through pgRDF that
+  commits meanwhile is counted. A plain SQL write that commits after
+  the scan leaves the count unverified again.
+- Each graph recounted gets a `recount` row in
+  [the act record](#the-act-record).
+
+**After a restore** every graph is unverified, because the stored
+counts are not part of a dump. Run `SELECT * FROM pgrdf.recount_graph();`
+once, as a superuser or as the storage owner. See
+[dump and restore](01-install.md#dump-and-restore).
+
+**What goes unnoticed.** The check stands on triggers. A privileged
+role, the owner of the pgRDF tables or a superuser, can switch them off
+or go around them and leave a count that reads verified and is wrong:
+
+- `SET session_replication_role = replica`, which is also how a
+  logical replication subscriber applies changes;
+- `ALTER TABLE … DISABLE TRIGGER` on a storage table;
+- `pg_restore --disable-triggers`;
+- attaching, detaching or dropping a partition that holds rows;
+- writing the count tables directly.
+
+No grant puts another role among them. A direct write to the count
+tables (`pgrdf._pgrdf_graph_counts`, `_pgrdf_graph_count_deltas`,
+`_pgrdf_graph_count_bypass`) is refused with `42501` for every role
+that does not hold the table owner's privileges, whatever it was
+granted.
+
+After any of these, run `recount_graph`.
+[`graph_integrity()`](#checking-a-graphs-health) sets the stored count
+beside a scan and says whether they agree.
+
+### Totals
+
+`pgrdf.graph_totals()` (since 0.6.42) adds the listing up in one row.
+With the three graphs listed at the top of this section, as a
+superuser:
+
+```sql
+SELECT * FROM pgrdf.graph_totals();
+--  scope | graphs_listed | graphs_total | asserted | inferred | unverified_graphs | terms
+-- -------+---------------+--------------+----------+----------+-------------------+-------
+--  all   |             3 |            3 |       24 |        8 |                 0 |
+```
+
+| Column | Meaning |
+|---|---|
+| `scope` | `all` when the caller is listed every graph, `own` when it is listed the graphs it owns. |
+| `graphs_listed` | How many graphs the caller is listed. |
+| `graphs_total` | How many graphs the database holds, for every caller. |
+| `asserted`, `inferred` | Sums over the listed graphs. |
+| `unverified_graphs` | Listed graphs whose count was not verified, and so were counted by scan for this call. |
+| `terms` | Reserved for the number of dictionary terms. `NULL` in 0.6.42, for every caller. |
+
+A total is never the database's unless `scope` says `all`. A client
+that compares listings over time can tell "no longer listed to me" from
+"dropped" by `graphs_total`.
 
 ## Clear, copy, move, drop
 
@@ -285,9 +479,11 @@ graph's storage stays with the owner of the pgRDF tables (the *storage
 owner*). Graphs that existed before 0.6.41 have no recorded owner; the
 column reads `NULL`, never a guess.
 
-**By default the owner decides nothing.** Table privileges alone say
-who may do what, as before. A superuser can reserve the destructive
-acts for the owner, usually per database:
+**By default the owner reserves nothing.** Table privileges alone say
+who may do what, as before. The owner decides one thing without any
+setting: [which graphs a role is listed](#which-graphs-are-listed)
+(since 0.6.42). A superuser can reserve the destructive acts for the
+owner, usually per database:
 
 ```sql
 ALTER DATABASE mydb SET pgrdf.graph_owner_enforce = on;   -- new sessions
@@ -318,6 +514,71 @@ What the setting does not do:
 "Holds the privileges of" means the role is the owner, or a member
 that inherits from it. A login that may `SET ROLE` to the owner without
 inheriting owns nothing until it does switch.
+
+### Which graphs are listed
+
+Since 0.6.42 `graph_inventory()` and `graph_totals()` answer for the
+role that calls them. Before, every role that could call the inventory
+was listed every graph.
+
+| Caller | Listed |
+|---|---|
+| an admin | every graph |
+| any other role | the graphs it owns |
+
+An **admin** is a superuser, a role that holds the storage owner's
+privileges, or a role that holds `pg_read_all_data`. A role **owns** a
+graph when it holds the privileges of the graph's recorded owner: the
+test `pgrdf.graph_owner_enforce` uses for the destructive acts, so
+there is one notion of owning a graph for both. The listing rule does
+not depend on that setting. It is always on.
+
+```sql
+SET ROLE alice;
+SELECT iri, owner FROM pgrdf.graph_inventory();
+--              iri              | owner
+-- ------------------------------+-------
+--  http://example.org/catalogue | alice
+
+SET ROLE bob;
+SELECT iri, owner FROM pgrdf.graph_inventory();
+-- (0 rows)
+
+SELECT * FROM pgrdf.graph_inventory('http://example.org/catalogue');
+-- ERROR:  42501: pgrdf: graph_inventory: that graph is not listed to this role
+-- HINT:  pgrdf.graph_inventory() lists the graphs this role owns; the graph's owner or the
+--        storage owner can hand it over with pgrdf.set_graph_owner(graph_id, role).
+```
+
+- "Holds" means the privileges are in effect, as above. A role granted
+  `pg_read_all_data`, or an owner's role, `WITH INHERIT FALSE` is listed
+  nothing more until it switches with `SET ROLE`.
+- The listing follows `current_user`: after `SET ROLE`, the role acted
+  as; inside a `SECURITY DEFINER` function, that function's owner.
+- A graph with no recorded owner is listed to admins only. That is
+  every graph created before 0.6.41, and graph `0`.
+  [`set_graph_owner`](#transferring-a-graph) gives such a graph an
+  owner.
+- Being listed needs `USAGE` on the schema and `EXECUTE` on the
+  function, and no privilege on the pgRDF tables.
+- A role that should be listed everything has to be an admin.
+  `GRANT pg_read_all_data TO app` is the grant that adds no right to
+  write; it lets the role read every table on the server. It lists
+  every graph and makes none of them the role's own:
+  [`recount_graph`](#stored-counts) still refuses another role's graph.
+- The owner is recorded by role name. A role that is dropped and
+  created again under the same name owns, and is listed, the graphs of
+  the old one. A renamed role no longer owns its graphs until
+  `set_graph_owner` says so.
+
+**This is a listing rule, not secrecy.** It decides what these two
+functions show and nothing about what a role can read. A role that
+holds `SELECT` on the pgRDF tables can query any graph, count it with
+`count_quads()` or a SPARQL query, and look it up with
+`graph_id(iri)`, listed or not. The act record names every graph and
+is readable by every role with `USAGE` on the schema. Tenants that must
+not see each other's graphs belong in separate databases: the database
+is the boundary.
 
 ### Transferring a graph
 
@@ -352,7 +613,10 @@ created, loaded, cleared, locked, validated. Never one per triple.
 pgrdf.graph_acts(graph_id bigint DEFAULT NULL, since timestamptz DEFAULT NULL)
 ```
 
-Both arguments are optional filters; rows come oldest first.
+Both arguments are optional filters; rows come oldest first. To keep up
+with the record as it grows, read it through
+[`graph_act_feed()`](#following-the-act-record), not by polling with
+`since`.
 
 For the `catalogue` graph from the previous section, after `alice`
 loaded it, locked it and unlocked it, and a superuser handed it to
@@ -381,7 +645,9 @@ What you can rely on:
   table still cannot insert, change or delete a row: a direct write is
   refused with `42501`. Only a role holding the storage owner's
   privileges, or a superuser, can write it directly.
-- **Anyone with `USAGE` on the `pgrdf` schema can read it.**
+- **Anyone with `USAGE` on the `pgrdf` schema can read it.** Unlike
+  the inventory, it is not narrowed by role: every reader sees the acts
+  of every graph.
 - **An act made of other acts is one row.** A `move_graph` is recorded
   as `move`, not as a copy and a drop. The exception is `create`: a
   graph created on the way (by a load into a new graph, say) always
@@ -430,6 +696,7 @@ share it) and `detail`.
 | `validate` | `validate` answers, on the data graph | `conforms`, `results` (how many), `mode`, `shapes_graph_id`, `shapes_graph_iri`, `shapes_digest`, `materialization` (the data graph's state when it was read). See [validation](06-validation-recipes.md#the-verdict-is-recorded). |
 | `dedup` | `dedup_graph`, or a staged load that removed repeats | `removed`, and `asserted_removed` or `during` |
 | `set_owner` | `set_graph_owner` | `from`, `to` |
+| `recount` | `recount_graph`, one row per graph counted (since 0.6.42) | `asserted`, `inferred` (the count found), `was_asserted`, `was_inferred`, `was_verified` (the count that was stored) |
 | `ingest` | the internal JSON ingest functions | `rows`, `stored` |
 
 ### Declared identity
@@ -498,6 +765,90 @@ SELECT graph_iri, act, workspace, agent, thread, on_behalf_of, harness
 --  http://example.org/pool-2 | create |           |                |        |                   |
 ```
 
+### Following the act record
+
+A client that shows acts as they happen, or drops a cache when a graph
+changes, reads the record again and again and must not miss a row.
+`graph_acts(NULL, since)` cannot promise that. It filters on `at`, the
+moment an act started inside its transaction, and a transaction can
+commit long after that moment. A load that runs for ten minutes is
+recorded with the time it began; a client that has moved its `since`
+past that time in the meantime never sees the load. Polling on `act_id`
+has the same gap, because an id is taken when the row is written, not
+when its transaction commits.
+
+`pgrdf.graph_act_feed()` (since 0.6.42) reads the same record ordered
+by transaction, and returns a cursor with it:
+
+```text
+pgrdf.graph_act_feed(after xid8 DEFAULT NULL, only_graph bigint DEFAULT NULL,
+                     page text DEFAULT NULL, max_acts integer DEFAULT 1000)
+```
+
+Each row has the columns of `graph_acts()`, with two in front:
+
+| Column | Meaning |
+|---|---|
+| `complete_below` | The cursor, a transaction id. Every act of every transaction below it has been delivered. The same on every row of a read. |
+| `next_page` | `NULL`, or a token when more acts are waiting than `max_acts` allows in one call. |
+
+The rule for a client:
+
+1. Call with `after` set to the `complete_below` you kept from the
+   read before. The first time, leave it out.
+2. Show every act you get at once, except those whose `act_id` you have
+   shown already.
+3. While `next_page` is not `NULL`, call again with `page` set to it
+   and the other arguments unchanged.
+4. Keep `complete_below` for the next read.
+
+```sql
+-- the first read
+SELECT complete_below, next_page, act_id, graph_iri, act, xact
+  FROM pgrdf.graph_act_feed();
+
+-- every later read: $1 is the complete_below you kept
+SELECT complete_below, next_page, act_id, graph_iri, act, xact
+  FROM pgrdf.graph_act_feed(after => $1::xid8);
+
+-- a further page of the same read: $2 is the next_page you were given
+SELECT complete_below, next_page, act_id, graph_iri, act, xact
+  FROM pgrdf.graph_act_feed(after => $1::xid8, page => $2);
+```
+
+What you can rely on, and what to expect:
+
+- **An act you are shown is committed and stays.** Nothing in the feed
+  is provisional. What is still open is the range from `complete_below`
+  upward, where a transaction that has not finished may yet add an act.
+  That is why the next read starts at the cursor and returns the acts
+  at or above it once more. Drop those by `act_id`. Acts below the
+  cursor never come again, so the ids at or above it are all you need
+  to remember.
+- **A read always returns a row.** When there is no act to deliver, one
+  row comes back whose `act_id` is `NULL`. It carries the cursor and is
+  not an act.
+- **One read, one cursor.** `complete_below` is the same on every page.
+  Follow `next_page` to `NULL` before you keep it, and pass the token
+  back as you received it.
+- **Your own open transaction is left out.** Acts it has recorded can
+  still roll back, so the feed shows them only after it commits.
+- **The cursor waits for the oldest transaction on the server that
+  holds a transaction id and has not ended**, in any database: a long
+  load, or a session left idle in a transaction. Acts keep arriving
+  meanwhile; each read repeats more of them until that transaction
+  ends.
+- **`only_graph` narrows the feed to one graph id.** The role does not
+  narrow it: like `graph_acts()`, it shows the acts of every graph.
+- **`max_acts` is the page size**, 1000 unless you say otherwise.
+- **`complete_below` and `xact` are `xid8` values**, PostgreSQL's
+  64-bit transaction id. Keep the cursor as text and pass it back with
+  a cast, as above.
+- **A cursor belongs to the server it was read from.** Acts restored
+  from another server are delivered to a reader that starts from the
+  beginning; a cursor from before the restore is not valid on the new
+  server, so start again with `after` left out.
+
 ### Being told when an act commits
 
 With `pgrdf.notify_acts` on, each recorded act is followed by a
@@ -517,6 +868,11 @@ The setting is off by default and only a superuser can change it:
 PostgreSQL serialises the commits of transactions that notify, across
 every database of the server. Turn it on per database or per role with
 `ALTER DATABASE … SET` / `ALTER ROLE … SET` where a listener needs it.
+
+A notification is a wake-up, not a cursor. A listener that was
+disconnected gets nothing for the time it was away. Let the
+notification say when to read, and
+[`graph_act_feed()`](#following-the-act-record) what happened.
 
 ## Who is working on a graph right now
 
@@ -644,22 +1000,35 @@ set. If you kept the digest of that graph from before, read
 
 `pgrdf.graph_integrity(graph_id)` checks that every triple is
 well-formed: no literal subjects, no blank-node or literal predicates,
-no references to missing terms.
+no references to missing terms. It also checks the graph's lock and,
+since 0.6.42, its stored count.
 
 ```sql
 SELECT pgrdf.graph_integrity(pgrdf.graph_id('http://example.org/people'));
 -- {"clean": true, "graph_id": 1, "illegal_terms": 0, "dangling_refs": 0,
 --  "counts": {"quads": 22, "subject_literal": 0, "predicate_bnode": 0, ...},
+--  "stored_count": {"asserted": 14, "inferred": 8, "verified": true,
+--                   "scanned_asserted": 14, "scanned_inferred": 8, "consistent": true},
 --  "lock_custody": {"locked": false, "write_triggers": 0, "consistent": true}}
 ```
 
-`lock_custody` checks that a locked graph carries its write triggers
-and an open one carries none; a mismatch (someone removed a trigger by
-hand) makes the graph not clean.
+`stored_count` sets the [count pgRDF keeps](#stored-counts) beside a
+scan made for this call. `consistent` is false only when a count that
+reads verified differs from the scan. That state should never exist,
+and it makes the graph not clean. An unverified count reads
+`"verified": false` and is still consistent: it claims nothing.
+`pgrdf.recount_graph(graph_id)` cures both.
 
-A graph that is not clean should be reloaded from source. Validation
-results on such a graph can't be trusted. An unknown graph id is
-refused with `42704`.
+`lock_custody` checks that a locked graph carries its two lock triggers
+and an open one carries neither; a mismatch (someone removed a trigger
+by hand) makes the graph not clean. Since 0.6.42 every graph's
+partition also carries the two triggers that watch for plain SQL
+writes (`pgrdf_count_bypass`, `pgrdf_count_bypass_truncate`). They
+refuse nothing, and `write_triggers` does not count them.
+
+A graph with illegal terms or dangling references should be reloaded
+from source. Validation results on such a graph can't be trusted. An
+unknown graph id is refused with `42704`.
 
 ## Looking up a term
 

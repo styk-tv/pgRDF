@@ -143,24 +143,7 @@ fn materialize(graph_id: i64, profile: default!(String, "'owl-rl'")) -> pgrx::Js
     let act = crate::storage::acts::begin(graph_id, "materialize");
 
     // 1. Idempotency: wipe prior inferred rows in this graph.
-    let dropped: i64 = Spi::connect_mut(|client| {
-        let table = client
-            .update(
-                "WITH del AS (DELETE FROM pgrdf._pgrdf_quads
-                               WHERE graph_id = $1 AND is_inferred = TRUE
-                               RETURNING 1)
-                 SELECT count(*)::bigint FROM del",
-                None,
-                &[unsafe {
-                    pgrx::datum::DatumWithOid::new(
-                        graph_id,
-                        pgrx::pg_sys::PgBuiltInOids::INT8OID.into(),
-                    )
-                }],
-            )
-            .expect("materialize: delete-prior failed");
-        table.first().get_one::<i64>().ok().flatten().unwrap_or(0)
-    });
+    let dropped: i64 = crate::storage::quads::delete_graph_rows(graph_id, true);
 
     // 2. Stream base triples out. (`load_ms` covers the SPI stream +
     //    the dedup-set build — both scale with base size.)

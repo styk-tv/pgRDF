@@ -97,9 +97,27 @@ fn graph_integrity(graph_id: i64) -> pgrx::JsonB {
         None => true, // no dedicated partition: engine fence only
     };
 
+    // 0.6.42: the count the engine keeps, against a scan. A verified
+    // count that differs from the scan is the one state that must not
+    // exist; an unverified one says so itself and is cured by a recount.
+    let stored = crate::storage::counts::stored(graph_id);
+    let (scan_asserted, scan_inferred) = crate::storage::counts::scanned(graph_id);
+    let count_consistent = match stored {
+        Some(s) if s.verified => (s.asserted, s.inferred) == (scan_asserted, scan_inferred),
+        _ => true,
+    };
+
     pgrx::JsonB(json!({
         "graph_id": graph_id,
         "counts":   counts,
+        "stored_count": {
+            "asserted": stored.map(|s| s.asserted),
+            "inferred": stored.map(|s| s.inferred),
+            "verified": stored.map(|s| s.verified).unwrap_or(false),
+            "scanned_asserted": scan_asserted,
+            "scanned_inferred": scan_inferred,
+            "consistent": count_consistent,
+        },
         "illegal_terms": illegal,
         "dangling_refs": dangling,
         "lock_custody": {
@@ -111,7 +129,7 @@ fn graph_integrity(graph_id: i64) -> pgrx::JsonB {
         // statement about structure only — it does not claim the data
         // is right, only that every term sits in a position its kind
         // is allowed to occupy and resolves to a dictionary row.
-        "clean": illegal == 0 && dangling == 0 && lock_consistent,
+        "clean": illegal == 0 && dangling == 0 && lock_consistent && count_consistent,
     }))
 }
 

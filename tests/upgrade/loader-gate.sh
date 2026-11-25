@@ -159,4 +159,48 @@ pool=$(q $A -c "SELECT string_agg(concat_ws('/', coalesce(a.workspace, '-'), coa
 [ "$pool" = "first/a1 second/- -/-" ] || fail "declared values leaked between transactions: '$pool'"
 ok "each transaction's act carries its own declared values, never the previous one's"
 
+# F. A file that states one triple twice, through the two routes that write
+#    without the unique index and build it when the load ends: the count is
+#    the set, not the lines.
+#    The repeat sits 60,000 statements after its first statement, so the
+#    two land in different batches and both rows are written before the
+#    index build removes one.
+awk 'BEGIN { for (i = 0; i < 60000; i++) printf "<urn:lg:rep:s%d> <urn:lg:rep:p> <urn:lg:rep:o%d> .\n", i, i;
+             print "<urn:lg:rep:s0> <urn:lg:rep:p> <urn:lg:rep:o0> ." }' > "$WORK/rep.nt"
+#    Both routes take that path only into an empty dictionary, so each gets
+#    a database of its own. (Checked by removing the fix: without it this
+#    step reports 120001 for the 60000 triples.)
+routes=""
+for route in bulk stream; do
+  D=pgrdf_loader_gate_$route
+  "${PSQL[@]}" -d postgres -q -c "DROP DATABASE IF EXISTS $D" >/dev/null 2>&1 || true
+  q postgres -q -c "CREATE DATABASE $D"
+  q $D -q -c "CREATE EXTENSION pgrdf"
+  g=$(q $D -c "SELECT pgrdf.add_graph('urn:lg:$route')")
+  if [ "$route" = bulk ]; then
+    q $D -q -c "SET pgrdf.bulk_defer_index_min = 1" -c "SELECT pgrdf.load_turtle('$WORK/rep.nt', $g, NULL, true)" >/dev/null
+  else
+    q $D -q -c "SELECT pgrdf.load_turtle_streaming('$WORK/rep.nt', $g, 20000)" >/dev/null
+  fi
+  routes="$routes $route=$(q $D -c "SELECT string_agg(coalesce(detail ->> 'route', act), '+' ORDER BY act_id) FROM pgrdf.graph_acts($g) WHERE act <> 'create'")"
+  removed=$(q $D -c "SELECT count(*) FROM pgrdf.duplicate_report()")
+  [ "$removed" = "0" ] || fail "$route: the graph still holds repeats"
+  got=$(q $D -c "SELECT asserted || ' ' || counts_verified || ' of ' || (SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $g) FROM pgrdf.graph_inventory($g)")
+  [ "$got" = "60000 true of 60000" ] || fail "$route: after a load of 60001 statements, 60000 distinct: '$got', expected '60000 true of 60000'"
+  q postgres -q -c "DROP DATABASE $D"
+done
+ok "a bulk load and a streaming load that write a repeated triple before the index is built store 60000 and count 60000 (routes taken:$routes)"
+
+# G. After every route above (staged with a dedup, a declined staged load,
+#    refused loads, loads from two sessions, bulk and streaming), every
+#    graph's stored count is verified and equal to a scan.
+for db in $A $B; do
+  wrong=$(q $db -c "SELECT count(*) FROM pgrdf.graph_inventory() i
+                     WHERE NOT i.counts_verified
+                        OR i.asserted <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND NOT q.is_inferred)
+                        OR i.inferred <> (SELECT count(*) FROM pgrdf._pgrdf_quads q WHERE q.graph_id = i.graph_id AND q.is_inferred)")
+  [ "$wrong" = "0" ] || fail "$db: $wrong graph(s) unverified or miscounted: $(q $db -c "SELECT string_agg(graph_id || ':' || asserted || '+' || inferred || ':' || counts_verified, ' ') FROM pgrdf.graph_inventory()")"
+done
+ok "every graph's stored count is verified and equal to a scan after the staged, declined, refused and two-session loads"
+
 echo "loader gate: passed"
