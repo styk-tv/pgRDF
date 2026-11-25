@@ -23,7 +23,7 @@ The code says what kind of refusal it is, and so who has to act.
 | `22021` | A stored term holds a character pgRDF cannot emit (U+0000) | reload the graph | exporting or digesting a graph that holds a term with U+0000, stored by a version before 0.6.41 |
 | `55000` | Wrong state for this operation | change the state first | unlocking an unlocked graph; `move_graph` into a non-empty graph; an export or digest before `ALTER EXTENSION pgrdf UPDATE` |
 | `55P03` | The graph is locked | unlock it, or leave it alone | any write to a graph under `lock_graph` |
-| `42501` | Missing privilege, or not the graph's owner | grant it, or act as the owner | creating a graph without `INSERT` on the pgRDF tables; a file loader without `pg_read_server_files`; `stats()` without `EXECUTE`; `clear_graph` on another role's graph under `pgrdf.graph_owner_enforce`; `graph_inventory(g)` for a graph that is not listed to the calling role, or `recount_graph(g)` for another role's graph (since 0.6.42); a direct write to the act record or to the stored counts' tables, whatever grants the role holds |
+| `42501` | Missing privilege, or not the graph's owner | grant it, or act as the owner | creating a graph without `INSERT` on the pgRDF tables; a file loader without `pg_read_server_files`; `stats()` without `EXECUTE`; `clear_graph` on another role's graph under `pgrdf.graph_owner_enforce`; `graph_inventory(g)` for a graph that is not listed to the calling role, or `recount_graph(g)` for another role's graph, or `recount_terms()` without the storage owner's privileges (since 0.6.42); a direct write to the act record or to the stored counts' tables, whatever grants the role holds |
 | `2BP01` | Dependent objects | pass `cascade`, or remove them | `drop_graph(g, cascade => false)` on a graph with inferred triples |
 | `XX000` | A pgRDF defect | report it | see below |
 
@@ -295,6 +295,7 @@ the first three, no rows is the healthy answer.
 | `pgrdf.graph_acts()` | Who did what to a graph, and when? | [Managing graphs](05-graphs.md#the-act-record) |
 | `pgrdf.graph_integrity(g)` | Is every triple of this graph well-formed, and does its stored count agree with a scan? | [Managing graphs](05-graphs.md#checking-a-graphs-health) |
 | `pgrdf.graph_totals()` | How many graphs and triples am I listed, out of how many graphs, and is any count unverified? | [Managing graphs](05-graphs.md#totals) |
+| `pgrdf.count_terms()` | How many terms does the dictionary hold? | [Managing graphs](05-graphs.md#the-term-count) |
 | `pgrdf.graph_act_feed()` | What has been done since I last read the act record? | [Managing graphs](05-graphs.md#following-the-act-record) |
 
 ### ownership_drift

@@ -193,13 +193,18 @@ counted every triple of every graph. The count is of the set a graph
 holds: a bulk or streaming load of a file that states a triple twice
 counts it once.
 
+A count is kept for every registered graph. A graph id that was never
+registered (rows written with `put_quad` into an id that has no graph)
+has none: its rows live in the default partition, and
+`count_quads(graph_id)` counts them by scan.
+
 One thing slows it: a transaction that holds a transaction id and
 stays open, most often a session left idle in a transaction. The writes
 other sessions commit after it began are added up on every call until
 it ends. The counts are exact throughout. The listing calls themselves
-(`graph_inventory()` in its three forms, `graph_totals()` and
-`count_quads()`) take no transaction id, so a session that only lists
-graphs holds nobody up. Other pgRDF read functions still take one
+(`graph_inventory()` in its three forms, `graph_totals()`,
+`count_quads()` and `count_terms()`) take no transaction id, so a
+session that only lists graphs holds nobody up. Other pgRDF read functions still take one
 (#177). Measured times are in the [changelog](../CHANGELOG.md).
 
 **`change_seq` works as a cache key.** It moves whenever a committed
@@ -218,6 +223,26 @@ when the number differs.
   again after a dump and restore, and for a graph that is dropped and
   created again. Do not compare a value read from a standby with one
   read from its primary.
+- Read inside a transaction that has itself written to the graph, it
+  includes that transaction's own change, which can still roll back.
+  Read the key outside your own write transactions.
+
+**A cache that outlives such events** keys on `counts_scanned_at` as
+well: `(graph_id, counts_scanned_at, change_seq)`, used only while
+`counts_verified` is true.
+
+- `counts_scanned_at` is stamped by every act that sets a count from the
+  whole graph: creating the graph, the upgrade to 0.6.42,
+  `recount_graph`, `clear_graph`, and a load that swaps the graph's
+  storage or builds its index at the end. It is never `NULL` while
+  `counts_verified` is true, and within one stamp `change_seq` never
+  goes back.
+- `add_graph(iri)` never hands out a graph id twice. `add_graph(id)`
+  can bind an id that was dropped, and a restore keeps the ids while
+  the counts start over. Both give a new `counts_scanned_at`, so the
+  three values together never name two different contents.
+- A recount moves `counts_scanned_at` and `change_seq` without changing
+  a triple. That costs a cache miss, never a wrong hit.
 
 **A count is verified** when a scan set it and every change since came
 through pgRDF's own functions. That is the normal state. A write made
@@ -279,8 +304,9 @@ SELECT * FROM pgrdf.recount_graph(3);
 
 **After a restore** every graph is unverified, because the stored
 counts are not part of a dump. Run `SELECT * FROM pgrdf.recount_graph();`
-once, as a superuser or as the storage owner. See
-[dump and restore](01-install.md#dump-and-restore).
+once, as a superuser or as the storage owner, and
+`SELECT * FROM pgrdf.recount_terms();` for [the term count](#the-term-count).
+See [dump and restore](01-install.md#dump-and-restore).
 
 **What goes unnoticed.** The check stands on triggers. A privileged
 role, the owner of the pgRDF tables or a superuser, can switch them off
@@ -299,7 +325,8 @@ tables (`pgrdf._pgrdf_graph_counts`, `_pgrdf_graph_count_deltas`,
 that does not hold the table owner's privileges, whatever it was
 granted.
 
-After any of these, run `recount_graph`.
+After any of these, run `recount_graph`, and `recount_terms` when the
+dictionary was written.
 [`graph_integrity()`](#checking-a-graphs-health) sets the stored count
 beside a scan and says whether they agree.
 
@@ -311,9 +338,9 @@ superuser:
 
 ```sql
 SELECT * FROM pgrdf.graph_totals();
---  scope | graphs_listed | graphs_total | asserted | inferred | unverified_graphs | terms
--- -------+---------------+--------------+----------+----------+-------------------+-------
---  all   |             3 |            3 |       24 |        8 |                 0 |
+--  scope | graphs_listed | graphs_total | asserted | inferred | unverified_graphs | terms | terms_verified
+-- -------+---------------+--------------+----------+----------+-------------------+-------+----------------
+--  all   |             3 |            3 |       24 |        8 |                 0 |    43 | t
 ```
 
 | Column | Meaning |
@@ -323,11 +350,49 @@ SELECT * FROM pgrdf.graph_totals();
 | `graphs_total` | How many graphs the database holds, for every caller. |
 | `asserted`, `inferred` | Sums over the listed graphs. |
 | `unverified_graphs` | Listed graphs whose count was not verified, and so were counted by scan for this call. |
-| `terms` | Reserved for the number of dictionary terms. `NULL` in 0.6.42, for every caller. |
+| `terms` | The number of terms in the dictionary, from [the count pgRDF keeps](#the-term-count). `NULL` when that count is not verified, and when `scope` is `own`. |
+| `terms_verified` | `t`: `terms` is the kept count. `f`: it is not verified, and `terms` is `NULL`. `NULL` when `scope` is `own`. |
 
 A total is never the database's unless `scope` says `all`. A client
 that compares listings over time can tell "no longer listed to me" from
 "dropped" by `graphs_total`.
+
+### The term count
+
+The dictionary holds every IRI, blank node and literal once, for the
+whole database. Since 0.6.42 pgRDF keeps the number of terms the way it
+keeps a graph's count: every function that adds a term records it in the
+transaction that adds it. The dictionary belongs to the database and not
+to a graph, so `graph_totals()` gives the number to a caller whose
+`scope` is `all` and to nobody else.
+
+The kept count is verified until a term is added or removed in plain
+SQL on `pgrdf._pgrdf_dictionary`. Then `graph_totals()` returns `terms`
+as `NULL` with `terms_verified` false. It does not count the dictionary
+for you, and this is where it differs from a graph's count: the
+dictionary is as large as the database, and `graph_totals()` is a call
+a client makes every time it lists graphs. Two calls do the rest:
+
+```sql
+SELECT pgrdf.count_terms();            -- the exact number, now
+SELECT * FROM pgrdf.recount_terms();   -- count again and store it
+--  terms | was_terms | was_verified
+```
+
+- `pgrdf.count_terms()` returns the kept count when it is verified, in
+  milliseconds, and counts the dictionary otherwise. It needs `SELECT`
+  on `pgrdf._pgrdf_dictionary`, takes no transaction id, and is to the
+  dictionary what `count_quads` is to a graph.
+- `pgrdf.recount_terms()` counts the dictionary, stores the number and
+  marks it verified. It returns the number found beside the one that
+  was stored. It is allowed to a role that holds the storage owner's
+  privileges and refused with `42501` to every other role, including
+  one that sees every graph through `pg_read_all_data`. It changes no
+  term and leaves no row in the act record, which is kept per graph.
+- After a restore the term count is unverified: the dictionary is
+  filled after the extension is created. Run `recount_terms()` once.
+- [What goes unnoticed](#stored-counts) for a graph's count goes
+  unnoticed here too.
 
 ## Clear, copy, move, drop
 

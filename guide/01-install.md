@@ -388,11 +388,13 @@ not held up. Measured times are in the [changelog](../CHANGELOG.md).
   create it again after. A `GRANT` or `REVOKE` you made on the function
   itself does not carry over.
 - **Every graph partition gains two triggers**, `pgrdf_count_bypass`
-  and `pgrdf_count_bypass_truncate`, and so does the quad table. They
-  fire once per statement and refuse nothing. They are how a write in
-  plain SQL turns a count
+  and `pgrdf_count_bypass_truncate`, and so do the quad table and the
+  dictionary. They fire once per statement and refuse nothing. They are
+  how a write in plain SQL turns a count
   [unverified](05-graphs.md#stored-counts).
-- **Every graph starts verified.** The update's pass is the scan.
+- **Every graph starts verified, and so does
+  [the term count](05-graphs.md#the-term-count).** The update's passes
+  are the scans: one over the quad table, one over the dictionary.
 - **The count tables are written by pgRDF only.** A role granted
   `ALL TABLES IN SCHEMA pgrdf` holds privileges on them and is refused
   all the same (`42501`). Nothing needs granting, and nothing needs
@@ -400,8 +402,9 @@ not held up. Measured times are in the [changelog](../CHANGELOG.md).
 - **A restore from a dump needs one call afterwards**: see
   [dump and restore](#dump-and-restore). `pg_upgrade` needs nothing.
 - **A role that switches triggers off, or changes partitions by hand,
-  steps outside the count's detection.** `recount_graph` is the cure:
-  see [stored counts](05-graphs.md#stored-counts).
+  steps outside the count's detection.** `recount_graph` is the cure,
+  and `recount_terms` for the dictionary: see
+  [stored counts](05-graphs.md#stored-counts).
 
 ### Upgrading to 0.6.41
 
@@ -462,11 +465,15 @@ contains `CREATE EXTENSION pgrdf`, not the library.
 The [stored counts](05-graphs.md#stored-counts) of 0.6.42 are not part
 of a dump. After a restore every graph's count is unverified: the
 inventory still returns exact numbers, by counting each graph on every
-call, at the speed it had before 0.6.42. Run this once, as a superuser
-or as the storage owner, to store the counts again:
+call, at the speed it had before 0.6.42. The
+[term count](05-graphs.md#the-term-count) is unverified too, and
+`graph_totals()` returns no number of terms until it is counted again.
+Run this once, as a superuser or as the storage owner, to store the
+counts again:
 
 ```sql
 SELECT * FROM pgrdf.recount_graph();
+SELECT * FROM pgrdf.recount_terms();
 ```
 
 One thing is not clean yet (#166): the restore prints two errors per
@@ -499,6 +506,7 @@ and check that the errors are only these.
 | `export_graph` or a digest refuses with `55000` after new files were installed | The database has not been updated. Run `ALTER EXTENSION pgrdf UPDATE`. |
 | `graph_inventory()` lists fewer graphs than before, or none | Since 0.6.42 a role that is not an admin is listed the graphs it owns. See [which graphs are listed](05-graphs.md#which-graphs-are-listed). |
 | `graph_inventory()` is slow again and `counts_verified` reads `f` | The counts are unverified, as after a restore or a write in plain SQL. Run `SELECT * FROM pgrdf.recount_graph();` as a superuser or as the storage owner. See [stored counts](05-graphs.md#stored-counts). |
+| `graph_totals()` returns `terms` as `NULL` and `terms_verified` as `f` | The term count is unverified, as after a restore or a term written in plain SQL. Run `SELECT * FROM pgrdf.recount_terms();` as a superuser or as the storage owner; `pgrdf.count_terms()` gives the number meanwhile. See [the term count](05-graphs.md#the-term-count). |
 | Server won't start: `could not access file "pgrdf"` | The library isn't where PostgreSQL looks. Check the copy step, or `dynamic_library_path` (route D). |
 | `could not load library … GLIBC_2.39 not found` | The system's glibc is too old. Use Debian 13, Ubuntu 24.04+, or the `postgres:18` image. |
 | `CREATE EXTENSION` can't find `pgrdf.control` | The `share/extension` files weren't copied, or were copied for a different PostgreSQL installation than the running one. |
