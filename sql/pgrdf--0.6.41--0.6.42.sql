@@ -68,6 +68,9 @@ CREATE TABLE _pgrdf_graph_count_bypass (
 );
 CREATE INDEX _pgrdf_graph_count_bypass_idx
     ON _pgrdf_graph_count_bypass (graph_id, xact);
+-- The sequence belongs to its column, so it follows the table when a
+-- consumer hands the storage tables to another role.
+ALTER SEQUENCE _pgrdf_graph_count_bypass_seq OWNED BY _pgrdf_graph_count_bypass.id;
 
 REVOKE ALL ON _pgrdf_graph_counts, _pgrdf_graph_count_deltas,
               _pgrdf_graph_count_bypass FROM PUBLIC;
@@ -78,6 +81,41 @@ GRANT INSERT ON _pgrdf_graph_count_deltas TO PUBLIC;
 
 CREATE TRIGGER pgrdf_count_delta_guard BEFORE INSERT ON _pgrdf_graph_count_deltas
     FOR EACH ROW EXECUTE FUNCTION _count_delta_guard();
+
+-- Everything else on the count tables is the engine's, which writes them
+-- as the storage owner. A role that was granted the tables wholesale
+-- (GRANT ... ON ALL TABLES IN SCHEMA pgrdf) could otherwise set a count,
+-- or delete the mark that says a count is unverified.
+CREATE FUNCTION _refuse_count_write() RETURNS trigger
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF pg_catalog.pg_has_role(
+       current_user,
+       (SELECT relowner FROM pg_catalog.pg_class WHERE oid = TG_RELID),
+       'USAGE') THEN
+    IF TG_LEVEL = 'STATEMENT' THEN RETURN NULL; END IF;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION USING
+    ERRCODE = '42501',
+    MESSAGE = pg_catalog.format(
+      'pgrdf: graph counts are written by the engine: direct %s refused', TG_OP),
+    HINT = 'Read them with pgrdf.graph_inventory(); repair one with pgrdf.recount_graph(graph_id).';
+END
+$fn$;
+CREATE TRIGGER pgrdf_counts_row BEFORE INSERT OR UPDATE OR DELETE ON _pgrdf_graph_counts
+    FOR EACH ROW EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_truncate BEFORE TRUNCATE ON _pgrdf_graph_counts
+    FOR EACH STATEMENT EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_row BEFORE UPDATE OR DELETE ON _pgrdf_graph_count_deltas
+    FOR EACH ROW EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_truncate BEFORE TRUNCATE ON _pgrdf_graph_count_deltas
+    FOR EACH STATEMENT EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_row BEFORE INSERT OR UPDATE OR DELETE ON _pgrdf_graph_count_bypass
+    FOR EACH ROW EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_truncate BEFORE TRUNCATE ON _pgrdf_graph_count_bypass
+    FOR EACH STATEMENT EXECUTE FUNCTION _refuse_count_write();
 
 CREATE TRIGGER pgrdf_count_bypass
     BEFORE INSERT OR UPDATE OR DELETE ON _pgrdf_quads
@@ -91,9 +129,9 @@ CREATE TRIGGER pgrdf_count_bypass
 CREATE TRIGGER pgrdf_count_bypass_truncate
     BEFORE TRUNCATE ON _pgrdf_quads_default
     FOR EACH STATEMENT EXECUTE FUNCTION _count_bypass('0');
-
 -- The count tables belong to the storage owner, like every storage table:
--- the engine reads and writes them as that role.
+-- the engine reads and writes them as that role. The bypass log's sequence
+-- is owned by its column and moves with its table.
 DO $pgrdf_counts_owner$
 DECLARE
   storage_owner name := (SELECT pg_catalog.pg_get_userbyid(relowner) FROM pg_catalog.pg_class
@@ -102,7 +140,6 @@ BEGIN
   EXECUTE pg_catalog.format('ALTER TABLE pgrdf._pgrdf_graph_counts OWNER TO %I', storage_owner);
   EXECUTE pg_catalog.format('ALTER TABLE pgrdf._pgrdf_graph_count_deltas OWNER TO %I', storage_owner);
   EXECUTE pg_catalog.format('ALTER TABLE pgrdf._pgrdf_graph_count_bypass OWNER TO %I', storage_owner);
-  EXECUTE pg_catalog.format('ALTER SEQUENCE pgrdf._pgrdf_graph_count_bypass_seq OWNER TO %I', storage_owner);
 END
 $pgrdf_counts_owner$;
 
@@ -180,7 +217,8 @@ AS $fn$
            CASE WHEN graph_act_feed.page IS NOT NULL
                 THEN split_part(graph_act_feed.page, ':', 2)::xid8 END AS px,
            CASE WHEN graph_act_feed.page IS NOT NULL
-                THEN split_part(graph_act_feed.page, ':', 3)::bigint END AS pa
+                THEN split_part(graph_act_feed.page, ':', 3)::bigint END AS pa,
+           pg_snapshot_xmax(pg_current_snapshot()) AS xmax
   ), picked AS (
     SELECT a.*
       FROM pgrdf._pgrdf_graph_acts a, tok
@@ -189,6 +227,11 @@ AS $fn$
        -- The caller's own open transaction: the only visible acts that
        -- can still roll back.
        AND a.xact IS DISTINCT FROM pg_current_xact_id_if_assigned()
+       -- A visible act of this server has a transaction id below the
+       -- snapshot's xmax. One at or above it came with a restore from
+       -- another server; it is history, delivered to a reader that starts
+       -- from the beginning and to no cursor.
+       AND (graph_act_feed.after IS NULL OR a.xact < tok.xmax)
        AND (tok.px IS NULL OR (a.xact, a.act_id) > (tok.px, tok.pa))
      ORDER BY a.xact, a.act_id
      LIMIT greatest(graph_act_feed.max_acts, 1) + 1
@@ -207,7 +250,6 @@ AS $fn$
     FROM tok CROSS JOIN tail LEFT JOIN shown p ON true
    ORDER BY p.xact, p.act_id
 $fn$;
-
 -- #171, #175: graph_inventory() reads the stored counts, lists by role,
 -- and gains four columns and two one-graph forms. A changed result type
 -- needs the function dropped first.

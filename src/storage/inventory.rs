@@ -60,13 +60,17 @@ enum Which {
 /// WITH INHERIT FALSE does not hold the privileges until it SET ROLEs.
 /// `pg_read_all_data` does not bypass row-level security; pgRDF uses none.
 pub(crate) fn caller_sees_all_graphs() -> bool {
-    crate::storage::partition::read_one::<bool>(
-        "SELECT pg_catalog.pg_has_role(current_user, c.relowner, 'USAGE') \
-             OR pg_catalog.pg_has_role(current_user, 'pg_read_all_data', 'USAGE') \
-           FROM pg_catalog.pg_class c WHERE c.oid = 'pgrdf._pgrdf_quads'::regclass",
-        &[],
-    )
-    .unwrap_or(false)
+    // `has_privs_of_role` is the USAGE test (`pg_has_role(..., 'USAGE')`),
+    // asked directly: no query on the listing's hot path.
+    unsafe {
+        let me = pgrx::pg_sys::GetUserId();
+        crate::storage::partition::storage_owner_oid()
+            .is_some_and(|owner| pgrx::pg_sys::has_privs_of_role(me, owner))
+            || pgrx::pg_sys::has_privs_of_role(
+                me,
+                pgrx::pg_sys::Oid::from(pgrx::pg_sys::ROLE_PG_READ_ALL_DATA),
+            )
+    }
 }
 
 /// The graphs the caller owns: the test `require_graph_owner` uses, so
@@ -104,6 +108,15 @@ fn inventory_rows(which: Which) -> Vec<InventoryRow> {
             String::new(),
         )
     };
+    // One statement per form, each with a plain equality where it has
+    // one: a filter of the shape "$3 IS NULL OR graph_id = $3" has no good
+    // generic plan, so the plan cache would plan the statement again on
+    // every call, and for one graph's row planning is most of the cost.
+    let only = match &which {
+        Which::All => "AND ($3::bigint IS NULL) AND ($4::text IS NULL)",
+        Which::Id(_) => "AND g.graph_id = $3 AND ($4::text IS NULL)",
+        Which::Iri(_) => "AND g.iri = $4 AND ($3::bigint IS NULL)",
+    };
     let sql = format!(
         "SELECT g.graph_id, g.iri,
                 COALESCE(g.locked, false), g.lock_reason,
@@ -136,8 +149,7 @@ fn inventory_rows(which: Which) -> Vec<InventoryRow> {
                   ON la.act_id = (j.r ->> 'locked_act')::bigint AND g.locked
            {count_join}
           WHERE {LISTED_TO_CALLER}
-            AND ($3::bigint IS NULL OR g.graph_id = $3)
-            AND ($4::text IS NULL OR g.iri = $4)
+            {only}
           ORDER BY g.graph_id"
     );
     // Reading only, and through read-only SPI all the way down: a call
@@ -145,18 +157,39 @@ fn inventory_rows(which: Which) -> Vec<InventoryRow> {
     let rows: Vec<InventoryRow> = crate::storage::partition::as_storage_owner_reading(|| {
         let mut rows = Vec::new();
         Spi::connect(|client| {
-            let tup = client
-                .select(
-                    &sql,
-                    None,
-                    &[
-                        sees_all.into(),
-                        caller.into(),
-                        by_id.into(),
-                        by_iri.clone().into(),
-                    ],
-                )
-                .unwrap_or_else(|e| panic!("graph_inventory: enumeration failed: {e}"));
+            // Prepared once per backend (read-only: no transaction id) and
+            // reused: for one graph's row, planning this statement costs
+            // more than running it.
+            if !crate::query::plan_cache::contains(&sql) {
+                let prepared = client
+                    .prepare(
+                        sql.as_str(),
+                        &[
+                            PgOid::BuiltIn(PgBuiltInOids::BOOLOID),
+                            PgOid::BuiltIn(PgBuiltInOids::OIDOID),
+                            PgOid::BuiltIn(PgBuiltInOids::INT8OID),
+                            PgOid::BuiltIn(PgBuiltInOids::TEXTOID),
+                        ],
+                    )
+                    .unwrap_or_else(|e| panic!("graph_inventory: prepare failed: {e}"))
+                    .keep();
+                crate::query::plan_cache::insert(sql.clone(), prepared);
+            }
+            let args = [
+                sees_all.into(),
+                caller.into(),
+                by_id.into(),
+                by_iri.clone().into(),
+            ];
+            let tup = crate::query::plan_cache::with_plan(&sql, |plan| {
+                client
+                    .select(
+                        plan.expect("graph_inventory: plan is cached after insert"),
+                        None,
+                        &args,
+                    )
+                    .unwrap_or_else(|e| panic!("graph_inventory: enumeration failed: {e}"))
+            });
             for row in tup {
                 let graph_id = row.get::<i64>(1).unwrap().unwrap_or(0);
                 let verified = row.get::<bool>(20).unwrap().unwrap_or(false);
@@ -356,12 +389,16 @@ fn graph_inventory_by_iri(
     TableIterator::new(inventory_rows(Which::Iri(iri.to_string())).into_iter())
 }
 
-/// The ids of the graphs listed to the caller, in order; with `only`,
-/// that graph alone. Asking for one graph that exists and is not listed
-/// refuses 42501; one that does not exist refuses 42704 under `what`.
+/// The ids of the graphs the caller may act on (it owns them, or it holds
+/// the storage owner's privileges), in order; with `only`, that graph
+/// alone. Asking for one graph that exists and is somebody else's refuses
+/// 42501; one that does not exist refuses 42704 under `what`.
 pub(crate) fn listed_graph_ids(only: Option<i64>, what: &str) -> Vec<i64> {
     let caller = unsafe { pgrx::pg_sys::GetUserId() };
-    let sees_all = caller_sees_all_graphs();
+    // An act, not a look: the storage owner may, and the graph's owner.
+    // A role that only reads everything (pg_read_all_data) may not leave
+    // acts on other roles' graphs.
+    let sees_all = crate::storage::partition::caller_owns_storage();
     crate::storage::partition::as_storage_owner(|| {
         let ids: Vec<i64> = Spi::connect(|client| {
             client
@@ -389,7 +426,7 @@ pub(crate) fn listed_graph_ids(only: Option<i64>, what: &str) -> Vec<i64> {
             if exists {
                 crate::refuse_with_hint(
                     PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
-                    format!("pgrdf: {what}: graph {id} is not listed to this role"),
+                    format!("pgrdf: {what}: graph {id} belongs to another role"),
                     "The graph's owner or the storage owner can run this, or hand the graph \
                      over with pgrdf.set_graph_owner(graph_id, role)."
                         .to_string(),
@@ -408,7 +445,8 @@ pub(crate) fn listed_graph_ids(only: Option<i64>, what: &str) -> Vec<i64> {
 /// count that is not verified (`counts_verified` false in the
 /// inventory), which is what a write made in plain SQL, a restore, or a
 /// privileged role that switched the count triggers off leaves behind.
-/// `recount_graph(NULL)` does it for every graph listed to the caller.
+/// `recount_graph(NULL)` does it for every graph the caller owns, or for
+/// every graph when the caller holds the storage owner's privileges.
 ///
 /// One row per graph: the count found, the count that was stored, and
 /// whether that one was verified. Changes no triple, so it runs on a
@@ -640,6 +678,10 @@ pub(crate) fn drift_rows_for(storage_owner: pgrx::pg_sys::Oid) -> Vec<DriftRow> 
                          AND pg_catalog.has_table_privilege(so.oid, c.oid, 'UPDATE')
                         WHEN c.relname = '_pgrdf_graph_acts' THEN
                              pg_catalog.has_table_privilege(so.oid, c.oid, 'INSERT')
+                        -- 0.6.42: the engine writes the count tables as the
+                        -- storage owner, and their guard admits nobody else.
+                        WHEN c.relname IN ('_pgrdf_graph_counts', '_pgrdf_graph_count_deltas',
+                                           '_pgrdf_graph_count_bypass') THEN false
                         ELSE true
                         END),
                 pg_catalog.format('ALTER %s pgrdf.%I OWNER TO %I',
@@ -1214,6 +1256,25 @@ mod tests {
             "0",
             "nothing listed, nothing recounted"
         );
+        // Reading everything is not acting on everything: the role sees
+        // the graph and may not leave an act on it.
+        Spi::run("CREATE ROLE inv42_auditor NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO inv42_auditor").unwrap();
+        Spi::run("GRANT pg_read_all_data TO inv42_auditor").unwrap();
+        assert_eq!(
+            as_role(
+                "inv42_auditor",
+                &format!("SELECT count(*)::text FROM pgrdf.graph_inventory({g})")
+            ),
+            "1"
+        );
+        assert_eq!(
+            as_role(
+                "inv42_auditor",
+                &format!("SELECT count(*)::text FROM pgrdf.recount_graph({g})")
+            ),
+            "42501"
+        );
     }
 
     /// Totals state the scope they cover and never pass a part for the whole.
@@ -1272,5 +1333,111 @@ mod tests {
                               count(next_page)) FROM pgrdf.graph_act_feed(NULL, {g})"
         ));
         assert_eq!(row.as_deref(), Some("1|0|1|0"));
+    }
+
+    /// The count tables are the engine's. A role granted every table of the
+    /// schema, as the install guide's grant does, can neither set a count
+    /// nor remove the mark that says a count is unverified.
+    #[pg_test]
+    fn a_granted_role_cannot_write_the_count_tables() {
+        as_role_fn();
+        let g = n("SELECT pgrdf.add_graph('urn:inv42:guarded')").unwrap();
+        Spi::run("CREATE ROLE inv42_granted NOLOGIN").unwrap();
+        Spi::run("GRANT USAGE ON SCHEMA pgrdf TO inv42_granted").unwrap();
+        Spi::run(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgrdf TO inv42_granted",
+        )
+        .unwrap();
+        Spi::run(&format!(
+            "INSERT INTO pgrdf._pgrdf_quads_g{g} (subject_id, predicate_id, object_id, graph_id) \
+             VALUES (5, 6, 7, {g})"
+        ))
+        .unwrap();
+        for forged in [
+            format!(
+                "UPDATE pgrdf._pgrdf_graph_counts SET asserted = 1000 WHERE graph_id = {g} RETURNING 'done'"
+            ),
+            format!("DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = {g} RETURNING 'done'"),
+            "DELETE FROM pgrdf._pgrdf_graph_count_bypass RETURNING 'done'".to_string(),
+            format!(
+                "INSERT INTO pgrdf._pgrdf_graph_count_bypass (graph_id) VALUES ({g}) RETURNING 'done'"
+            ),
+            format!(
+                "INSERT INTO pgrdf._pgrdf_graph_count_deltas (graph_id, d_asserted, d_inferred) VALUES ({g}, 9, 0) RETURNING 'done'"
+            ),
+        ] {
+            assert_eq!(as_role("inv42_granted", &forged), "42501", "{forged}");
+        }
+        assert_eq!(
+            t(&format!(
+                "SELECT concat_ws('|', asserted, counts_verified) FROM pgrdf.graph_inventory({g})"
+            ))
+            .as_deref(),
+            Some("1|f"),
+            "the direct write is still on record"
+        );
+        // And the role's own engine writes are counted as anyone's.
+        Spi::run("SELECT pgrdf.recount_graph()").unwrap();
+        assert_ne!(
+            as_role(
+                "inv42_granted",
+                &format!("SELECT pgrdf.put_quad(5, 6, 8, {g})::text")
+            ),
+            "42501"
+        );
+        assert_eq!(
+            as_role(
+                "inv42_granted",
+                &format!(
+                    "DELETE FROM pgrdf._pgrdf_graph_count_deltas WHERE graph_id = {g} RETURNING 'done'"
+                )
+            ),
+            "42501"
+        );
+        assert_eq!(
+            t(&format!(
+                "SELECT concat_ws('|', asserted, counts_verified) FROM pgrdf.graph_inventory({g})"
+            ))
+            .as_deref(),
+            Some("2|t")
+        );
+    }
+
+    /// change_seq never goes back: a recount takes the marks of the direct
+    /// writes it cures with it.
+    #[pg_test]
+    fn change_seq_never_goes_back() {
+        let g = n("SELECT pgrdf.add_graph('urn:inv42:seq')").unwrap();
+        let seq = |g: i64| {
+            n(&format!(
+                "SELECT change_seq FROM pgrdf.graph_inventory({g})"
+            ))
+            .unwrap()
+        };
+        let mut last = seq(g);
+        let mut step = |what: &str, q: String| {
+            Spi::run(&q).unwrap();
+            let now = seq(g);
+            assert!(now > last, "{what}: change_seq went from {last} to {now}");
+            last = now;
+        };
+        step(
+            "an engine write",
+            format!("SELECT pgrdf.put_quad(1, 2, 3, {g})"),
+        );
+        for o in 4..=8 {
+            step(
+                "a direct write",
+                format!(
+                    "INSERT INTO pgrdf._pgrdf_quads_g{g} (subject_id, predicate_id, object_id, graph_id) \
+                     VALUES (1, 2, {o}, {g})"
+                ),
+            );
+        }
+        step(
+            "the recount that cures them",
+            format!("SELECT pgrdf.recount_graph({g})"),
+        );
+        step("a clear", format!("SELECT pgrdf.clear_graph({g})"));
     }
 }

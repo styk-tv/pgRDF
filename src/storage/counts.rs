@@ -77,6 +77,9 @@ CREATE TABLE _pgrdf_graph_count_bypass (
 );
 CREATE INDEX _pgrdf_graph_count_bypass_idx
     ON _pgrdf_graph_count_bypass (graph_id, xact);
+-- The sequence belongs to its column, so it follows the table when a
+-- consumer hands the storage tables to another role.
+ALTER SEQUENCE _pgrdf_graph_count_bypass_seq OWNED BY _pgrdf_graph_count_bypass.id;
 
 REVOKE ALL ON _pgrdf_graph_counts, _pgrdf_graph_count_deltas,
               _pgrdf_graph_count_bypass FROM PUBLIC;
@@ -87,6 +90,41 @@ GRANT INSERT ON _pgrdf_graph_count_deltas TO PUBLIC;
 
 CREATE TRIGGER pgrdf_count_delta_guard BEFORE INSERT ON _pgrdf_graph_count_deltas
     FOR EACH ROW EXECUTE FUNCTION _count_delta_guard();
+
+-- Everything else on the count tables is the engine's, which writes them
+-- as the storage owner. A role that was granted the tables wholesale
+-- (GRANT ... ON ALL TABLES IN SCHEMA pgrdf) could otherwise set a count,
+-- or delete the mark that says a count is unverified.
+CREATE FUNCTION _refuse_count_write() RETURNS trigger
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF pg_catalog.pg_has_role(
+       current_user,
+       (SELECT relowner FROM pg_catalog.pg_class WHERE oid = TG_RELID),
+       'USAGE') THEN
+    IF TG_LEVEL = 'STATEMENT' THEN RETURN NULL; END IF;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION USING
+    ERRCODE = '42501',
+    MESSAGE = pg_catalog.format(
+      'pgrdf: graph counts are written by the engine: direct %s refused', TG_OP),
+    HINT = 'Read them with pgrdf.graph_inventory(); repair one with pgrdf.recount_graph(graph_id).';
+END
+$fn$;
+CREATE TRIGGER pgrdf_counts_row BEFORE INSERT OR UPDATE OR DELETE ON _pgrdf_graph_counts
+    FOR EACH ROW EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_truncate BEFORE TRUNCATE ON _pgrdf_graph_counts
+    FOR EACH STATEMENT EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_row BEFORE UPDATE OR DELETE ON _pgrdf_graph_count_deltas
+    FOR EACH ROW EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_truncate BEFORE TRUNCATE ON _pgrdf_graph_count_deltas
+    FOR EACH STATEMENT EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_row BEFORE INSERT OR UPDATE OR DELETE ON _pgrdf_graph_count_bypass
+    FOR EACH ROW EXECUTE FUNCTION _refuse_count_write();
+CREATE TRIGGER pgrdf_counts_truncate BEFORE TRUNCATE ON _pgrdf_graph_count_bypass
+    FOR EACH STATEMENT EXECUTE FUNCTION _refuse_count_write();
 
 CREATE TRIGGER pgrdf_count_bypass
     BEFORE INSERT OR UPDATE OR DELETE ON _pgrdf_quads
@@ -463,7 +501,15 @@ pub(crate) fn scanned(graph_id: i64) -> (i64, i64) {
 
 /// What a scan leaves on the base row besides the numbers: when, under
 /// which snapshot, in which transaction, and where in that transaction.
-const SCAN_STAMP: &str = "scanned_at = clock_timestamp(), \
+/// `change_seq` takes the retired deltas (`gone`, a CTE of the statement)
+/// and the bypass marks that applied until now with it, so it never goes
+/// back: a reader added both to it a moment ago.
+const SCAN_STAMP: &str = "change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1 \
+       + (SELECT count(*) FROM pgrdf._pgrdf_graph_count_bypass b \
+           WHERE (b.graph_id = c.graph_id OR b.graph_id IS NULL) \
+             AND CASE WHEN b.xact = c.scan_xact THEN b.id > c.scan_mark \
+                      ELSE NOT pg_visible_in_snapshot(b.xact, c.scan_snapshot) END), \
+     scanned_at = clock_timestamp(), \
      scan_snapshot = pg_current_snapshot(), scan_xact = pg_current_xact_id(), \
      scan_mark = nextval('pgrdf._pgrdf_graph_count_bypass_seq'), \
      folded_below = greatest(c.folded_below, pg_snapshot_xmin(pg_current_snapshot()))";
@@ -479,14 +525,26 @@ fn forget_spent_bypasses() {
 }
 
 /// Set the count of `graph_id` from a scan and mark it verified. Returns
-/// the count it found. One statement, so the rows it counts, the deltas
-/// it retires and the snapshot it records are the same view: a direct
-/// writer still in flight is not in that snapshot, and its mark applies
-/// again the moment it commits.
+/// the count it found.
+///
+/// Lock first, scan second. A fold holds the base row from its statement
+/// to the end of its transaction. If this scanned first and waited for
+/// the row afterwards, a fold that committed in between could have taken
+/// in the delta of a write this scan did not see, and the scan's older
+/// number would then be stored over it: rows in the graph and in no
+/// count. With the row held before the scan's snapshot is taken, no fold
+/// can commit in between (folds skip a locked row). In REPEATABLE READ
+/// the lock raises a serialization failure when the row has moved on,
+/// which is the honest answer there.
+///
+/// The scan sees every row this transaction wrote, so what the open
+/// tally has gathered for the graph so far is in the number already and
+/// is dropped; what the call gains after this point still counts.
 pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
     if !present() {
         return scanned(graph_id);
     }
+    TALLY.with(|t| t.borrow_mut().1.remove(&graph_id));
     as_storage_owner(|| {
         Spi::run_with_args(
             "INSERT INTO pgrdf._pgrdf_graph_counts (graph_id) VALUES ($1) \
@@ -494,6 +552,11 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
             &[graph_id.into()],
         )
         .expect("opening the graph count failed");
+        Spi::run_with_args(
+            "SELECT 1 FROM pgrdf._pgrdf_graph_counts WHERE graph_id = $1 FOR UPDATE",
+            &[graph_id.into()],
+        )
+        .expect("locking the graph count failed");
         let found = Spi::connect_mut(|c| {
             let t = c
                 .update(
@@ -505,7 +568,6 @@ pub(crate) fn set_by_scan(graph_id: i64) -> (i64, i64) {
                                       FROM pgrdf._pgrdf_quads WHERE graph_id = $1) \
                          UPDATE pgrdf._pgrdf_graph_counts c \
                             SET asserted = n.a, inferred = n.i, \
-                                change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1, \
                                 {SCAN_STAMP} \
                            FROM n WHERE c.graph_id = $1 \
                          RETURNING c.asserted, c.inferred"
@@ -569,6 +631,11 @@ pub(crate) fn dropped(graph_id: i64) {
 /// Every row of a graph was replaced in one act (a TRUNCATE, or a
 /// partition swapped for a new one holding `asserted` rows): the count is
 /// known without a scan, and whatever deltas describe the old rows go.
+///
+/// No lock-first step as in [`set_by_scan`]: the caller holds ACCESS
+/// EXCLUSIVE on the graph's partition, so no writer of this graph is in
+/// flight, and the value stored is absolute, not a scan a fold could have
+/// overtaken.
 pub(crate) fn replaced(graph_id: i64, asserted: i64, inferred: i64) {
     if !present() {
         return;
@@ -587,7 +654,6 @@ pub(crate) fn replaced(graph_id: i64, asserted: i64, inferred: i64) {
                                 WHERE graph_id = $1 RETURNING 1) \
                  UPDATE pgrdf._pgrdf_graph_counts c \
                     SET asserted = $2, inferred = $3, \
-                        change_seq = c.change_seq + (SELECT count(*) FROM gone) + 1, \
                         {SCAN_STAMP} \
                   WHERE c.graph_id = $1"
             ),

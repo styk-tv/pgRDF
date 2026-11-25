@@ -42,8 +42,8 @@ held a snapshot open.
   that is not an admin, it will see fewer graphs after this upgrade**; compare
   `graphs_listed` with `graphs_total` in `graph_totals()` to tell "not listed
   to me" from "dropped". This is a listing rule, not secrecy: a role that may
-  read triples can still count any graph with a query, `graph_id(iri)` answers
-  for anyone, and the act record is readable by every role. The database
+  read triples can still count any graph with a query and resolve any IRI
+  with `graph_id(iri)`, and the act record is readable by every role. The database
   remains the boundary between tenants.
 - **Every graph partition carries two statement-level triggers**
   (`pgrdf_count_bypass`, `pgrdf_count_bypass_truncate`), and so does the quad
@@ -65,8 +65,10 @@ held a snapshot open.
   last set the count.
 - **`recount_graph(graph_id)`** counts a graph again, stores what it finds and
   returns it beside what was stored. `recount_graph()` does every graph listed
-  to the caller. It changes no triple, runs on a locked graph, and is recorded
-  as act `recount`.
+  the caller owns, or every graph for a role holding the storage owner's
+  privileges; it is allowed to the graph's owner and to the storage owner. It
+  changes no triple, runs on a locked graph, and is recorded as act
+  `recount`.
 - **`graph_inventory(graph_id)` and `graph_inventory(iri)`**: one graph's row.
   Three answers that cannot be confused: the row (an empty graph shows 0),
   `42501` for a graph that exists and is not listed to the caller, and no row
@@ -97,6 +99,16 @@ held a snapshot open.
   quad table (about the cost of one 0.6.41 `graph_inventory()` call), and
   holds writers out from that pass to its commit. Readers are not blocked.
 - It warns with the number of graphs that have no recorded owner.
+- It drops and re-creates `graph_inventory()`, because the result type
+  changed. A view of yours over that function stops the upgrade: drop it
+  before and create it again after. A GRANT or REVOKE you made on the function
+  does not carry over.
+- The stored-count tables are written by the engine only. A role granted
+  `ALL TABLES IN SCHEMA pgrdf` holds privileges on them and is refused all the
+  same (`42501`); nothing needs revoking.
+- A graph's owner is recorded by role name. A role dropped and created again
+  under the same name owns, and is listed, the graphs of the old one; a
+  renamed role no longer owns its graphs until `set_graph_owner` says so.
 - A database restored from a dump has no stored counts: every graph is
   unverified and counted by scan until `SELECT * FROM pgrdf.recount_graph();`
   is run once. `pg_upgrade` needs nothing.

@@ -358,6 +358,11 @@ pub(crate) fn as_storage_owner<R>(f: impl FnOnce() -> R) -> R {
 /// lists graphs into a transaction other sessions must wait out before
 /// they can call anything below it finished. `f` must read through
 /// `Spi::connect` + `select` to keep that true.
+///
+/// Read-only SPI runs under the calling statement's snapshot. That is
+/// right for a function that only reads; a function that writes and then
+/// lists in the same call would not see its own writes this way and must
+/// use [`as_storage_owner`].
 pub(crate) fn as_storage_owner_reading<R>(f: impl FnOnce() -> R) -> R {
     as_storage_owner_impl(true, f)
 }
@@ -376,11 +381,35 @@ pub(crate) fn read_one<T: pgrx::datum::FromDatum + pgrx::datum::IntoDatum>(
     })
 }
 
+/// The owner of the quad table, read from the system cache: no query.
+pub(crate) fn storage_owner_oid() -> Option<pgrx::pg_sys::Oid> {
+    unsafe {
+        let ns = pgrx::pg_sys::get_namespace_oid(c"pgrdf".as_ptr(), true);
+        if ns == pgrx::pg_sys::InvalidOid {
+            return None;
+        }
+        let rel = pgrx::pg_sys::get_relname_relid(c"_pgrdf_quads".as_ptr(), ns);
+        if rel == pgrx::pg_sys::InvalidOid {
+            return None;
+        }
+        let tup = pgrx::pg_sys::SearchSysCache1(
+            pgrx::pg_sys::SysCacheIdentifier::RELOID as i32,
+            pgrx::pg_sys::Datum::from(rel),
+        );
+        if tup.is_null() {
+            return None;
+        }
+        let owner = (*(pgrx::pg_sys::GETSTRUCT(tup) as pgrx::pg_sys::Form_pg_class)).relowner;
+        pgrx::pg_sys::ReleaseSysCache(tup);
+        Some(owner)
+    }
+}
+
 fn as_storage_owner_impl<R>(reading: bool, f: impl FnOnce() -> R) -> R {
     const OWNER: &str = "SELECT relowner FROM pg_catalog.pg_class \
          WHERE oid = 'pgrdf._pgrdf_quads'::regclass";
     let owner: pgrx::pg_sys::Oid = if reading {
-        read_one(OWNER, &[])
+        storage_owner_oid()
     } else {
         Spi::get_one(OWNER).expect("storage owner lookup failed")
     }
@@ -401,11 +430,20 @@ fn as_storage_owner_impl<R>(reading: bool, f: impl FnOnce() -> R) -> R {
     }
     pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
         if reading {
-            // The same setting, local to the transaction, through a SELECT.
-            read_one::<String>(
-                "SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)",
-                &[],
-            );
+            // The same setting, local to the transaction, set directly:
+            // no statement, so no transaction id and no round trip.
+            unsafe {
+                pgrx::pg_sys::set_config_option(
+                    c"search_path".as_ptr(),
+                    c"pg_catalog, pg_temp".as_ptr(),
+                    pgrx::pg_sys::GucContext::PGC_USERSET,
+                    pgrx::pg_sys::GucSource::PGC_S_SESSION,
+                    pgrx::pg_sys::GucAction::GUC_ACTION_LOCAL,
+                    true,
+                    0,
+                    false,
+                );
+            }
         } else {
             Spi::run("SET LOCAL search_path = pg_catalog, pg_temp")
                 .expect("owner switch: restricting search_path failed");

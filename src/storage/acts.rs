@@ -355,7 +355,8 @@ AS $fn$
            CASE WHEN graph_act_feed.page IS NOT NULL
                 THEN split_part(graph_act_feed.page, ':', 2)::xid8 END AS px,
            CASE WHEN graph_act_feed.page IS NOT NULL
-                THEN split_part(graph_act_feed.page, ':', 3)::bigint END AS pa
+                THEN split_part(graph_act_feed.page, ':', 3)::bigint END AS pa,
+           pg_snapshot_xmax(pg_current_snapshot()) AS xmax
   ), picked AS (
     SELECT a.*
       FROM pgrdf._pgrdf_graph_acts a, tok
@@ -364,6 +365,11 @@ AS $fn$
        -- The caller's own open transaction: the only visible acts that
        -- can still roll back.
        AND a.xact IS DISTINCT FROM pg_current_xact_id_if_assigned()
+       -- A visible act of this server has a transaction id below the
+       -- snapshot's xmax. One at or above it came with a restore from
+       -- another server; it is history, delivered to a reader that starts
+       -- from the beginning and to no cursor.
+       AND (graph_act_feed.after IS NULL OR a.xact < tok.xmax)
        AND (tok.px IS NULL OR (a.xact, a.act_id) > (tok.px, tok.pa))
      ORDER BY a.xact, a.act_id
      LIMIT greatest(graph_act_feed.max_acts, 1) + 1

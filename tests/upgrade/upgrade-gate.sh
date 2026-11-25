@@ -242,4 +242,31 @@ diff <(echo "$fresh_cfg") <(echo "$up_cfg") || fail "pg_dump registrations diffe
 diff <(echo "$fresh_shape") <(echo "$up_shape") || fail "columns, indexes or triggers differ between a fresh install and the upgrade"
 ok "functions ($(echo "$up_sig" | wc -l | tr -d ' ')), relations ($(echo "$up_rels" | wc -l | tr -d ' ')), columns, indexes and triggers ($(echo "$up_shape" | wc -l | tr -d ' ')), function privileges and pg_dump registrations ($(echo "$up_cfg" | wc -l | tr -d ' ')) match a fresh install"
 
+# 8. The hand-over on the current release, in the fresh database: every
+#    storage table goes to another role, the report's cures are run, and
+#    the app role then creates and fills a graph. The bypass log's sequence
+#    moves with its table; nothing about the counts is left behind.
+q $FRESH -q -c "GRANT USAGE, CREATE ON SCHEMA pgrdf TO $STORE" -c "
+DO \$\$DECLARE r record; BEGIN
+  FOR r IN SELECT relname FROM pg_class
+            WHERE relnamespace = 'pgrdf'::regnamespace AND relkind IN ('r', 'p')
+  LOOP EXECUTE format('ALTER TABLE pgrdf.%I OWNER TO $STORE', r.relname); END LOOP;
+  FOR r IN SELECT cure FROM pgrdf.ownership_drift() WHERE blocking
+  LOOP EXECUTE r.cure; END LOOP;
+END\$\$"
+blocking=$(q $FRESH -c "SELECT count(*) FROM pgrdf.ownership_drift() WHERE blocking")
+[ "$blocking" = "0" ] || fail "after the hand-over and its cures, ownership_drift() still reports: $(q $FRESH -c "SELECT string_agg(relname, ', ') FROM pgrdf.ownership_drift() WHERE blocking")"
+q $FRESH -q -c "GRANT USAGE ON SCHEMA pgrdf TO $APP" \
+  -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pgrdf TO $APP" \
+  -c "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA pgrdf TO $APP"
+fg=$(q $FRESH -c "SET ROLE $APP" -c "SELECT pgrdf.add_graph('urn:ug:handed-over')" | tail -n 1)
+q $FRESH -q -c "SET ROLE $APP" -c "SELECT pgrdf.parse_turtle('<urn:ug:a> <urn:ug:p> <urn:ug:b> .', $fg)" >/dev/null
+q $FRESH -q -c "INSERT INTO pgrdf._pgrdf_quads_g$fg (subject_id, predicate_id, object_id, graph_id) VALUES (5, 6, 7, $fg)"
+state=$(q $FRESH -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($fg)")
+[ "$state" = "2 false" ] || fail "after the hand-over, a direct write reads '$state', expected '2 false'"
+q $FRESH -q -c "SET ROLE $APP" -c "SELECT pgrdf.recount_graph($fg)" >/dev/null
+state=$(q $FRESH -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($fg)")
+[ "$state" = "2 true" ] || fail "after the hand-over and a recount the row reads '$state', expected '2 true'"
+ok "storage handed to $STORE on $CUR with the report's cures: $APP creates, fills and recounts a graph; a direct write is still seen"
+
 echo "upgrade gate: $PREV -> $CUR passed"

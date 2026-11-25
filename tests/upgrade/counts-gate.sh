@@ -37,9 +37,12 @@ q() { "${PSQL[@]}" -d $DB -v ON_ERROR_STOP=1 -At "$@"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok   $*"; }
 held=""
+held2=""
 cleanup() {
   exec 3>&- 2>/dev/null || true
+  exec 4>&- 2>/dev/null || true
   [ -n "$held" ] && kill "$held" 2>/dev/null || true
+  [ -n "$held2" ] && kill "$held2" 2>/dev/null || true
   "${PSQL[@]}" -d postgres -q -c "DROP DATABASE IF EXISTS $DB" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
@@ -63,6 +66,23 @@ release() {
   wait "$held" || fail "the held session failed: $(cat "$WORK/held.out")"
   held=""
   rm -f "$WORK/fifo"
+}
+# A second session that stays connected, on fd 4.
+hold2() {
+  mkfifo "$WORK/fifo2"
+  # Without the first held session's pipe: a copy of its write end here
+  # would keep that session from seeing the end of its input.
+  "${PSQL[@]}" -d $DB -v ON_ERROR_STOP=1 -At < "$WORK/fifo2" > "$WORK/held2.out" 2>&1 3>&- &
+  held2=$!
+  exec 4> "$WORK/fifo2"
+  echo "$1" >&4
+}
+say2() { echo "$1" >&4; }
+release2() {
+  exec 4>&-
+  wait "$held2" || fail "the second held session failed: $(cat "$WORK/held2.out")"
+  held2=""
+  rm -f "$WORK/fifo2"
 }
 # Wait until a statement run in another session answers 't'.
 until_true() {
@@ -131,6 +151,38 @@ state=$(q -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_invento
 [ "$state" = "11 true" ] || fail "after the second recount the row reads '$state', expected '11 true'"
 true_or_fail "after the recount race"
 ok "a direct write that committed after a recount scanned the graph leaves the count unverified and exact (11); the next recount verifies it"
+
+# C2. A recount beside a fold. An engine write is open (B); another session
+#     has folded and holds the graph's base row (C); a recount starts (A),
+#     scans without B's row and waits for C. B commits; C folds B's delta
+#     into the base and commits. The recount must not then store its older
+#     scan over that base: the row would be in the graph and in no count.
+gd=$(q -c "SELECT pgrdf.add_graph('urn:cg:c2')")
+writes "$gd" 1 5
+q -q -c "SELECT pgrdf._fold_counts($gd)" > /dev/null
+hold "BEGIN; SELECT pgrdf.put_quad(901, 1, 1, $gd);"
+until_true "SELECT count(*) = 1 FROM pg_stat_activity WHERE state = 'idle in transaction' AND datname = '$DB'"
+# A fold from a third session brings the base row's bound up to B's
+# transaction, so that C's first fold below finds nothing to move and only
+# holds the row: a session that had changed the row would make the recount
+# wait before it scans, and the order under test would not arise.
+q -q -c "SELECT pgrdf._fold_counts($gd)" > /dev/null
+hold2 "BEGIN; SELECT pgrdf._fold_counts($gd);"
+until_true "SELECT count(*) = 2 FROM pg_stat_activity WHERE state = 'idle in transaction' AND datname = '$DB'"
+# Without the two held sessions' pipes: a copy of their write ends in this
+# subshell would keep them from seeing the end of their input.
+( exec 3>&- 4>&-; q -q -c "SELECT pgrdf.recount_graph($gd)" > "$WORK/recount.out" 2>&1 ) &
+recount_pid=$!
+until_true "SELECT count(*) > 0 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = '$DB'"
+say "COMMIT;"
+release
+say2 "SELECT pgrdf._fold_counts($gd); COMMIT;"
+release2
+wait "$recount_pid" || fail "the recount beside a fold failed: $(cat "$WORK/recount.out")"
+state=$(q -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory($gd)")
+[ "$state" = "6 true" ] || fail "after a recount beside a fold the row reads '$state'; the graph holds $(q -c "SELECT count(*) FROM pgrdf._pgrdf_quads WHERE graph_id = $gd") rows"
+true_or_fail "after a recount beside a fold"
+ok "a recount that waited for a fold which took in a write committed meanwhile counts that write: 6, verified"
 
 # ── D. The act feed ─────────────────────────────────────────────────────
 # A transaction that creates a graph holds the quad table until it ends, so
