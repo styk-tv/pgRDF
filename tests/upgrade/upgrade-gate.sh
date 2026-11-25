@@ -55,6 +55,9 @@ q $UP -q -c "UPDATE pgrdf._pgrdf_graphs SET owner = NULL WHERE iri = 'urn:ug:old
 # in plain SQL. Its rows live in the default partition.
 q $UP -q -c "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri, owner) VALUES (777001, 'urn:ug:nopart', current_user)" \
          -c "SELECT pgrdf.put_quad(1, 2, 3, 777001)"
+# And one registered under a negative id, which the registry does not
+# refuse. The dictionary's count is kept under -1: the two must not meet.
+q $UP -q -c "INSERT INTO pgrdf._pgrdf_graphs (graph_id, iri, owner) VALUES (-1, 'urn:ug:negative', current_user)"
 kept_before=$(q $UP -c "SELECT pgrdf.graph_digest(pgrdf.graph_id('urn:ug:kept'))")
 kept_structure=$(q $UP -c "SELECT pgrdf.structural_digest(pgrdf.graph_id('urn:ug:kept'))")
 scanned="SELECT string_agg(graph_id || ':' || a || '+' || i, ' ' ORDER BY graph_id)
@@ -119,8 +122,10 @@ ok "updated to $CUR; the count tables are owned by $STORE; no blocking drift"
 q $UP -q -c "SELECT pgrdf.put_quad(1, 2, 4, 777001)"
 np=$(q $UP -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory(777001)")
 [ "$np" = "2 false" ] || fail "a registered graph without a partition of its own reads '$np' after the upgrade and one more write, expected '2 false'"
-q $UP -q -c "DELETE FROM pgrdf._pgrdf_graphs WHERE graph_id = 777001" -c "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = 777001"
-ok "a registered graph without a partition of its own is counted by scan and never called verified (2 rows, one written after the upgrade)"
+neg=$(q $UP -c "SELECT asserted || ' ' || counts_verified FROM pgrdf.graph_inventory(-1)")
+[ "$neg" = "0 false" ] || fail "a graph registered as -1 reads '$neg' after the upgrade, expected '0 false': it is not the dictionary"
+q $UP -q -c "DELETE FROM pgrdf._pgrdf_graphs WHERE graph_id IN (777001, -1)" -c "DELETE FROM pgrdf._pgrdf_graph_counts WHERE graph_id = 777001"
+ok "a registered graph without a partition of its own is counted by scan and never called verified (2 rows, one written after the upgrade); a graph registered as -1 upgrades and is not shown the term count"
 
 # 4b. Every graph was counted by the upgrade: verified, and equal to a scan.
 truth="SELECT count(*) FROM pgrdf.graph_inventory() i
