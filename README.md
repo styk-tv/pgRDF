@@ -45,7 +45,7 @@ With Docker and nothing else, run the extension in a stock
 `postgres:18` container:
 
 ```sh
-VER=0.6.41
+VER=0.6.42
 ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 curl -fsSL https://github.com/styk-tv/pgRDF/releases/download/v$VER/pgrdf-$VER-pg18-glibc-$ARCH.tar.gz | tar -xz
 
