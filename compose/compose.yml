@@ -42,7 +42,7 @@ services:
     command: ["sh", "/parity-check.sh"]
 
   postgres:
-    image: docker.io/library/postgres:18-trixie
+    image: docker.io/library/postgres:${PG_MAJOR:-18}-trixie
     container_name: ${PGRDF_CONTAINER:-pgrdf-pgrdf-postgres}
     restart: unless-stopped
     depends_on:
@@ -71,7 +71,7 @@ services:
       # the PG<=17 convention). Mounting at the old path makes the 18
       # entrypoint refuse to start ("data in /var/lib/postgresql/data
       # (unused mount/volume)"). See docker-library/postgres#37.
-      - pgrdf-pg18-data:/var/lib/postgresql
+      - pgrdf-data:/var/lib/postgresql
       # Drop the extension files at canonical PG 17 paths. These bind
       # mounts require the files to exist on the host first - produced
       # by `just build-ext` (see compose/README.md).
@@ -106,14 +106,14 @@ services:
       #     (`compose/pg-data` is gitignored, so CI always initdb's
       #     from scratch). Per-file mounts drop pgRDF in beside the
       #     stock extensions instead of hiding them.
-      - ./extensions/lib/pgrdf.so:/usr/lib/postgresql/18/lib/pgrdf.so:ro,z
-      - ./extensions/share/extension/pgrdf.control:/usr/share/postgresql/18/extension/pgrdf.control:ro,z
-      - ./extensions/share/extension/pgrdf--0.6.42.sql:/usr/share/postgresql/18/extension/pgrdf--0.6.42.sql:ro,z
+      - ./extensions/lib/pgrdf.so:/usr/lib/postgresql/${PG_MAJOR:-18}/lib/pgrdf.so:ro,z
+      - ./extensions/share/extension/pgrdf.control:/usr/share/postgresql/${PG_MAJOR:-18}/extension/pgrdf.control:ro,z
+      - ./extensions/share/extension/pgrdf--0.6.42.sql:/usr/share/postgresql/${PG_MAJOR:-18}/extension/pgrdf--0.6.42.sql:ro,z
       # The upgrade script, mounted so `ALTER EXTENSION pgrdf UPDATE` is
       # exercisable on the bench. Without it the bench can only do fresh
       # installs, and the path real deployments take -- upgrading in place
       # over existing graphs -- would ship untested.
-      - ./extensions/share/extension/pgrdf--0.6.41--0.6.42.sql:/usr/share/postgresql/18/extension/pgrdf--0.6.41--0.6.42.sql:ro,z
+      - ./extensions/share/extension/pgrdf--0.6.41--0.6.42.sql:/usr/share/postgresql/${PG_MAJOR:-18}/extension/pgrdf--0.6.41--0.6.42.sql:ro,z
       # Read-only ontology + regression fixtures, reachable from the
       # postgres process at /fixtures (see pgrdf.load_turtle path arg).
       - ../fixtures:/fixtures:ro,z
@@ -124,5 +124,5 @@ services:
       retries: 5
 
 volumes:
-  # Named volume for PG18 PGDATA — see the postgres service note.
-  pgrdf-pg18-data:
+  pgrdf-data:
+    name: ${COMPOSE_PROJECT_NAME}_pgrdf-pg${PG_MAJOR:-18}-data

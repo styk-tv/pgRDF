@@ -26,10 +26,10 @@
 #   DOCKER_BUILDKIT=1 docker build -t pgrdf-builder -f compose/builder.Containerfile .
 #   docker run --rm -v "$PWD/compose/extensions:/out" pgrdf-builder
 
-FROM docker.io/library/rust:1.96-trixie AS builder
+FROM docker.io/library/rust:1.99.1-trixie AS builder
 
 ARG PG_MAJOR=18
-ARG PGRX_VERSION=0.19.3
+ARG PGRX_VERSION=0.20.1
 # Build identity baked into the .so via option_env!("PGRDF_BUILD_ID") —
 # pgrdf.build_id() reports this. CI passes the tag; a build without it
 # honestly reports "unknown" (#112). No paths/host/user, readable by any role.

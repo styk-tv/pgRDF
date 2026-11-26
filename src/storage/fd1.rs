@@ -174,7 +174,7 @@ pub(crate) fn fd1_stream(graph_id: i64) -> Result<String, Refusal> {
     let mut hasher = Sha256::new();
     let mut first = true;
     for line in ground {
-        pgrx::check_for_interrupts!();
+        pgrx::check_for_interrupts();
         if !first {
             hasher.update(b"\n");
         }

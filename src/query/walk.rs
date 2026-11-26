@@ -204,7 +204,7 @@ fn path_walk(
             .collect();
         let mut depth = 0;
         while !frontier.is_empty() && depth < max_depth {
-            pgrx::check_for_interrupts!();
+            pgrx::check_for_interrupts();
             let mut next: Vec<(i32, i64)> = Vec::new();
             for (w, n) in expand(&frontier) {
                 if visited[w as usize].insert(n) {
@@ -230,7 +230,7 @@ fn path_walk(
         // Exact truncation: the cap stopped the walk with nodes whose
         // continuation reaches something not yet reached.
         if !frontier.is_empty() && depth >= max_depth {
-            pgrx::check_for_interrupts!();
+            pgrx::check_for_interrupts();
             if expand(&frontier)
                 .into_iter()
                 .any(|(w, n)| !visited[w as usize].contains(&n))
