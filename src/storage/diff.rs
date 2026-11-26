@@ -218,7 +218,7 @@ fn components(graph_id: i64) -> Vec<Component> {
     }
     let mut out = Vec::with_capacity(groups.len());
     for (_, group) in groups {
-        pgrx::check_for_interrupts!();
+        pgrx::check_for_interrupts();
         let (_lines, digest, labels) = canonicalize_labeled(group.clone());
         out.push(Component {
             digest,
@@ -486,7 +486,7 @@ fn graph_diff(
             continue;
         }
         for comp in comps {
-            pgrx::check_for_interrupts!();
+            pgrx::check_for_interrupts();
             if !comp.triples.iter().any(|t| narrow.matches(t)) {
                 continue;
             }

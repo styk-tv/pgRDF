@@ -110,7 +110,7 @@ fn graph_manifest(graph_id: i64) -> pgrx::JsonB {
     let mut lines = Lines::export(graph_id);
     let mut h = Sha256::new();
     for l in lines.by_ref() {
-        pgrx::check_for_interrupts!();
+        pgrx::check_for_interrupts();
         h.update(l.as_bytes());
         h.update(b"\n");
     }

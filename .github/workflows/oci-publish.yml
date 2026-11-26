@@ -245,7 +245,7 @@ jobs:
             --annotation "org.opencontainers.image.base.name=docker.io/library/postgres:18-trixie" \
             --annotation "io.styk.pgrdf.pg=${PG}" \
             --annotation "io.styk.pgrdf.arch=${ARCH}" \
-            --annotation "io.styk.pgrdf.build-base=docker.io/library/rust:1.96-trixie" \
+            --annotation "io.styk.pgrdf.build-base=docker.io/library/rust:1.99.1-trixie" \
             "${F}:application/vnd.styk.pgrdf.tarball.v1+gzip"
           # Capture the manifest digest for the attestation step.
           DIGEST=$(oras manifest fetch --descriptor "${REG}:${TAG}" | jq -r .digest)

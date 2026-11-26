@@ -572,7 +572,7 @@ pub(crate) fn rdfc_digest(graph_id: i64) -> Result<String, Refusal> {
     let mut blank_lines = blank_lines.into_iter().peekable();
     let mut hasher = Sha256::new();
     for line in ground {
-        pgrx::check_for_interrupts!();
+        pgrx::check_for_interrupts();
         while let Some(b) = blank_lines.next_if(|b| *b <= line) {
             hasher.update(b.as_bytes());
         }

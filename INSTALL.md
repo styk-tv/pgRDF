@@ -9,12 +9,12 @@ archive.
 
 - PostgreSQL 18 with its development files (`pg_config`, server
   headers). On Debian / Ubuntu: `postgresql-server-dev-18`.
-- Rust 1.96 or newer.
-- `cargo-pgrx` **0.19.3**, which must match the `pgrx` version in
+- Rust 1.99.1 or newer.
+- `cargo-pgrx` **0.20.1**, which must match the `pgrx` version in
   `Cargo.toml`.
 
 ```bash
-cargo install cargo-pgrx --locked --version 0.19.3
+cargo install cargo-pgrx --locked --version 0.20.1
 cargo pgrx init --pg18 "$(which pg_config)"
 ```
 

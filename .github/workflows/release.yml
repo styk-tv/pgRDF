@@ -5,7 +5,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PGRX_VERSION: "0.19.3"
+  PGRX_VERSION: "0.20.1"
 
 permissions:
   contents: write
@@ -177,12 +177,12 @@ jobs:
             "runtime": { "fn": "pgrdf.version()", "value": "${VER}", "source": "env!(CARGO_PKG_VERSION) compile-time; asserted == tag pre-build + boot-gated in oci-publish" },
             "install_sql": "${INSTALL_SQL}",
             "upgrade_sql": "${UPGRADE_SQL}",
-            "platform": { "pg_major": "${{ matrix.pg }}", "arch": "${{ matrix.arch }}", "base": "postgres:18-trixie (glibc)", "build_base": "rust:1.96-trixie", "glibc_floor": "${GLIBC_FLOOR}" },
+            "platform": { "pg_major": "${{ matrix.pg }}", "arch": "${{ matrix.arch }}", "base": "postgres:18-trixie (glibc)", "build_base": "rust:1.99.1-trixie", "glibc_floor": "${GLIBC_FLOOR}" },
             "build": { "tag": "${GITHUB_REF_NAME}", "git_sha": "${GITHUB_SHA}", "built": "${BUILT}" },
             "integrity": "SHA256SUMS (sibling file)"
           }
           JSON
-          echo "MANIFEST platform: base=postgres:18-trixie build_base=rust:1.96-trixie arch=${{ matrix.arch }} glibc_floor=${GLIBC_FLOOR}"
+          echo "MANIFEST platform: base=postgres:18-trixie build_base=rust:1.99.1-trixie arch=${{ matrix.arch }} glibc_floor=${GLIBC_FLOOR}"
           # SHA256SUMS hashes every file INCLUDING MANIFEST.json (covers it for integrity).
           ( cd "${OUT}" && find . -type f ! -name SHA256SUMS -print0 | xargs -0 sha256sum > SHA256SUMS )
           tar czf "${OUT}.tar.gz" "${OUT}"

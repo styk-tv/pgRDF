@@ -1,5 +1,8 @@
 # compose/ — development setup
 
+For a local PostgreSQL 19 runtime, set `PG_MAJOR=19` for both `just build-ext` and Compose. Each major uses its own data volume.
+
+
 A local PostgreSQL 18 server running a pgRDF you built from this
 checkout. It's for working on pgRDF itself. To just try pgRDF, use the
 prebuilt release instead ([install guide](../guide/01-install.md)).
